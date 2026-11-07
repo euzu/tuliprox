@@ -5,9 +5,11 @@
 //! `tests/recovery_journal.rs`.
 
 use super::{
-    BPlusTreeRecoveryJournal, RecoveryBatch, RecoveryFaultPoint, RecoveryOpenAction, RecoveryOperation, RecoveryPaths,
-    RecoveryPolicy, RecoveryRepositoryState, RecoverySchema,
+    maintenance_lease_path, BPlusTreeRecoveryJournal, RecoveryBatch, RecoveryFaultPoint, RecoveryMaintenanceGuard,
+    RecoveryOpenAction, RecoveryOperation, RecoveryPaths, RecoveryPolicy, RecoveryRepositoryState, RecoverySchema,
+    RecoveryUseGuard,
 };
+use crate::{sidecar_lock_path, wal_path, wal_temporary_path};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io;
@@ -278,5 +280,115 @@ fn a_database_that_cannot_be_read_is_still_refused() -> io::Result<()> {
         panic!("an unreadable database must not be adopted");
     };
     assert!(error.to_string().contains("unreadable"), "the error must name corruption, not adoption: {error}");
+    Ok(())
+}
+
+#[test]
+fn lease_exclusivity_rejects_concurrent_maintenance_guards() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    let first = RecoveryMaintenanceGuard::try_acquire(&fixture.paths)?;
+    let second = RecoveryMaintenanceGuard::try_acquire(&fixture.paths);
+    assert!(
+        matches!(second, Err(ref error) if error.kind() == io::ErrorKind::WouldBlock),
+        "second exclusive acquisition must fail with WouldBlock: {second:?}"
+    );
+    drop(first);
+    let after_drop = RecoveryMaintenanceGuard::try_acquire(&fixture.paths)?;
+    drop(after_drop);
+    Ok(())
+}
+
+#[test]
+fn shared_use_guard_and_exclusive_maintenance_guard_exclude_each_other() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    let use_guard = RecoveryUseGuard::try_acquire(&fixture.paths)?;
+    let maintenance_attempt = RecoveryMaintenanceGuard::try_acquire(&fixture.paths);
+    assert!(
+        matches!(maintenance_attempt, Err(ref error) if error.kind() == io::ErrorKind::WouldBlock),
+        "maintenance guard must fail with WouldBlock while use guard is held: {maintenance_attempt:?}"
+    );
+    drop(use_guard);
+
+    let maintenance_guard = RecoveryMaintenanceGuard::try_acquire(&fixture.paths)?;
+    let use_attempt = RecoveryUseGuard::try_acquire(&fixture.paths);
+    assert!(
+        matches!(use_attempt, Err(ref error) if error.kind() == io::ErrorKind::WouldBlock),
+        "use guard must fail with WouldBlock while maintenance guard is held: {use_attempt:?}"
+    );
+    drop(maintenance_guard);
+    Ok(())
+}
+
+#[test]
+fn maintenance_lease_path_is_stable_and_distinct_from_database_artifacts() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    let lease_path_1 = maintenance_lease_path(&fixture.paths)?;
+    let lease_path_2 = maintenance_lease_path(&fixture.paths)?;
+    assert_eq!(lease_path_1, lease_path_2, "maintenance_lease_path must be stable");
+
+    assert_ne!(lease_path_1, fixture.paths.database);
+    assert_ne!(lease_path_1, sidecar_lock_path(&fixture.paths.database));
+
+    let _guard = RecoveryMaintenanceGuard::try_acquire(&fixture.paths)?;
+    let lease_resolved = crate::common::resolved_path_identity(&lease_path_1)?;
+    let db_resolved = crate::common::resolved_path_identity(&fixture.paths.database)?;
+    let lock_resolved = crate::common::resolved_path_identity(&sidecar_lock_path(&fixture.paths.database))?;
+
+    assert_ne!(lease_resolved, db_resolved, "lease path must not resolve to the database file itself");
+    assert_ne!(lease_resolved, lock_resolved, "lease path must not resolve to the sidecar lock");
+    Ok(())
+}
+
+#[test]
+fn verify_rebuild_history_never_modifies_a_database_it_refuses() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    {
+        let (mut journal, _) = fixture.open()?;
+        let _ = journal.apply_batch(batch("a", "one"))?;
+    }
+    let mut db_bytes = std::fs::read(&fixture.paths.database)?;
+    let corrupt_len = 64.min(db_bytes.len());
+    db_bytes[..corrupt_len].fill(0);
+    std::fs::write(&fixture.paths.database, &db_bytes)?;
+    let recorded_bytes = std::fs::read(&fixture.paths.database)?;
+
+    assert!(BPlusTreeRecoveryJournal::verify_rebuild_history(&fixture.paths, &Schema).is_err());
+    assert_eq!(
+        std::fs::read(&fixture.paths.database)?,
+        recorded_bytes,
+        "database file bytes must be unchanged after verify_rebuild_history refusal"
+    );
+    assert!(!wal_path(&fixture.paths.database).try_exists()?, "no WAL file must appear after verify_rebuild_history");
+    assert!(
+        !wal_temporary_path(&fixture.paths.database).try_exists()?,
+        "no temporary WAL file must appear after verify_rebuild_history"
+    );
+    Ok(())
+}
+
+#[test]
+fn read_rebuild_history_returns_committed_records_and_reports_matching_revisions() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    {
+        let (mut journal, _) = fixture.open()?;
+        let _ = journal.apply_batch(batch("a", "one"))?;
+        let _ = journal.apply_batch(batch("b", "two"))?;
+    }
+    let db_bytes_before = std::fs::read(&fixture.paths.database)?;
+
+    let (report, records) = BPlusTreeRecoveryJournal::read_rebuild_history(&fixture.paths, &Schema)?;
+    assert_eq!(report.database_revision, report.recovery_revision);
+    assert_eq!(report.live_records, 2);
+
+    let mut expected = std::collections::BTreeMap::new();
+    expected.insert(Key("a".to_owned()), Record { name: "one".to_owned() });
+    expected.insert(Key("b".to_owned()), Record { name: "two".to_owned() });
+    assert_eq!(records, expected);
+
+    assert_eq!(
+        std::fs::read(&fixture.paths.database)?,
+        db_bytes_before,
+        "database file bytes must be unchanged after read_rebuild_history"
+    );
     Ok(())
 }

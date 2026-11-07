@@ -3,7 +3,7 @@ pub mod migration;
 mod page;
 mod publish;
 mod tree;
-mod wal;
+pub(crate) mod wal;
 
 pub use format::{Locator, MAGIC, STORAGE_VERSION_V3 as STORAGE_VERSION};
 pub use publish::{publish_staged_database, BPlusTreeStagingArtifacts};

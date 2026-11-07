@@ -96,6 +96,12 @@ record caused the entire database migration to abort.
 
 **The Solution & Resilience:**
 
+> This salvage procedure is for playlist and metadata databases. It must not be used for `api_user.db`, because skipping a
+> user or guessing an optional field can change access. Use
+> [API User Database Offline Repair](./operations-debugging.md#api-user-database-offline-repair) instead.
+> For Docker commands using a backup of your own data, follow
+> [Manual Docker Repair](#6-api-user-database-migration-manual-docker-repair).
+
 1. **Automatic Error Recovery:** Tuliprox's migration engine now automatically catches decompression and decoding errors on
    damaged individual records, logs a warning with the path of the skipped record, and continues migrating all healthy records
    into a valid, crash-safe V3 database.
@@ -239,3 +245,97 @@ restart is the acceptable recovery.
 captures what every thread was doing at that moment.
 
 ---
+
+## 6. API User Database Migration: Manual Docker Repair
+
+Run these commands in your Compose project directory, in the same terminal. Replace `tuliprox` with your container name.
+The example uses a working copy of your original database.
+
+### Step 1: Back up the original data and prepare a working copy
+
+```bash
+umask 077
+CONTAINER=tuliprox
+IMAGE=$(docker inspect --format '{{.Image}}' "$CONTAINER")
+REPAIR_DIR=$(mktemp -d "$PWD/tuliprox-user-db-repair.XXXXXX")
+
+docker stop "$CONTAINER"
+mkdir "$REPAIR_DIR/original" "$REPAIR_DIR/working"
+docker cp "$CONTAINER:/app/config/." "$REPAIR_DIR/original/"
+cp -a "$REPAIR_DIR/original/." "$REPAIR_DIR/working/"
+```
+
+Keep the container stopped and leave `original/` unchanged. The copy includes `api_user.db`, WAL files and recovery history.
+
+### Step 2: Export the users
+
+```bash
+docker run --rm --network none \
+  --volume "$REPAIR_DIR/working:/app/config" \
+  --entrypoint /app/tuliprox "$IMAGE" \
+  --user-db-get /app/config/api_user.db > "$REPAIR_DIR/users.json"
+```
+
+Expected: exit code `0` and a JSON file containing your users. Stop here if the export fails.
+
+If the export refuses because a pending write-ahead log (`api_user.db.wal`) was left by an unclean shutdown, replay it
+first. `--user-db-set` takes exclusive access and replays the log, so run it **without** `--user-db-input` at this point:
+
+```bash
+docker run --rm --network none \
+  --volume "$REPAIR_DIR/working:/app/config" \
+  --entrypoint /app/tuliprox "$IMAGE" \
+  --user-db-set /app/config/api_user.db
+```
+
+When the log cannot be replayed, stop and keep `original/` unchanged. Do not delete the `.wal` files of a V3 database:
+they hold the data needed to roll back a partially written transaction. A legacy V1/V2 database has no log of its own,
+so a stray one there can be moved out of `working/` before Step 2 is repeated.
+
+### Step 3: Check the unedited file
+
+```bash
+docker run --rm --network none \
+  --volume "$REPAIR_DIR/working:/app/config" \
+  --volume "$REPAIR_DIR/users.json:/repair/users.json:ro" \
+  --entrypoint /app/tuliprox "$IMAGE" \
+  --user-db-check /app/config/api_user.db --user-db-input /repair/users.json
+```
+
+Unresolved values produce a message referring to `unassigned_value`. If the result is `Status: VALID`, continue with Step 5.
+
+### Step 4: Edit the JSON file and check it again
+
+```bash
+nano "$REPAIR_DIR/users.json"
+```
+
+For each non-null `unassigned_value`, use a matching user export or provisioning record to identify its field.
+Move the value unchanged into `plan` or `filter`, then set `unassigned_value` to `null`.
+Keep all users and other fields unchanged. If the field cannot be established, stop rather than guess.
+
+Run the command from Step 3 again. Expected: `Status: VALID`. Continue when the check succeeds.
+
+### Step 5: Apply the repair
+
+```bash
+docker run --rm --network none \
+  --volume "$REPAIR_DIR/working:/app/config" \
+  --volume "$REPAIR_DIR/users.json:/repair/users.json:ro" \
+  --entrypoint /app/tuliprox "$IMAGE" \
+  --user-db-set /app/config/api_user.db --user-db-input /repair/users.json
+```
+
+Expected: `Status: SUCCESS` and `Archive Created`.
+
+### Step 6: Check the repaired database
+
+```bash
+docker run --rm --network none \
+  --volume "$REPAIR_DIR/working:/app/config" \
+  --entrypoint /app/tuliprox "$IMAGE" \
+  --user-db-check /app/config/api_user.db
+```
+
+Expected: `Status: VALID`, your original user count and `Recovery History: VERIFIED`.
+The repaired database is in `$REPAIR_DIR/working`. The original backup remains in `$REPAIR_DIR/original`.

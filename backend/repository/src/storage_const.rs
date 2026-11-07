@@ -17,6 +17,7 @@ pub const USER_LIVE_BOUQUET: &str = "live_bouquet.json";
 pub const USER_VOD_BOUQUET: &str = "vod_bouquet.json";
 pub const USER_SERIES_BOUQUET: &str = "series_bouquet.json";
 pub const API_USER_DB_FILE: &str = "api_user.db";
+pub(crate) const API_USER_REPAIR_BACKUP_PREFIX: &str = "api_user_repair_backup_";
 pub const PATH_XTREAM: &str = "xtream";
 pub const PATH_STALKER: &str = "stalker";
 // Stalker B+Tree store base names; `stalker_file_path_for_name` appends `.{FILE_SUFFIX_DB}`.
