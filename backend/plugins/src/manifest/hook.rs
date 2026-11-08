@@ -82,6 +82,7 @@ hook_ids! {
     RpcCall => "rpc.call", "rpc", Requirement::RpcExports;
     TasksRun => "tasks.run", "tasks", Requirement::Tasks;
     SettingsMigrate => "settings.migrate", "settings-migration", Requirement::None;
+    HttpHandle => "http.handle", "http-routes", Requirement::Capability(Capability::HttpRoutes);
 }
 
 /// Former spellings of the six stage ids without the `playlist.` prefix.
@@ -138,7 +139,7 @@ impl HookId {
             Self::StreamInjectHeaders => Some(PluginHook::InjectHeaders),
             Self::TasksRun => Some(PluginHook::RunTask),
             // Called by the settings migration step, never by the pipeline.
-            Self::EpgResolveConflict | Self::RpcCall | Self::SettingsMigrate => None,
+            Self::EpgResolveConflict | Self::RpcCall | Self::SettingsMigrate | Self::HttpHandle => None,
         }
     }
 }
@@ -149,10 +150,10 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn the_frozen_table_has_28_unique_ids_and_round_trips() {
-        assert_eq!(HookId::ALL.len(), 28);
+    fn the_table_has_unique_ids_and_round_trips() {
+        assert_eq!(HookId::ALL.len(), 29);
         let spellings: HashSet<_> = HookId::ALL.iter().map(|hook| hook.as_str()).collect();
-        assert_eq!(spellings.len(), 28);
+        assert_eq!(spellings.len(), 29);
         for hook in HookId::ALL {
             assert_eq!(HookId::parse(hook.as_str()), Ok(*hook));
             let (group, name) = hook.as_str().split_once('.').expect("ids are dotted");
@@ -166,7 +167,7 @@ mod tests {
         assert_eq!(stages, 6);
         let others: HashSet<_> =
             HookId::ALL.iter().map(|hook| hook.wit_interface()).filter(|wit| *wit != "playlist-hooks").collect();
-        assert_eq!(others.len(), 22, "22 other ids, 22 distinct interfaces");
+        assert_eq!(others.len(), 23, "23 other ids, 23 distinct interfaces");
         assert_eq!(HookId::PlaylistLoaded.wit_interface(), "source-hooks");
         assert_eq!(HookId::InputFetch.wit_interface(), "input-provider");
         assert_eq!(HookId::RpcCall.wit_interface(), "rpc");
@@ -190,7 +191,8 @@ mod tests {
                 "input.fetch",
                 "output.render",
                 "rpc.call",
-                "tasks.run"
+                "tasks.run",
+                "http.handle"
             ]
         );
         assert_eq!(HookId::StreamInjectHeaders.requirement(), Requirement::Capability(Capability::StreamHeaders));

@@ -3,7 +3,7 @@
 //! Hooks are associated functions (no `self`): a component instance is
 //! single-threaded and the host builds a fresh one per instantiation, so state
 //! lives in `static`s / `thread_local!`s initialised by [`Lifecycle::init`].
-//! Every hook returns `Result<_, String>`; an `Err` is treated exactly like a
+//! Pipeline hooks return `Result<_, String>`; an `Err` is treated exactly like a
 //! trap (fail-open, logged, counted) and `std::result::Result<_, kv::Error>` /
 //! `http::Error` convert into it with `?`.
 //!
@@ -18,6 +18,7 @@ use crate::{
         epg_match_hooks::MatchRequest,
         epg_types::{EpgChannel, EpgProgramme},
         event_hooks::Event,
+        http_routes::{Request as HttpRouteRequest, Response as HttpRouteResponse},
         input_provider::InputRequest,
         metrics_hooks::Metric,
         notification_hooks::{DeliveryError, Notification},
@@ -310,4 +311,16 @@ impl<T: Tasks> exports::tasks::Guest for Adapter<T> {
 
 impl<T: SettingsMigration> exports::settings_migration::Guest for Adapter<T> {
     fn migrate(from_version: u32, settings: String) -> Res<String> { T::migrate(from_version, &settings) }
+}
+
+/// Incoming HTTP routes. `authenticate` runs before `handle` for `auth: plugin`.
+/// Return `None` for invalid credentials; errors never grant access.
+pub trait HttpRoutes {
+    fn authenticate(req: &HttpRouteRequest) -> Res<Option<String>>;
+    fn handle(req: HttpRouteRequest) -> Res<HttpRouteResponse>;
+}
+
+impl<T: HttpRoutes> exports::http_routes::Guest for Adapter<T> {
+    fn authenticate(req: HttpRouteRequest) -> Res<Option<String>> { T::authenticate(&req) }
+    fn handle(req: HttpRouteRequest) -> Res<HttpRouteResponse> { T::handle(req) }
 }

@@ -251,6 +251,7 @@ async fn persist_update_fields(
     Ok(written)
 }
 
+#[cfg(feature = "plugins")]
 fn store_failure(err: UpdateStoreError) -> Response {
     match err {
         UpdateStoreError::NotFound(id) => {

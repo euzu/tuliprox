@@ -132,6 +132,7 @@ fn the_full_example_parses_into_typed_fields() {
             notifications: false,
             stream_headers: true,
             process: false,
+            http_routes: false,
         }
     );
     assert_eq!(manifest.capabilities.granted().len(), 5);
@@ -314,10 +315,11 @@ fn every_supported_id_is_accepted_when_its_requirements_are_met() {
         .map(|hook| ["  - ", hook.as_str(), "\n"].concat())
         .collect::<String>();
     let text = with(&format!(
-        "capabilities: {{ epg_write: true, notifications: true, stream_headers: true }}\n\
+        "capabilities: {{ epg_write: true, notifications: true, stream_headers: true, http_routes: true }}\n\
          hooks:\n{ids}\
          events: [playlist.update]\n\
          tasks: [{{ id: nightly-run }}]\n\
+         routes: [{{ id: probe, method: GET, path: / }}]\n\
          provides: {{ input_type: true, output_format: my-format }}\n\
          ui:\n  rpc_exports:\n    - {{ name: ping, kind: read }}\n"
     ));

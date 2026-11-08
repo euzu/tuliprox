@@ -5487,6 +5487,7 @@ dependencies = [
  "http-body-util",
  "libc",
  "log",
+ "matchit",
  "notify",
  "regex",
  "reqwest",

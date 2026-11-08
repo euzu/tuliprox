@@ -1,0 +1,26 @@
+id: http-probe
+name: HTTP route probe
+version: 0.1.0
+api_version: 1
+capabilities:
+  http_routes: true
+  storage: true
+hooks: [http.handle]
+routes:
+  - id: host-read
+    method: GET
+    path: /host/{id}/
+  - id: host-write
+    method: PATCH
+    path: /host/{id}/
+  - id: custom
+    method: POST
+    path: /custom/
+    auth: plugin
+  - id: login
+    method: POST
+    path: /login/
+    auth: plugin
+  - id: root
+    method: GET
+    path: /

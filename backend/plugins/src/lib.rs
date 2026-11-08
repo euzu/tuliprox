@@ -22,6 +22,7 @@ mod filter_batch;
 mod header_inject;
 mod host_fns;
 mod http;
+mod http_routes;
 mod image_cache;
 mod input_provider;
 mod install;
@@ -56,6 +57,7 @@ pub use marketplace::{
     sync_source, Blocker, Eligibility, FetchPolicy, MarketplaceError, ReleaseLookup, ResolvedRelease, UpdateCandidate,
     CATALOG_MAX_BYTES, PACKAGE_MAX_BYTES,
 };
+pub use http_routes::{HostAuthorization, HttpRouteRequest, HttpRouteResponse};
 pub use mcp_tools::{PluginMcpTool, PluginMcpToolKind};
 pub use migration::MigratedSettings;
 pub use state::{HostClock, PluginServices, SealResourceUrl};

@@ -425,3 +425,28 @@ world enricher-plugin {
   include task-plugin;
   include rpc-plugin;
 }
+
+// Additive ABI 1.x interface. Existing records and worlds remain frozen.
+// manifest: http.handle, capability http_routes, non-empty routes.
+interface http-routes {
+  record request {
+    route: string,                 // manifest route id, selected by host
+    method: string,
+    path: string,                  // plugin-relative, encoded URI path
+    query: string,                 // raw query, without ?
+    params: list<tuple<string, string>>, // encoded path parameters
+    headers: list<tuple<string, string>>,
+    body: list<u8>,
+    principal: option<string>,     // host sets after authentication; never client supplied
+  }
+  record response {
+    status: u16,
+    headers: list<tuple<string, string>>,
+    body: list<u8>,
+  }
+  // Called only for auth: plugin. none rejects with 401; err fails closed.
+  // For a login endpoint the plugin may explicitly accept an anonymous principal.
+  authenticate: func(req: request) -> result<option<string>, string>;
+  handle: func(req: request) -> result<response, string>;
+}
+world http-plugin { include base; export http-routes; }

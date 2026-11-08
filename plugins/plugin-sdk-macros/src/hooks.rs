@@ -84,6 +84,7 @@ hook_table! {
     "Rpc", "rpc", ["rpc.call"];
     "Tasks", "tasks", ["tasks.run"];
     "SettingsMigration", "settings-migration", ["settings.migrate"];
+    "HttpRoutes", "http-routes", ["http.handle"];
 }
 
 /// The family that serves a manifest hook id.

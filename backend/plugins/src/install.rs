@@ -761,6 +761,7 @@ const fn capability_description(capability: Capability) -> &'static str {
             "Stream header injection: may add HTTP headers to upstream stream requests when a client session starts."
         }
         Capability::Process => PROCESS_SENTENCE,
+        Capability::HttpRoutes => "HTTP routes: may serve incoming requests and authenticate external clients in its own URL namespace.",
     }
 }
 

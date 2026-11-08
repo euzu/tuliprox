@@ -33,6 +33,10 @@ Capability sentences, from `backend/plugins/src/install.rs`:
 | `stream_headers` | "Stream header injection: may add HTTP headers to upstream stream requests when a client session starts." |
 | `process` | "Run local programs: may start any program on this server, as the user tuliprox runs as, with arguments and input of its own choosing. Grant it only to a plugin you would trust with a shell." |
 
+The `http_routes` capability grants a plugin incoming HTTP endpoints in its own namespace, including
+explicitly delegated client authentication. See [Incoming HTTP routes](./http-routes.md) for host permissions,
+credential handling, fail-closed authentication and response isolation.
+
 A hook that needs a capability makes the manifest invalid if the manifest does not request it: `stream.inject-headers`
 needs `stream_headers`, `epg.transform-programmes` and `epg.enrich-programmes` need `epg_write`, and
 `notifications.send` needs `notifications`.

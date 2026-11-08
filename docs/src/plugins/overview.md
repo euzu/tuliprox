@@ -169,3 +169,5 @@ adjust them.
 
 <!-- UNVERIFIED: the TinyGo and componentize-py recipes. No component was built with them in this project, so the
 flags above come from the tools' documentation, not from a run. -->
+
+Incoming REST APIs are described in [Incoming HTTP routes](./http-routes.md).
