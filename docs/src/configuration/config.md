@@ -1154,7 +1154,7 @@ hour instead of a single one-shot alert.
 
 ```yaml
 messaging:
-  notify_on: [ "info", "stats", "error", "watch" ]
+  notify_on: [ "info", "stats", "error", "watch", "system.disk.alert" ]
 
   # Disk-space alerts are sent through the channels above. Configure the
   # thresholds and the re-arm interval here. The 2-second sampling tick is
