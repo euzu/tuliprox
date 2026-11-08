@@ -18,7 +18,6 @@ pub mod channel;
 pub mod channels;
 pub mod outbox;
 pub mod rate_limit;
-pub mod render;
 
 use crate::{
     channel::{Delivery, RenderedMessage},
@@ -47,7 +46,7 @@ pub fn configured_channels(app_config: &Arc<AppConfig>, id: EventId) -> Vec<Stri
     if !is_enabled(id, messaging) {
         return Vec::new();
     }
-    channels::channels(app_config, messaging)
+    channels::channels()
         .into_iter()
         .filter(|channel| channel.wants(id, severity_of(id)))
         .map(|channel| channel.id().to_string())
@@ -56,48 +55,13 @@ pub fn configured_channels(app_config: &Arc<AppConfig>, id: EventId) -> Vec<Stri
 
 fn severity_of(id: EventId) -> Severity { shared::model::notification::registry::default_severity(id) }
 
-/// Render `event` for `channel`, falling back to the built-in body.
-async fn render_for<'a>(
-    app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
-    channel: &Channel,
-    event: &'a NotificationEvent,
-) -> RenderedMessage<'a> {
-    let capabilities = channel.capabilities();
-    let mut templated = false;
-    let mut body = event.body.clone();
-
-    if capabilities.supports_templates {
-        if let Some(template) = channel.template_for(event.id) {
-            if let Some(rendered) = render::render(app_config, client, template, event).await {
-                body = rendered;
-                templated = true;
-            }
-        }
-    }
-
-    if let Some(limit) = capabilities.max_body_bytes {
-        if body.len() > limit {
-            // Truncate on a character boundary, never mid-codepoint.
-            let mut end = limit;
-            while end > 0 && !body.is_char_boundary(end) {
-                end -= 1;
-            }
-            body.truncate(end);
-        }
-    }
-
-    RenderedMessage { event, body, templated }
-}
-
 /// Send `event` to exactly one channel, by its stable id.
 ///
 /// This is the entry point the outbox worker drives: it retries per
-/// channel, so a message that reached Telegram but not Discord is re-sent
-/// only to Discord.
+/// channel, so a message that reached one channel but not another is re-sent
+/// only to the other.
 pub async fn send_event_to_channel(
     app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
     event: &NotificationEvent,
     channel_id: &str,
 ) -> Delivery {
@@ -108,7 +72,7 @@ pub async fn send_event_to_channel(
     if !is_enabled(event.id, messaging) {
         return Delivery::Skipped;
     }
-    let Some(channel) = channels::channels(app_config, messaging).into_iter().find(|c| c.id() == channel_id) else {
+    let Some(channel) = channels::channels().into_iter().find(|c| c.id() == channel_id) else {
         // The channel was removed from the config between enqueue and
         // delivery. Nothing to do, and nothing to retry.
         return Delivery::Skipped;
@@ -122,8 +86,7 @@ pub async fn send_event_to_channel(
     {
         return suppression_outcome(&channel, event, reason);
     }
-    let msg = render_for(app_config, client, &channel, event).await;
-    channel.send(&msg).await
+    channel.send(&RenderedMessage::of(event)).await
 }
 
 /// Turn a suppression decision into a delivery outcome.
@@ -177,7 +140,7 @@ pub fn quiet_hours_defer(channel: &Channel) -> Option<std::time::Duration> {
 /// outbox was promoted out of the recording supervisor. Falls back to a
 /// direct best-effort send when the outbox is absent (unit tests, early
 /// startup) or full.
-pub async fn send_event(app_config: &Arc<AppConfig>, client: &reqwest::Client, event: NotificationEvent) {
+pub async fn send_event(app_config: &Arc<AppConfig>, event: NotificationEvent) {
     let cfg = app_config.config.load();
     let Some(messaging) = cfg.messaging.as_ref() else {
         return;
@@ -192,15 +155,15 @@ pub async fn send_event(app_config: &Arc<AppConfig>, client: &reqwest::Client, e
         },
         None => event,
     };
-    let set: ChannelSet = channels::channels(app_config, messaging);
-    dispatch(app_config, client, &event, &set).await;
+    let set: ChannelSet = channels::channels();
+    dispatch(&event, &set).await;
 }
 
 /// Deliver to every channel in `set` at once.
 ///
 /// Concurrent rather than sequential: one slow provider must not delay the
 /// others.
-async fn dispatch(app_config: &Arc<AppConfig>, client: &reqwest::Client, event: &NotificationEvent, set: &ChannelSet) {
+async fn dispatch(event: &NotificationEvent, set: &ChannelSet) {
     let sends = set.iter().filter(|channel| channel.wants(event.id, event.severity)).map(|channel| async move {
         let routing = channel.routing();
         if let Some(reason) =
@@ -208,8 +171,7 @@ async fn dispatch(app_config: &Arc<AppConfig>, client: &reqwest::Client, event: 
         {
             return (channel.id(), suppression_outcome(channel, event, reason));
         }
-        let msg = render_for(app_config, client, channel, event).await;
-        let outcome = channel.send(&msg).await;
+        let outcome = channel.send(&RenderedMessage::of(event)).await;
         (channel.id(), outcome)
     });
     for (id, outcome) in futures::future::join_all(sends).await {
@@ -226,8 +188,8 @@ async fn dispatch(app_config: &Arc<AppConfig>, client: &reqwest::Client, event: 
 /// Send a legacy [`MessageContent`], lifted into the envelope.
 ///
 /// Kept so the existing emitters need no change.
-pub async fn send_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: MessageContent) {
-    send_event(app_config, client, NotificationEvent::from_content(&content)).await;
+pub async fn send_message(app_config: &Arc<AppConfig>, content: MessageContent) {
+    send_event(app_config, NotificationEvent::from_content(&content)).await;
 }
 
 /// Legacy shim: the channels configured for a [`MsgKind`].
@@ -245,13 +207,9 @@ pub struct TestOutcome {
     pub reason: Option<String>,
     /// Exactly what the channel was asked to send.
     pub rendered: String,
-    pub templated: bool,
 }
 
-/// A representative event for `id`, for testing a channel or a template.
-///
-/// Carries a plausible payload so a template that walks `event.fields`
-/// renders something recognisable rather than blank.
+/// A representative event for `id`, for testing a channel.
 #[must_use]
 pub fn test_event(id: EventId) -> NotificationEvent {
     let description = shared::model::notification::registry::describe(id)
@@ -264,33 +222,30 @@ pub fn test_event(id: EventId) -> NotificationEvent {
     .with_fields(&serde_json::json!({ "test": true }))
 }
 
-/// Render `event` for each requested channel, and send unless `preview`.
+/// Show `event` for each requested channel, and send unless `preview`.
 ///
 /// Bypasses `notify_on` and the suppression window deliberately: the
 /// operator asked for this one explicitly, and a test that silently does
 /// nothing because of a dedup window would be worse than useless.
 pub async fn render_and_send_test(
     app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
     event: &NotificationEvent,
     only_channel: Option<&str>,
     preview: bool,
 ) -> Vec<TestOutcome> {
-    let cfg = app_config.config.load();
-    let Some(messaging) = cfg.messaging.as_ref() else {
+    if app_config.config.load().messaging.is_none() {
         return Vec::new();
-    };
-    let set = channels::channels(app_config, messaging);
+    }
+    let set = channels::channels();
     let mut results = Vec::with_capacity(set.len());
     for channel in set.iter().filter(|c| only_channel.is_none_or(|want| c.id() == want)) {
-        let msg = render_for(app_config, client, channel, event).await;
+        let msg = RenderedMessage::of(event);
         if preview {
             results.push(TestOutcome {
                 channel: channel.id().to_string(),
                 outcome: "preview".to_string(),
                 reason: None,
                 rendered: msg.body.clone(),
-                templated: msg.templated,
             });
             continue;
         }
@@ -300,13 +255,7 @@ pub async fn render_and_send_test(
             Delivery::Retry { reason, .. } => ("retry".to_string(), Some(reason)),
             Delivery::Permanent { reason } => ("permanent".to_string(), Some(reason)),
         };
-        results.push(TestOutcome {
-            channel: channel.id().to_string(),
-            outcome,
-            reason,
-            rendered: msg.body.clone(),
-            templated: msg.templated,
-        });
+        results.push(TestOutcome { channel: channel.id().to_string(), outcome, reason, rendered: msg.body.clone() });
     }
     results
 }
@@ -314,239 +263,6 @@ pub async fn render_and_send_test(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arc_swap::{ArcSwap, ArcSwapOption};
-    use shared::model::ConfigPaths;
-    use tuliprox_core::{
-        model::{MediaToolCapabilities, ProcessingStats},
-        utils::FileLockManager,
-    };
-
-    /// Adapter onto the new pipeline.
-    ///
-    /// These tests predate the channel/envelope refactor and assert that the
-    /// documented Discord and Telegram templates still render exactly as
-    /// before, so they are kept pointed at the real renderer rather than
-    /// rewritten.
-    async fn render_template(
-        app_cfg: &Arc<AppConfig>,
-        client: &reqwest::Client,
-        template: Option<&str>,
-        content: &MessageContent,
-    ) -> String {
-        let event = NotificationEvent::from_content(content);
-        match template {
-            Some(t) => render::render(app_cfg, client, t, &event).await.unwrap_or_else(|| event.body.clone()),
-            None => event.body.clone(),
-        }
-    }
-
-    fn create_app_config() -> Arc<AppConfig> {
-        Arc::new(AppConfig {
-            config: Arc::new(ArcSwap::default()),
-            sources: Arc::new(ArcSwap::default()),
-            hdhomerun: Arc::new(ArcSwapOption::default()),
-            plugins: Arc::default(),
-            api_proxy: Arc::new(ArcSwapOption::default()),
-            file_locks: Arc::new(FileLockManager::default()),
-            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-                home_path: String::new(),
-                config_path: String::new(),
-                storage_path: String::new(),
-                config_file_path: String::new(),
-                sources_file_path: String::new(),
-                mapping_file_path: None,
-                mapping_files_used: None,
-                template_file_path: None,
-                template_files_used: None,
-                api_proxy_file_path: String::new(),
-                custom_stream_response_path: None,
-            })),
-            custom_stream_response: Arc::new(ArcSwapOption::default()),
-            access_token_secret: [
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
-                29, 30, 31, 32,
-            ],
-            encrypt_secret: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            media_tools: Arc::new(MediaToolCapabilities::new()),
-        })
-    }
-
-    #[tokio::test]
-    async fn test_render_template_simple() {
-        let msg = "Hello World".to_string();
-        let content = MessageContent::Info(msg);
-        let app_cfg = create_app_config();
-        let client = reqwest::Client::new();
-        let output = render_template(&app_cfg, &client, Some("Message: {{message}}, Kind: {{kind}}"), &content).await;
-
-        assert!(output.contains("Message: Hello World"));
-        assert!(output.contains("Kind: Info"));
-    }
-
-    #[tokio::test]
-    async fn test_render_template_processing_stats() {
-        let stats = ProcessingStats { stats: None, errors: Some("test error".to_string()) };
-        let content = MessageContent::ProcessingStats(stats);
-        let app_cfg = create_app_config();
-        let client = reqwest::Client::new();
-        let output = render_template(&app_cfg, &client, Some("Error: {{processing.errors}}"), &content).await;
-        assert_eq!(output, "Error: test error");
-    }
-
-    #[tokio::test]
-    async fn test_render_discord_template() {
-        use shared::model::{InputStats, InputType, PlaylistStats, SourceStats, TargetStats};
-
-        let input_stats = InputStats {
-            name: "Test Input".to_string(),
-            input_type: InputType::M3u,
-            error_count: 5,
-            raw_stats: PlaylistStats { group_count: 100, channel_count: 1000 },
-            processed_stats: PlaylistStats { group_count: 50, channel_count: 500 },
-            secs_took: 125,
-        };
-
-        let source_stats = SourceStats { inputs: vec![input_stats], targets: vec![TargetStats::success("Target 1")] };
-
-        // Add a second source for testing multi-source rendering
-        let input_stats2 = InputStats {
-            name: "Input 2".to_string(),
-            input_type: InputType::Xtream,
-            error_count: 0,
-            raw_stats: PlaylistStats { group_count: 200, channel_count: 2000 },
-            processed_stats: PlaylistStats { group_count: 180, channel_count: 1800 },
-            secs_took: 300,
-        };
-        let source_stats2 = SourceStats { inputs: vec![input_stats2], targets: vec![TargetStats::success("Target 2")] };
-
-        let stats = ProcessingStats {
-            stats: Some(vec![source_stats, source_stats2]),
-            errors: Some("Some global error message".to_string()),
-        };
-
-        let content = MessageContent::ProcessingStats(stats);
-        let app_cfg = create_app_config();
-        let client = reqwest::Client::new();
-
-        // Use the absolute path for the template
-        let template = r#"
-            {
-              "username": "Tuliprox",
-              "avatar_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/frontend/public/assets/tuliprox-logo.svg",
-              "embeds": [
-                {
-                  "title": "🔄 Playlist Update Report",
-                  "color": 3310335,
-                  "fields": [
-                    {{#each stats}}
-                    {
-                      "name": "📥 Source Stats",
-                      "value": "{{#each inputs}}**{{name}}** (`{{type}}`)\n⏱️ Took: `{{took}}` | ❌ Errors: `{{errors}}` \n📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ **`{{processed.groups}}`**/**`{{processed.channels}}`**\n{{#unless @last}}\n{{/unless}}{{/each}}",
-                      "inline": false
-                    },
-                    {
-                      "name": "🚀 Targets",
-                      "value": "{{#each targets}}✅ `{{target}}`{{#unless @last}}\n{{/unless}}{{/each}}",
-                      "inline": false
-                    }{{#unless @last}},{{/unless}}
-                    {{/each}}
-                    {{#if processing.errors}}
-                    {{#if stats}},{{/if}}
-                    {
-                      "name": "❌ Processing Errors",
-                      "value": "```{{processing.errors}}```",
-                      "inline": false
-                    }
-                    {{/if}}
-                  ],
-                  "footer": {
-                    "text": "Tuliprox • Automated Task",
-                    "icon_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/frontend/public/assets/tuliprox-logo.svg"
-                  },
-                  "timestamp": "{{timestamp}}"
-                }
-              ]
-            }
-        "#;
-
-        let output = render_template(&app_cfg, &client, Some(template), &content).await;
-
-        println!("{output}");
-
-        // Verify some expected strings in the output
-        assert!(output.contains("\"username\": \"Tuliprox\""));
-        assert!(output.contains("Test Input"));
-        assert!(output.contains("Input 2"));
-        assert!(output.contains("📥 Source Stats"));
-        assert!(output.contains("❌ Processing Errors"));
-        assert!(output.contains("Some global error message"));
-        assert!(output.contains("Target 1"));
-        assert!(output.contains("Target 2"));
-        assert!(output.contains("2:05 mins")); // 125 secs
-        assert!(output.contains("5:00 mins")); // 300 secs
-    }
-
-    #[tokio::test]
-    async fn test_render_telegram_template() {
-        use shared::model::{InputStats, InputType, PlaylistStats, SourceStats, TargetStats};
-
-        let input_stats = InputStats {
-            name: "Telegram Input".to_string(),
-            input_type: InputType::Xtream,
-            error_count: 2,
-            raw_stats: PlaylistStats { group_count: 50, channel_count: 500 },
-            processed_stats: PlaylistStats { group_count: 45, channel_count: 450 },
-            secs_took: 45,
-        };
-
-        let source_stats = SourceStats { inputs: vec![input_stats], targets: vec![TargetStats::success("Target T1")] };
-
-        let stats = ProcessingStats {
-            stats: Some(vec![source_stats]),
-            errors: Some("An error occurred during sync".to_string()),
-        };
-
-        let content = MessageContent::ProcessingStats(stats);
-        let app_cfg = create_app_config();
-        let client = reqwest::Client::new();
-
-        let template = r"
-            *🔄 Playlist Update Report*
-
-            {{#each stats}}
-            *📥 Source Stats*
-            {{#each inputs}}
-            • *{{name}}* (`{{type}}`)
-              ⏱️ Took: `{{took}}` | ❌ Errors: `{{errors}}`
-              📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ *`{{processed.groups}}`*/*`{{processed.channels}}`*
-            {{/each}}
-
-            *🚀 Targets*
-            {{#each targets}}
-            ✅ `{{target}}`
-            {{/each}}
-            {{/each}}
-
-            {{#if processing.errors}}
-            *❌ Processing Errors*
-            ```
-            {{processing.errors}}
-            ```
-            {{/if}}
-
-            _Timestamp: {{timestamp}}_
-        ";
-        let output = render_template(&app_cfg, &client, Some(template), &content).await;
-
-        println!("Telegram Output:\n{output}");
-
-        assert!(output.contains("🔄 Playlist Update Report"));
-        assert!(output.contains("Telegram Input"));
-        assert!(output.contains("⏱️ Took: `45 secs`"));
-        assert!(output.contains("❌ Errors: `2`"));
-        assert!(output.contains("Target T1"));
-        assert!(output.contains("An error occurred during sync"));
-    }
 
     #[test]
     fn disk_alert_kind_is_msg_kind_disk_alert() {
@@ -561,26 +277,8 @@ mod tests {
         assert_eq!(content.kind(), shared::model::MsgKind::DiskAlert);
     }
 
-    #[tokio::test]
-    async fn test_render_disk_alert_template_exposes_fields() {
-        let alert = shared::model::DiskAlert {
-            level: shared::model::DiskAlertLevel::Critical,
-            total_bytes: 1_000_000_000,
-            free_bytes: 50_000_000,
-            used_bytes: 950_000_000,
-            percent: 95.0,
-        };
-        let content = MessageContent::DiskAlert(alert);
-        let app_cfg = create_app_config();
-        let client = reqwest::Client::new();
-        let template = r"[{{kind}}] {{disk.level}} - {{disk.percent}}% used";
-        let output = render_template(&app_cfg, &client, Some(template), &content).await;
-        assert!(output.starts_with("[DiskAlert] critical - "));
-        assert!(output.ends_with("% used"));
-    }
-
-    #[tokio::test]
-    async fn test_render_disk_alert_falls_back_to_default_text() {
+    #[test]
+    fn a_disk_alert_body_names_the_level_and_the_percent() {
         let alert = shared::model::DiskAlert {
             level: shared::model::DiskAlertLevel::Warn,
             total_bytes: 1_000_000_000,
@@ -588,11 +286,14 @@ mod tests {
             used_bytes: 850_000_000,
             percent: 85.0,
         };
-        let content = MessageContent::DiskAlert(alert);
-        let app_cfg = create_app_config();
-        let client = reqwest::Client::new();
-        let output = render_template(&app_cfg, &client, None, &content).await;
-        assert!(output.contains("warning"), "fallback must mention alert level, got {output}");
-        assert!(output.contains("85.0%"), "fallback must include percent, got {output}");
+        let event = NotificationEvent::from_content(&MessageContent::DiskAlert(alert));
+        assert!(event.body.contains("warning"), "the body must mention the alert level, got {}", event.body);
+        assert!(event.body.contains("85.0%"), "the body must include the percent, got {}", event.body);
+    }
+
+    #[test]
+    fn a_rendered_message_carries_the_event_body() {
+        let event = test_event(shared::model::notification::registry::SYSTEM_INFO);
+        assert_eq!(RenderedMessage::of(&event).body, event.body);
     }
 }

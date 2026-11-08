@@ -113,7 +113,6 @@ impl RecordingNotificationPlan {
 /// the entry.
 pub(super) fn spawn_recording_notification_after_persist(
     app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
     plan: RecordingNotificationPlan,
     persisted: bool,
 ) {
@@ -134,8 +133,7 @@ pub(super) fn spawn_recording_notification_after_persist(
         None => event,
     };
     let app_config = Arc::clone(app_config);
-    let client = client.clone();
     tokio::spawn(async move {
-        tuliprox_messaging::send_event(&app_config, &client, event).await;
+        tuliprox_messaging::send_event(&app_config, event).await;
     });
 }

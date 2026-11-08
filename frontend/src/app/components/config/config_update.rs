@@ -626,7 +626,6 @@ mod tests {
                 MessagingConfigDto {
                     notify_on: vec!["system.disk.alert".to_string()],
                     disk_alert: Some(DiskAlertConfigDto::default()),
-                    ..Default::default()
                 },
             )],
         );
@@ -649,7 +648,6 @@ mod tests {
                 MessagingConfigDto {
                     notify_on: vec!["system.disk.alert".to_string()],
                     disk_alert: Some(disk_alert.clone()),
-                    ..Default::default()
                 },
             )],
         );

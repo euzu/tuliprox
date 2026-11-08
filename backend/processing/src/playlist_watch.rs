@@ -143,7 +143,7 @@ pub fn group_changes(
 /// title (added before removed), so notifications and tests do not depend on
 /// which concurrent group diff finished first. Above the summary threshold,
 /// summed over every group, channel lists are dropped and only counts remain:
-/// nobody reads thousands of titles, and channels such as Telegram reject a
+/// nobody reads thousands of titles, and chat services reject a
 /// body that large outright.
 pub fn assemble_watch_changes(
     target_name: &str,

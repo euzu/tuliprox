@@ -11,9 +11,10 @@ created and the pipeline behaves as it does without the plugin system. If the fi
 mount), the server logs a warning and starts with plugins off. The management API (`/api/v1/plugins`) is part of the web API, so it needs
 `web_ui.enabled: true`. To build and run a first plugin, start with the [Quickstart](./quickstart.md).
 
-> **Notifier plugins are optional.** Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and local commands are
-> built into the server and configured under `messaging` (see the configuration reference). The notifier plugins under
-> `plugins/notifiers/` do the same job as plugins, for anyone who prefers a channel to be one; configure either, or both.
+Notification delivery uses plugins. Install and approve a notifier from the Marketplace, configure it in the Plugin Manager,
+and enable it. The `messaging` configuration controls global event subscriptions and disk alerts; transport credentials
+and per-channel routing belong to each notifier's settings. Built-in channel keys such as `messaging.telegram` and
+`messaging.discord` are no longer accepted.
 
 ## What a plugin is
 

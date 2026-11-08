@@ -40,12 +40,12 @@ fn unknown_wire_name_does_not_resolve() {
 
 #[test]
 fn recording_template_filenames_match_the_legacy_names() {
-    // The legacy on-disk names were `telegram_recording_completed.templ`
+    // The legacy on-disk names were `command_recording_completed.templ`
     // and friends. The canonical dotted ids produce the same stems, so
     // existing template files keep being discovered.
-    assert_eq!(registry::RECORDING_COMPLETED.template_filename("telegram"), "telegram_recording_completed.templ");
-    assert_eq!(registry::RECORDING_STARTED.template_filename("discord"), "discord_recording_started.templ");
-    assert_eq!(registry::RECORDING_FAILED.template_filename("rest"), "rest_recording_failed.templ");
+    assert_eq!(registry::RECORDING_COMPLETED.template_filename("command"), "command_recording_completed.templ");
+    assert_eq!(registry::RECORDING_STARTED.template_filename("command"), "command_recording_started.templ");
+    assert_eq!(registry::RECORDING_FAILED.template_filename("command"), "command_recording_failed.templ");
 }
 
 #[test]

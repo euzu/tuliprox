@@ -34,7 +34,7 @@ outbox apply as for every notifier plugin (see *Per-Channel Routing* in the conf
 | `timeout_secs` | `20`    | 1 to 25. The program is stopped after this long and the notification is retried.                             |
 | `routing`      | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                              |
 
-Compared with the built-in `messaging.command` channel: `program`, `args` and `timeout_secs` keep their meaning
+Migrating from the built-in `messaging.command` channel: `program`, `args` and `timeout_secs` keep their meaning
 (`timeout_secs` is now at most 25, the default 20, because a plugin call has a 30 second limit). Two things differ:
 
 * **No inherited environment.** The program gets `PATH`, the three variables below, and nothing else, so it no longer sees

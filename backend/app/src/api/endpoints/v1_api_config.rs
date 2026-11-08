@@ -7,8 +7,8 @@ use crate::{
     },
     auth::{verify_token, AuthBearer},
     config_loader::{
-        persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users,
-        read_api_proxy_file_with_templates, read_plans_file, save_plans,
+        plans_file_path, prepare_sources_batch, prepare_users, read_api_proxy_file_with_templates, read_plans_file,
+        save_plans,
     },
     iptv::xtream::{get_xtream_stream_url_base, xtream_login},
     model::{
@@ -277,14 +277,6 @@ fn sanitize_target_identity_only(target: &ConfigTargetDto) -> ConfigTargetDto {
 }
 
 fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto, permissions: Option<PermissionSet>) {
-    // Unconditional: `config.yml` goes out in full to anyone with
-    // `ConfigRead`, which included the Telegram bot token, the Pushover
-    // credentials and any `Authorization` header on the REST channel.
-    // `save_config_main` puts a returned mask back, so the round-trip is
-    // lossless.
-    if let Some(messaging) = app_config.config.messaging.as_mut() {
-        messaging.redact_secrets();
-    }
     if let Some(permissions) = permissions {
         if !permissions.contains(Permission::ConfigRead) {
             app_config.config = ConfigDto::default();
@@ -407,16 +399,6 @@ async fn save_config_main(
         return response;
     }
 
-    // A client that echoes a redacted secret back means "keep what is
-    // stored". Without this the round-trip would write the mask over the
-    // real token and silently break the channel.
-    if let Some(incoming) = cfg.messaging.as_mut() {
-        let stored = app_state.app_config.config.load();
-        if let Some(current) = stored.messaging.as_ref() {
-            incoming.restore_redacted_secrets(&shared::model::MessagingConfigDto::from(current));
-        }
-    }
-
     // The page was filled from the env-resolved config and edits neither list:
     // the marketplace sources and the plugin entries keep their written form.
     {
@@ -449,12 +431,6 @@ async fn save_config_main(
     if let Err(err) = validate_library_paths_from_dto(&cfg) {
         (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response()
     } else {
-        if let Err(err) = persist_messaging_templates(&app_state.app_config, &mut cfg).await {
-            error!("Failed to persist messaging templates: {err}");
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
-                .into_response();
-        }
-
         if let Some(err) = intern_save_config_main(&file_path, &backup_dir, &cfg).await {
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                 .into_response();
@@ -1079,12 +1055,11 @@ pub struct MessagingTestRequest {
     /// Event id to simulate. Defaults to `system.info`.
     #[serde(default)]
     pub event: Option<String>,
-    /// Restrict to one channel by its stable id (`telegram`, `discord`, ...).
+    /// Restrict to one channel by its stable id (`plugin.<plugin id>`).
     /// Absent means every configured channel.
     #[serde(default)]
     pub channel: Option<String>,
-    /// Render only, send nothing. Lets a template be iterated without
-    /// spamming a channel.
+    /// Show what would be sent, send nothing.
     #[serde(default)]
     pub preview: bool,
 }
@@ -1099,8 +1074,6 @@ pub struct MessagingTestChannelResult {
     pub reason: Option<String>,
     /// Exactly what the channel was asked to send.
     pub rendered: String,
-    /// Whether an operator template produced `rendered`.
-    pub templated: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1131,10 +1104,8 @@ async fn test_messaging(
     };
 
     let event = tuliprox_messaging::test_event(event_id);
-    let client = app_state.http_clients.default.load();
     let results = tuliprox_messaging::render_and_send_test(
         &app_state.app_config,
-        &client,
         &event,
         request.channel.as_deref(),
         request.preview,
@@ -1151,7 +1122,6 @@ async fn test_messaging(
                 outcome: outcome.outcome,
                 reason: outcome.reason,
                 rendered: outcome.rendered,
-                templated: outcome.templated,
             })
             .collect(),
     };

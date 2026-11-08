@@ -28,7 +28,7 @@ pub enum UserLifecycleState {
 /// # What is deliberately absent
 ///
 /// The password, token and any proxy credentials. This record reaches
-/// notification channels — Telegram, a webhook, a shell command — and
+/// notification channels — a chat service, a webhook, a shell command — and
 /// several of them are third-party services with their own logging. An
 /// account identity is what a lifecycle notification needs; the secret is
 /// not, so it is not in the type at all rather than being redacted at each

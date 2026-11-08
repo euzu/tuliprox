@@ -4,6 +4,56 @@
 
 ## ⚠️ Breaking Changes
 
+- **`messaging.command` is removed, and with it the notification templates.** The built-in `command` channel was the last
+  one: the config key is no longer accepted, so a config that still contains it fails to load with `unknown field`, and no
+  channel is built into the server any more. Install, approve and configure the `command-notifier` plugin instead
+  (`plugins.plugins`, id `command-notifier`, settings `program`, `args`, `timeout_secs`). Because a plugin cannot start a
+  program on its own, the plugin asks for the new `process` capability, which the admin approves in the Plugin Manager.
+  Two behaviours differ: `timeout_secs` is at most 25 (default 20), since a plugin call has a 30 second limit, and the
+  program no longer inherits tuliprox's environment, only `PATH` and `TULIPROX_EVENT_ID`, `TULIPROX_EVENT_SEVERITY` and
+  `TULIPROX_EVENT_TITLE`. With the last channel gone the Handlebars templating of messages is removed too:
+  `templates:` in a channel, `messaging_templates/*.templ` files and the `templated` field of
+  `POST /api/v1/config/messaging/test` no longer exist. A plugin lays the event out itself, and the program gets the event
+  as JSON.
+
+- **`messaging.telegram` is removed.** The built-in Telegram channel is gone, together with its form in the Web UI and its
+  Handlebars templates: the config key is no longer accepted, so a config that still contains it fails to load with
+  `unknown field`. Install and configure the `telegram-notifier` plugin instead (`plugins.plugins`, id
+  `telegram-notifier`, settings `bot_token`, `chat_ids` and optionally `style`). `chat_ids` keep their format
+  (`<chat_id>`, `<chat_id>:<thread_id>`, `@channel`). `markdown: true` is replaced by `style: html` (the default: bold
+  title and headings, nothing else is interpreted) or `style: text`; MarkdownV2 is no longer used. The plugin lays the
+  event out itself, so `messaging_templates/telegram_*.templ` files are ignored. Only `command` remains a built-in
+  channel.
+
+- **`messaging.rest` is removed, and with it webhook templates.** The built-in REST channel is gone, together with its form
+  in the Web UI: the config key is no longer accepted, so a config that still contains it fails to load with `unknown
+  field`. Install and configure the `rest-notifier` plugin instead (`plugins.plugins`, id `rest-notifier`, settings `url`
+  and, as needed, `method`, `headers`, `secret_headers`, `signing_secret`). The channel's Handlebars templates do not carry
+  over: the plugin sends the event itself as JSON, or its plain-text body. A body shaped for one particular service
+  belongs in a notifier plugin for that service. `X-Tuliprox-Timestamp` and `X-Tuliprox-Signature` keep their exact
+  format, so a receiver that verifies them needs no change.
+
+- **`messaging.pushover` is removed.** The built-in Pushover channel is gone, together with its form in the Web UI: the
+  config key is no longer accepted, so a config that still contains it fails to load with `unknown field`. Install and
+  configure the `pushover-notifier` plugin instead (`plugins.plugins`, id `pushover-notifier`, settings `token` and `user`).
+
+- **`messaging.ntfy` is removed.** The built-in ntfy channel is gone; the config key is no longer accepted, so a config
+  that still contains it fails to load with `unknown field`. Install and configure the `ntfy-notifier` plugin instead
+  (`plugins.plugins`, id `ntfy-notifier`, settings `url`, `topic` and optionally `token`).
+
+- **`messaging.gotify` is removed.** The built-in Gotify channel is gone; the config key is no longer accepted, so a
+  config that still contains it fails to load with `unknown field`. Install and configure the `gotify-notifier` plugin
+  instead (`plugins.plugins`, id `gotify-notifier`, settings `url` and `token`).
+
+- **`messaging.slack` is removed.** The built-in Slack channel is gone; the config key is no longer accepted, so a
+  config that still contains it fails to load with `unknown field`. Install and configure the `slack-notifier` plugin
+  instead (`plugins.plugins`, id `slack-notifier`, setting `url`).
+
+- **`messaging.discord` is removed.** The built-in Discord channel (and its `discord_*.templ` templates and the Web UI
+  form) is gone; the config key is no longer accepted, so a config that still contains it fails to load with
+  `unknown field`. Install and configure the `discord-notifier` plugin instead (`plugins.plugins`, id
+  `discord-notifier`, setting `url`).
+
 - **API user database migration refuses unresolved field assignments or unverifiable recovery history.** Untracked
   legacy databases migrate automatically when every record is unambiguous. Tracked databases requiring reconstruction
   need verified field-named recovery history bound to their identity and revision.
@@ -218,12 +268,6 @@
   source URL below its short label, so sources on the same host are distinguishable. The URL is masked according to
   `sanitize_sensitive_info`. The **Plugins** sidebar entry moved into the **Settings** group.
 
-- **Notifier plugins, next to the built-in channels.** Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and
-  local commands are all still built into the server and configured under `messaging`, exactly as before. Each also exists
-  as an optional plugin under `plugins/notifiers/<id>` (`make plugin-notifiers` builds them all), for anyone who wants
-  a channel to be a plugin; nothing is removed or renamed. The plugin system and its SDK gained what these plugins needed
-  (see the entries below), so a channel can move into a plugin later without further host work.
-
 - **The plugin SDK has its own version.** `tuliprox-plugin-api`, `tuliprox-plugin-sdk` and `tuliprox-plugin-sdk-macros`
   are versioned 1.x as the plugin contract instead of following the tuliprox release, so a plugin's `Cargo.lock` stays
   valid across tuliprox updates and `cargo build --locked` no longer breaks after a release. The three crates share
@@ -271,14 +315,14 @@
   is logged by program name. See
   [Running programs](docs/src/plugins/security.md#running-programs).
 
-- **Local commands are also available as a plugin.** The `command-notifier` plugin (`plugins/notifiers/command-notifier`,
+- **Local commands are a plugin.** The `command-notifier` plugin (`plugins/notifiers/command-notifier`,
   `make plugin-command-notifier`) runs a program for each notification with the event as JSON on its standard input, and
   `TULIPROX_EVENT_ID`, `TULIPROX_EVENT_SEVERITY` and `TULIPROX_EVENT_TITLE` in its environment. A non-zero exit or a timeout is
   retried with the program's first line of standard error as the reason; a program that cannot be started is dead-lettered
   at once. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
   [Command Notifier](docs/src/plugins/command-notifier.md).
 
-- **Telegram notifications are also available as a plugin.** The `telegram-notifier` plugin (`plugins/notifiers/telegram-notifier`,
+- **Telegram notifications are a plugin.** The `telegram-notifier` plugin (`plugins/notifiers/telegram-notifier`,
   `make plugin-telegram-notifier`) sends each notification to one or more Telegram chats through a bot: a bold title (marked
   `⚠️` for a warning and `🚨` for an error), the event's sections as bold headings with their lines, and Telegram's own HTML
   mode with only `& < >` escaped, so nothing in an event can become markup. A message that would pass Telegram's limit is
@@ -290,7 +334,7 @@
   every request URL, so no error or log line is ever built from a URL or a transport error. Its settings form ships its own
   translations (English, Russian, Spanish, Arabic). See [Telegram Notifier](docs/src/plugins/telegram-notifier.md).
 
-- **REST webhooks are also available as a plugin.** The `rest-notifier` plugin (`plugins/notifiers/rest-notifier`, `make plugin-rest-notifier`) sends
+- **Webhooks are a plugin.** The `rest-notifier` plugin (`plugins/notifiers/rest-notifier`, `make plugin-rest-notifier`) sends
   each notification to any HTTP endpoint with POST, PUT or PATCH: the event as JSON (`id`, `severity`, `timestamp`,
   `instance`, `title`, `body`, `fields`, `sections`) or the plain-text body, your own headers, and a list of secret headers
   (such as `Authorization: Bearer ...`) whose whole entries are masked in the Web UI. An optional `signing_secret` adds the
@@ -299,7 +343,7 @@
   outbound limits. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
   [REST Notifier](docs/src/plugins/rest-notifier.md).
 
-- **Pushover notifications are also available as a plugin.** The `pushover-notifier` plugin (`plugins/notifiers/pushover-notifier`,
+- **Pushover notifications are a plugin.** The `pushover-notifier` plugin (`plugins/notifiers/pushover-notifier`,
   `make plugin-pushover-notifier`) sends notifications to Pushover. The message carries the event's own time as the
   Pushover timestamp, so one delivered late through the outbox still shows when it happened. With `style: html` the event's
   sections are sent as bold headings with their lines below; the message is assembled from whole lines, so the
@@ -307,7 +351,7 @@
   URL, and in no error or log line. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
   [Pushover Notifier](docs/src/plugins/pushover-notifier.md).
 
-- **ntfy notifications are also available as a plugin.** The `ntfy-notifier` plugin (`plugins/notifiers/ntfy-notifier`,
+- **ntfy notifications are a plugin.** The `ntfy-notifier` plugin (`plugins/notifiers/ntfy-notifier`,
   `make plugin-ntfy-notifier`) publishes to an ntfy topic through ntfy's JSON API, so a title or a message can carry any
   Unicode text (the header form had to strip emoji from titles). Events carry their domain and, for a warning or an error,
   a warning or alarm tag as ntfy tags; the message is cut at ntfy's 4096-byte limit on a character boundary; with
@@ -316,20 +360,20 @@
   [ntfy Notifier](docs/src/plugins/ntfy-notifier.md). The SDK's `notify` module gained `Section`, `sections_of` and a
   `markdown` helper (escaping, hard line breaks, sections as bold headings), which the Gotify plugin now uses too.
 
-- **Gotify notifications are also available as a plugin.** The `gotify-notifier` plugin (`plugins/notifiers/gotify-notifier`,
+- **Gotify notifications are a plugin.** The `gotify-notifier` plugin (`plugins/notifiers/gotify-notifier`,
   `make plugin-gotify-notifier`) pushes notifications to a Gotify server, as plain text or, with `style: markdown`, as the
   event's sections in markdown that Gotify clients render. The application token travels in the `X-Gotify-Key` header
   instead of the URL, so it cannot end up in a proxy log or an error. Its settings form ships its own translations
   (English, Russian, Spanish, Arabic). See [Gotify Notifier](docs/src/plugins/gotify-notifier.md).
 
-- **Slack notifications are also available as a plugin.** The `slack-notifier` plugin (`plugins/notifiers/slack-notifier`,
+- **Slack notifications are a plugin.** The `slack-notifier` plugin (`plugins/notifiers/slack-notifier`,
   `make plugin-slack-notifier`) delivers notifications to a Slack incoming webhook as Block Kit blocks (a header, the
   event's sections, a footer with the event id, instance and time) or as plain text. `&`, `<` and `>` are escaped, so event
   text cannot become a mention or a link. Its settings form ships its own translations (English, Russian, Spanish,
   Arabic). See [Slack Notifier](docs/src/plugins/slack-notifier.md). The SDK gained `tuliprox_plugin_sdk::notify`
   (HTTP status to `DeliveryError`, `Retry-After`, ISO 8601 times) for notification plugins, which the Discord plugin now uses too.
 
-- **Discord notifications are also available as a plugin.** The `discord-notifier` plugin (`plugins/notifiers/discord-notifier`,
+- **Discord notifications are a plugin.** The `discord-notifier` plugin (`plugins/notifiers/discord-notifier`,
   `make plugin-discord-notifier`) delivers notifications to a Discord webhook as an embed (a colour per severity, the
   instance name as footer, the event's detail as fields) or as plain text, with `@everyone` and role pings disabled. Routing, quiet hours,
   suppression and the retrying outbox apply as for every channel. Its settings form ships its own translations
