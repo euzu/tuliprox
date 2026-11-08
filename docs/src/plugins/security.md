@@ -91,6 +91,8 @@ A plugin with custom UI runs its scripts in a sandboxed frame. The frame has an 
   authenticated call itself, and only for methods the manifest declares.
 - The frame document is served without authentication. That is a design choice: an iframe `src` carries no token. The
   route serves only files under the plugin's `ui/` directory, of an allowed type, for an enabled plugin.
+  Declared locale JSON files are also available for loaded, disabled and failed plugins so settings can be translated
+  before enabling; executable UI assets still require an enabled plugin.
 
 Limits that remain:
 

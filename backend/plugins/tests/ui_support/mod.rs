@@ -17,7 +17,7 @@ use tuliprox_plugins::{PluginServices, PluginSystem};
 pub const ID: &str = "probe-bare";
 
 const UI_SECTION: &str =
-    "\nui:\n  contributions:\n    - slot: menu\n      title: \"Probe\"\n      element: ui/index.html\n";
+    "\nui:\n  locales: [en]\n  contributions:\n    - slot: menu\n      title: \"Probe\"\n      element: ui/index.html\n";
 
 pub struct Staged {
     pub system: PluginSystem,
@@ -50,6 +50,8 @@ pub fn stage(entry: Option<bool>) -> Option<Staged> {
     let data = tempfile::tempdir().expect("temporary data dir");
     let plugin_dir = plugins.path().join(ID);
     fs::create_dir_all(plugin_dir.join("ui/assets")).expect("ui dir");
+    fs::create_dir_all(plugin_dir.join("ui/locales")).expect("locale dir");
+    fs::write(plugin_dir.join("ui/locales/en.json"), r#"{"settings.title":"Settings"}"#).expect("locale");
     fs::copy(source.join("plugin.wasm"), plugin_dir.join("plugin.wasm")).expect("copy the component");
     let manifest = fs::read_to_string(source.join("manifest.yml")).expect("fixture manifest");
     fs::write(plugin_dir.join("manifest.yml"), format!("{manifest}{UI_SECTION}")).expect("manifest");

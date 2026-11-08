@@ -212,22 +212,23 @@ impl PluginSystem {
     pub fn ui_path_is_safe(raw_path: &str) -> bool { raw_path_is_safe(raw_path) }
 
     /// The file `path` (percent-decoded once) of plugin `id`'s `ui/`
-    /// directory, if the plugin is `enabled` and every rule of
+    /// directory, if the plugin is enabled (or this is a declared locale of a
+    /// loaded, disabled or failed plugin) and every rule of
     /// [`resolve_in`] holds. `None` is a `404`. Blocking filesystem work: call
     /// it from `spawn_blocking`.
     #[must_use]
     pub fn ui_asset(&self, id: &str, path: &str) -> Option<UiAsset> {
         let snapshot = self.registry().snapshot();
         let record = snapshot.get(id)?;
-        if record.state() != PluginState::Enabled {
+        let manifest = record.manifest.as_deref()?;
+        if !can_serve_asset(record.state(), manifest, path) {
             return None;
         }
-        let manifest = record.manifest.as_deref()?;
         resolve_in(&record.dir, &manifest.version.to_string(), path)
     }
 
     /// Everything the web UI renders for each plugin with a `ui:` part whose
-    /// state is `enabled`, `disabled` or `failed` (the last two grey out).
+    /// state is `loaded`, `enabled`, `disabled` or `failed` (inactive entries grey out).
     #[must_use]
     pub fn api_ui(&self) -> Vec<PluginUiDto> {
         self.registry().snapshot().plugins.iter().filter_map(|record| ui_entry(record)).collect()
@@ -329,9 +330,18 @@ fn source_tile(manifest: &Manifest, hook: HookId, tile: Option<&SourceTile>) -> 
     })
 }
 
+// Settings can be edited before a plugin is enabled. Serve only its declared
+// locale JSON in that state; executable UI assets still require an enabled plugin.
+fn can_serve_asset(state: PluginState, manifest: &Manifest, path: &str) -> bool {
+    state == PluginState::Enabled
+        || (matches!(state, PluginState::Loaded | PluginState::Disabled | PluginState::Failed)
+            && manifest.ui.locales.iter().any(|lang| path == format!("locales/{lang}.json")))
+}
+
 fn ui_entry(record: &PluginRecord) -> Option<PluginUiDto> {
     let manifest = record.manifest.as_deref().filter(|manifest| has_ui(manifest))?;
     let state = match record.state() {
+        PluginState::Loaded => PluginStateDto::Loaded,
         PluginState::Enabled => PluginStateDto::Enabled,
         PluginState::Disabled => PluginStateDto::Disabled,
         PluginState::Failed => PluginStateDto::Failed,
@@ -404,6 +414,24 @@ mod tests {
     fn manifest(extra: &str) -> Manifest {
         let text = format!("id: demo-plugin\nname: Demo Input\nversion: 0.1.0\napi_version: 1\n{extra}");
         Manifest::parse(&text, "demo-plugin").expect("valid manifest")
+    }
+
+    #[test]
+    fn inactive_plugins_expose_declared_locales_but_no_executable_ui() {
+        let manifest = manifest("ui:\n  locales: [en, es]\n");
+        for state in [PluginState::Loaded, PluginState::Disabled, PluginState::Failed] {
+            assert!(can_serve_asset(state, &manifest, "locales/en.json"));
+            assert!(can_serve_asset(state, &manifest, "locales/es.json"));
+            for path in ["index.html", "assets/app.js", "other.json", "locales/ru.json", "locales/../index.html"] {
+                assert!(!can_serve_asset(state, &manifest, path), "{state:?}: {path}");
+            }
+        }
+        for state in
+            [PluginState::Discovered, PluginState::Invalid, PluginState::PendingApproval, PluginState::Approved]
+        {
+            assert!(!can_serve_asset(state, &manifest, "locales/en.json"));
+        }
+        assert!(can_serve_asset(PluginState::Enabled, &manifest, "index.html"));
     }
 
     const PROVIDER: &str =

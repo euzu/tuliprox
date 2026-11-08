@@ -13,6 +13,8 @@ A source is the direct HTTPS URL of a repository's root `marketplace.json`. For 
 for example `https://raw.githubusercontent.com/<owner>/<repo>/main/marketplace.json`. The URL must point at the file itself,
 not at the repository page.
 
+The official Tuliprox catalog (`https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/marketplace.json`) is included by default when `repositories` is omitted. Set `repositories: []` to use no sources.
+
 You can add sources in two places. Both edit the same list in `config.yml`:
 
 - In `config.yml`, under `plugins.repositories`.

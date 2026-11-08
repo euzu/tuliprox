@@ -1,5 +1,208 @@
 {
   "format_version": 1,
   "name": "Tuliprox plugins",
-  "plugins": []
+  "plugins": [
+    {
+      "id": "command-notifier",
+      "name": "Command Notifier",
+      "description": "Runs a local program for each tuliprox notification, with the event as JSON on its standard input. For anything that has no notifier plugin of its own: a script that sends mail, writes a log, drives home automation. Needs the process capability, which the admin approves knowingly: the program runs as the user tuliprox runs as.",
+      "author": "tuliprox",
+      "category": "notifier",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/notifiers/command-notifier",
+      "releases": [
+        {
+          "version": "1.0.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/command-notifier-1.0.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "notifications",
+            "process"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "discord-notifier",
+      "name": "Discord Notifier",
+      "description": "Delivers tuliprox notifications to a Discord webhook as an embed or plain text. Routing, quiet hours, suppression and retries are the host's; this plugin formats the message and speaks to Discord.",
+      "author": "tuliprox",
+      "category": "notifier",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/notifiers/discord-notifier",
+      "releases": [
+        {
+          "version": "1.0.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/discord-notifier-1.0.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "notifications",
+            "network"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gotify-notifier",
+      "name": "Gotify Notifier",
+      "description": "Delivers tuliprox notifications to a Gotify server as push messages, as plain text or as markdown. Routing, quiet hours, suppression and retries are the host's; this plugin formats the message and speaks to Gotify.",
+      "author": "tuliprox",
+      "category": "notifier",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/notifiers/gotify-notifier",
+      "releases": [
+        {
+          "version": "1.0.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/gotify-notifier-1.0.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "notifications",
+            "network"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ntfy-notifier",
+      "name": "ntfy Notifier",
+      "description": "Delivers tuliprox notifications to an ntfy topic as push messages, as plain text or as markdown. Routing, quiet hours, suppression and retries are the host's; this plugin formats the message and speaks to ntfy.",
+      "author": "tuliprox",
+      "category": "notifier",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/notifiers/ntfy-notifier",
+      "releases": [
+        {
+          "version": "1.0.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/ntfy-notifier-1.0.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "notifications",
+            "network"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pushover-notifier",
+      "name": "Pushover Notifier",
+      "description": "Delivers tuliprox notifications to Pushover as push messages, as plain text or as HTML. Routing, quiet hours, suppression and retries are the host's; this plugin formats the message and speaks to Pushover.",
+      "author": "tuliprox",
+      "category": "notifier",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/notifiers/pushover-notifier",
+      "releases": [
+        {
+          "version": "1.0.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/pushover-notifier-1.0.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "notifications",
+            "network"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rest-notifier",
+      "name": "REST Notifier",
+      "description": "Delivers tuliprox notifications to any HTTP endpoint (a webhook): the event as JSON, or its plain-text body, with your own headers and an optional HMAC signature the receiver can verify. Routing, quiet hours, suppression and retries are the host's; this plugin builds the request and speaks HTTP.",
+      "author": "tuliprox",
+      "category": "notifier",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/notifiers/rest-notifier",
+      "releases": [
+        {
+          "version": "1.0.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/rest-notifier-1.0.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "notifications",
+            "network"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "slack-notifier",
+      "name": "Slack Notifier",
+      "description": "Delivers tuliprox notifications to a Slack incoming webhook as Block Kit blocks or plain text. Routing, quiet hours, suppression and retries are the host's; this plugin formats the message and speaks to Slack.",
+      "author": "tuliprox",
+      "category": "notifier",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/notifiers/slack-notifier",
+      "releases": [
+        {
+          "version": "1.0.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/slack-notifier-1.0.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "notifications",
+            "network"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "telegram-notifier",
+      "name": "Telegram Notifier",
+      "description": "Delivers tuliprox notifications to Telegram chats, groups, topics and channels through a bot, as formatted or plain text. Routing, quiet hours, suppression and retries are the host's; this plugin formats the message, splits a long one, and remembers which chats already have it so a retry never repeats a delivery.",
+      "author": "tuliprox",
+      "category": "notifier",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/notifiers/telegram-notifier",
+      "releases": [
+        {
+          "version": "1.0.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/telegram-notifier-1.0.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "notifications",
+            "network",
+            "storage"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "matrix-notifier",
+      "name": "Matrix Notifier",
+      "description": "Delivers tuliprox notifications to a Matrix room through the client-server API. Routing, quiet hours, suppression and retries come from the host's messaging outbox; this plugin only speaks Matrix.",
+      "author": "tuliprox",
+      "category": "notifier",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/examples/matrix-notifier",
+      "releases": [
+        {
+          "version": "0.1.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/matrix-notifier-0.1.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "notifications",
+            "network",
+            "storage"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "youtube-input",
+      "name": "YouTube Input",
+      "description": "Ingests YouTube channels, playlists, and live streams as native playlist channels.",
+      "author": "tuliprox",
+      "category": "input",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/inputs/youtube-input",
+      "releases": [
+        {
+          "version": "0.1.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/youtube-input-0.1.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "network",
+            "storage"
+          ]
+        }
+      ]
+    }
+  ]
 }

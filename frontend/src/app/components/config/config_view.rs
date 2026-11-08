@@ -6,8 +6,8 @@ use crate::{
                 config_update::apply_and_prepare_config,
                 config_view_context::ConfigViewContext,
                 plugin_config::{
-                    save_modified_plugins, use_plugin_settings, PluginConfigExtensions, PluginConfigSections,
-                    PluginConfigTab, PluginSettingsContext,
+                    save_modified_plugins, use_plugin_settings, PluginConfigExtensions, PluginConfigTab,
+                    PluginSettingsContext,
                 },
                 ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView,
                 MainConfigView, McpConfigView, MessagingConfigView, MetadataUpdateConfigView, PanelConfigView,
@@ -620,9 +620,6 @@ pub fn ConfigView() -> Html {
                  <TabSet tabs={tabs.clone()} active_tab={Some((*active_tab).clone())}
                      on_tab_change={Some(handle_tab_change)}
                      class="tp__config-view__tabset"/>
-
-                // Sections of plugins, after the built-in ones.
-                { html_if!(!setup_mode, { <PluginConfigSections /> }) }
 
                 { html_if!(services_ctx.auth.has_any_permissions(Permission::ConfigWrite | Permission::SourceWrite) && (*edit_mode || setup_mode), {
                     <div class="tp__config-view__toolbar tp__form-page__toolbar">
