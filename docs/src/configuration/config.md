@@ -1068,6 +1068,26 @@ Recording lifecycle notifications are global-channel notifications. Tuliprox sen
 legacy administrator recordings, and built-in administrator private recordings. Private recordings owned by regular
 users are suppressed.
 
+#### Helpers
+
+Besides the standard Handlebars helpers (`if`, `each`, `eq`, ...), templates can use:
+
+* `{{json_escape value}}` — Escapes a string for use inside a JSON string literal.
+* `{{bytes value}}` — Formats a byte count as a human-readable size (`1024` → `1.00 KB`, binary units).
+* `{{round value}}` — Rounds a number to an integer; halves round away from zero (`2.5` → `3`).
+  `{{round value decimals=2}}` keeps two decimal places (maximum 10).
+
+`bytes` and `round` render nothing when the value is missing or not a number. `decimals` must be a number, not a
+string: `decimals="1"` is ignored and rounds to an integer.
+
+Discord example for disk alerts:
+
+```json
+{"embeds":[{"title":":floppy_disk: Disk {{disk.level}}",
+  "description":"{{round disk.percent decimals=1}}% used · {{bytes disk.free_bytes}} free of {{bytes disk.total_bytes}}",
+  "color":16753920,"footer":{"text":"{{event.id}} · {{timestamp}}"}}]}
+```
+
 #### Template Examples
 
 **Telegram (Markdown Report):**
@@ -1134,7 +1154,7 @@ hour instead of a single one-shot alert.
 
 ```yaml
 messaging:
-  notify_on: [ "info", "stats", "error", "watch" ]
+  notify_on: [ "info", "stats", "error", "watch", "system.disk.alert" ]
 
   # Disk-space alerts are sent through the channels above. Configure the
   # thresholds and the re-arm interval here. The 2-second sampling tick is
@@ -1156,10 +1176,8 @@ messaging:
     bot_token: "<TOKEN>"
     chat_ids: [ "<CHAT_ID>" ]
     templates:
-      # Custom templates per level. Plain-text defaults are used if omitted.
-      disk_alert_warn: "⚠️ Disk is {{percent}}% full (Warn threshold)."
-      disk_alert_critical: "🚨 Disk is {{percent}}% full — cleanup now!"
-      disk_alert_normal: "✅ Disk back to normal at {{percent}}%."
+      # One template for every level. The built-in text is used if omitted.
+      system.disk.alert: "💾 Disk {{disk.level}}: {{round disk.percent}}% used, {{bytes disk.free_bytes}} free."
 ```
 
 > **Note on `mounts`:** Earlier drafts of this section described a `mounts` config field. The current
@@ -1167,22 +1185,18 @@ messaging:
 > mount (see `DiskProbe::for_cwd()` in `backend/app/src/api/sys_usage.rs`). If you need to monitor a different
 > path, change the working directory of the Tuliprox process.
 
-**Available Handlebars Variables** (all `disk_alert_*` templates):
+**Available Handlebars Variables** (`system.disk.alert` template):
 
-* `{{level}}` — The new level after the transition (`Warn`, `Critical`, or `Normal`).
-* `{{percent}}` — Current percent-used, rounded to one decimal place.
-* `{{free_bytes}}` / `{{total_bytes}}` / `{{used_bytes}}` — Raw byte counts for the sampled mount.
+* `{{disk.level}}` — The alert level (`warn` or `critical`).
+* `{{disk.percent}}` — Current percent-used, unrounded. Use `{{round disk.percent}}` or
+  `{{round disk.percent decimals=1}}`.
+* `{{disk.free_bytes}}` / `{{disk.total_bytes}}` / `{{disk.used_bytes}}` — Raw byte counts for the sampled mount.
+  Use `{{bytes disk.free_bytes}}` for a human-readable size such as `45.30 GB`.
 * `{{timestamp}}` — Event time in UTC (ISO 8601 / RFC3339).
 
-**Available template keys per channel** (Handlebars): `disk_alert_warn`, `disk_alert_critical`,
-`disk_alert_normal`. If a template is not configured for a level, Tuliprox falls back to a clear plain-text
-default line, e.g.:
-
-> `[WARN] Disk is 82.3% full (free=3.4GB total=19.0GB).`
-> **Note:** Disk alerts are sent through **every** configured messaging channel. If you want a channel to
-> ignore disk alerts, simply do not declare the matching `disk_alert_*` template key for it and it will still
-> receive the plain-text default. Use the standard `notify_on` list to control which event kinds are sent at
-> all.
+If no template is configured, Tuliprox sends the built-in text, e.g.
+`Disk usage warning: 82.3% used (15.60 GB of 19.00 GB), 3.40 GB free.` Disk alerts follow the standard `notify_on`
+list and per-channel `routing`.
 
 ---
 
