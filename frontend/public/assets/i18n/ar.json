@@ -1259,6 +1259,7 @@
     "FIRMWARE_NAME": "اسم البرنامج الثابت",
     "FIRMWARE_VERSION": "إصدار البرنامج الثابت",
     "FLAT": "مسطح",
+    "FOLLOW_SYMLINKS": "تتبع الروابط الرمزية",
     "FORCE_REDIRECT": "إعادة التوجيه الإجباري",
     "FORMAT": "تنسيق",
     "FORMATS": "تنسيقات",

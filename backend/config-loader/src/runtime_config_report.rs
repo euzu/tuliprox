@@ -146,6 +146,7 @@ fn library_config_to_dto(config: &LibraryConfig) -> LibraryConfigDto {
                 path: directory.path.clone(),
                 content_type: directory.content_type,
                 recursive: directory.recursive,
+                follow_symlinks: directory.follow_symlinks,
             })
             .collect(),
         supported_extensions: config.supported_extensions.clone(),

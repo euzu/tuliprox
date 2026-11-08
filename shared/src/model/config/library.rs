@@ -54,10 +54,18 @@ pub struct LibraryScanDirectoryDto {
     pub content_type: LibraryContentType,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub recursive: bool,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub follow_symlinks: bool,
 }
 impl Default for LibraryScanDirectoryDto {
     fn default() -> Self {
-        Self { enabled: true, path: String::new(), content_type: LibraryContentType::default(), recursive: true }
+        Self {
+            enabled: true,
+            path: String::new(),
+            content_type: LibraryContentType::default(),
+            recursive: true,
+            follow_symlinks: true,
+        }
     }
 }
 
@@ -207,7 +215,10 @@ impl LibraryConfigDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_movie_category, default_series_category, LibraryPlaylistConfigDto};
+    use super::{
+        default_movie_category, default_series_category, LibraryContentType, LibraryPlaylistConfigDto,
+        LibraryScanDirectoryDto,
+    };
 
     #[test]
     fn playlist_default_uses_default_categories() {
@@ -223,5 +234,43 @@ mod tests {
         playlist.prepare();
         assert_eq!(playlist.movie_category, default_movie_category());
         assert_eq!(playlist.series_category, default_series_category());
+    }
+
+    #[test]
+    fn scan_directory_default_has_follow_symlinks_true() {
+        let dir = LibraryScanDirectoryDto::default();
+        assert!(dir.follow_symlinks);
+    }
+
+    #[test]
+    fn scan_directory_serialization_omits_follow_symlinks_when_true() {
+        let dir = LibraryScanDirectoryDto {
+            enabled: true,
+            path: "/media".to_string(),
+            content_type: LibraryContentType::Movie,
+            recursive: true,
+            follow_symlinks: true,
+        };
+        let yaml = serde_saphyr::to_string(&dir).expect("serialize");
+        assert!(!yaml.contains("follow_symlinks"));
+
+        let deserialized: LibraryScanDirectoryDto = serde_saphyr::from_str(&yaml).expect("deserialize");
+        assert!(deserialized.follow_symlinks);
+    }
+
+    #[test]
+    fn scan_directory_serialization_includes_follow_symlinks_when_false() {
+        let dir = LibraryScanDirectoryDto {
+            enabled: true,
+            path: "/media".to_string(),
+            content_type: LibraryContentType::Movie,
+            recursive: true,
+            follow_symlinks: false,
+        };
+        let yaml = serde_saphyr::to_string(&dir).expect("serialize");
+        assert!(yaml.contains("follow_symlinks: false"));
+
+        let deserialized: LibraryScanDirectoryDto = serde_saphyr::from_str(&yaml).expect("deserialize");
+        assert!(!deserialized.follow_symlinks);
     }
 }

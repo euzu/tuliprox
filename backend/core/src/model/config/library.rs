@@ -13,6 +13,7 @@ pub struct LibraryScanDirectory {
     pub path: String,
     pub content_type: LibraryContentType,
     pub recursive: bool,
+    pub follow_symlinks: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +104,7 @@ impl From<&LibraryConfigDto> for LibraryConfig {
                     path: d.path.clone(),
                     content_type: d.content_type,
                     recursive: d.recursive,
+                    follow_symlinks: d.follow_symlinks,
                 })
                 .collect(),
             supported_extensions: dto.supported_extensions.iter().map(|ext| ext.to_lowercase()).collect(),

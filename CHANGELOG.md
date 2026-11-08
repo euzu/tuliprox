@@ -219,6 +219,13 @@
 
 ## 🌟 New Features
 
+- **The local library follows symlinks.** Media linked into a scan directory from another drive or a cloud mount
+  (rclone, NFS, SMB) is now scanned and streamed. Symlinked files and directories are followed; directory loops are
+  detected, so every directory is scanned once. A dangling link, for example on an offline mount, is logged and
+  skipped; a target rebuild stops instead, so an offline mount never drops catalog entries. Symlinks that already
+  exist in scan directories are picked up on the next scan; disable it per scan directory with
+  `follow_symlinks: false`. When scan directories are nested, the innermost one decides.
+
 - **Playlist stats show the full EPG source URL.** Each row in the EPG coverage source list now shows the configured
   source URL below its short label, so sources on the same host are distinguishable. The URL is masked according to
   `sanitize_sensitive_info`. The **Plugins** sidebar entry moved into the **Settings** group.
@@ -1394,6 +1401,9 @@
 
 ## 🐛 Fixes
 
+- **Local library files stream when the scan directory is a symlink.** The stream check compared the resolved file path
+  with the unresolved scan directory path, so every file below a symlinked scan directory returned `403 Forbidden`.
+
 - **The override dialog shows the right channel for M3U items in Xtream targets.** M3U items whose stream URL has no
   numeric id (for example HDHomeRun `.../auto/v5.2`) are stored in Xtream targets with provider id `0`. All of them
   shared one override key, so the dialog showed the processed values of another channel. The key now comes from the
@@ -2053,6 +2063,10 @@
   episodes are unchanged: their properties carry no provider URL at that layer.
 
 ## ⚙️ New Settings
+
+- **`library.scan_directories[].follow_symlinks`: follow symlinks in a scan directory.** Default `true`. With `false`,
+  the scanner skips symlinks and streaming only serves files whose resolved path lies inside the resolved scan
+  directory. The Web UI library settings show it as the **Follow symlinks** column.
 
 - **`plugins.directories` and `TULIPROX_PLUGINS_DIRS`: search plugins in several directories.** Directories are
   searched in order; a plugin id found again in a later directory overrides the earlier one, and installs and uploads

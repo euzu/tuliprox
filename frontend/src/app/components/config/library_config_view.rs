@@ -25,6 +25,21 @@ use shared::model::{
 use std::rc::Rc;
 use yew::{platform::spawn_local, prelude::*};
 
+/// Builds the change callback for one boolean column of the scan directory table.
+fn scan_directory_toggle(
+    form: &UseReducerHandle<LibraryConfigFormState>,
+    set: fn(&mut LibraryScanDirectoryDto, bool),
+) -> Callback<(usize, bool)> {
+    let form = form.clone();
+    Callback::from(move |(idx, value): (usize, bool)| {
+        let mut scan_directories = form.form.scan_directories.clone();
+        if let Some(dir) = scan_directories.get_mut(idx) {
+            set(dir, value);
+            form.dispatch(LibraryConfigFormAction::ScanDirectories(scan_directories));
+        }
+    })
+}
+
 crate::app::components::define_table_columns! {
     enum DirectoryColumn {
         Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
@@ -35,6 +50,7 @@ crate::app::components::define_table_columns! {
         ContentType => ("content_type", "LABEL.CONTENT_TYPE"),
         Enabled => ("enabled", "LABEL.ENABLED"),
         Recursive => ("recursive", "LABEL.RECURSIVE"),
+        FollowSymlinks => ("follow_symlinks", "LABEL.FOLLOW_SYMLINKS"),
     }
 }
 
@@ -255,29 +271,11 @@ pub fn LibraryConfigView() -> Html {
         })
     };
 
-    let handle_enabled_change = {
-        let form = form_state.clone();
-        Callback::from(move |(idx, value): (usize, bool)| {
-            let mut scan_directories = form.form.scan_directories.clone();
-            if idx >= scan_directories.len() {
-                return;
-            }
-            scan_directories[idx].enabled = value;
-            form.dispatch(LibraryConfigFormAction::ScanDirectories(scan_directories));
-        })
-    };
+    let handle_enabled_change = scan_directory_toggle(&form_state, |dir, value| dir.enabled = value);
 
-    let handle_recursive_change = {
-        let form = form_state.clone();
-        Callback::from(move |(idx, value): (usize, bool)| {
-            let mut scan_directories = form.form.scan_directories.clone();
-            if idx >= scan_directories.len() {
-                return;
-            }
-            scan_directories[idx].recursive = value;
-            form.dispatch(LibraryConfigFormAction::ScanDirectories(scan_directories));
-        })
-    };
+    let handle_recursive_change = scan_directory_toggle(&form_state, |dir, value| dir.recursive = value);
+
+    let handle_follow_symlinks_change = scan_directory_toggle(&form_state, |dir, value| dir.follow_symlinks = value);
 
     let handle_type_change = {
         let form = form_state.clone();
@@ -368,6 +366,7 @@ pub fn LibraryConfigView() -> Html {
                                     })},
                                     DirectoryColumn::Enabled => html! {translator.t(if directory.enabled { "LABEL.ENABLED" } else { "LABEL.DISABLED" })},
                                     DirectoryColumn::Recursive => html! {translator.t(if directory.recursive { "LABEL.ENABLED" } else { "LABEL.DISABLED" })},
+                                    DirectoryColumn::FollowSymlinks => html! {translator.t(if directory.follow_symlinks { "LABEL.ENABLED" } else { "LABEL.DISABLED" })},
                                     DirectoryColumn::Actions => html! {},
                                 }}
                             </td>
@@ -389,6 +388,7 @@ pub fn LibraryConfigView() -> Html {
         let path_change = handle_path_change.clone();
         let enabled_change = handle_enabled_change.clone();
         let recursive_change = handle_recursive_change.clone();
+        let follow_symlinks_change = handle_follow_symlinks_change.clone();
         let type_change = handle_type_change.clone();
         let get_options = get_content_type_options.clone();
         let render = Callback::from(move |visible: Rc<Vec<usize>>| {
@@ -426,6 +426,11 @@ pub fn LibraryConfigView() -> Html {
                                     let recursive_change = recursive_change.clone();
                                     html! {<ToggleSwitch value={dir.recursive} readonly={false}
                                         on_change={Callback::from(move |value| recursive_change.emit((idx, value)))}/>}
+                                }
+                                DirectoryColumn::FollowSymlinks => {
+                                    let follow_symlinks_change = follow_symlinks_change.clone();
+                                    html! {<ToggleSwitch value={dir.follow_symlinks} readonly={false}
+                                        on_change={Callback::from(move |value| follow_symlinks_change.emit((idx, value)))}/>}
                                 }
                             };
                             html! {<td key={column.id()} data-column-id={column.id()}>{content}</td>}

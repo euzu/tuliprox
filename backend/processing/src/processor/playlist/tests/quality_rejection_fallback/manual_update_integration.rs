@@ -20,6 +20,7 @@ async fn library_context(root: &Path, order: ProcessingOrder) -> PlaylistProcess
         path: media.to_string_lossy().into_owned(),
         content_type: LibraryContentType::Movie,
         recursive: true,
+        follow_symlinks: true,
     }];
     config.library = Some(library);
     let mut metadata = MetadataUpdateConfig::default();
