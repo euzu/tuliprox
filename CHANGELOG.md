@@ -219,6 +219,12 @@
 
 ## 🌟 New Features
 
+- **Notification templates can format numbers and sizes.** Two Handlebars helpers join `json_escape`:
+  `{{bytes disk.free_bytes}}` renders a byte count as `45.30 GB`, and `{{round disk.percent}}` (or
+  `{{round disk.percent decimals=1}}`) rounds a number. A custom `system.disk.alert` template can now match the
+  built-in disk alert text. The disk alert docs now list the real `disk.*` variables and the `system.disk.alert`
+  template key.
+
 - **The local library follows symlinks.** Media linked into a scan directory from another drive or a cloud mount
   (rclone, NFS, SMB) is now scanned and streamed. Symlinked files and directories are followed; directory loops are
   detected, so every directory is scanned once. A dangling link, for example on an offline mount, is logged and

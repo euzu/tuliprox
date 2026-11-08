@@ -336,7 +336,7 @@ Notification capabilities include:
 - Dead-letter tracking for notifications that permanently fail
 - Provider `Retry-After` support where applicable
 - HMAC-SHA256 signing for REST webhooks
-- Per-channel Handlebars templates
+- Per-channel Handlebars templates with `json_escape`, `bytes` and `round` helpers
 - Preview/test endpoint so templates can be rendered without sending them
 - Events for provider failures, exhausted pools, priority fallback, user connection denial, auth activity, config reload  
   failures, metadata failures, scheduled-task failures, recording lifecycle, disk alerts, and more
