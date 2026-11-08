@@ -59,6 +59,7 @@ build settings-migrate-probe
 build task-probe
 build ui-demo
 build http-probe
+build managed-probe
 
 # Install one component once per manifest in <fixture>/manifests; each
 # manifest's id must be its file name.
@@ -76,6 +77,10 @@ install_manifests() {
 
 # Each run starts from an empty plugins directory so no stale id survives.
 rm -rf "$out/plugins"
+
+install_plugin managed-probe \
+    "$out/build/$target/release/plugin_fixture_managed_probe.wasm" \
+    "$fixtures/managed-probe/manifest.yml"
 
 install_plugin http-probe \
     "$out/build/$target/release/plugin_fixture_http_probe.wasm" \

@@ -25,6 +25,7 @@ relative to `backend/plugins/src/`, `backend/processing/src/` or `backend/app/sr
 
 | Hook id | Interface | SDK method: input -> output | Also requires | When it runs |
 | --- | --- | --- | --- | --- |
+| `playlist.managed-channels` | `managed-channel-hooks` | `reconcile_input(input_name)` -> complete managed channel list | `playlist_write` | After provider inventory hooks, including cached inputs; failures retain last-good channels ([details](./managed-channels.md)) |
 | `http.handle` | `http-routes` | `authenticate(request)` -> identity; `handle(request)` -> HTTP response | `http_routes`, non-empty `routes` | A request to the plugin HTTP namespace (`http_routes.rs`, `plugins_http_api.rs`) |
 | `playlist.before-filter` | `playlist-hooks` | `on_stage(stage, target, channels)` -> sparse `ChannelChange` list | none | Before the filter stage of each target (`processor/playlist/transform.rs`) |
 | `playlist.after-filter` | `playlist-hooks` | same | none | After the filter stage |

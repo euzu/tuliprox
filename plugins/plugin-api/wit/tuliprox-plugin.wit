@@ -450,3 +450,15 @@ interface http-routes {
   handle: func(req: request) -> result<response, string>;
 }
 world http-plugin { include base; export http-routes; }
+
+// Additive interface; the existing source hook and channel record stay frozen.
+// A successful list replaces this plugin's entire contribution to one input.
+interface managed-channel-hooks {
+  use types.{channel};
+  record managed-channel {
+    id: string,  // stable plugin-owned identity, independent of URL/name/order
+    value: channel,
+  }
+  reconcile-input: func(input-name: string) -> result<list<managed-channel>, string>;
+}
+world managed-channel-plugin { include base; export managed-channel-hooks; }

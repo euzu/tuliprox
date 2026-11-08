@@ -85,6 +85,7 @@ hook_table! {
     "Tasks", "tasks", ["tasks.run"];
     "SettingsMigration", "settings-migration", ["settings.migrate"];
     "HttpRoutes", "http-routes", ["http.handle"];
+    "ManagedChannelHooks", "managed-channel-hooks", ["playlist.managed-channels"];
 }
 
 /// The family that serves a manifest hook id.

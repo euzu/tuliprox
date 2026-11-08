@@ -70,6 +70,7 @@ pub mod bindings {
                 include tuliprox:plugin/task-plugin@1.0.0;
                 include tuliprox:plugin/settings-migration-plugin@1.0.0;
                 include tuliprox:plugin/http-plugin@1.0.0;
+                include tuliprox:plugin/managed-channel-plugin@1.0.0;
             }
         ",
         world: "tuliprox:sdk/union",
@@ -100,9 +101,9 @@ pub mod tasks;
 
 pub use hooks::{
     ChnoHooks, DedupeHooks, EpgConflictHooks, EpgEnrichHooks, EpgLoadHooks, EpgMatchHooks, EpgTransformHooks,
-    EventHooks, FilterHooks, GroupMergeHooks, HttpRoutes, InputProvider, Lifecycle, MetadataHooks, MetricsHooks,
-    NotificationHooks, OutputGenerator, PlaylistHooks, Rpc, SettingsMigration, SortHooks, SortKeyHooks, SourceHooks,
-    StreamHooks, Tasks,
+    EventHooks, FilterHooks, GroupMergeHooks, HttpRoutes, InputProvider, Lifecycle, ManagedChannelHooks, MetadataHooks,
+    MetricsHooks, NotificationHooks, OutputGenerator, PlaylistHooks, Rpc, SettingsMigration, SortHooks, SortKeyHooks,
+    SourceHooks, StreamHooks, Tasks,
 };
 pub use settings::{Migrations, PluginSettings, Secret};
 /// The contract version the SDK is generated against.
@@ -115,8 +116,8 @@ pub mod wit {
         exports::tuliprox::plugin::{
             chno_hooks, dedupe_hooks, epg_conflict_hooks, epg_enrich_hooks, epg_load_hooks, epg_match_hooks,
             epg_transform_hooks, event_hooks, filter_hooks, group_merge_hooks, http_routes, input_provider, lifecycle,
-            metadata_hooks, metrics_hooks, notification_hooks, output_generator, playlist_hooks, rpc,
-            settings_migration, sort_hooks, sort_key_hooks, source_hooks, stream_hooks, tasks,
+            managed_channel_hooks, metadata_hooks, metrics_hooks, notification_hooks, output_generator, playlist_hooks,
+            rpc, settings_migration, sort_hooks, sort_key_hooks, source_hooks, stream_hooks, tasks,
         },
         tuliprox::plugin::{epg_types, host, status, types},
     };
@@ -140,6 +141,7 @@ pub mod prelude {
             event_hooks::Event,
             http_routes::{Request as HttpRouteRequest, Response as HttpRouteResponse},
             input_provider::InputRequest,
+            managed_channel_hooks::ManagedChannel,
             metrics_hooks::Metric,
             notification_hooks::{DeliveryError, Notification},
             output_generator::OutputRequest,

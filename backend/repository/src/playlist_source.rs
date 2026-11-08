@@ -55,7 +55,7 @@ trait PlaylistSourceOps: Send + Sync {
 /// Forward a method to whichever source the kind holds.
 ///
 /// `PlaylistSourceOps` is private and never used as a trait object, so this
-/// macro — not a vtable — is the dispatch mechanism. Writing the seven arms
+/// macro — not a vtable — is the dispatch mechanism. Writing the source arms
 /// once replaces roughly 126 hand-written match arms, and it doubles as the
 /// conformance check: a variant missing a method fails to compile here.
 macro_rules! dispatch {
@@ -68,6 +68,7 @@ macro_rules! dispatch {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.$method($($arg),*),
             PlaylistSourceKind::MediaServerDisk(source) => source.$method($($arg),*),
             PlaylistSourceKind::Memory(source) => source.$method($($arg),*),
+            PlaylistSourceKind::Appended(source) => source.$method($($arg),*),
         }
     };
 }
@@ -86,6 +87,7 @@ macro_rules! dispatch_await {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.$method($($arg),*).await,
             PlaylistSourceKind::MediaServerDisk(source) => source.$method($($arg),*).await,
             PlaylistSourceKind::Memory(source) => source.$method($($arg),*).await,
+            PlaylistSourceKind::Appended(source) => source.$method($($arg),*).await,
         }
     };
 }
@@ -103,6 +105,7 @@ enum PlaylistSourceKind {
     LocalLibraryDisk(Box<LocalLibraryDiskPlaylistSource>),
     MediaServerDisk(Box<MediaServerDiskPlaylistSource>),
     Memory(MemoryPlaylistSource),
+    Appended(Box<AppendedPlaylistSource>),
 }
 
 type XtreamQueryHandle = (BPlusTreeQuery<u32, XtreamPlaylistItem>, Arc<FileReadGuard>);
@@ -163,6 +166,39 @@ impl PlaylistSource {
         inner
     }
 
+    /// Append an in-memory contribution without materializing a disk-backed provider.
+    /// The contribution is only in this processing view, never the persisted provider cache.
+    pub fn append_groups(mut self, groups: Vec<PlaylistGroup>) -> Self {
+        if groups.is_empty() {
+            return self;
+        }
+        match &mut self.kind {
+            PlaylistSourceKind::Memory(source) => {
+                source.append_managed_groups(groups);
+                self
+            }
+            PlaylistSourceKind::Empty(_) => {
+                let mut result = MemoryPlaylistSource::new(groups).into_source();
+                result.skip_set = self.skip_set;
+                result
+            }
+            PlaylistSourceKind::Appended(source) => {
+                source.added = std::mem::take(&mut source.added).append_groups(groups);
+                self
+            }
+            _ => {
+                let skip_set = self.skip_set.take();
+                Self {
+                    kind: PlaylistSourceKind::Appended(Box::new(AppendedPlaylistSource {
+                        base: self,
+                        added: MemoryPlaylistSource::new(groups).into_source(),
+                    })),
+                    skip_set,
+                }
+            }
+        }
+    }
+
     pub fn is_memory(&self) -> bool {
         match &self.kind {
             PlaylistSourceKind::Empty(source) => source.is_memory(),
@@ -172,6 +208,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.is_memory(),
             PlaylistSourceKind::MediaServerDisk(source) => source.is_memory(),
             PlaylistSourceKind::Memory(source) => source.is_memory(),
+            PlaylistSourceKind::Appended(source) => source.is_memory(),
         }
     }
 
@@ -185,6 +222,7 @@ impl PlaylistSource {
                 PlaylistSourceKind::LocalLibraryDisk(source) => source.get_channel_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::MediaServerDisk(source) => source.get_channel_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::Memory(source) => source.get_channel_count_excluding_clusters(skip_set),
+                PlaylistSourceKind::Appended(source) => source.get_channel_count_excluding_clusters(skip_set),
             };
         }
 
@@ -196,6 +234,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.get_channel_count(),
             PlaylistSourceKind::MediaServerDisk(source) => source.get_channel_count(),
             PlaylistSourceKind::Memory(source) => source.get_channel_count(),
+            PlaylistSourceKind::Appended(source) => source.get_channel_count(),
         }
     }
 
@@ -221,6 +260,7 @@ impl PlaylistSource {
                 PlaylistSourceKind::LocalLibraryDisk(source) => source.get_group_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::MediaServerDisk(source) => source.get_group_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::Memory(source) => source.get_group_count_excluding_clusters(skip_set),
+                PlaylistSourceKind::Appended(source) => source.get_group_count_excluding_clusters(skip_set),
             };
         }
 
@@ -232,6 +272,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.get_group_count(),
             PlaylistSourceKind::MediaServerDisk(source) => source.get_group_count(),
             PlaylistSourceKind::Memory(source) => source.get_group_count(),
+            PlaylistSourceKind::Appended(source) => source.get_group_count(),
         }
     }
 
@@ -248,6 +289,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.is_empty(),
             PlaylistSourceKind::MediaServerDisk(source) => source.is_empty(),
             PlaylistSourceKind::Memory(source) => source.is_empty(),
+            PlaylistSourceKind::Appended(source) => source.is_empty(),
         }
     }
 
@@ -329,6 +371,7 @@ impl PlaylistSource {
                     source.get_missing_vod_info_count_excluding_clusters(skip_set)
                 }
                 PlaylistSourceKind::Memory(source) => source.get_missing_vod_info_count_excluding_clusters(skip_set),
+                PlaylistSourceKind::Appended(source) => source.get_missing_vod_info_count_excluding_clusters(skip_set),
             };
         }
 
@@ -340,6 +383,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.get_missing_vod_info_count(),
             PlaylistSourceKind::MediaServerDisk(source) => source.get_missing_vod_info_count(),
             PlaylistSourceKind::Memory(source) => source.get_missing_vod_info_count(),
+            PlaylistSourceKind::Appended(source) => source.get_missing_vod_info_count(),
         }
     }
 
@@ -363,6 +407,9 @@ impl PlaylistSource {
                     source.get_missing_series_info_count_excluding_clusters(skip_set)
                 }
                 PlaylistSourceKind::Memory(source) => source.get_missing_series_info_count_excluding_clusters(skip_set),
+                PlaylistSourceKind::Appended(source) => {
+                    source.get_missing_series_info_count_excluding_clusters(skip_set)
+                }
             };
         }
 
@@ -374,6 +421,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.get_missing_series_info_count(),
             PlaylistSourceKind::MediaServerDisk(source) => source.get_missing_series_info_count(),
             PlaylistSourceKind::Memory(source) => source.get_missing_series_info_count(),
+            PlaylistSourceKind::Appended(source) => source.get_missing_series_info_count(),
         }
     }
 
@@ -393,6 +441,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.deduplicate(duplicates),
             PlaylistSourceKind::MediaServerDisk(source) => source.deduplicate(duplicates),
             PlaylistSourceKind::Memory(source) => source.deduplicate(duplicates),
+            PlaylistSourceKind::Appended(source) => source.deduplicate(duplicates),
         }
     }
 
@@ -405,6 +454,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.take_groups(),
             PlaylistSourceKind::MediaServerDisk(source) => source.take_groups(),
             PlaylistSourceKind::Memory(source) => source.take_groups(),
+            PlaylistSourceKind::Appended(source) => source.take_groups(),
         };
 
         if let Some(skip_set) = self.skip_set.clone() {
@@ -423,6 +473,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.clone_source(),
             PlaylistSourceKind::MediaServerDisk(source) => source.clone_source(),
             PlaylistSourceKind::Memory(source) => source.clone_source(),
+            PlaylistSourceKind::Appended(source) => source.clone_source(),
         }?;
         cloned.skip_set.clone_from(&self.skip_set);
         Ok(cloned)
@@ -437,6 +488,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.release_resources(cluster),
             PlaylistSourceKind::MediaServerDisk(source) => source.release_resources(cluster),
             PlaylistSourceKind::Memory(source) => source.release_resources(cluster),
+            PlaylistSourceKind::Appended(source) => source.release_resources(cluster),
         }
     }
 
@@ -451,6 +503,7 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.sort_by_provider_ordinal(),
             PlaylistSourceKind::MediaServerDisk(source) => source.sort_by_provider_ordinal(),
             PlaylistSourceKind::Memory(source) => source.sort_by_provider_ordinal(),
+            PlaylistSourceKind::Appended(source) => source.sort_by_provider_ordinal(),
         }
     }
 }
@@ -1269,6 +1322,20 @@ pub struct MemoryPlaylistSource {
 }
 
 impl MemoryPlaylistSource {
+    /// Contributions have local group ids that must not collide with provider category ids.
+    fn append_managed_groups(&mut self, mut groups: Vec<PlaylistGroup>) {
+        let mut used: HashSet<u32> = self.playlist.iter().map(|group| group.id).collect();
+        let mut next = 1u32;
+        for group in &mut groups {
+            while used.contains(&next) {
+                next = next.wrapping_add(1);
+            }
+            group.id = next;
+            used.insert(next);
+        }
+        self.merge_groups(groups);
+    }
+
     pub fn new(groups: Vec<PlaylistGroup>) -> Self { Self { playlist: Arc::new(groups) } }
 
     pub fn into_source(self) -> PlaylistSource { PlaylistSource::memory(self) }
@@ -1684,6 +1751,60 @@ mod tests {
         assert_eq!(groups[0].xtream_cluster, XtreamCluster::Live);
     }
 
+    #[test]
+    fn appended_memory_groups_cannot_overwrite_provider_groups_by_local_id() {
+        let mut provider = make_cluster_group(
+            "Provider",
+            XtreamCluster::Live,
+            vec![make_cluster_item("original", XtreamCluster::Live)],
+        );
+        provider.id = 1;
+        let mut added =
+            make_cluster_group("Sports", XtreamCluster::Live, vec![make_cluster_item("managed", XtreamCluster::Live)]);
+        added.id = 1;
+        let mut source = MemoryPlaylistSource::new(vec![provider]).into_source().append_groups(vec![added]);
+        let groups = source.take_groups();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(&*groups[0].title, "Provider");
+        assert_eq!(&*groups[1].title, "Sports");
+        assert_ne!(groups[0].id, groups[1].id);
+    }
+
+    #[tokio::test]
+    async fn appended_disk_source_stays_lazy_cloneable_and_never_writes_provider_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_config = crate::test_config::app_config_in(temp.path());
+        let storage_path = temp.path().join("disk-overlay");
+        tokio::fs::create_dir_all(&storage_path).await.unwrap();
+        let live_path = crate::xtream_get_file_path(&storage_path, XtreamCluster::Live);
+        let mut tree = crate::BPlusTree::new();
+        tree.insert(1u32, crate::test_config::xtream_playlist_item(1));
+        tree.store_with_index(&live_path, |item| item.source_ordinal).unwrap();
+        let bytes = tokio::fs::read(&live_path).await.unwrap();
+        let disk =
+            PlaylistSource::xtream_disk(XtreamDiskPlaylistSource::new(&app_config, &storage_path).await.unwrap());
+        let mut source = disk.append_groups(vec![make_cluster_group(
+            "Managed",
+            XtreamCluster::Live,
+            vec![make_cluster_item("managed", XtreamCluster::Live)],
+        )]);
+        assert!(!source.is_memory());
+        assert_eq!(source.get_channel_count(), 2);
+        assert_eq!(source.items().count(), 2);
+        assert_eq!(source.items().count(), 2, "reads must not drain overlay");
+        assert_eq!(source.get_cluster_count(XtreamCluster::Live), 2);
+        let mut cloned = source.clone_source().unwrap();
+        assert_eq!(cloned.into_items().count(), 2);
+        assert_eq!(source.items().count(), 2, "clone must not drain original");
+        let mut hidden = PlaylistSource::filtered(source.clone_source().unwrap(), HashSet::from([XtreamCluster::Live]));
+        assert!(hidden.is_empty());
+        assert_eq!(hidden.items().count(), 0);
+        assert!(hidden.take_groups().is_empty());
+        let groups = source.take_groups();
+        assert_eq!(groups.iter().map(|g| g.channels.len()).sum::<usize>(), 2);
+        assert_eq!(tokio::fs::read(&live_path).await.unwrap(), bytes, "overlay cannot alter raw provider snapshot");
+    }
+
     #[tokio::test]
     async fn cluster_count_identical_for_memory_and_disk_sources() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1755,5 +1876,95 @@ mod tests {
         assert_eq!(disk_source.get_cluster_count(XtreamCluster::Live), 3);
         assert_eq!(disk_source.get_cluster_count(XtreamCluster::Video), 2);
         assert_eq!(disk_source.get_cluster_count(XtreamCluster::Series), 1);
+    }
+}
+
+/// A disk-backed provider plus a small, independently owned memory overlay.
+struct AppendedPlaylistSource {
+    base: PlaylistSource,
+    added: PlaylistSource,
+}
+
+impl AppendedPlaylistSource {
+    fn group_count_excluding(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        self.base
+            .items()
+            .chain(self.added.items())
+            .filter(|item| !skip.contains(&item.header.xtream_cluster))
+            .map(|item| (item.header.xtream_cluster, Arc::clone(&item.header.group)))
+            .collect::<HashSet<_>>()
+            .len()
+    }
+}
+
+impl PlaylistSourceOps for AppendedPlaylistSource {
+    fn is_memory(&self) -> bool { false }
+    fn get_channel_count(&mut self) -> usize { self.base.get_channel_count() + self.added.get_channel_count() }
+    fn get_group_count(&mut self) -> usize { self.group_count_excluding(&HashSet::new()) }
+    fn get_channel_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        self.base.items().chain(self.added.items()).filter(|item| !skip.contains(&item.header.xtream_cluster)).count()
+    }
+    fn get_group_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        self.group_count_excluding(skip)
+    }
+    fn is_empty(&mut self) -> bool { self.base.is_empty() && self.added.is_empty() }
+    fn into_items(&mut self) -> SourceItems<'_> {
+        SourceItems::Appended(Box::new(self.base.into_items().chain(self.added.into_items())))
+    }
+    fn items(&mut self) -> SourceCowItems<'_> {
+        SourceCowItems::Appended(Box::new(self.base.items().chain(self.added.items())))
+    }
+    fn items_mut(&mut self) -> SourceItemsMut<'_> {
+        SourceItemsMut::Appended(Box::new(self.base.items_mut().chain(self.added.items_mut())))
+    }
+    async fn update_playlist(&mut self, _group: &PlaylistGroup) {
+        warn!("Cannot update a disk-backed playlist with an appended overlay");
+    }
+    fn get_missing_vod_info_count(&mut self) -> usize {
+        self.base.get_missing_vod_info_count() + self.added.get_missing_vod_info_count()
+    }
+    fn get_missing_series_info_count(&mut self) -> usize {
+        self.base.get_missing_series_info_count() + self.added.get_missing_series_info_count()
+    }
+    fn get_missing_vod_info_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        if skip.contains(&XtreamCluster::Video) {
+            0
+        } else {
+            self.get_missing_vod_info_count()
+        }
+    }
+    fn get_missing_series_info_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        if skip.contains(&XtreamCluster::Series) {
+            0
+        } else {
+            self.get_missing_series_info_count()
+        }
+    }
+    fn deduplicate(&mut self, duplicates: &mut HashSet<UUIDType>) {
+        self.base.deduplicate(duplicates);
+        self.added.deduplicate(duplicates);
+    }
+    fn take_groups(&mut self) -> Vec<PlaylistGroup> {
+        let mut memory = MemoryPlaylistSource::new(self.base.take_groups());
+        memory.append_managed_groups(self.added.take_groups());
+        memory.take_groups()
+    }
+    fn clone_source(&self) -> Result<PlaylistSource, TuliproxError> {
+        Ok(PlaylistSource::new(PlaylistSourceKind::Appended(Box::new(Self {
+            base: self.base.clone_source()?,
+            added: self.added.clone_source()?,
+        }))))
+    }
+    fn release_resources(&mut self, cluster: XtreamCluster) {
+        self.base.release_resources(cluster);
+        self.added.release_resources(cluster);
+    }
+    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> {
+        Box::pin(self.base.obtain_resources()).await?;
+        Box::pin(self.added.obtain_resources()).await
+    }
+    fn sort_by_provider_ordinal(&mut self) {
+        self.base.sort_by_provider_ordinal();
+        self.added.sort_by_provider_ordinal();
     }
 }

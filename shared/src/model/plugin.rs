@@ -23,6 +23,8 @@ pub enum PluginHook {
     /// After an input downloaded, before target processing (`source-hooks`).
     /// The caller hands over only the scoped subset ([`PluginHost::scope`]).
     PlaylistLoaded,
+    /// Plugin-owned channel snapshot merged into an existing input.
+    ManagedChannels,
     /// Around each transform stage of a target, wherever
     /// `execution_plan.transform_stages` puts it (`playlist-hooks`).
     BeforeFilter,
@@ -72,6 +74,7 @@ impl PluginHook {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PlaylistLoaded => "playlist-loaded",
+            Self::ManagedChannels => "managed-channels",
             Self::BeforeFilter => "before-filter",
             Self::AfterFilter => "after-filter",
             Self::BeforeRename => "before-rename",
@@ -429,6 +432,16 @@ pub trait PluginHost: Clone + Send + Sync + 'static {
         async { Ok(()) }
     }
 
+    /// Return managed channels for an input, without modifying provider items.
+    /// The host reconciles each owner's snapshot and retains last-good data on failures.
+    fn managed_channels(
+        &self,
+        _ctx: &HookCtx<'_>,
+        _report: &mut PluginRunReport,
+    ) -> impl Future<Output = Result<Vec<PlaylistItem>, PluginAbort>> + Send {
+        async { Ok(Vec::new()) }
+    }
+
     /// `true` when `plugin` is enabled and runs `hook`. Strategy and filter
     /// references name one plugin; this is how config validation and the call
     /// sites check them.
@@ -660,6 +673,17 @@ impl<P: PluginHost> PluginHost for Option<P> {
         match self {
             Some(host) => host.on_playlist_loaded(ctx, items, report).await,
             None => Ok(()),
+        }
+    }
+
+    async fn managed_channels(
+        &self,
+        ctx: &HookCtx<'_>,
+        report: &mut PluginRunReport,
+    ) -> Result<Vec<PlaylistItem>, PluginAbort> {
+        match self {
+            Some(host) => host.managed_channels(ctx, report).await,
+            None => Ok(Vec::new()),
         }
     }
 

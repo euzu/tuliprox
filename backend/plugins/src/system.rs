@@ -36,6 +36,7 @@ struct Inner {
     metrics: MetricsCache,
     headers: HeaderCache,
     tasks: TaskRunner,
+    managed: crate::managed_channels::ManagedSnapshots,
     /// The MCP tools derived from the registry snapshot.
     mcp_tools: McpToolCache,
     // Declared last: the engine and its epoch ticker go after the registry,
@@ -80,6 +81,7 @@ impl PluginSystem {
             inner: Arc::new(Inner {
                 install: tokio::sync::Mutex::new(()),
                 registry,
+                managed: crate::managed_channels::ManagedSnapshots::new(shared.data_dir.join(".managed-channels")),
                 shared,
                 events: EventQueue::new(config),
                 metrics: MetricsCache::new(config),
@@ -164,6 +166,14 @@ impl PluginHost for PluginSystem {
             return Ok(());
         }
         self.dispatcher().run_playlist_loaded(ctx, items, report).await
+    }
+
+    async fn managed_channels(
+        &self,
+        ctx: &HookCtx<'_>,
+        report: &mut PluginRunReport,
+    ) -> Result<Vec<PlaylistItem>, PluginAbort> {
+        self.inner.managed.reconcile(&self.dispatcher(), ctx, report).await
     }
 
     fn provides(&self, hook: PluginHook, plugin: &str) -> bool { self.dispatcher().named(hook, plugin).is_some() }

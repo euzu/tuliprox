@@ -37,6 +37,10 @@ The `http_routes` capability grants a plugin incoming HTTP endpoints in its own 
 explicitly delegated client authentication. See [Incoming HTTP routes](./http-routes.md) for host permissions,
 credential handling, fail-closed authentication and response isolation.
 
+The `playlist_write` capability allows a plugin to contribute its own managed live channels
+to existing inputs. It cannot delete provider channels through reconciliation. See
+[Managed Channels](./managed-channels.md) for identity, snapshot storage and failure behavior.
+
 A hook that needs a capability makes the manifest invalid if the manifest does not request it: `stream.inject-headers`
 needs `stream_headers`, `epg.transform-programmes` and `epg.enrich-programmes` need `epg_write`, and
 `notifications.send` needs `notifications`.

@@ -518,6 +518,19 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         }
     }
 
+    // Managed contributions are processing overlays, not provider-cache writes. Run on
+    // cached inputs too, after inventory hooks, so providers never ingest their own output.
+    if error.is_none() && input.staged.is_none() {
+        match apply_managed_channels(&ctx.plugins, &input.name, playlist, &mut plugins).await {
+            Ok(overlaid) => playlist = overlaid,
+            Err((original, abort)) => {
+                playlist = original;
+                error = Some(TuliproxError::Plugin(abort.to_string()));
+            }
+        }
+        playlist = filter_skipped_clusters_from_source(playlist, input);
+    }
+
     if input.input_type == InputType::M3u {
         let alias_errors = download_m3u_alias_playlists(ctx, input).await;
         playlist_download_result.download_err.extend(alias_errors);
@@ -562,6 +575,25 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         accepted_empty_clusters,
         input_telemetry: playlist_download_result.input_telemetry,
         plugins,
+    }
+}
+
+/// Append a complete managed view, preserving disk-backed providers as lazy sources.
+pub(crate) async fn apply_managed_channels<P: PluginHost>(
+    plugins: &P,
+    input_name: &str,
+    playlist: PlaylistSource,
+    report: &mut PluginRunReport,
+) -> Result<PlaylistSource, (PlaylistSource, PluginAbort)> {
+    match plugins.managed_channels(&HookCtx::new("").with_input(input_name), report).await {
+        Ok(mut items) => {
+            // The full managed set follows the provider in source order.
+            for item in &mut items {
+                item.header.source_ordinal = u32::MAX;
+            }
+            Ok(playlist.append_groups(group_mapped_items(items)))
+        }
+        Err(abort) => Err((playlist, abort)),
     }
 }
 
@@ -719,6 +751,85 @@ mod tests {
     use super::*;
     use shared::model::NoPlugins;
     use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct ManagedOverlay;
+    impl PluginHost for ManagedOverlay {
+        async fn managed_channels(
+            &self,
+            ctx: &HookCtx<'_>,
+            _report: &mut PluginRunReport,
+        ) -> Result<Vec<PlaylistItem>, PluginAbort> {
+            if ctx.input != Some("provider") {
+                return Ok(vec![]);
+            }
+            Ok(vec![PlaylistItem {
+                header: shared::model::PlaylistItemHeader {
+                    id: "plugin:managed".into(),
+                    input_stream_id: "plugin:managed".into(),
+                    input_name: "provider".into(),
+                    name: "Team channel".into(),
+                    title: "Team channel".into(),
+                    group: "Sports".into(),
+                    url: "https://stream.test/team.ts".into(),
+                    ..Default::default()
+                },
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_overlay_refreshes_a_cached_input_without_accumulating_or_modifying_provider_items() {
+        let provider = PlaylistItem {
+            header: shared::model::PlaylistItemHeader {
+                id: "1".into(),
+                input_stream_id: "1".into(),
+                input_name: "provider".into(),
+                name: "Provider channel".into(),
+                title: "Provider channel".into(),
+                group: "News".into(),
+                url: "https://stream.test/provider.ts".into(),
+                ..Default::default()
+            },
+        };
+        let mut cached = MemoryPlaylistSource::new(group_mapped_items(vec![provider])).into_source();
+        for _ in 0..2 {
+            let source = cached.clone_source().unwrap();
+            let mut result =
+                apply_managed_channels(&ManagedOverlay, "provider", source, &mut PluginRunReport::default())
+                    .await
+                    .ok()
+                    .unwrap();
+            assert_eq!(result.get_channel_count(), 2);
+            assert_eq!(result.get_group_count(), 2);
+            let originals: Vec<_> =
+                result.items().filter(|item| &*item.header.id == "1").map(|item| item.into_owned()).collect();
+            assert_eq!(originals.len(), 1);
+            assert_eq!(&*originals[0].header.name, "Provider channel");
+            assert_eq!(&*originals[0].header.url, "https://stream.test/provider.ts");
+        }
+        assert_eq!(cached.get_channel_count(), 1, "cached provider source must remain unchanged");
+        let mut other = apply_managed_channels(
+            &ManagedOverlay,
+            "other",
+            cached.clone_source().unwrap(),
+            &mut PluginRunReport::default(),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert_eq!(other.get_channel_count(), 1);
+        let mut empty = apply_managed_channels(
+            &ManagedOverlay,
+            "provider",
+            PlaylistSource::default(),
+            &mut PluginRunReport::default(),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert_eq!(empty.get_channel_count(), 1, "empty provider playlists still accept managed channels");
+    }
 
     fn plugin_input(plugin: Option<&str>) -> ConfigInput {
         ConfigInput {

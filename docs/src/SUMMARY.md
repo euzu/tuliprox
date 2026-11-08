@@ -39,6 +39,7 @@
   - [Hook Reference](./plugins/hooks.md)
   - [Host API](./plugins/host-api.md)
   - [Incoming HTTP Routes](./plugins/http-routes.md)
+  - [Managed Channels](./plugins/managed-channels.md)
   - [Settings, Secrets & Config Extensions](./plugins/settings.md)
   - [Custom UI](./plugins/custom-ui.md)
   - [Events, Notifications, Inputs, Outputs & MCP](./plugins/events-notifications-inputs.md)

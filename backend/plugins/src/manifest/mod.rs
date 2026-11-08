@@ -41,11 +41,12 @@ pub(crate) enum Capability {
     StreamHeaders,
     Process,
     HttpRoutes,
+    PlaylistWrite,
 }
 
 impl Capability {
     /// Every capability, in manifest order.
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Network,
         Self::Storage,
         Self::EpgWrite,
@@ -54,6 +55,7 @@ impl Capability {
         Self::StreamHeaders,
         Self::Process,
         Self::HttpRoutes,
+        Self::PlaylistWrite,
     ];
 
     /// The manifest key.
@@ -67,6 +69,7 @@ impl Capability {
             Self::StreamHeaders => "stream_headers",
             Self::Process => "process",
             Self::HttpRoutes => "http_routes",
+            Self::PlaylistWrite => "playlist_write",
         }
     }
 }
@@ -84,6 +87,7 @@ pub(crate) struct Capabilities {
     pub stream_headers: bool,
     pub process: bool,
     pub http_routes: bool,
+    pub playlist_write: bool,
 }
 
 impl Capabilities {
@@ -97,6 +101,7 @@ impl Capabilities {
             Capability::StreamHeaders => self.stream_headers,
             Capability::Process => self.process,
             Capability::HttpRoutes => self.http_routes,
+            Capability::PlaylistWrite => self.playlist_write,
         }
     }
 
