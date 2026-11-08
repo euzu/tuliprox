@@ -74,6 +74,16 @@ where
     items
 }
 
+fn assign_explorer_virtual_ids(items: &mut [UiPlaylistItem]) {
+    let mut next_id = items.iter().map(|item| item.virtual_id).max().unwrap_or(0).saturating_add(1);
+    for item in items.iter_mut() {
+        if item.virtual_id == 0 {
+            item.virtual_id = next_id;
+            next_id = next_id.saturating_add(1);
+        }
+    }
+}
+
 pub(in crate::api::endpoints) async fn get_playlist_for_target(
     cfg_target: Option<&ConfigTarget>,
     app_state: &Arc<AppState>,
@@ -228,6 +238,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                     &input.name,
                 )
                 .await;
+                assign_explorer_virtual_ids(&mut items);
                 apply_overlay_input(&mut items, input, app_state).await;
                 return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
             }
@@ -248,6 +259,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                     &input.name,
                 )
                 .await;
+                assign_explorer_virtual_ids(&mut items);
                 apply_overlay_input(&mut items, input, app_state).await;
                 return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
             }
@@ -497,5 +509,40 @@ mod tests {
         assert_eq!(collected.len(), 2, "corrupt record must be skipped");
         assert_eq!(collected[0].logo.as_ref(), "http://example.com/logo1.png");
         assert_eq!(collected[1].logo.as_ref(), "http://example.com/logo2.png");
+    }
+
+    #[test]
+    fn test_assign_explorer_virtual_ids_allocates_unique_nonzero_ids() {
+        let mut item1 = sample_item("http://example.com/logo1.png");
+        item1.virtual_id = 0;
+        let mut item2 = sample_item("http://example.com/logo2.png");
+        item2.virtual_id = 0;
+
+        let mut items = vec![item1, item2];
+        super::assign_explorer_virtual_ids(&mut items);
+
+        assert_ne!(items[0].virtual_id, 0);
+        assert_ne!(items[1].virtual_id, 0);
+        assert_ne!(items[0].virtual_id, items[1].virtual_id);
+    }
+
+    #[test]
+    fn test_assign_explorer_virtual_ids_preserves_existing_and_starts_above_max() {
+        let mut item1 = sample_item("http://example.com/logo1.png");
+        item1.virtual_id = 10;
+        let mut item2 = sample_item("http://example.com/logo2.png");
+        item2.virtual_id = 0;
+        let mut item3 = sample_item("http://example.com/logo3.png");
+        item3.virtual_id = 25;
+        let mut item4 = sample_item("http://example.com/logo4.png");
+        item4.virtual_id = 0;
+
+        let mut items = vec![item1, item2, item3, item4];
+        super::assign_explorer_virtual_ids(&mut items);
+
+        assert_eq!(items[0].virtual_id, 10);
+        assert_eq!(items[1].virtual_id, 26);
+        assert_eq!(items[2].virtual_id, 25);
+        assert_eq!(items[3].virtual_id, 27);
     }
 }

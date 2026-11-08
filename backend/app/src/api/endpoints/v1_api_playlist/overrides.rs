@@ -338,7 +338,7 @@ fn header_of(id: Arc<str>, url: &Arc<str>, input_name: &Arc<str>, item_type: Pla
 }
 
 fn xtream_inventory_item(item: &XtreamPlaylistItem, aliases: &InputAliasMap) -> Option<InventoryItem> {
-    let header = header_of(Arc::from(item.provider_id.to_string()), &item.url, &item.input_name, item.item_type);
+    let header = header_of(item.override_source_id(), &item.url, &item.input_name, item.item_type);
     let key = override_key(&header, aliases)?;
     Some(InventoryItem {
         key,

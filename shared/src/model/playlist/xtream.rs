@@ -229,6 +229,17 @@ pub struct XtreamPlaylistItem {
 }
 
 impl XtreamPlaylistItem {
+    /// Id the override key is built from: the unchanged input stream id, because M3U-origin items without a
+    /// numeric stream id are stored with `provider_id = 0`. Falls back to `provider_id` for old records.
+    #[must_use]
+    pub fn override_source_id(&self) -> Arc<str> {
+        if self.input_stream_id.is_empty() {
+            Arc::from(self.provider_id.to_string())
+        } else {
+            Arc::clone(&self.input_stream_id)
+        }
+    }
+
     pub fn to_common(&self) -> CommonPlaylistItem {
         CommonPlaylistItem {
             virtual_id: self.virtual_id,

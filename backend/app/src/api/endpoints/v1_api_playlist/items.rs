@@ -173,7 +173,7 @@ impl StoredPlaylistRecord for XtreamPlaylistItem {
     fn with_provider_id<T>(&self, visit: impl FnOnce(&str) -> T) -> T { with_decimal(self.provider_id, visit) }
 
     fn override_id(&self, aliases: &InputAliasMap) -> Option<Arc<str>> {
-        let id: Arc<str> = Arc::from(self.provider_id.to_string());
+        let id = self.override_source_id();
         override_key_id(id, &self.url, &self.input_name, self.item_type, aliases)
     }
 

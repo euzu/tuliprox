@@ -474,3 +474,34 @@ fn clear_series_details_removes_details() {
         _ => panic!("expected series properties"),
     }
 }
+
+#[test]
+fn xtream_record_override_source_id_uses_input_stream_id_or_falls_back_to_provider_id() {
+    let mut item = XtreamPlaylistItem {
+        virtual_id: VirtualId::new(42),
+        provider_id: 42,
+        name: "Test".intern(),
+        logo: "".intern(),
+        logo_small: "".intern(),
+        group: "Group".intern(),
+        title: "Test".intern(),
+        parent_code: "".intern(),
+        rec: "".intern(),
+        url: "http://example.test/stream".intern(),
+        epg_channel_id: None,
+        xtream_cluster: XtreamCluster::Live,
+        additional_properties: None,
+        item_type: PlaylistItemType::Live,
+        category_id: 1,
+        input_name: "test-input".intern(),
+        channel_no: 1,
+        source_ordinal: 0,
+        input_stream_id: "".intern(),
+        upstream_user_agent: None,
+    };
+
+    assert_eq!(item.override_source_id().as_ref(), "42");
+
+    item.input_stream_id = "hash123".intern();
+    assert_eq!(item.override_source_id().as_ref(), "hash123");
+}

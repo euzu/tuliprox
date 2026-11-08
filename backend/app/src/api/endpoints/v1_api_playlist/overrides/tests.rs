@@ -29,10 +29,10 @@ use shared::{
     foundation::Filter,
     model::{
         ConfigPaths, ConfigTargetOptions, EpgChannel, EpgConfigDto, EpgOutputOptions, EpgSourceDto, InputType,
-        M3uPlaylistItem, Permission, PlaylistItemType, ProcessingOrder, UserId, VirtualId, WebAuthConfigDto,
-        WebUiConfigDto, XtreamCluster, XtreamPlaylistItem,
+        M3uPlaylistItem, Permission, PlaylistItemType, ProcessingOrder, UiPlaylistItem, UserId, VirtualId,
+        WebAuthConfigDto, WebUiConfigDto, XtreamCluster, XtreamPlaylistItem,
     },
-    utils::Internable,
+    utils::{extract_id_from_url, Internable},
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tower::ServiceExt;
@@ -360,6 +360,17 @@ impl Fixture {
         let target_path = get_target_storage_path(&config, name).expect("target path");
         let path = m3u_get_file_path_for_db(&target_path);
         let mut tree = BPlusTree::<u32, M3uPlaylistItem>::new();
+        for item in items {
+            tree.insert(item.virtual_id.get(), item);
+        }
+        store(&path, tree);
+    }
+
+    fn write_xtream_target_playlist(&self, name: &str, items: Vec<XtreamPlaylistItem>) {
+        let config = self.app_state.app_config.config.load_full();
+        let target_path = crate::repository::xtream_get_storage_path(&config, name).expect("target path");
+        let path = xtream_get_file_path(&target_path, XtreamCluster::Live);
+        let mut tree = BPlusTree::<u32, XtreamPlaylistItem>::new();
         for item in items {
             tree.insert(item.virtual_id.get(), item);
         }
@@ -1406,4 +1417,109 @@ async fn test_b4_explorer_flag_controls_meta_and_streaming() {
     let meta = item.explorer_meta.expect("explorer=true must attach explorer_meta");
     assert_eq!(meta.override_id.as_deref(), Some("p1"));
     assert!(!meta.override_state.edited);
+}
+
+#[tokio::test]
+async fn override_provenance_finds_xtream_target_records_from_m3u_input_without_numeric_id() {
+    let fixture = fixture();
+    let url1 = "http://192.168.20.2:5004/auto/v5.1";
+    let url2 = "http://192.168.20.2:5004/auto/v5.2";
+    let hash1 = extract_id_from_url(url1);
+    let hash2 = extract_id_from_url(url2);
+
+    let mut m3u1 = m3u_record_of(CONFIG_INPUT, &hash1, "WRAL HD", "Group", PlaylistItemType::Live);
+    m3u1.url = url1.intern();
+    m3u1.input_stream_id = hash1.clone().intern();
+
+    let mut m3u2 = m3u_record_of(CONFIG_INPUT, &hash2, "WRAL DT", "Group", PlaylistItemType::Live);
+    m3u2.url = url2.intern();
+    m3u2.input_stream_id = hash2.clone().intern();
+
+    fixture.write_input_playlist(CONFIG_INPUT, vec![m3u1, m3u2]);
+
+    let mut xtream1 = xtream_record(1, 0, "WRAL HD Processed", "Group", CONFIG_INPUT);
+    xtream1.url = url1.intern();
+    xtream1.input_stream_id = hash1.clone().intern();
+
+    let mut xtream2 = xtream_record(2, 0, "WRAL DT Processed", "Group", CONFIG_INPUT);
+    xtream2.url = url2.intern();
+    xtream2.input_stream_id = hash2.clone().intern();
+
+    fixture.write_xtream_target_playlist(XTREAM_TARGET, vec![xtream1, xtream2]);
+
+    let sources = fixture.app_state.app_config.sources.load();
+    let aliases = tuliprox_core::model::InputAliasMap::from_inputs(&sources.inputs);
+    let key1 = tuliprox_core::model::override_key(
+        &shared::model::PlaylistItemHeader {
+            id: hash1.clone().intern(),
+            url: url1.intern(),
+            input_name: CONFIG_INPUT.intern(),
+            item_type: PlaylistItemType::Live,
+            ..Default::default()
+        },
+        &aliases,
+    )
+    .expect("override key 1")
+    .id;
+    let key2 = tuliprox_core::model::override_key(
+        &shared::model::PlaylistItemHeader {
+            id: hash2.clone().intern(),
+            url: url2.intern(),
+            input_name: CONFIG_INPUT.intern(),
+            item_type: PlaylistItemType::Live,
+            ..Default::default()
+        },
+        &aliases,
+    )
+    .expect("override key 2")
+    .id;
+
+    // Query for 5.1:
+    let (status, body) =
+        fixture.get(&format!("/playlist/overrides/item?target_id=2&input={CONFIG_INPUT}&kind=live&id={key1}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["name"], "WRAL HD", "{body}");
+    assert_eq!(body["processed"]["name"], "WRAL HD Processed", "{body}");
+
+    // Query for 5.2:
+    let (status, body) =
+        fixture.get(&format!("/playlist/overrides/item?target_id=2&input={CONFIG_INPUT}&kind=live&id={key2}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["name"], "WRAL DT", "{body}");
+    assert_eq!(body["processed"]["name"], "WRAL DT Processed", "{body}");
+}
+
+#[tokio::test]
+async fn input_explorer_for_m3u_input_returns_distinct_nonzero_virtual_ids() {
+    let fixture = fixture();
+    let mut item1 = m3u_record_of(CONFIG_INPUT, "p1", "Item One", "Group", PlaylistItemType::Live);
+    item1.virtual_id = VirtualId::default();
+    let mut item2 = m3u_record_of(CONFIG_INPUT, "p2", "Item Two", "Group", PlaylistItemType::Live);
+    item2.virtual_id = VirtualId::default();
+
+    fixture.write_input_playlist(CONFIG_INPUT, vec![item1, item2]);
+
+    let (status, body) = fixture
+        .call("POST", "/playlist/live?explorer=true", Some(&fixture.reader), Some(json!({ "Input": CONFIG_INPUT })))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body.as_array().expect("array of items");
+    assert_eq!(items.len(), 2, "{body}");
+    let item1: UiPlaylistItem = serde_json::from_value(items[0].clone()).expect("item1");
+    let item2: UiPlaylistItem = serde_json::from_value(items[1].clone()).expect("item2");
+
+    assert_ne!(item1.virtual_id, 0, "item1 virtual_id must be non-zero in explorer mode");
+    assert_ne!(item2.virtual_id, 0, "item2 virtual_id must be non-zero in explorer mode");
+    assert_ne!(item1.virtual_id, item2.virtual_id, "virtual_ids must be distinct");
+
+    // Non-explorer mode leaves raw input records with virtual_id == 0:
+    let (status, body) = fixture
+        .call("POST", "/playlist/live?explorer=false", Some(&fixture.reader), Some(json!({ "Input": CONFIG_INPUT })))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body.as_array().expect("array of items");
+    let non_exp1: UiPlaylistItem = serde_json::from_value(items[0].clone()).expect("non_exp1");
+    let non_exp2: UiPlaylistItem = serde_json::from_value(items[1].clone()).expect("non_exp2");
+    assert_eq!(non_exp1.virtual_id, 0);
+    assert_eq!(non_exp2.virtual_id, 0);
 }

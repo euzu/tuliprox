@@ -397,8 +397,13 @@ fn targets_for_input(app_config: &crate::model::AppConfig, aliases: &InputAliasM
 }
 
 fn header_of_ui_item(item: &UiPlaylistItem) -> PlaylistItemHeader {
+    let id = item
+        .explorer_meta
+        .as_ref()
+        .and_then(|m| m.override_source_id.as_ref())
+        .map_or_else(|| Arc::clone(&item.provider_id), Arc::clone);
     PlaylistItemHeader {
-        id: Arc::clone(&item.provider_id),
+        id,
         url: Arc::clone(&item.url),
         input_name: Arc::clone(&item.input_name),
         item_type: item.item_type,
@@ -1167,5 +1172,116 @@ mod tests {
         // Different stamp misses cache
         let changed_stamps = vec![(path1, second_stamp)];
         assert!(get_cached_input_index(&input_name, &changed_stamps).is_none());
+    }
+
+    #[test]
+    fn overlay_xtream_target_items_from_m3u_input_uses_override_source_id() {
+        use shared::{
+            model::{InputType, PlaylistItemType, VirtualId, XtreamPlaylistItem},
+            utils::extract_id_from_url,
+        };
+
+        let now = 1000i64;
+        let url1 = "http://192.168.20.2:5004/auto/v5.1";
+        let url2 = "http://192.168.20.2:5004/auto/v5.2";
+        let hash1 = extract_id_from_url(url1);
+        let hash2 = extract_id_from_url(url2);
+
+        let input_name = Arc::from("test_m3u_input");
+        let input = ConfigInput { name: Arc::clone(&input_name), input_type: InputType::M3u, ..Default::default() };
+        let aliases = InputAliasMap::from_inputs(&[Arc::new(input)]);
+
+        let header1 = PlaylistItemHeader {
+            id: Arc::from(hash1.as_str()),
+            url: Arc::from(url1),
+            input_name: Arc::clone(&input_name),
+            item_type: PlaylistItemType::Live,
+            ..Default::default()
+        };
+        let expected_key1 = override_key(&header1, &aliases).expect("expected override key 1");
+
+        let header2 = PlaylistItemHeader {
+            id: Arc::from(hash2.as_str()),
+            url: Arc::from(url2),
+            input_name: Arc::clone(&input_name),
+            item_type: PlaylistItemType::Live,
+            ..Default::default()
+        };
+        let expected_key2 = override_key(&header2, &aliases).expect("expected override key 2");
+        assert_ne!(expected_key1.id, expected_key2.id);
+
+        let xtream1 = XtreamPlaylistItem {
+            virtual_id: VirtualId::new(1),
+            provider_id: 0,
+            name: "WRAL HD".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Group".intern(),
+            title: "WRAL HD".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: url1.intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: None,
+            item_type: PlaylistItemType::Live,
+            category_id: 1,
+            input_name: Arc::clone(&input_name),
+            channel_no: 1,
+            source_ordinal: 0,
+            input_stream_id: Arc::from(hash1.as_str()),
+            upstream_user_agent: None,
+        };
+
+        let xtream2 = XtreamPlaylistItem {
+            virtual_id: VirtualId::new(2),
+            provider_id: 0,
+            name: "WRAL DT".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Group".intern(),
+            title: "WRAL DT".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: url2.intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: None,
+            item_type: PlaylistItemType::Live,
+            category_id: 1,
+            input_name: Arc::clone(&input_name),
+            channel_no: 2,
+            source_ordinal: 1,
+            input_stream_id: Arc::from(hash2.as_str()),
+            upstream_user_agent: None,
+        };
+
+        let item1 = UiPlaylistItem::from_xtream(xtream1, true);
+        let item2 = UiPlaylistItem::from_xtream(xtream2, true);
+        let mut items = vec![item1, item2];
+
+        let ov = ItemOverride { title: FieldDelta::Set("WRAL DT Custom".to_string()), ..Default::default() };
+        let mut merged_lookup = HashMap::new();
+        merged_lookup
+            .insert((Arc::clone(&input_name), expected_key2.clone()), MergedOverrideEntry { ov, pending: false });
+
+        let epg_index = EpgStatusIndex::default();
+        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now);
+
+        let meta1 = items[0].explorer_meta.as_ref().expect("meta1");
+        let meta2 = items[1].explorer_meta.as_ref().expect("meta2");
+
+        assert_eq!(meta1.override_id.as_ref(), Some(&expected_key1.id));
+        assert_eq!(meta2.override_id.as_ref(), Some(&expected_key2.id));
+        assert_ne!(meta1.override_id, meta2.override_id);
+
+        assert_eq!(items[0].title.as_ref(), "WRAL HD");
+        assert_eq!(items[1].title.as_ref(), "WRAL DT Custom");
+
+        assert!(!meta1.override_state.edited);
+        assert!(meta2.override_state.edited);
+
+        assert!(!meta1.override_state.ambiguous);
+        assert!(!meta2.override_state.ambiguous);
     }
 }

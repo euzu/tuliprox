@@ -48,6 +48,9 @@ pub struct UiItemExplorerMeta {
     /// Channel number of the item as the playlist stores it (`None` when unset/0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chno: Option<u32>,
+    /// Internal source id for Xtream items (e.g. `input_stream_id` for M3U origin) used to compute the override key.
+    #[serde(skip)]
+    pub override_source_id: Option<Arc<str>>,
 }
 
 /// Lightweight playlist item for UI streaming.
@@ -292,7 +295,11 @@ impl UiPlaylistItem {
     }
 
     pub fn from_xtream(item: XtreamPlaylistItem, explorer: bool) -> Self {
-        let explorer_meta = explorer.then(|| explorer_meta_for(item.additional_properties.as_ref(), item.channel_no));
+        let explorer_meta = explorer.then(|| {
+            let mut meta = explorer_meta_for(item.additional_properties.as_ref(), item.channel_no);
+            meta.override_source_id = Some(item.override_source_id());
+            meta
+        });
         Self {
             virtual_id: item.virtual_id.get(),
             provider_id: item.provider_id.to_string().into(),
@@ -402,6 +409,7 @@ mod tests {
             added: Some(1700000000),
             last_modified: Some(1700000100),
             chno: Some(42),
+            ..Default::default()
         };
 
         // Case 1: epg_channel_id None + explorer_meta None -> 12 elements
@@ -533,5 +541,14 @@ mod tests {
         let meta = item_explorer.explorer_meta.expect("explorer_meta must be Some");
         assert_eq!(meta.added, Some(1700000020));
         assert_eq!(meta.last_modified, None);
+    }
+
+    #[test]
+    fn serialization_of_ui_item_explorer_meta_skips_override_source_id() {
+        let meta = UiItemExplorerMeta { override_source_id: Some(Arc::from("hash123")), ..Default::default() };
+        let json = serde_json::to_string(&meta).expect("serialize meta");
+        assert!(!json.contains("override_source_id"), "wire JSON must not contain override_source_id: {json}");
+        let deserialized: UiItemExplorerMeta = serde_json::from_str(&json).expect("deserialize meta");
+        assert_eq!(deserialized.override_source_id, None);
     }
 }
