@@ -148,6 +148,7 @@ fn short_epg_live_item() -> XtreamPlaylistItem {
         source_ordinal: 0,
         input_stream_id: "".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -260,6 +261,7 @@ fn m3u_catchup_item(name: &str, input_name: &str, url: &str, catchup_source: Opt
             ..shared::model::LiveStreamProperties::default()
         }))),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -480,6 +482,7 @@ fn create_test_vod_item(url: &str, container_extension: &str, item_type: Playlis
         source_ordinal: 0,
         input_stream_id: "813563".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -725,6 +728,7 @@ fn m3u_timeshift_item() -> XtreamPlaylistItem {
         source_ordinal: 0,
         input_stream_id: "100".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 

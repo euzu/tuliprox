@@ -373,6 +373,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "1".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
         let filter = std::sync::Arc::new(
             shared::foundation::get_filter(r#"NOT Group ~ "^VIP.*""#, None).expect("filter parses"),
@@ -419,6 +420,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "1".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
         assert!(tx.send(Ok((item, true))).await.is_ok());
         assert!(tx.send(Err(shared::error::TuliproxError::RepositoryXtream("corrupt page"))).await.is_ok());
@@ -546,6 +548,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: id.to_string().intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         }
     }
 

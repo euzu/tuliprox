@@ -1394,6 +1394,17 @@
 
 ## 🐛 Fixes
 
+- **The override dialog shows the right channel for M3U items in Xtream targets.** M3U items whose stream URL has no
+  numeric id (for example HDHomeRun `.../auto/v5.2`) are stored in Xtream targets with provider id `0`. All of them
+  shared one override key, so the dialog showed the processed values of another channel. The key now comes from the
+  original input stream id. The explorer list now also uses this key, so saved overrides of these channels show and
+  apply. Override keys also stay correct when a target mapper rewrites the URL or id.
+
+- **The input playlist explorer gives every M3U channel its own row.** Stored M3U input channels have no virtual id,
+  so all rows shared one identity: selection marked every row, the open edit panel did not reload when another
+  channel was selected, and a save replaced every row. The explorer response now assigns each such channel a unique
+  explorer-local id.
+
 - **Shared HLS sessions continue on a healthy mirror after the active origin fails.** When the active origin
   failed during playback, the content check against the alternative mirror tried to pin the reference segment
   file a second time. A completed startup segment already holds that pin, so the check failed with

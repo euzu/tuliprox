@@ -2,7 +2,7 @@ use crate::model::ConfigInput;
 use shared::{
     model::{
         FieldDelta, InputType, ItemOverride, LiveStreamProperties, OverrideItemKind, PlaylistItemHeader,
-        SeriesStreamProperties, StreamProperties, VideoStreamProperties,
+        PlaylistItemType, SeriesStreamProperties, StreamProperties, VideoStreamProperties,
     },
     utils::{extract_id_from_url, extract_numeric_id_from_url, override_url_hash},
 };
@@ -20,23 +20,29 @@ pub enum IdSource {
 #[inline]
 fn is_short_hash_shape(s: &str) -> bool { s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit()) }
 
-pub fn classify_id(header: &PlaylistItemHeader, input_type: InputType) -> IdSource {
+/// Classifies the identity origin of an item from its id, url, and input type.
+pub fn classify_id_parts(id: &str, url: &str, input_type: InputType) -> IdSource {
     if !input_type.is_m3u() {
         return IdSource::Provider;
     }
-    let numeric_url_id = extract_numeric_id_from_url(&header.url);
+    let numeric_url_id = extract_numeric_id_from_url(url);
     if let Some(num) = numeric_url_id.filter(|&id| id > 0) {
-        if header.id.parse::<u32>().ok() == Some(num) {
+        if id.parse::<u32>().ok() == Some(num) {
             return IdSource::UrlNumeric;
         }
-    } else if numeric_url_id == Some(0) && header.id.as_ref() == "0" {
+    } else if numeric_url_id == Some(0) && id == "0" {
         return IdSource::UrlHash;
     }
 
-    if is_short_hash_shape(&header.id) && header.id.as_ref() == extract_id_from_url(&header.url) {
+    if is_short_hash_shape(id) && id == extract_id_from_url(url) {
         return IdSource::UrlHash;
     }
     IdSource::Attribute
+}
+
+/// Classifies the identity origin of an item header.
+pub fn classify_id(header: &PlaylistItemHeader, input_type: InputType) -> IdSource {
+    classify_id_parts(&header.id, &header.url, input_type)
 }
 
 /// The identity of an item override within a parent input.
@@ -168,25 +174,37 @@ impl InputAliasMap {
     }
 }
 
-pub fn override_key(header: &PlaylistItemHeader, aliases: &InputAliasMap) -> Option<OverrideKey> {
-    if header.id.is_empty() {
+/// Computes the override key for an item from its id, url, input name, item type, and alias map.
+pub fn override_key_for(
+    id: &Arc<str>,
+    url: &str,
+    input_name: &str,
+    item_type: PlaylistItemType,
+    aliases: &InputAliasMap,
+) -> Option<OverrideKey> {
+    if id.is_empty() {
         return None;
     }
-    let parent_info = aliases.runtime_to_parent.get(header.input_name.as_ref())?;
+    let parent_info = aliases.runtime_to_parent.get(input_name)?;
 
-    let id_source = classify_id(header, parent_info.input_type);
+    let id_source = classify_id_parts(id, url, parent_info.input_type);
     let key_id = if id_source == IdSource::UrlHash {
-        let Some(hash) = override_url_hash(&header.url, &parent_info.credentials[..]) else {
-            log::debug!("Failed to compute canonical override url hash for item {} with url {}", header.id, header.url);
+        let Some(hash) = override_url_hash(url, &parent_info.credentials[..]) else {
+            log::debug!("Failed to compute canonical override url hash for item {id}");
             return None;
         };
         Arc::from(hash.as_str())
     } else {
-        Arc::clone(&header.id)
+        Arc::clone(id)
     };
 
-    let kind = OverrideItemKind::from(header.item_type);
+    let kind = OverrideItemKind::from(item_type);
     Some(OverrideKey { kind, id: key_id })
+}
+
+/// Computes the override key for a playlist item header.
+pub fn override_key(header: &PlaylistItemHeader, aliases: &InputAliasMap) -> Option<OverrideKey> {
+    override_key_for(&header.id, &header.url, &header.input_name, header.item_type, aliases)
 }
 
 #[derive(Debug, Clone, Default)]

@@ -65,6 +65,7 @@ pub(in crate::api::endpoints::v1_api_playlist) fn m3u_item(
         additional_properties: None,
         input_stream_id: provider_id.intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -96,6 +97,7 @@ pub(in crate::api::endpoints::v1_api_playlist) fn xtream_item(
         source_ordinal: 7,
         input_stream_id: provider_id.to_string().intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -934,6 +936,85 @@ fn override_id_of_an_m3u_item_without_numeric_id_is_the_url_hash() {
     // A numeric m3u id is the provider id, not a url hash.
     let numeric = m3u_item(2, "5555", "Num", "UK", None);
     assert_eq!(numeric.override_id(&aliases).as_deref(), Some("5555"));
+}
+
+#[test]
+fn override_id_of_xtream_target_items_from_m3u_input_without_numeric_id_uses_input_stream_id() {
+    let url1 = "http://host:5004/auto/v5.1";
+    let url2 = "http://host:5004/auto/v5.2";
+    let hash1 = extract_id_from_url(url1);
+    let hash2 = extract_id_from_url(url2);
+    let aliases = aliases_for("input-a", InputType::M3u);
+
+    let mut m3u1 = m3u_item(1, "", "WRAL HD", "Live", None);
+    m3u1.url = url1.intern();
+    m3u1.provider_id = hash1.clone().intern();
+    m3u1.input_stream_id = hash1.clone().intern();
+
+    let mut m3u2 = m3u_item(2, "", "WRAL DT", "Live", None);
+    m3u2.url = url2.intern();
+    m3u2.provider_id = hash2.clone().intern();
+    m3u2.input_stream_id = hash2.clone().intern();
+
+    let mut xtream1 = xtream_item(1, 0, "WRAL HD", "Live", None);
+    xtream1.url = url1.intern();
+    xtream1.input_stream_id = hash1.intern();
+
+    let mut xtream2 = xtream_item(2, 0, "WRAL DT", "Live", None);
+    xtream2.url = url2.intern();
+    xtream2.input_stream_id = hash2.intern();
+
+    let m3u1_id = m3u1.override_id(&aliases).expect("m3u1 override id");
+    let m3u2_id = m3u2.override_id(&aliases).expect("m3u2 override id");
+    assert_ne!(m3u1_id, m3u2_id);
+
+    let xtream1_id = xtream1.override_id(&aliases).expect("xtream1 override id");
+    let xtream2_id = xtream2.override_id(&aliases).expect("xtream2 override id");
+
+    assert_ne!(xtream1_id, xtream2_id);
+    assert_eq!(xtream1_id, m3u1_id);
+    assert_eq!(xtream2_id, m3u2_id);
+}
+
+#[test]
+fn override_id_of_target_records_after_url_mapping_matches_input_record() {
+    let input_url = "http://host:5004/auto/v5.2";
+    let input_hash = extract_id_from_url(input_url);
+    let aliases = aliases_for("input-a", InputType::M3u);
+
+    let mut m3u_input = m3u_item(1, "", "WRAL DT", "Live", None);
+    m3u_input.url = input_url.intern();
+    m3u_input.provider_id = input_hash.clone().intern();
+    m3u_input.input_stream_id = input_hash.clone().intern();
+
+    let expected_id = m3u_input.override_id(&aliases).expect("m3u input override id");
+    assert!(expected_id.starts_with("urlhash-v1:"), "{expected_id}");
+
+    let mapped_url = "http://other/live/123.ts";
+
+    // Xtream target record after URL mapping
+    let mut xtream_target = xtream_item(1, 0, "WRAL DT", "Live", None);
+    xtream_target.url = mapped_url.intern();
+    xtream_target.input_url = input_url.intern();
+    xtream_target.input_stream_id = input_hash.clone().intern();
+
+    assert_eq!(xtream_target.override_id(&aliases).as_deref(), Some(&*expected_id));
+
+    // M3U target record after URL mapping and provider_id rewriting
+    let mut m3u_target = m3u_item(1, "mapped-provider-id", "WRAL DT", "Live", None);
+    m3u_target.url = mapped_url.intern();
+    m3u_target.input_url = input_url.intern();
+    m3u_target.input_stream_id = input_hash.intern();
+
+    assert_eq!(m3u_target.override_id(&aliases).as_deref(), Some(&*expected_id));
+}
+
+#[test]
+fn override_id_of_an_xtream_item_with_empty_input_stream_id_falls_back_to_provider_id() {
+    let mut item = xtream_item(1, 4321, "n", "g", None);
+    item.input_stream_id = "".intern();
+    let aliases = aliases_for("input-a", InputType::Xtream);
+    assert_eq!(item.override_id(&aliases).as_deref(), Some("4321"));
 }
 
 #[test]

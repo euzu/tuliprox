@@ -286,6 +286,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                       {html_if!(auth.has_permission(Permission::ConfigRead), {
                           <MenuItem class={if is_active(ViewType::Config) { "active" } else {""}} icon="Config" name={ViewType::Config.to_string()} label={translate.t("LABEL.CONFIG")}  onclick={&handle_menu_click}></MenuItem>
                       })}
+                      {html_if!(auth.has_permission(Permission::SystemRead), {
+                          <MenuItem class={if is_active(ViewType::Plugins) { "active" } else {""}} icon="Plugin" name={ViewType::Plugins.to_string()} label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></MenuItem>
+                      })}
                       {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
                           <MenuItem class={if is_active(ViewType::Users) { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
                       })}
@@ -297,9 +300,6 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                       })}
                       {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
                           <MenuItem class={if is_active(ViewType::PlaylistSettings) { "active" } else {""}} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></MenuItem>
-                      })}
-                      {html_if!(auth.has_permission(Permission::SystemRead), {
-                          <MenuItem class={if is_active(ViewType::Plugins) { "active" } else {""}} icon="Nodes" name={ViewType::Plugins.to_string()} label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></MenuItem>
                       })}
                     </CollapsePanel>
                 }
@@ -379,6 +379,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(auth.has_permission(Permission::ConfigRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Config, if is_active(ViewType::Config) { " active" } else {""})} icon="Config" name={ViewType::Config.to_string()} hint={translate.t("LABEL.CONFIG")} aria_label={translate.t("LABEL.CONFIG")} onclick={&handle_menu_click}></IconButton>
             })}
+            {html_if!(auth.has_permission(Permission::SystemRead), {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plugins, if is_active(ViewType::Plugins) { " active" } else {""})} icon="Plugin" name={ViewType::Plugins.to_string()} hint={translate.t("LABEL.PLUGINS")} aria_label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></IconButton>
+            })}
             {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if is_active(ViewType::Users) { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} hint={translate.t("LABEL.USER")} aria_label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></IconButton>
             })}
@@ -390,9 +393,6 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             })}
             {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistSettings, if is_active(ViewType::PlaylistSettings) { " active" } else {""})} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} hint={translate.t("LABEL.PLAYLIST")} aria_label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(auth.has_permission(Permission::SystemRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plugins, if is_active(ViewType::Plugins) { " active" } else {""})} icon="Nodes" name={ViewType::Plugins.to_string()} hint={translate.t("LABEL.PLUGINS")} aria_label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
                 auth.has_any_permissions(Permission::PlaylistRead | Permission::PlaylistWrite | Permission::EpgRead),

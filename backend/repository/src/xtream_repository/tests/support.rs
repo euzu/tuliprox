@@ -104,6 +104,7 @@ pub(in crate::xtream_repository::tests) fn make_live_item(
         source_ordinal: 0,
         input_stream_id: provider_id.to_string().intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 

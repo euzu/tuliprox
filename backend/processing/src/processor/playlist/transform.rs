@@ -763,6 +763,7 @@ pub(crate) async fn execute_pipe_with_insertions<'a, P: PluginHost>(
     };
 
     let is_memory = source.is_memory();
+    let is_m3u = fpl.input.input_type.is_m3u();
     let pre_transform_dedup_enabled = target.execution_plan.pre_transform_identity_dedup;
     if !is_memory && pre_transform_dedup_enabled {
         warn!(
@@ -791,9 +792,6 @@ pub(crate) async fn execute_pipe_with_insertions<'a, P: PluginHost>(
         };
 
     items.retain_mut(|item| {
-        if is_memory {
-            item.header.freeze_input_stream_id();
-        }
         if bouquet_filter.is_some_and(|filter| !filter.allows(item.header.xtream_cluster, &item.header.group)) {
             rejected += 1;
             return false;
@@ -801,6 +799,12 @@ pub(crate) async fn execute_pipe_with_insertions<'a, P: PluginHost>(
         if deduplicate_memory && !duplicates.insert(item.get_uuid()) {
             duplicates_removed += 1;
             return false;
+        }
+        if is_m3u {
+            item.header.freeze_input_url();
+        }
+        if is_memory {
+            item.header.freeze_input_stream_id();
         }
         true
     });

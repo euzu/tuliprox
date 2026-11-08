@@ -924,11 +924,10 @@ pub fn PlaylistExplorer() -> Html {
             if patched_items.is_empty() {
                 return;
             }
-            let patch_map: HashMap<u32, UiPlaylistItem> =
-                patched_items.into_iter().map(|it| (it.virtual_id, it)).collect();
+            let patch_map = edit_panel::bulk_patch_map(patched_items);
 
             if let Some(ref sel) = *selected_item {
-                if let Some(patched) = patch_map.get(&sel.virtual_id) {
+                if let Some(patched) = patch_map.get(&(sel.xtream_cluster, sel.virtual_id)) {
                     selected_item.set(Some(Rc::new(patched.clone())));
                 }
             }

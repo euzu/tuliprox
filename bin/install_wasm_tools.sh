@@ -61,7 +61,7 @@ fi
 mkdir -p "${INSTALL_DIR}"
 
 echo "📦 Installing wasm tools ${VERSION} from ${download_url}"
-curl -fsSL "${download_url}" -o "${archive_path}"
+curl -fsSL --retry 5 --retry-delay 5 --connect-timeout 30 "${download_url}" -o "${archive_path}"
 rm -rf "${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
 tar -xzf "${archive_path}" -C "${INSTALL_DIR}" --strip-components=1
