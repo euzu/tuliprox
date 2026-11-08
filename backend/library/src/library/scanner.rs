@@ -508,6 +508,7 @@ mod tests {
             config
         }
 
+        /// A symlinked file is cataloged under its link path.
         #[tokio::test]
         async fn test_symlinked_file_found_with_link_path() {
             let temp = tempdir().expect("tempdir");
@@ -528,6 +529,7 @@ mod tests {
             assert!(file_paths.contains(&target_file.to_str().unwrap()));
         }
 
+        /// A symlinked directory outside the root is scanned through the link.
         #[tokio::test]
         async fn test_symlinked_directory_outside_root() {
             let temp = tempdir().expect("tempdir");
@@ -552,6 +554,7 @@ mod tests {
             assert_eq!(files[0].file_path, expected_link_file.to_string_lossy().to_string());
         }
 
+        /// With `follow_symlinks: false`, file and directory links are skipped.
         #[tokio::test]
         async fn test_follow_symlinks_false_skips_both() {
             let temp = tempdir().expect("tempdir");
@@ -581,6 +584,7 @@ mod tests {
             assert_eq!(files[0].file_path, real_file.to_string_lossy().to_string());
         }
 
+        /// A link back to the root terminates and finds each file once.
         #[tokio::test]
         async fn test_symlink_cycle_terminates_and_finds_files_once() {
             let temp = tempdir().expect("tempdir");
@@ -604,6 +608,7 @@ mod tests {
             assert_eq!(files[0].file_path, movie_file.to_string_lossy().to_string());
         }
 
+        /// Two links to one directory always catalog the alias that sorts first.
         #[tokio::test]
         async fn test_shared_symlink_target_uses_first_alias_by_name() {
             let temp = tempdir().expect("tempdir");
@@ -624,6 +629,7 @@ mod tests {
             assert_eq!(files[0].path, root_dir.join("a_alias").join("movie.mp4"));
         }
 
+        /// A dangling link is skipped in best-effort scans and fails complete scans.
         #[tokio::test]
         async fn test_dangling_symlink_handling() {
             let temp = tempdir().expect("tempdir");
@@ -652,6 +658,7 @@ mod tests {
             assert!(complete_result.is_err(), "Complete completeness must fail on dangling symlink");
         }
 
+        /// A scan root that is a symlink is scanned in both modes.
         #[tokio::test]
         async fn test_scan_root_is_symlink() {
             let temp = tempdir().expect("tempdir");

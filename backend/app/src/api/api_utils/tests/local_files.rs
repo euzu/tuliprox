@@ -466,12 +466,14 @@ mod library_path_check {
         is_library_path_allowed(Path::new(requested), Path::new(canonical), roots)
     }
 
+    /// A follow root serves a link inside it even when the target lies elsewhere.
     #[test]
     fn follow_allows_lexical_inside_with_canonical_outside() {
         let roots = [root("/media/library", Some("/media/library"), true)];
         assert!(allowed("/media/library/linked_movie.mp4", "/mnt/external/storage/linked_movie.mp4", &roots));
     }
 
+    /// A follow root rejects `..` below the root and relative request paths.
     #[test]
     fn follow_denies_dotdot_and_relative() {
         let roots = [root("/media/library", Some("/media/library"), true)];
@@ -479,24 +481,28 @@ mod library_path_check {
         assert!(!allowed("media/library/movie.mp4", "/etc/passwd", &roots));
     }
 
+    /// A no-follow root rejects a link whose target lies outside the root.
     #[test]
     fn no_follow_denies_canonical_outside() {
         let roots = [root("/media/library", Some("/media/library"), false)];
         assert!(!allowed("/media/library/linked_movie.mp4", "/mnt/external/storage/linked_movie.mp4", &roots));
     }
 
+    /// A no-follow root that is itself a symlink serves files inside its target.
     #[test]
     fn no_follow_symlinked_root_allows_file_inside_target() {
         let roots = [root("/media/symlink_root", Some("/mnt/disk/real_root"), false)];
         assert!(allowed("/media/symlink_root/movie.mp4", "/mnt/disk/real_root/movie.mp4", &roots));
     }
 
+    /// A path outside every configured root is rejected.
     #[test]
     fn path_outside_every_root_denied() {
         let roots = [root("/media/library", Some("/media/library"), true)];
         assert!(!allowed("/var/data/movie.mp4", "/var/data/movie.mp4", &roots));
     }
 
+    /// A follow root configured with `..` matches lexically and still rejects escapes.
     #[test]
     fn follow_accepts_root_with_parent_components() {
         // A configured root such as `/srv/app/../media` stays lexical; files below it are allowed.
@@ -505,6 +511,7 @@ mod library_path_check {
         assert!(!allowed("/srv/app/../media/../etc/passwd", "/mnt/cloud/movie.mp4", &roots));
     }
 
+    /// An inner no-follow root keeps its strict rule inside an outer follow root.
     #[test]
     fn nested_no_follow_root_overrides_outer_follow_root() {
         let roots = [root("/media", None, true), root("/media/private", Some("/media/private"), false)];
@@ -513,6 +520,7 @@ mod library_path_check {
         assert!(allowed("/media/public/link.mp4", "/mnt/cloud/link.mp4", &roots));
     }
 
+    /// An inner follow root keeps its lexical rule inside an outer no-follow root.
     #[test]
     fn nested_follow_root_overrides_outer_no_follow_root() {
         let roots = [root("/media", Some("/media"), false), root("/media/cloud", None, true)];

@@ -236,12 +236,14 @@ mod tests {
         assert_eq!(playlist.series_category, default_series_category());
     }
 
+    /// The DTO default follows symlinks.
     #[test]
     fn scan_directory_default_has_follow_symlinks_true() {
         let dir = LibraryScanDirectoryDto::default();
         assert!(dir.follow_symlinks);
     }
 
+    /// The default `true` is omitted when serializing and restored when parsing.
     #[test]
     fn scan_directory_serialization_omits_follow_symlinks_when_true() {
         let dir = LibraryScanDirectoryDto {
@@ -258,6 +260,7 @@ mod tests {
         assert!(deserialized.follow_symlinks);
     }
 
+    /// `false` is serialized explicitly and parsed back.
     #[test]
     fn scan_directory_serialization_includes_follow_symlinks_when_false() {
         let dir = LibraryScanDirectoryDto {
