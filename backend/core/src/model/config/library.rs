@@ -3,7 +3,7 @@ use shared::{
     defaults::DEFAULT_STORAGE_DIR,
     error::TuliproxError,
     model::{ConfigDto, LibraryConfigDto, LibraryContentType, LibraryMetadataFormat},
-    utils::{normalize_container_extension, Internable},
+    utils::Internable,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -92,6 +92,17 @@ impl LibraryConfig {
 
 macros::from_impl!(LibraryConfig);
 
+/// Normalizes a configured library extension to the form the scanner compares against.
+///
+/// The scanner matches the lowercased `Path::extension` of each file, so only surrounding
+/// whitespace, one leading dot and case are dropped. Other characters (`mpeg-2`) and long
+/// extensions are kept. Returns `None` for an entry that names no extension.
+fn normalize_library_extension(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let extension = trimmed.strip_prefix('.').unwrap_or(trimmed);
+    (!extension.is_empty()).then(|| extension.to_lowercase())
+}
+
 impl From<&LibraryConfigDto> for LibraryConfig {
     fn from(dto: &LibraryConfigDto) -> Self {
         Self {
@@ -110,7 +121,7 @@ impl From<&LibraryConfigDto> for LibraryConfig {
             supported_extensions: dto
                 .supported_extensions
                 .iter()
-                .filter_map(|ext| normalize_container_extension(ext).map(std::borrow::Cow::into_owned))
+                .filter_map(|ext| normalize_library_extension(ext))
                 .collect(),
             metadata: LibraryMetadataConfig {
                 read_existing: LibraryMetadataReadConfig {
@@ -164,14 +175,17 @@ mod tests {
         std::env::temp_dir().join(format!("tuliprox-library-missing-{nonce}")).to_string_lossy().to_string()
     }
 
+    /// Configured extensions lose dot, spaces and case but keep every scanner-matchable character.
     #[test]
     fn supported_extensions_are_normalized_to_bare_lowercase() {
         let dto = LibraryConfigDto {
-            supported_extensions: vec![".MP3".to_string(), " flac ".to_string(), "mkv".to_string(), ".".to_string()],
+            supported_extensions: [".MP3", " flac ", "mkv", ".", "MPEG-2", "longextension"]
+                .map(str::to_string)
+                .to_vec(),
             ..Default::default()
         };
         let config = super::LibraryConfig::from(&dto);
-        assert_eq!(config.supported_extensions, vec!["mp3", "flac", "mkv"]);
+        assert_eq!(config.supported_extensions, vec!["mp3", "flac", "mkv", "mpeg-2", "longextension"]);
     }
 
     #[test]
