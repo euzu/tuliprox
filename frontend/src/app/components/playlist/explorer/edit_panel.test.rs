@@ -446,9 +446,7 @@ fn apply_bulk_patches_to_categories_updates_multiple_items_and_rebuilds_groups()
     let mut patched2 = (*item2).clone();
     patched2.group = Arc::from("Moved Group 2");
 
-    let mut patch_map = HashMap::new();
-    patch_map.insert(1, patched1);
-    patch_map.insert(2, patched2);
+    let patch_map = bulk_patch_map(vec![patched1, patched2]);
 
     let updated = apply_bulk_patches_to_categories(&categories, &patch_map);
     let groups = updated.live.as_ref().unwrap();
@@ -572,7 +570,7 @@ fn apply_bulk_patches_to_categories_ignores_same_virtual_id_in_other_cluster() {
 
     let mut patched = (*live).clone();
     patched.name = Arc::from("Live Patched");
-    let patch_map = HashMap::from([(1, patched)]);
+    let patch_map = bulk_patch_map(vec![patched]);
 
     let updated = apply_bulk_patches_to_categories(&categories, &patch_map);
     assert_eq!(&*updated.live.as_ref().unwrap()[0].channels[0].name, "Live Patched");
@@ -580,4 +578,52 @@ fn apply_bulk_patches_to_categories_ignores_same_virtual_id_in_other_cluster() {
     assert_eq!(vod_groups.len(), 1);
     assert_eq!(vod_groups[0].channels.len(), 1);
     assert_eq!(&*vod_groups[0].channels[0].name, "Movie");
+}
+
+#[test]
+fn bulk_patch_map_keeps_same_virtual_id_of_different_clusters_apart() {
+    let make_item = |name: &str, group: &str, item_type: PlaylistItemType, cluster: XtreamCluster| {
+        Rc::new(UiPlaylistItem {
+            virtual_id: 1,
+            provider_id: Arc::from(name),
+            name: Arc::from(name),
+            title: Arc::from(name),
+            group: Arc::from(group),
+            logo: Arc::from(""),
+            url: Arc::from(""),
+            item_type,
+            xtream_cluster: cluster,
+            category_id: 1,
+            rating: 0.0,
+            input_name: Arc::from("in"),
+            epg_channel_id: None,
+            explorer_meta: None,
+        })
+    };
+    let live = make_item("Live", "Live Group", PlaylistItemType::Live, XtreamCluster::Live);
+    let vod = make_item("Movie", "Vod Group", PlaylistItemType::Video, XtreamCluster::Video);
+    let group_of = |item: &Rc<UiPlaylistItem>, cluster: XtreamCluster| {
+        vec![Rc::new(UiPlaylistGroup {
+            id: 1,
+            title: Arc::clone(&item.group),
+            channels: vec![Rc::clone(item)],
+            xtream_cluster: cluster,
+        })]
+    };
+    let categories = UiPlaylistCategories {
+        live: Some(group_of(&live, XtreamCluster::Live)),
+        vod: Some(group_of(&vod, XtreamCluster::Video)),
+        series: None,
+    };
+
+    let mut patched_live = (*live).clone();
+    patched_live.name = Arc::from("Live Patched");
+    let mut patched_vod = (*vod).clone();
+    patched_vod.name = Arc::from("Movie Patched");
+    let patch_map = bulk_patch_map(vec![patched_live, patched_vod]);
+    assert_eq!(patch_map.len(), 2);
+
+    let updated = apply_bulk_patches_to_categories(&categories, &patch_map);
+    assert_eq!(&*updated.live.as_ref().unwrap()[0].channels[0].name, "Live Patched");
+    assert_eq!(&*updated.vod.as_ref().unwrap()[0].channels[0].name, "Movie Patched");
 }

@@ -448,10 +448,20 @@ pub fn replace_item_in_categories(
     }
 }
 
+/// Bulk patches keyed by cluster and virtual id; virtual ids are only unique within a cluster.
+pub type BulkPatchMap = HashMap<(XtreamCluster, u32), UiPlaylistItem>;
+
+/// Builds the bulk patch map from the saved items.
+#[must_use]
+pub fn bulk_patch_map(items: Vec<UiPlaylistItem>) -> BulkPatchMap {
+    items.into_iter().map(|it| ((it.xtream_cluster, it.virtual_id), it)).collect()
+}
+
+/// Applies bulk patches to all clusters and moves patched items into their target groups.
 #[must_use]
 pub fn apply_bulk_patches_to_categories(
     categories: &UiPlaylistCategories,
-    patch_map: &HashMap<u32, UiPlaylistItem>,
+    patch_map: &BulkPatchMap,
 ) -> UiPlaylistCategories {
     if patch_map.is_empty() {
         return categories.clone();
@@ -475,7 +485,7 @@ pub fn apply_bulk_patches_to_categories(
                 let mut modified = false;
 
                 for ch in &g.channels {
-                    if let Some(patched) = patch_map.get(&ch.virtual_id).filter(|it| it.xtream_cluster == cluster) {
+                    if let Some(patched) = patch_map.get(&(cluster, ch.virtual_id)) {
                         modified = true;
                         if patched.group.as_ref() == g.title.as_ref() {
                             new_channels.push(Rc::new(patched.clone()));

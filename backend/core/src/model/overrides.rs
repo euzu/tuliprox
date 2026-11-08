@@ -190,7 +190,7 @@ pub fn override_key_for(
     let id_source = classify_id_parts(id, url, parent_info.input_type);
     let key_id = if id_source == IdSource::UrlHash {
         let Some(hash) = override_url_hash(url, &parent_info.credentials[..]) else {
-            log::debug!("Failed to compute canonical override url hash for item {id} with url {url}");
+            log::debug!("Failed to compute canonical override url hash for item {id}");
             return None;
         };
         Arc::from(hash.as_str())
