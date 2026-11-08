@@ -1272,6 +1272,7 @@
     "FIRMWARE_NAME": "Firmware Name",
     "FIRMWARE_VERSION": "Firmware Version",
     "FLAT": "Flat",
+    "FOLLOW_SYMLINKS": "Follow symlinks",
     "FORCE_REDIRECT": "Force redirect",
     "FORMAT": "Format",
     "FORMATS": "Formats",

@@ -5,7 +5,7 @@ use crate::{
 use log::{debug, error, info, trace, warn};
 use shared::model::LibraryContentType;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{Display, Formatter},
     path::{Path, PathBuf},
 };
@@ -257,47 +257,86 @@ impl LibraryScanner {
             return Ok(Vec::new());
         }
 
+        // Directory cycles are only possible through symlinks.
+        let mut visited_dirs = HashSet::new();
+        if scan_directory.follow_symlinks {
+            match tolerate(fs::canonicalize(path).await, "canonicalize scan root", path, completeness)? {
+                Some(canonical_root) => visited_dirs.insert(canonical_root),
+                None => return Ok(Vec::new()),
+            };
+        }
+
         let mut files = Vec::new();
-        self.scan_directory_recursive(
-            path,
-            scan_directory.recursive,
-            scan_directory.content_type,
-            &mut files,
-            completeness,
-        )
-        .await?;
+        self.scan_directory_recursive(path, scan_directory, &mut files, &mut visited_dirs, completeness).await?;
         Ok(files)
     }
 
+    /// Scans `path` and, when `recursive`, its subdirectories; collects supported video files into `files`.
     fn scan_directory_recursive<'a>(
         &'a self,
         path: &'a Path,
-        recursive: bool,
-        content_type: LibraryContentType,
+        scan_directory: &'a LibraryScanDirectory,
         files: &'a mut Vec<ScannedMediaFile>,
+        visited_dirs: &'a mut HashSet<PathBuf>,
         completeness: ScanCompleteness,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            let mut entries = fs::read_dir(path).await?;
+            let mut read_dir = fs::read_dir(path).await?;
+            // Entries read before a read error are still scanned; the error is returned afterwards.
+            let mut entries = Vec::new();
+            let read_error = loop {
+                match read_dir.next_entry().await {
+                    Ok(Some(entry)) => entries.push(entry),
+                    Ok(None) => break None,
+                    Err(err) => break Some(err),
+                }
+            };
+            // Name order makes the same alias win when several symlinks share one target directory.
+            entries.sort_by_key(fs::DirEntry::file_name);
 
-            while let Some(entry) = entries.next_entry().await? {
+            for entry in entries {
                 let entry_path = entry.path();
-                let metadata = match entry.metadata().await {
-                    Ok(m) => m,
-                    Err(err) => {
-                        error!("Failed to read metadata for {}: {err}", entry_path.display());
-                        if completeness == ScanCompleteness::Complete {
-                            return Err(err);
-                        }
+                let Some(file_type) =
+                    tolerate(entry.file_type().await, "read file type for", &entry_path, completeness)?
+                else {
+                    continue;
+                };
+
+                let metadata = if file_type.is_symlink() {
+                    if !scan_directory.follow_symlinks {
+                        debug!("Skipping symlink because follow_symlinks is false: {}", entry_path.display());
                         continue;
                     }
+                    // Follows the link; a dangling link (e.g. offline mount) fails here.
+                    fs::metadata(&entry_path).await
+                } else {
+                    entry.metadata().await
+                };
+                let Some(metadata) = tolerate(metadata, "read metadata for", &entry_path, completeness)? else {
+                    continue;
                 };
 
                 if metadata.is_dir() {
-                    if recursive {
+                    if scan_directory.recursive {
+                        if scan_directory.follow_symlinks {
+                            let Some(canonical_dir) = tolerate(
+                                fs::canonicalize(&entry_path).await,
+                                "canonicalize directory",
+                                &entry_path,
+                                completeness,
+                            )?
+                            else {
+                                continue;
+                            };
+                            if !visited_dirs.insert(canonical_dir) {
+                                debug!("Skipping already visited directory: {}", entry_path.display());
+                                continue;
+                            }
+                        }
+
                         // Recursively scan subdirectories
                         if let Err(err) = self
-                            .scan_directory_recursive(&entry_path, recursive, content_type, files, completeness)
+                            .scan_directory_recursive(&entry_path, scan_directory, files, visited_dirs, completeness)
                             .await
                         {
                             error!("Failed to scan subdirectory {}: {err}", entry_path.display());
@@ -311,24 +350,21 @@ impl LibraryScanner {
                     if let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) {
                         let ext_lower = ext.to_lowercase();
                         if self.config.supported_extensions.contains(&ext_lower) {
-                            match ScannedMediaFile::from_path(&entry_path, content_type).await {
-                                Ok(video_file) => {
-                                    trace!("Found video file: {}", video_file.file_path);
-                                    files.push(video_file);
-                                }
-                                Err(err) => {
-                                    error!("Failed to read metadata for {}: {err}", entry_path.display());
-                                    if completeness == ScanCompleteness::Complete {
-                                        return Err(err);
-                                    }
-                                }
+                            if let Some(video_file) = tolerate(
+                                ScannedMediaFile::from_path(&entry_path, scan_directory.content_type).await,
+                                "read metadata for",
+                                &entry_path,
+                                completeness,
+                            )? {
+                                trace!("Found video file: {}", video_file.file_path);
+                                files.push(video_file);
                             }
                         }
                     }
                 }
             }
 
-            Ok(())
+            read_error.map_or(Ok(()), Err)
         })
     }
 
@@ -344,6 +380,26 @@ impl LibraryScanner {
                 false
             }
             Err(_) => false,
+        }
+    }
+}
+
+/// Applies the scan error policy: `Complete` propagates the error, `BestEffort` logs it and yields `None`.
+fn tolerate<T>(
+    result: io::Result<T>,
+    action: &str,
+    path: &Path,
+    completeness: ScanCompleteness,
+) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(err) => {
+            error!("Failed to {action} {}: {err}", path.display());
+            if completeness == ScanCompleteness::Complete {
+                Err(err)
+            } else {
+                Ok(None)
+            }
         }
     }
 }
@@ -426,5 +482,206 @@ mod tests {
         assert_eq!(episode_numbers["MyShow.2020.S01E03.mkv"], 3);
         assert_eq!(episode_numbers["MyShow.2021.720p.mkv"], 4);
         assert_eq!(episode_numbers["MyShow.2020.1080p.mkv"], 5);
+    }
+
+    #[cfg(unix)]
+    mod symlink_tests {
+        use super::*;
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+
+        /// Movie scan directory for `path` with the given traversal flags.
+        fn scan_dir(path: &Path, recursive: bool, follow_symlinks: bool) -> LibraryScanDirectory {
+            LibraryScanDirectory {
+                enabled: true,
+                path: path.to_string_lossy().into_owned(),
+                content_type: LibraryContentType::Movie,
+                recursive,
+                follow_symlinks,
+            }
+        }
+
+        /// Test config that scans exactly `scan_dirs`.
+        fn test_library_config(scan_dirs: Vec<LibraryScanDirectory>) -> LibraryConfig {
+            let mut config = create_test_config();
+            config.scan_directories = scan_dirs;
+            config
+        }
+
+        /// A symlinked file is cataloged under its link path.
+        #[tokio::test]
+        async fn test_symlinked_file_found_with_link_path() {
+            let temp = tempdir().expect("tempdir");
+            let target_file = temp.path().join("real_movie.mp4");
+            tokio::fs::write(&target_file, b"content").await.expect("write target");
+
+            let link_file = temp.path().join("link_movie.mp4");
+            symlink(&target_file, &link_file).expect("symlink");
+
+            let config = test_library_config(vec![scan_dir(temp.path(), false, true)]);
+
+            let scanner = LibraryScanner::new(config);
+            let files = scanner.scan_all().await.expect("scan_all");
+
+            let file_paths: Vec<_> = files.iter().map(|f| f.file_path.as_str()).collect();
+            assert_eq!(file_paths.len(), 2);
+            assert!(file_paths.contains(&link_file.to_str().unwrap()));
+            assert!(file_paths.contains(&target_file.to_str().unwrap()));
+        }
+
+        /// A symlinked directory outside the root is scanned through the link.
+        #[tokio::test]
+        async fn test_symlinked_directory_outside_root() {
+            let temp = tempdir().expect("tempdir");
+            let root_dir = temp.path().join("root");
+            let outside_dir = temp.path().join("outside");
+            tokio::fs::create_dir_all(&root_dir).await.expect("create root");
+            tokio::fs::create_dir_all(&outside_dir).await.expect("create outside");
+
+            let media_file = outside_dir.join("outside_movie.mp4");
+            tokio::fs::write(&media_file, b"content").await.expect("write media");
+
+            let link_dir = root_dir.join("linked_dir");
+            symlink(&outside_dir, &link_dir).expect("symlink dir");
+
+            let config = test_library_config(vec![scan_dir(&root_dir, true, true)]);
+
+            let scanner = LibraryScanner::new(config);
+            let files = scanner.scan_all().await.expect("scan_all");
+
+            assert_eq!(files.len(), 1);
+            let expected_link_file = link_dir.join("outside_movie.mp4");
+            assert_eq!(files[0].file_path, expected_link_file.to_string_lossy().to_string());
+        }
+
+        /// With `follow_symlinks: false`, file and directory links are skipped.
+        #[tokio::test]
+        async fn test_follow_symlinks_false_skips_both() {
+            let temp = tempdir().expect("tempdir");
+            let root_dir = temp.path().join("root");
+            let outside_dir = temp.path().join("outside");
+            tokio::fs::create_dir_all(&root_dir).await.expect("create root");
+            tokio::fs::create_dir_all(&outside_dir).await.expect("create outside");
+
+            let outside_file = outside_dir.join("outside.mp4");
+            tokio::fs::write(&outside_file, b"content").await.expect("write outside");
+
+            let real_file = root_dir.join("real.mp4");
+            tokio::fs::write(&real_file, b"content").await.expect("write real");
+
+            let file_link = root_dir.join("link.mp4");
+            symlink(&outside_file, &file_link).expect("symlink file");
+
+            let dir_link = root_dir.join("dir_link");
+            symlink(&outside_dir, &dir_link).expect("symlink dir");
+
+            let config = test_library_config(vec![scan_dir(&root_dir, true, false)]);
+
+            let scanner = LibraryScanner::new(config);
+            let files = scanner.scan_all().await.expect("scan_all");
+
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].file_path, real_file.to_string_lossy().to_string());
+        }
+
+        /// A link back to the root terminates and finds each file once.
+        #[tokio::test]
+        async fn test_symlink_cycle_terminates_and_finds_files_once() {
+            let temp = tempdir().expect("tempdir");
+            let root_dir = temp.path().join("root");
+            let sub_dir = root_dir.join("sub");
+            tokio::fs::create_dir_all(&sub_dir).await.expect("create sub");
+
+            let movie_file = sub_dir.join("movie.mp4");
+            tokio::fs::write(&movie_file, b"content").await.expect("write movie");
+
+            // Loop: root/sub/loop -> root
+            let loop_link = sub_dir.join("loop");
+            symlink(&root_dir, &loop_link).expect("create loop symlink");
+
+            let config = test_library_config(vec![scan_dir(&root_dir, true, true)]);
+
+            let scanner = LibraryScanner::new(config);
+            let files = scanner.scan_all().await.expect("scan_all");
+
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].file_path, movie_file.to_string_lossy().to_string());
+        }
+
+        /// Two links to one directory always catalog the alias that sorts first.
+        #[tokio::test]
+        async fn test_shared_symlink_target_uses_first_alias_by_name() {
+            let temp = tempdir().expect("tempdir");
+            let root_dir = temp.path().join("root");
+            let target_dir = temp.path().join("target");
+            tokio::fs::create_dir_all(&root_dir).await.expect("create root");
+            tokio::fs::create_dir_all(&target_dir).await.expect("create target");
+            tokio::fs::write(target_dir.join("movie.mp4"), b"content").await.expect("write movie");
+
+            // Created in reverse name order so creation order cannot decide the winner.
+            symlink(&target_dir, root_dir.join("z_alias")).expect("symlink z");
+            symlink(&target_dir, root_dir.join("a_alias")).expect("symlink a");
+
+            let scanner = LibraryScanner::new(test_library_config(vec![scan_dir(&root_dir, true, true)]));
+            let files = scanner.scan_all().await.expect("scan_all");
+
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, root_dir.join("a_alias").join("movie.mp4"));
+        }
+
+        /// A dangling link is skipped in best-effort scans and fails complete scans.
+        #[tokio::test]
+        async fn test_dangling_symlink_handling() {
+            let temp = tempdir().expect("tempdir");
+            let root_dir = temp.path().join("root");
+            tokio::fs::create_dir_all(&root_dir).await.expect("create root");
+
+            let real_file = root_dir.join("real.mp4");
+            tokio::fs::write(&real_file, b"content").await.expect("write real");
+
+            let dangling = root_dir.join("dangling.mp4");
+            symlink(temp.path().join("nonexistent.mp4"), &dangling).expect("create dangling symlink");
+
+            let scan_dir = scan_dir(&root_dir, false, true);
+
+            let config = test_library_config(vec![scan_dir.clone()]);
+            let scanner = LibraryScanner::new(config);
+
+            // BestEffort continues and finds the real file
+            let best_effort_files =
+                scanner.scan_all_with_completeness(ScanCompleteness::BestEffort).await.expect("best effort");
+            assert_eq!(best_effort_files.len(), 1);
+            assert_eq!(best_effort_files[0].file_path, real_file.to_string_lossy().to_string());
+
+            // Complete fails on dangling symlink
+            let complete_result = scanner.scan_all_with_completeness(ScanCompleteness::Complete).await;
+            assert!(complete_result.is_err(), "Complete completeness must fail on dangling symlink");
+        }
+
+        /// A scan root that is a symlink is scanned in both modes.
+        #[tokio::test]
+        async fn test_scan_root_is_symlink() {
+            let temp = tempdir().expect("tempdir");
+            let real_root = temp.path().join("real_root");
+            tokio::fs::create_dir_all(&real_root).await.expect("create real root");
+
+            let movie_file = real_root.join("movie.mp4");
+            tokio::fs::write(&movie_file, b"content").await.expect("write movie");
+
+            let symlink_root = temp.path().join("symlink_root");
+            symlink(&real_root, &symlink_root).expect("create symlink root");
+
+            // follow_symlinks: true
+            let config_follow = test_library_config(vec![scan_dir(&symlink_root, false, true)]);
+            let scanner_follow = LibraryScanner::new(config_follow);
+            let files_follow = scanner_follow.scan_all().await.expect("scan_all follow");
+            assert_eq!(files_follow.len(), 1);
+
+            // follow_symlinks: false
+            let config_no_follow = test_library_config(vec![scan_dir(&symlink_root, false, false)]);
+            let scanner_no_follow = LibraryScanner::new(config_no_follow);
+            let files_no_follow = scanner_no_follow.scan_all().await.expect("scan_all no follow");
+            assert_eq!(files_no_follow.len(), 1);
+        }
     }
 }

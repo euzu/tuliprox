@@ -1260,6 +1260,7 @@
     "FIRMWARE_NAME": "Nombre del firmware",
     "FIRMWARE_VERSION": "Versión del firmware",
     "FLAT": "Plano",
+    "FOLLOW_SYMLINKS": "Seguir enlaces simbólicos",
     "FORCE_REDIRECT": "Forzar redirección",
     "FORMAT": "Formato",
     "FORMATS": "Formatos",

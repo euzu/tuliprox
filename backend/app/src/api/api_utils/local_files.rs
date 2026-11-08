@@ -33,7 +33,7 @@ use shared::{
 };
 use std::{
     io::SeekFrom,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -184,20 +184,23 @@ pub(crate) async fn local_stream_response(
             return StatusCode::FORBIDDEN.into_response();
         }
 
-        let Some(library_paths) = app_state
-            .app_config
-            .config
-            .load()
-            .library
-            .as_ref()
-            .map(|lib| lib.scan_directories.iter().map(|dir| dir.path.clone()).collect::<Vec<_>>())
-        else {
+        let Some(scan_directories) = app_state.app_config.config.load().library.as_ref().map(|lib| {
+            lib.scan_directories.iter().map(|dir| (dir.path.clone(), dir.follow_symlinks)).collect::<Vec<_>>()
+        }) else {
             return StatusCode::NOT_FOUND.into_response();
         };
 
+        let mut roots = Vec::with_capacity(scan_directories.len());
+        for (dir_path, follow_symlinks) in scan_directories {
+            // Only no-follow roots compare canonical paths; skip the syscall otherwise.
+            let canonical = if follow_symlinks { None } else { tokio::fs::canonicalize(&dir_path).await.ok() };
+            let Ok(lexical) = std::path::absolute(&dir_path) else { continue };
+            roots.push(AllowedLibraryRoot { lexical, canonical, follow_symlinks });
+        }
+
         // Verify path is within allowed media directories
-        // (requires configuration of allowed base paths)
-        if !is_path_within_allowed_directories(&canonical, &library_paths) {
+        let requested = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
+        if !is_library_path_allowed(&requested, &canonical, &roots) {
             return StatusCode::FORBIDDEN.into_response();
         }
     }
@@ -378,13 +381,39 @@ pub(crate) async fn local_stream_response(
     response
 }
 
-pub(super) fn is_path_within_allowed_directories(sub_path: &Path, root_paths: &[String]) -> bool {
-    for root_path in root_paths {
-        if sub_path.starts_with(PathBuf::from(root_path)) {
-            return true;
+/// A library scan directory as seen by the local stream path check.
+#[derive(Debug)]
+pub(crate) struct AllowedLibraryRoot {
+    pub(crate) lexical: PathBuf,
+    pub(crate) canonical: Option<PathBuf>,
+    pub(crate) follow_symlinks: bool,
+}
+
+impl AllowedLibraryRoot {
+    /// Applies this root's rule: lexical containment when following symlinks, canonical containment otherwise.
+    fn allows(&self, requested: &Path, canonical: &Path) -> bool {
+        if self.follow_symlinks {
+            // Lexical check: the part below the root must not climb out via `..`.
+            requested
+                .strip_prefix(&self.lexical)
+                .is_ok_and(|rest| rest.components().all(|c| matches!(c, Component::Normal(_))))
+        } else {
+            self.canonical.as_ref().is_some_and(|root| canonical.starts_with(root))
         }
     }
-    false
+}
+
+/// The most specific root that lexically contains `requested` decides, so a no-follow root nested inside a
+/// follow root stays strict. Without a lexical match, only no-follow roots may accept the canonical path.
+pub(crate) fn is_library_path_allowed(requested: &Path, canonical: &Path, roots: &[AllowedLibraryRoot]) -> bool {
+    match roots
+        .iter()
+        .filter(|root| requested.starts_with(&root.lexical))
+        .max_by_key(|root| root.lexical.components().count())
+    {
+        Some(root) => root.allows(requested, canonical),
+        None => roots.iter().any(|root| !root.follow_symlinks && root.allows(requested, canonical)),
+    }
 }
 
 #[cfg(windows)]
