@@ -381,6 +381,7 @@ pub(crate) async fn local_stream_response(
     response
 }
 
+/// A library scan directory as seen by the local stream path check.
 #[derive(Debug)]
 pub(crate) struct AllowedLibraryRoot {
     pub(crate) lexical: PathBuf,
@@ -389,6 +390,7 @@ pub(crate) struct AllowedLibraryRoot {
 }
 
 impl AllowedLibraryRoot {
+    /// Applies this root's rule: lexical containment when following symlinks, canonical containment otherwise.
     fn allows(&self, requested: &Path, canonical: &Path) -> bool {
         if self.follow_symlinks {
             // Lexical check: the part below the root must not climb out via `..`.

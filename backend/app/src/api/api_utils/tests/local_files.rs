@@ -456,10 +456,12 @@ mod library_path_check {
     use crate::api::api_utils::local_files::{is_library_path_allowed, AllowedLibraryRoot};
     use std::path::{Path, PathBuf};
 
+    /// Builds an allowed root; `canonical` is `None` for follow roots that skip canonicalization.
     fn root(lexical: &str, canonical: Option<&str>, follow_symlinks: bool) -> AllowedLibraryRoot {
         AllowedLibraryRoot { lexical: PathBuf::from(lexical), canonical: canonical.map(PathBuf::from), follow_symlinks }
     }
 
+    /// Runs the path check on string paths.
     fn allowed(requested: &str, canonical: &str, roots: &[AllowedLibraryRoot]) -> bool {
         is_library_path_allowed(Path::new(requested), Path::new(canonical), roots)
     }

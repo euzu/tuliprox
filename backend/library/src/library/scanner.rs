@@ -271,6 +271,7 @@ impl LibraryScanner {
         Ok(files)
     }
 
+    /// Scans `path` and, when `recursive`, its subdirectories; collects supported video files into `files`.
     fn scan_directory_recursive<'a>(
         &'a self,
         path: &'a Path,
@@ -280,9 +281,20 @@ impl LibraryScanner {
         completeness: ScanCompleteness,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            let mut entries = fs::read_dir(path).await?;
+            let mut read_dir = fs::read_dir(path).await?;
+            // Entries read before a read error are still scanned; the error is returned afterwards.
+            let mut entries = Vec::new();
+            let read_error = loop {
+                match read_dir.next_entry().await {
+                    Ok(Some(entry)) => entries.push(entry),
+                    Ok(None) => break None,
+                    Err(err) => break Some(err),
+                }
+            };
+            // Name order makes the same alias win when several symlinks share one target directory.
+            entries.sort_by_key(fs::DirEntry::file_name);
 
-            while let Some(entry) = entries.next_entry().await? {
+            for entry in entries {
                 let entry_path = entry.path();
                 let Some(file_type) =
                     tolerate(entry.file_type().await, "read file type for", &entry_path, completeness)?
@@ -352,7 +364,7 @@ impl LibraryScanner {
                 }
             }
 
-            Ok(())
+            read_error.map_or(Ok(()), Err)
         })
     }
 
@@ -478,6 +490,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         use tempfile::tempdir;
 
+        /// Movie scan directory for `path` with the given traversal flags.
         fn scan_dir(path: &Path, recursive: bool, follow_symlinks: bool) -> LibraryScanDirectory {
             LibraryScanDirectory {
                 enabled: true,
@@ -488,6 +501,7 @@ mod tests {
             }
         }
 
+        /// Test config that scans exactly `scan_dirs`.
         fn test_library_config(scan_dirs: Vec<LibraryScanDirectory>) -> LibraryConfig {
             let mut config = create_test_config();
             config.scan_directories = scan_dirs;
@@ -588,6 +602,26 @@ mod tests {
 
             assert_eq!(files.len(), 1);
             assert_eq!(files[0].file_path, movie_file.to_string_lossy().to_string());
+        }
+
+        #[tokio::test]
+        async fn test_shared_symlink_target_uses_first_alias_by_name() {
+            let temp = tempdir().expect("tempdir");
+            let root_dir = temp.path().join("root");
+            let target_dir = temp.path().join("target");
+            tokio::fs::create_dir_all(&root_dir).await.expect("create root");
+            tokio::fs::create_dir_all(&target_dir).await.expect("create target");
+            tokio::fs::write(target_dir.join("movie.mp4"), b"content").await.expect("write movie");
+
+            // Created in reverse name order so creation order cannot decide the winner.
+            symlink(&target_dir, root_dir.join("z_alias")).expect("symlink z");
+            symlink(&target_dir, root_dir.join("a_alias")).expect("symlink a");
+
+            let scanner = LibraryScanner::new(test_library_config(vec![scan_dir(&root_dir, true, true)]));
+            let files = scanner.scan_all().await.expect("scan_all");
+
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, root_dir.join("a_alias").join("movie.mp4"));
         }
 
         #[tokio::test]
