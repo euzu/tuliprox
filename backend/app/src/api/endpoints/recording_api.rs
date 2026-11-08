@@ -1341,6 +1341,7 @@ mod tests {
         });
         let input = Arc::new(tuliprox_core::model::ConfigInput { id: 7, name: "input-a".into(), ..Default::default() });
         let target = Arc::new(tuliprox_core::model::ConfigTarget {
+            managed_channels: Vec::new(),
             id: 11,
             enabled: true,
             name: "1".to_string(),

@@ -451,14 +451,23 @@ interface http-routes {
 }
 world http-plugin { include base; export http-routes; }
 
-// Additive interface; the existing source hook and channel record stay frozen.
-// A successful list replaces this plugin's entire contribution to one input.
+// Managed-channel interface is unreleased; input and target bindings share this contract.
 interface managed-channel-hooks {
   use types.{channel};
+  enum destination-kind { input, target }
+  enum insertion-point { input, before-filter, after-filter }
+  record request {
+    kind: destination-kind,
+    name: string,
+    point: insertion-point,
+    inputs: list<string>,
+  }
   record managed-channel {
-    id: string,  // stable plugin-owned identity, independent of URL/name/order
+    id: string,
+    source-input: string, // must name one of request.inputs
     value: channel,
   }
-  reconcile-input: func(input-name: string) -> result<list<managed-channel>, string>;
+  // Successful complete list replaces this plugin's contribution to this binding.
+  reconcile: func(req: request) -> result<list<managed-channel>, string>;
 }
 world managed-channel-plugin { include base; export managed-channel-hooks; }

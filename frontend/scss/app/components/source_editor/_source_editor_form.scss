@@ -208,3 +208,13 @@ $form-width: 520px;
     }
   }
 }
+
+.tp__managed-channels__row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-block: 0.5rem;
+  > span { flex: 1; min-width: 8rem; overflow-wrap: anywhere; }
+  > .tp__select { min-width: 12rem; flex: 1; }
+}

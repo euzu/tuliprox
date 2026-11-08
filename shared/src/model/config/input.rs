@@ -143,6 +143,8 @@ pub struct ConfigInputDto {
     /// Set if and only if `input_type` is `Plugin`.
     #[serde(default, skip_serializing_if = "is_empty_map")]
     pub plugin_config: Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_channels: Vec<crate::model::PluginRef>,
 }
 
 /// `true` when `map` has no entries; a `skip_serializing_if` helper.
@@ -180,6 +182,7 @@ impl Default for ConfigInputDto {
             stalker: None,
             plugin: None,
             plugin_config: Map::new(),
+            managed_channels: Vec::new(),
         }
     }
 }

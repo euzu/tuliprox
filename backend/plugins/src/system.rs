@@ -170,10 +170,11 @@ impl PluginHost for PluginSystem {
 
     async fn managed_channels(
         &self,
-        ctx: &HookCtx<'_>,
+        plugin: &str,
+        request: &shared::model::ManagedChannelRequest<'_>,
         report: &mut PluginRunReport,
     ) -> Result<Vec<PlaylistItem>, PluginAbort> {
-        self.inner.managed.reconcile(&self.dispatcher(), ctx, report).await
+        self.inner.managed.reconcile(&self.dispatcher(), plugin, request, report).await
     }
 
     fn provides(&self, hook: PluginHook, plugin: &str) -> bool { self.dispatcher().named(hook, plugin).is_some() }

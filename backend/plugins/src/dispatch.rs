@@ -105,8 +105,6 @@ impl<'a> HookDispatcher<'a> {
         self.runnable(hook).find(|(plugin, _)| &*plugin.id == id)
     }
 
-    pub(crate) fn records(&self) -> impl Iterator<Item = &Arc<PluginRecord>> { self.snapshot.plugins.iter() }
-
     /// The plugin `id` in this snapshot, whatever its state.
     pub(crate) fn record(&self, id: &str) -> Option<&Arc<PluginRecord>> { self.snapshot.get(id) }
 

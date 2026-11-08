@@ -390,15 +390,25 @@ pub(crate) enum GroupingPolicy {
     ExactSequential,
 }
 
+#[derive(Default)]
+pub(crate) struct ManagedStageItems {
+    pub(crate) before: Vec<PlaylistItem>,
+    pub(crate) after: Vec<PlaylistItem>,
+}
+impl ManagedStageItems {
+    pub(crate) fn is_empty(&self) -> bool { self.before.is_empty() && self.after.is_empty() }
+}
+
 pub(crate) struct TransformBuffer<'a> {
     pub(crate) items: Vec<PlaylistItem>,
     pub(crate) grouping: GroupingPolicy,
+    pub(crate) managed: ManagedStageItems,
     pub(crate) locked: Option<&'a HashMap<UUIDType, Arc<ItemOverride>>>,
 }
 
 impl<'a> TransformBuffer<'a> {
     pub(crate) fn new(items: Vec<PlaylistItem>, locked: Option<&'a HashMap<UUIDType, Arc<ItemOverride>>>) -> Self {
-        Self { items, grouping: GroupingPolicy::ExactCategory, locked }
+        Self { items, grouping: GroupingPolicy::ExactCategory, locked, managed: ManagedStageItems::default() }
     }
 
     pub(crate) fn apply_filter(&mut self, target: &ConfigTarget) -> FilterOutcome {
@@ -624,6 +634,9 @@ async fn run_stages<P: PluginHost>(
 ) -> Result<(Vec<PlaylistGroup>, PipelineOutcome), PluginAbort> {
     let mut outcome = PipelineOutcome::default();
     for &stage in pipe {
+        if stage == TransformStage::Filter {
+            buffer.items.append(&mut buffer.managed.before);
+        }
         let (before, after) = stage_hook_pair(stage);
         if stage_hooks && plugins.wants(before, &target.name) {
             buffer.run_playlist_hook(plugins, before, ctx, &mut outcome.plugins).await?;
@@ -636,6 +649,10 @@ async fn run_stages<P: PluginHost>(
         apply_stage(&mut buffer, &mut outcome, target, stage, filter_calls.as_ref());
         if stage_hooks && plugins.wants(after, &target.name) {
             buffer.run_playlist_hook(plugins, after, ctx, &mut outcome.plugins).await?;
+        }
+        // Inventory hooks see only the filtered provider view; injected channels enter afterwards.
+        if stage == TransformStage::Filter {
+            buffer.items.append(&mut buffer.managed.after);
         }
     }
     Ok((buffer.into_groups(), outcome))
@@ -697,6 +714,7 @@ pub(crate) async fn execute_pipeline_on_groups_with_filter_calls<P: PluginHost>(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_pipe<'a, P: PluginHost>(
     target: &ConfigTarget,
@@ -707,6 +725,32 @@ pub(crate) async fn execute_pipe<'a, P: PluginHost>(
     bouquet_filter: Option<&tuliprox_core::model::TargetBouquetFilter>,
     plugins: &P,
     overrides: Option<&TargetOverrideSet>,
+) -> Result<(FetchedPlaylist<'a>, PipelineOutcome), TuliproxError> {
+    execute_pipe_with_insertions(
+        target,
+        pipe,
+        fpl,
+        duplicates,
+        consume_source,
+        bouquet_filter,
+        plugins,
+        overrides,
+        ManagedStageItems::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_pipe_with_insertions<'a, P: PluginHost>(
+    target: &ConfigTarget,
+    pipe: &ProcessingPipe,
+    fpl: &mut FetchedPlaylist<'a>,
+    duplicates: &mut HashSet<UUIDType>,
+    consume_source: bool,
+    bouquet_filter: Option<&tuliprox_core::model::TargetBouquetFilter>,
+    plugins: &P,
+    overrides: Option<&TargetOverrideSet>,
+    managed: ManagedStageItems,
 ) -> Result<(FetchedPlaylist<'a>, PipelineOutcome), TuliproxError> {
     let mut source = if consume_source {
         if fpl.is_memory() {
@@ -782,10 +826,14 @@ pub(crate) async fn execute_pipe<'a, P: PluginHost>(
 
     // Owned copy: a lock guard must not be held across the plugin hooks' await points.
     let locked_owned = overrides.map(|set| set.target_locked().clone());
-    let (groups, outcome) =
-        execute_pipeline_on_items(items, target, &fpl.input.name, pipe, plugins, locked_owned.as_ref())
-            .await
-            .map_err(|abort| TuliproxError::Plugin(abort.to_string()))?;
+    let result = if managed.is_empty() {
+        execute_pipeline_on_items(items, target, &fpl.input.name, pipe, plugins, locked_owned.as_ref()).await
+    } else {
+        let mut buffer = TransformBuffer::new(items, locked_owned.as_ref());
+        buffer.managed = managed;
+        run_stages(buffer, target, pipe, plugins, &HookCtx::new(&target.name).with_input(&fpl.input.name), true).await
+    };
+    let (groups, outcome) = result.map_err(|abort| TuliproxError::Plugin(abort.to_string()))?;
     let new_fpl = FetchedPlaylist {
         input: fpl.input,
         source: MemoryPlaylistSource::new(groups).into_source(),

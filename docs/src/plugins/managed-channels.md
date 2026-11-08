@@ -1,117 +1,135 @@
-# Managed channels in existing inputs
+# Managed channels
 
-A plugin can add live channels to an existing M3U or Xtream input without a separate
-`type: plugin` input. This supports integrations that maintain event or persistent team
-channels. It is a processing overlay: it changes what targets receive, not the provider's
-playlist or the raw provider cache.
+`ManagedChannelHooks` supplies plugin-owned live channels to an existing input or a selected
+target. There is one hook, one SDK API and no separate input provider or insertion package.
+The hook is unreleased: its original input-name-only signature was updated before release.
+Rebuild local managed-channel plugins against this contract.
 
-## Manifest and SDK
+## Select the destination
 
-Request the `playlist_write` capability and declare `playlist.managed-channels`:
+Configure bindings on the input or target in `source.yml`. The source editor exposes the
+same **Managed channels** controls on those blocks, including the target insertion point.
+Only enabled plugins providing `playlist.managed-channels` can be added in the editor;
+a configured but unavailable plugin can still be removed. Duplicate references within one
+destination are rejected, including attempts to bind one plugin before and after filtering.
+
+```yaml
+inputs:
+  - name: provider
+    type: m3u
+    url: https://provider.example/playlist.m3u
+    managed_channels:
+      - "plugin:sports-bridge"
+
+sources:
+  - inputs: [provider]
+    targets:
+      - name: Main TV
+        filter: 'Group ~ "News"'
+        managed_channels:
+          - plugin: "plugin:sports-bridge"
+            stage: after_filter
+        output:
+          - type: m3u
+            filename: main.m3u
+```
+
+Each reference is the string `plugin:<id>`. Input bindings are a list of those references.
+Target bindings are objects with `plugin` and optional `stage` (default `after_filter`).
+The example deliberately shows both placements; normally select one for the integration.
+
+| Placement | Result |
+| --- | --- |
+| Input | Merge after provider inventory hooks, before all target processing. Every target using that input can receive the channels. |
+| Target `before_filter` | Only this target receives the channels; its processing filter evaluates them. |
+| Target `after_filter` (default) | Only this target receives the channels; they bypass its processing filter. |
+
+The target point follows the Filter stage in its configured `processing_order`. Only
+remaining rename/map stages run on newly inserted channels; use the default filter-first
+order when those stages should process them. Sorting, numbering, EPG and output processing
+still run. Persist/output filters and bouquet restrictions still apply. Input cluster
+exclusions cannot be bypassed. Staged overlays cannot have independent input bindings;
+attach a binding to the provider parent or target instead.
+
+Bindings are reconciled once per destination before its processing, with insertion delayed
+to the configured point. A target binding is not called once per source input. The existing
+`playlist.after-filter` inventory hook runs before after-filter managed channels enter,
+so it does not discover the integration's own generated output. The managed request contains
+allowed input names, not a copy of the filtered provider inventory; inventory and external
+integration state remain the plugin's responsibility.
+
+## Plugin contract
 
 ```yaml
 capabilities:
   playlist_write: true
-hooks:
-  - playlist.managed-channels
+hooks: [playlist.managed-channels]
 ```
 
-Implement `ManagedChannelHooks::reconcile_input(input_name)` inside a
-`#[tuliprox_plugin]` module. The additive WIT interface is `managed-channel-hooks` and
-its standalone world is `managed-channel-plugin`. Existing interfaces are unchanged.
-
-The return value is the **complete** `Vec<ManagedChannel>` owned by this plugin for the
-named input. Each entry has a stable `id: String` and `value: Channel` (available in the
-SDK prelude). The host uses the returned name, title, group, URL, EPG ID, logo and channel
-number. `handle`, `input_name`, `input_stream_id` and `extra` cannot override ownership.
+The WIT interface is `managed-channel-hooks`, its world is `managed-channel-plugin`, and
+its SDK trait is `ManagedChannelHooks`. Implement `reconcile(&ManagedChannelRequest)`.
+The SDK prelude includes `ManagedChannel`, `ManagedChannelRequest`, `DestinationKind` and
+`InsertionPoint`.
 
 ```rust,ignore
 impl ManagedChannelHooks for Bridge {
-    fn reconcile_input(input_name: &str) -> Result<Vec<ManagedChannel>, String> {
-        let settings = Settings::current()?;
-        if input_name != settings.append_to_input {
-            return Ok(vec![]);
-        }
-        // Read the complete list maintained by HTTP handlers, e.g. from plugin KV.
-        // Every entry has a stable event/team id and its current playback URL.
-        load_managed_channels()
+    fn reconcile(req: &ManagedChannelRequest) -> Result<Vec<ManagedChannel>, String> {
+        // req.kind: Input or Target
+        // req.name: destination input/target name
+        // req.point: Input, BeforeFilter or AfterFilter
+        // req.inputs: source inputs the host permits for this binding
+        load_channels_for_destination(req)
     }
 }
 ```
 
-`append_to_input` and `load_managed_channels` are the integration plugin's settings and
-logic, not built-in SDK functions. Selecting a destination happens in the plugin; the
-host calls the hook for each eligible input. Return `Ok([])` for unselected inputs.
-When changing the destination, return an empty list for the old input to remove its
-contribution on that input's next successful refresh.
+`load_channels_for_destination` is the integration's own logic, e.g. a lookup of the channel
+list maintained by its HTTP handlers. A returned entry contains:
 
-## Reconciliation and ownership
+- `id`: stable plugin-owned identity, independent of name, URL and return order.
+- `source_input`: **required**, and must match one of `req.inputs`.
+- `value`: a `Channel` with name/title/group, playback URL, EPG ID, logo and number.
 
-- A new ID adds a channel. Returning an existing ID updates it. Omitting an ID removes
-  that channel from the next processed view. `Ok([])` deliberately removes all channels
-  owned by this plugin in that input.
-- IDs must be unique within a snapshot, nonblank, trimmed, at most 256 bytes and contain
-  no control characters. Identity is derived from plugin ID, input name and managed ID.
-  Name, URL, channel number and return order do not determine identity. Tuliprox also
-  includes the stream type in runtime identity; keep `item_type` stable for a managed ID.
-- Two plugins can use the same managed ID without colliding. A plugin cannot name a
-  provider channel or another plugin's channel for deletion. Ordinary filtering can
-  still filter any channel during target processing.
-- For now entries must be live (`live`, `live-unknown`, `live-hls`, `live-dash`) with the
-  `live` cluster and an absolute HTTP(S) playback URL. VOD, series and local-file channels
-  are rejected. Group/name defaults follow the input-provider conventions.
-- All entries are validated before any replacement. Duplicate IDs, invalid URLs, a
-  guest error, trap, timeout, resource exhaustion or failed snapshot save preserve the
-  previous successful contribution. A plugin with no successful snapshot contributes
-  nothing on failure. Failures still appear in plugin stats/logs and count toward the
-  existing circuit breaker; a tripped breaker serves the last-good snapshot until reset
-  or reload. `abort-target` does not override last-good fallback for this hook.
+For an input binding, `req.inputs` contains that input only. For a target binding it contains
+the target's available source inputs that allow live channels. The host sets each returned
+channel's origin from `source_input`; `value.input_name`, `value.input_stream_id`, `handle`
+and `extra` cannot override it. The pipeline routes each channel through that source's
+playback configuration, headers, credentials, connection limits and EPG processing.
+An out-of-scope origin rejects the entire new snapshot. If an input is removed or excludes
+live channels, cached fallback channels using that input are also excluded.
 
-## Processing order and storage
+## Ownership, persistence and failures
 
-The merge runs after provider loading, staged overlays, and `playlist.loaded` inventory
-hooks, but before target filtering/mapping/output. The inventory hook therefore sees
-provider data without feeding the plugin's own generated output back into discovery.
-Staged inputs are merged through their parent and are not independently overlaid.
+A successful complete list replaces this plugin's contribution to this binding. New IDs
+add channels, existing IDs update them, omitted IDs remove them, and `Ok([])` deliberately
+clears the contribution. No reconciliation action can delete provider channels or another
+plugin's channels. Normal target filters can still filter them.
 
-It also runs when the provider download is cached. Managed channels follow provider
-channels in source order, then participate in normal target processing, sorting, EPG
-matching and output. Input cluster exclusions still apply. Targets consuming the
-existing input receive its managed channels subject to their filters. A plugin with
-`playlist_write` does not bypass target rules.
+Snapshots are isolated by plugin, destination kind/name and insertion point. Changing an
+insertion point uses a separate fallback snapshot, while retaining the same channel identity
+for the same plugin/destination/source/managed ID. Different targets cannot borrow each other's
+fallback. Keep the stream type stable for a managed ID: native runtime identity includes type.
 
-The raw provider snapshot is never rewritten with managed channels. Disk-backed
-providers stay lazy; only the managed contribution is held in memory. Local group IDs
-are reassigned at merge time to avoid collisions with provider category IDs.
+Errors, traps, timeouts, resource exhaustion, invalid results and failed snapshot writes retain
+the previous successful contribution. Without a prior success, a failure contributes nothing.
+Duplicate IDs, whitespace/control characters in IDs, invalid origins and non-HTTP(S) URLs are
+rejected before any replacement. IDs are at most 256 bytes. Only live, live-unknown, live-hls and
+live-dash streams in the live cluster are supported.
 
-The host persists successful snapshots under
-`<plugins data_dir>/.managed-channels/<plugin-id>/<sha256(input-name)>.json`, atomically replacing
-one complete snapshot. This store is separate from guest-accessible KV, so a plugin
-cannot overwrite the fallback while preparing a replacement. Snapshots survive host
-restart and plugin reload. Corrupt/unreadable snapshot files are reported as input
-errors rather than interpreted as an intentional deletion.
+The host atomically persists snapshots under
+`<plugins data_dir>/.managed-channels/<plugin-id>/bindings/<scope-hash>.json`, separately from
+plugin KV. Corrupt or unreadable snapshots become processing errors rather than an intentional
+deletion. Snapshots survive restart/reload. A failed circuit breaker serves its last-good
+contribution until reset/reload; `abort-target` does not disable fallback for this hook.
 
-Disabling, unapproving or removing a plugin stops its contribution on subsequent
-processing; its snapshots are retained for re-enabling. Uninstall with `purge_kv=true`
-also deletes its managed snapshots. A live target remains unchanged until refreshed.
+Removing a binding or disabling/unapproving/removing its plugin stops its contribution on the
+next processing run. Snapshots remain for re-enabling; uninstall with `purge_kv=true` deletes
+the owner's snapshots. Raw provider caches are never rewritten with managed channels, and
+input overlays preserve lazy disk-backed processing.
 
-Limits: 10,000 channels and 16 MiB serialized snapshot per plugin/input. Normal hook
-memory, instance and execution limits apply. Calls for the same plugin/input are
-serialized; independent inputs and plugins can reconcile concurrently.
+Limits: 10,000 channels and 16 MiB serialized snapshot per binding. Existing hook memory,
+instance and execution limits apply. Concurrent calls for one binding are serialized.
 
-## Bridge workflow
-
-```text
-Existing M3U/XC input → provider inventory hook → bridge HTTP API ↔ Teamarr
-          │                                                   │
-          │                                      stored managed channel list
-          │                                                   │
-          └──────────── merge managed-channel hook ◄───────────┘
-                                      │
-                              existing target/output
-```
-
-HTTP handlers update the integration plugin's list. A playlist refresh invokes the
-managed hook and rebuilds targets. The hook does not itself trigger that refresh, fetch
-Teamarr XMLTV, or implement stream fallback. Those remain integration responsibilities.
-This support does not install a Teamarr/Dispatcharr compatibility plugin.
+A playlist refresh is required to publish changes. The hook does not trigger refreshes,
+implement Teamarr's Dispatcharr API, retrieve XMLTV, or provide ordered stream fallback.
+Those belong to the integration plugin.

@@ -102,6 +102,7 @@ async fn response_body_text(response: axum::response::Response) -> Result<String
 
 fn short_epg_target() -> ConfigTarget {
     ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,

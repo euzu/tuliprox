@@ -617,6 +617,7 @@ mod tests {
             ..ConfigInput::default()
         });
         let target = Arc::new(ConfigTarget {
+            managed_channels: Vec::new(),
             curation: None,
             id: 1,
             enabled: true,

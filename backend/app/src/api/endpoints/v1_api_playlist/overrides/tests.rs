@@ -75,6 +75,7 @@ fn xtream_output() -> TargetOutput {
 
 fn target(id: u16, name: &str, output: TargetOutput) -> Arc<ConfigTarget> {
     Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id,
         enabled: true,

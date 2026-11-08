@@ -141,7 +141,9 @@ pub mod prelude {
             event_hooks::Event,
             http_routes::{Request as HttpRouteRequest, Response as HttpRouteResponse},
             input_provider::InputRequest,
-            managed_channel_hooks::ManagedChannel,
+            managed_channel_hooks::{
+                DestinationKind, InsertionPoint, ManagedChannel, Request as ManagedChannelRequest,
+            },
             metrics_hooks::Metric,
             notification_hooks::{DeliveryError, Notification},
             output_generator::OutputRequest,

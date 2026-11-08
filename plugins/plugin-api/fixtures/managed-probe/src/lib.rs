@@ -10,13 +10,14 @@ mod plugin {
         }
     }
     impl ManagedChannelHooks for Probe {
-        fn reconcile_input(input: &str) -> Result<Vec<ManagedChannel>, String> {
+        fn reconcile(req: &ManagedChannelRequest) -> Result<Vec<ManagedChannel>, String> {
             let state: serde_json::Value = serde_json::from_str(&kv::get_str("state")?.unwrap_or_else(|| "{}".into()))
                 .map_err(|e| e.to_string())?;
-            let destination = state["input"].as_str().unwrap_or("provider");
-            if input != destination {
+            if state["destination"].as_str().is_some_and(|name| name != req.name) {
                 return Ok(vec![]);
             }
+            let source =
+                state["source_input"].as_str().or_else(|| req.inputs.first().map(String::as_str)).unwrap_or("outside");
             match state["mode"].as_str().unwrap_or("") {
                 "fail" => return Err("simulated outage".into()),
                 "trap" => panic!("simulated trap"),
@@ -29,6 +30,7 @@ mod plugin {
             let count = state["count"].as_u64().unwrap_or(2);
             Ok((0..count)
                 .map(|index| ManagedChannel {
+                    source_input: source.to_string(),
                     id: if state["duplicate"].as_bool().unwrap_or(false) {
                         "same".into()
                     } else {

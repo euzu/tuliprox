@@ -277,6 +277,12 @@ impl ConfigInputDto {
         provider_names: &HashSet<String>,
         templates: Option<&[PatternTemplate]>,
     ) -> Result<u16, TuliproxError> {
+        crate::model::validate_managed_channel_refs(&self.managed_channels).map_err(TuliproxError::ConfigInput)?;
+        if !self.managed_channels.is_empty() && (self.input_type == InputType::Staged || self.staged.is_some()) {
+            return Err(TuliproxError::ConfigInput(
+                "attach managed channels to a provider input or target, not a staged overlay".to_string(),
+            ));
+        }
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return Err(TuliproxError::ConfigInput("name for input is mandatory".to_string()));

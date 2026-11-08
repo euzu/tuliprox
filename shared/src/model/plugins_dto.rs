@@ -515,6 +515,10 @@ pub enum PluginReferenceKind {
     TargetOutput,
     /// A target strategy such as `sort: {strategy: plugin:<id>}`.
     TargetStrategy,
+    /// Managed-channel binding attached to an input.
+    InputManagedChannels,
+    /// Managed-channel binding attached to a target.
+    TargetManagedChannels,
     /// A `plugin.<id>.<fn>(…)` term in a target's processing filter.
     TargetFilter,
     /// A `type: plugin_task` schedule.

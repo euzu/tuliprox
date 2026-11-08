@@ -57,6 +57,8 @@ pub struct ConfigTargetDto {
     /// `plugin:<id>`: the plugin that merges groups (`merge-groups`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_merge: Option<PluginRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_channels: Vec<ManagedChannelBinding>,
 }
 
 impl Default for ConfigTargetDto {
@@ -78,6 +80,7 @@ impl Default for ConfigTargetDto {
             use_memory_cache: false,
             chno: None,
             group_merge: None,
+            managed_channels: Vec::new(),
         }
     }
 }
@@ -89,6 +92,8 @@ impl ConfigTargetDto {
         templates: Option<&[PatternTemplate]>,
         hdhr_config: Option<&HdHomeRunDeviceOverview>,
     ) -> Result<(), TuliproxError> {
+        validate_managed_channel_refs(self.managed_channels.iter().map(|binding| &binding.plugin))
+            .map_err(TuliproxError::ConfigTarget)?;
         self.id = id;
         if self.output.is_empty() {
             return Err(TuliproxError::ConfigTarget(format!("Missing output format for {}", self.name)));
@@ -272,10 +277,12 @@ impl ConfigTargetDto {
 mod tests;
 
 mod filter;
+mod managed_channels;
 mod options;
 mod output;
 mod plugin_ref;
 pub use filter::ConfigTargetFilterDto;
+pub use managed_channels::{validate_managed_channel_refs, ManagedChannelBinding, ManagedChannelStage};
 pub use options::{
     ConfigTargetOptions, ConfigTargetShareLiveStreams, DeduplicateConfig, DeduplicateKeep, DeduplicateMatchBy,
     EpgOutputOptions,

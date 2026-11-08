@@ -3,7 +3,10 @@ mod common;
 use common::probe_entry;
 use serde_json::{json, Value};
 use sha2::Digest;
-use shared::model::{HookCtx, PlaylistEntry, PluginHost, PluginRunReport, PluginStateDto};
+use shared::model::{
+    ManagedChannelRequest, ManagedChannelStage, ManagedDestination, PlaylistEntry, PluginHost, PluginRunReport,
+    PluginStateDto,
+};
 use std::{fs, path::PathBuf};
 use tempfile::TempDir;
 use tuliprox_core::model::PluginsConfig;
@@ -53,7 +56,26 @@ async fn set(system: &PluginSystem, owner: &str, value: Value) {
     system.api_rpc_call(owner, "set", value.to_string().as_bytes(), || true).await.unwrap();
 }
 async fn channels(system: &PluginSystem, input: &str) -> Vec<shared::model::PlaylistItem> {
-    system.managed_channels(&HookCtx::new("").with_input(input), &mut PluginRunReport::default()).await.unwrap()
+    let inputs = vec![input.to_string()];
+    let request =
+        ManagedChannelRequest { destination: ManagedDestination::Input, name: input, stage: None, inputs: &inputs };
+    let mut result = Vec::new();
+    for owner in system.plugin_ids() {
+        result.extend(system.managed_channels(&owner, &request, &mut PluginRunReport::default()).await.unwrap());
+    }
+    result
+}
+
+async fn target_channels(
+    system: &PluginSystem,
+    name: &str,
+    stage: ManagedChannelStage,
+    inputs: &[&str],
+) -> Vec<shared::model::PlaylistItem> {
+    let inputs = inputs.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+    let request =
+        ManagedChannelRequest { destination: ManagedDestination::Target, name, stage: Some(stage), inputs: &inputs };
+    system.managed_channels("managed-probe", &request, &mut PluginRunReport::default()).await.unwrap()
 }
 
 #[tokio::test]
@@ -70,6 +92,7 @@ async fn reconcile_adds_updates_and_deletes_without_changing_identity() {
     assert_eq!(first[0].get_uuid(), updated[0].get_uuid());
     assert_ne!(first[0].header.url, updated[0].header.url);
     assert_eq!(&*updated[0].header.name, "Renamed 0");
+    set(&s.system, "managed-probe", json!({"destination":"provider"})).await;
     assert!(channels(&s.system, "unselected-input").await.is_empty());
     set(&s.system, "managed-probe", json!({"mode":"empty"})).await;
     assert!(channels(&s.system, "provider").await.is_empty());
@@ -138,4 +161,32 @@ async fn purging_one_owner_cannot_remove_another_owners_snapshots() {
     assert!(!snapshots.join("managed").exists());
     assert!(snapshots.join("other-owner").is_dir());
     assert_eq!(channels(&s.system, "provider").await.len(), 2, "other owner must retain its last-good fallback");
+}
+
+#[tokio::test]
+async fn destination_and_stage_snapshots_are_isolated_and_origins_cannot_escape_target() {
+    let Some(s) = stage(&["managed-probe"]) else { return };
+    let a = target_channels(&s.system, "Alpha", ManagedChannelStage::AfterFilter, &["provider"]).await;
+    let b = target_channels(&s.system, "Beta", ManagedChannelStage::AfterFilter, &["provider"]).await;
+    assert_eq!(a.len(), 2);
+    assert_eq!(b.len(), 2);
+    assert_ne!(a[0].get_uuid(), b[0].get_uuid());
+    let before = target_channels(&s.system, "Alpha", ManagedChannelStage::BeforeFilter, &["provider"]).await;
+    assert_eq!(a[0].get_uuid(), before[0].get_uuid(), "moving insertion point should preserve channel identity");
+    set(&s.system, "managed-probe", json!({"source_input":"outside-target"})).await;
+    assert_eq!(
+        target_channels(&s.system, "Alpha", ManagedChannelStage::AfterFilter, &["provider"]).await.len(),
+        2,
+        "invalid response keeps last-good snapshot"
+    );
+    assert!(target_channels(&s.system, "Unseen", ManagedChannelStage::AfterFilter, &["provider"]).await.is_empty());
+    assert!(
+        target_channels(&s.system, "Alpha", ManagedChannelStage::AfterFilter, &["other-provider"]).await.is_empty(),
+        "revoked input must not survive in fallback"
+    );
+    set(&s.system, "managed-probe", json!({"mode":"empty"})).await;
+    assert!(target_channels(&s.system, "Alpha", ManagedChannelStage::AfterFilter, &["provider"]).await.is_empty());
+    set(&s.system, "managed-probe", json!({"mode":"fail"})).await;
+    assert_eq!(target_channels(&s.system, "Alpha", ManagedChannelStage::BeforeFilter, &["provider"]).await.len(), 2);
+    assert_eq!(target_channels(&s.system, "Beta", ManagedChannelStage::AfterFilter, &["provider"]).await.len(), 2);
 }

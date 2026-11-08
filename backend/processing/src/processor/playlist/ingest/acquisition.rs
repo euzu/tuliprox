@@ -521,7 +521,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     // Managed contributions are processing overlays, not provider-cache writes. Run on
     // cached inputs too, after inventory hooks, so providers never ingest their own output.
     if error.is_none() && input.staged.is_none() {
-        match apply_managed_channels(&ctx.plugins, &input.name, playlist, &mut plugins).await {
+        match apply_managed_channels(&ctx.plugins, &input.name, &input.managed_channels, playlist, &mut plugins).await {
             Ok(overlaid) => playlist = overlaid,
             Err((original, abort)) => {
                 playlist = original;
@@ -582,19 +582,28 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
 pub(crate) async fn apply_managed_channels<P: PluginHost>(
     plugins: &P,
     input_name: &str,
+    bindings: &[shared::model::PluginRef],
     playlist: PlaylistSource,
     report: &mut PluginRunReport,
 ) -> Result<PlaylistSource, (PlaylistSource, PluginAbort)> {
-    match plugins.managed_channels(&HookCtx::new("").with_input(input_name), report).await {
-        Ok(mut items) => {
-            // The full managed set follows the provider in source order.
-            for item in &mut items {
-                item.header.source_ordinal = u32::MAX;
-            }
-            Ok(playlist.append_groups(group_mapped_items(items)))
+    let inputs = vec![input_name.to_string()];
+    let request = shared::model::ManagedChannelRequest {
+        destination: shared::model::ManagedDestination::Input,
+        name: input_name,
+        stage: None,
+        inputs: &inputs,
+    };
+    let mut items = Vec::new();
+    for binding in bindings {
+        match plugins.managed_channels(binding.id(), &request, report).await {
+            Ok(mut contribution) => items.append(&mut contribution),
+            Err(abort) => return Err((playlist, abort)),
         }
-        Err(abort) => Err((playlist, abort)),
     }
+    for item in &mut items {
+        item.header.source_ordinal = u32::MAX;
+    }
+    Ok(playlist.append_groups(group_mapped_items(items)))
 }
 
 /// Run `on-playlist-loaded` over the items of `playlist` that a plugin's scope
@@ -757,10 +766,11 @@ mod tests {
     impl PluginHost for ManagedOverlay {
         async fn managed_channels(
             &self,
-            ctx: &HookCtx<'_>,
+            _plugin: &str,
+            request: &shared::model::ManagedChannelRequest<'_>,
             _report: &mut PluginRunReport,
         ) -> Result<Vec<PlaylistItem>, PluginAbort> {
-            if ctx.input != Some("provider") {
+            if request.name != "provider" {
                 return Ok(vec![]);
             }
             Ok(vec![PlaylistItem {
@@ -795,11 +805,16 @@ mod tests {
         let mut cached = MemoryPlaylistSource::new(group_mapped_items(vec![provider])).into_source();
         for _ in 0..2 {
             let source = cached.clone_source().unwrap();
-            let mut result =
-                apply_managed_channels(&ManagedOverlay, "provider", source, &mut PluginRunReport::default())
-                    .await
-                    .ok()
-                    .unwrap();
+            let mut result = apply_managed_channels(
+                &ManagedOverlay,
+                "provider",
+                &[shared::model::PluginRef::new("bridge").unwrap()],
+                source,
+                &mut PluginRunReport::default(),
+            )
+            .await
+            .ok()
+            .unwrap();
             assert_eq!(result.get_channel_count(), 2);
             assert_eq!(result.get_group_count(), 2);
             let originals: Vec<_> =
@@ -812,6 +827,7 @@ mod tests {
         let mut other = apply_managed_channels(
             &ManagedOverlay,
             "other",
+            &[shared::model::PluginRef::new("bridge").unwrap()],
             cached.clone_source().unwrap(),
             &mut PluginRunReport::default(),
         )
@@ -822,6 +838,7 @@ mod tests {
         let mut empty = apply_managed_channels(
             &ManagedOverlay,
             "provider",
+            &[shared::model::PluginRef::new("bridge").unwrap()],
             PlaylistSource::default(),
             &mut PluginRunReport::default(),
         )

@@ -172,4 +172,4 @@ flags above come from the tools' documentation, not from a run. -->
 
 Incoming REST APIs are described in [Incoming HTTP routes](./http-routes.md).
 
-Plugins can also add their own live channels to existing inputs with [Managed Channels](./managed-channels.md).
+Plugins can also add their own live channels to selected inputs or targets with [Managed Channels](./managed-channels.md).

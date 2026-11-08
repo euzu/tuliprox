@@ -710,6 +710,7 @@ mod tests {
             execution_plan: crate::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
+            managed_channels: Vec::new(),
         })
     }
 

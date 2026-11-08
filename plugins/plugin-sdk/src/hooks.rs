@@ -20,7 +20,7 @@ use crate::{
         event_hooks::Event,
         http_routes::{Request as HttpRouteRequest, Response as HttpRouteResponse},
         input_provider::InputRequest,
-        managed_channel_hooks::ManagedChannel,
+        managed_channel_hooks::{ManagedChannel, Request as ManagedChannelRequest},
         metrics_hooks::Metric,
         notification_hooks::{DeliveryError, Notification},
         output_generator::OutputRequest,
@@ -326,12 +326,12 @@ impl<T: HttpRoutes> exports::http_routes::Guest for Adapter<T> {
     fn handle(req: HttpRouteRequest) -> Res<HttpRouteResponse> { T::handle(req) }
 }
 
-/// A complete snapshot of this plugin's managed live channels for one input.
+/// A complete snapshot of this plugin's managed live channels for an input or target binding.
 /// `Ok([])` removes them; `Err` retains the host's last good snapshot.
 pub trait ManagedChannelHooks {
-    fn reconcile_input(input_name: &str) -> Res<Vec<ManagedChannel>>;
+    fn reconcile(req: &ManagedChannelRequest) -> Res<Vec<ManagedChannel>>;
 }
 
 impl<T: ManagedChannelHooks> exports::managed_channel_hooks::Guest for Adapter<T> {
-    fn reconcile_input(input_name: String) -> Res<Vec<ManagedChannel>> { T::reconcile_input(&input_name) }
+    fn reconcile(req: ManagedChannelRequest) -> Res<Vec<ManagedChannel>> { T::reconcile(&req) }
 }

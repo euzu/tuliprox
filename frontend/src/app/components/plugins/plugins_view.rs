@@ -414,6 +414,8 @@ fn reference_kind_key(kind: PluginReferenceKind) -> &'static str {
         PluginReferenceKind::Input => "LABEL.PLUGIN_REFERENCE_INPUT",
         PluginReferenceKind::TargetOutput => "LABEL.PLUGIN_REFERENCE_TARGET_OUTPUT",
         PluginReferenceKind::TargetStrategy => "LABEL.PLUGIN_REFERENCE_TARGET_STRATEGY",
+        PluginReferenceKind::InputManagedChannels => "LABEL.PLUGIN_REFERENCE_INPUT_MANAGED",
+        PluginReferenceKind::TargetManagedChannels => "LABEL.PLUGIN_REFERENCE_TARGET_MANAGED",
         PluginReferenceKind::TargetFilter => "LABEL.PLUGIN_REFERENCE_TARGET_FILTER",
         PluginReferenceKind::Schedule => "LABEL.PLUGIN_REFERENCE_SCHEDULE",
     }

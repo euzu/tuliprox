@@ -1,3 +1,4 @@
+use super::ManagedChannelsEditor;
 mod common;
 mod library;
 mod m3u;
@@ -398,6 +399,7 @@ generate_form_reducer!(
     action_name: ConfigInputFormAction,
     fields {
         Name => name: String,
+        ManagedChannels => managed_channels: Vec<shared::model::PluginRef>,
         Url => url: String,
         Username => username: Option<String>,
         Password => password: Option<String>,
@@ -1340,6 +1342,15 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         })
     };
 
+    let render_managed = || {
+        if input_form_state.form.input_type == InputType::Staged || input_form_state.form.staged.is_some() {
+            return Html::default();
+        }
+        html! {<ManagedChannelsEditor target={false} allow_write={props.allow_write}
+        bindings={input_form_state.form.managed_channels.iter().cloned().map(|plugin|shared::model::ManagedChannelBinding{plugin,stage:shared::model::ManagedChannelStage::AfterFilter}).collect::<Vec<_>>()}
+        on_change={{let state=input_form_state.clone();Callback::from(move |bindings:Vec<shared::model::ManagedChannelBinding>|state.dispatch(ConfigInputFormAction::ManagedChannels(bindings.into_iter().map(|binding|binding.plugin).collect())))}}/>}
+    };
+
     let render_edit_mode = || {
         html! {
             <div class="tp__source-editor-form__body">
@@ -1347,6 +1358,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={InputFormPage::Main.intern()} active={view_visible.intern()}>
                     {render_main()}
+                    {render_managed()}
+
                 </Panel>
                 { html_if!(stalker_input, {
                     <Panel value={InputFormPage::Device.intern()} active={view_visible.intern()}>

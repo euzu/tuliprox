@@ -761,7 +761,7 @@ const fn capability_description(capability: Capability) -> &'static str {
             "Stream header injection: may add HTTP headers to upstream stream requests when a client session starts."
         }
         Capability::Process => PROCESS_SENTENCE,
-        Capability::PlaylistWrite => "Managed channels: may add, update and remove its own live channels in existing inputs, without changing provider snapshots.",
+        Capability::PlaylistWrite => "Managed channels: may add, update and remove its own live channels in selected inputs or targets, without changing provider snapshots.",
         Capability::HttpRoutes => "HTTP routes: may serve incoming requests and authenticate external clients in its own URL namespace.",
     }
 }

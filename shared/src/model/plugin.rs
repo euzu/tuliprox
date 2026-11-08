@@ -436,7 +436,8 @@ pub trait PluginHost: Clone + Send + Sync + 'static {
     /// The host reconciles each owner's snapshot and retains last-good data on failures.
     fn managed_channels(
         &self,
-        _ctx: &HookCtx<'_>,
+        _plugin: &str,
+        _request: &ManagedChannelRequest<'_>,
         _report: &mut PluginRunReport,
     ) -> impl Future<Output = Result<Vec<PlaylistItem>, PluginAbort>> + Send {
         async { Ok(Vec::new()) }
@@ -678,11 +679,12 @@ impl<P: PluginHost> PluginHost for Option<P> {
 
     async fn managed_channels(
         &self,
-        ctx: &HookCtx<'_>,
+        plugin: &str,
+        request: &ManagedChannelRequest<'_>,
         report: &mut PluginRunReport,
     ) -> Result<Vec<PlaylistItem>, PluginAbort> {
         match self {
-            Some(host) => host.managed_channels(ctx, report).await,
+            Some(host) => host.managed_channels(plugin, request, report).await,
             None => Ok(Vec::new()),
         }
     }
@@ -997,4 +999,17 @@ mod tests {
             ]
         );
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedDestination {
+    Input,
+    Target,
+}
+#[derive(Debug, Clone, Copy)]
+pub struct ManagedChannelRequest<'a> {
+    pub destination: ManagedDestination,
+    pub name: &'a str,
+    pub stage: Option<super::ManagedChannelStage>,
+    pub inputs: &'a [String],
 }

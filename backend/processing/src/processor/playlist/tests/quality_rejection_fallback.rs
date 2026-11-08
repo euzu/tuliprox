@@ -474,6 +474,7 @@ fn xtream_target(use_memory_cache: bool) -> Arc<ConfigTarget> {
         execution_plan: TargetExecutionPlan::default(),
         watch: None,
         use_memory_cache,
+        managed_channels: Vec::new(),
     })
 }
 
