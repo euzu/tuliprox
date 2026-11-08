@@ -188,7 +188,7 @@ impl PluginEntryDto {
 }
 
 /// One `plugins.repositories[]` entry: a marketplace source. `url` is the direct HTTPS/raw URL of the repository's
-/// root `marketplace.json` and may be a `${env:VAR}` reference; it is kept
+/// `marketplace.json` and may be a `${env:VAR}` reference; it is kept
 /// unresolved here. `id` uses the plugin id shape.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -204,7 +204,7 @@ fn default_plugin_repositories() -> Vec<PluginRepositoryDto> {
     vec![PluginRepositoryDto {
         id: "tuliprox-plugins".to_string(),
         name: "Tuliprox plugins".to_string(),
-        url: "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/marketplace.json".to_string(),
+        url: "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json".to_string(),
         enabled: true,
     }]
 }
@@ -604,14 +604,14 @@ mod tests {
         assert_eq!(from_json(json!({})).repositories, defaults.repositories);
         assert_eq!(
             defaults.repositories[0].url,
-            "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/marketplace.json"
+            "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json"
         );
         assert!(defaults.repositories[0].enabled);
         let empty = from_json(json!({"repositories": []}));
-        assert!(empty.repositories.is_empty());
+        assert_eq!(empty.repositories, Vec::new());
         let saved = serde_json::to_value(&empty).unwrap();
         assert_eq!(saved["repositories"], json!([]));
-        assert!(from_json(saved).repositories.is_empty());
+        assert_eq!(from_json(saved).repositories, Vec::new());
     }
 
     #[test]

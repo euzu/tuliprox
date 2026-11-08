@@ -61,6 +61,7 @@ pub(crate) fn app_config_in(storage_dir: &Path) -> Arc<AppConfig> {
 pub(crate) fn target_with_output(name: &str, output: TargetOutput) -> ConfigTarget {
     ConfigTarget {
         curation: None,
+        managed_channels: Vec::new(),
         id: 1,
         enabled: true,
         name: name.to_string(),

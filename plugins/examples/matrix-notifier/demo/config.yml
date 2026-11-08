@@ -31,12 +31,14 @@ plugins:
     - id: matrix-notifier
       enabled: true
       settings:
-        homeserver: http://127.0.0.1:18972
-        room_id: "!demo:localhost"
-        access_token: demo-token       # or ${env:MATRIX_TOKEN}
-        min_severity: info             # the plugin's own floor (second)
-        routing:                       # applied by tuliprox BEFORE the plugin runs
-          max_per_hour: 60
+        ext:
+          messaging:
+            homeserver: http://127.0.0.1:18972
+            room_id: "!demo:localhost"
+            access_token: demo-token       # or ${env:MATRIX_TOKEN}
+            min_severity: info             # the plugin's own floor (second)
+            routing:                       # applied by tuliprox BEFORE the plugin runs
+              max_per_hour: 60
 
 # Only needed for the stream.probe.failed check (needs ffprobe on PATH).
 metadata_update:

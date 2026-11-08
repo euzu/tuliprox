@@ -24,6 +24,7 @@ pub mod runtime_liveness;
 mod step_measure;
 mod sys_utils;
 pub(crate) mod syslog;
+mod telegram;
 mod time_utils;
 
 #[macro_export]
@@ -89,6 +90,7 @@ pub use self::{
     resource_output::*,
     step_measure::*,
     sys_utils::*,
+    telegram::*,
     time_utils::*,
 };
 pub use debug_if_enabled;

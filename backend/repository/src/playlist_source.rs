@@ -1549,6 +1549,96 @@ where
     }
 }
 
+/// A disk-backed provider plus a small, independently owned memory overlay.
+struct AppendedPlaylistSource {
+    base: PlaylistSource,
+    added: PlaylistSource,
+}
+
+impl AppendedPlaylistSource {
+    fn group_count_excluding(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        self.base
+            .items()
+            .chain(self.added.items())
+            .filter(|item| !skip.contains(&item.header.xtream_cluster))
+            .map(|item| (item.header.xtream_cluster, Arc::clone(&item.header.group)))
+            .collect::<HashSet<_>>()
+            .len()
+    }
+}
+
+impl PlaylistSourceOps for AppendedPlaylistSource {
+    fn is_memory(&self) -> bool { false }
+    fn get_channel_count(&mut self) -> usize { self.base.get_channel_count() + self.added.get_channel_count() }
+    fn get_group_count(&mut self) -> usize { self.group_count_excluding(&HashSet::new()) }
+    fn get_channel_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        self.base.items().chain(self.added.items()).filter(|item| !skip.contains(&item.header.xtream_cluster)).count()
+    }
+    fn get_group_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        self.group_count_excluding(skip)
+    }
+    fn is_empty(&mut self) -> bool { self.base.is_empty() && self.added.is_empty() }
+    fn into_items(&mut self) -> SourceItems<'_> {
+        SourceItems::Appended(Box::new(self.base.into_items().chain(self.added.into_items())))
+    }
+    fn items(&mut self) -> SourceCowItems<'_> {
+        SourceCowItems::Appended(Box::new(self.base.items().chain(self.added.items())))
+    }
+    fn items_mut(&mut self) -> SourceItemsMut<'_> {
+        SourceItemsMut::Appended(Box::new(self.base.items_mut().chain(self.added.items_mut())))
+    }
+    async fn update_playlist(&mut self, _group: &PlaylistGroup) {
+        warn!("Cannot update a disk-backed playlist with an appended overlay");
+    }
+    fn get_missing_vod_info_count(&mut self) -> usize {
+        self.base.get_missing_vod_info_count() + self.added.get_missing_vod_info_count()
+    }
+    fn get_missing_series_info_count(&mut self) -> usize {
+        self.base.get_missing_series_info_count() + self.added.get_missing_series_info_count()
+    }
+    fn get_missing_vod_info_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        if skip.contains(&XtreamCluster::Video) {
+            0
+        } else {
+            self.get_missing_vod_info_count()
+        }
+    }
+    fn get_missing_series_info_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
+        if skip.contains(&XtreamCluster::Series) {
+            0
+        } else {
+            self.get_missing_series_info_count()
+        }
+    }
+    fn deduplicate(&mut self, duplicates: &mut HashSet<UUIDType>) {
+        self.base.deduplicate(duplicates);
+        self.added.deduplicate(duplicates);
+    }
+    fn take_groups(&mut self) -> Vec<PlaylistGroup> {
+        let mut memory = MemoryPlaylistSource::new(self.base.take_groups());
+        memory.append_managed_groups(self.added.take_groups());
+        memory.take_groups()
+    }
+    fn clone_source(&self) -> Result<PlaylistSource, TuliproxError> {
+        Ok(PlaylistSource::new(PlaylistSourceKind::Appended(Box::new(Self {
+            base: self.base.clone_source()?,
+            added: self.added.clone_source()?,
+        }))))
+    }
+    fn release_resources(&mut self, cluster: XtreamCluster) {
+        self.base.release_resources(cluster);
+        self.added.release_resources(cluster);
+    }
+    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> {
+        Box::pin(self.base.obtain_resources()).await?;
+        Box::pin(self.added.obtain_resources()).await
+    }
+    fn sort_by_provider_ordinal(&mut self) {
+        self.base.sort_by_provider_ordinal();
+        self.added.sort_by_provider_ordinal();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1876,95 +1966,5 @@ mod tests {
         assert_eq!(disk_source.get_cluster_count(XtreamCluster::Live), 3);
         assert_eq!(disk_source.get_cluster_count(XtreamCluster::Video), 2);
         assert_eq!(disk_source.get_cluster_count(XtreamCluster::Series), 1);
-    }
-}
-
-/// A disk-backed provider plus a small, independently owned memory overlay.
-struct AppendedPlaylistSource {
-    base: PlaylistSource,
-    added: PlaylistSource,
-}
-
-impl AppendedPlaylistSource {
-    fn group_count_excluding(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
-        self.base
-            .items()
-            .chain(self.added.items())
-            .filter(|item| !skip.contains(&item.header.xtream_cluster))
-            .map(|item| (item.header.xtream_cluster, Arc::clone(&item.header.group)))
-            .collect::<HashSet<_>>()
-            .len()
-    }
-}
-
-impl PlaylistSourceOps for AppendedPlaylistSource {
-    fn is_memory(&self) -> bool { false }
-    fn get_channel_count(&mut self) -> usize { self.base.get_channel_count() + self.added.get_channel_count() }
-    fn get_group_count(&mut self) -> usize { self.group_count_excluding(&HashSet::new()) }
-    fn get_channel_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
-        self.base.items().chain(self.added.items()).filter(|item| !skip.contains(&item.header.xtream_cluster)).count()
-    }
-    fn get_group_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
-        self.group_count_excluding(skip)
-    }
-    fn is_empty(&mut self) -> bool { self.base.is_empty() && self.added.is_empty() }
-    fn into_items(&mut self) -> SourceItems<'_> {
-        SourceItems::Appended(Box::new(self.base.into_items().chain(self.added.into_items())))
-    }
-    fn items(&mut self) -> SourceCowItems<'_> {
-        SourceCowItems::Appended(Box::new(self.base.items().chain(self.added.items())))
-    }
-    fn items_mut(&mut self) -> SourceItemsMut<'_> {
-        SourceItemsMut::Appended(Box::new(self.base.items_mut().chain(self.added.items_mut())))
-    }
-    async fn update_playlist(&mut self, _group: &PlaylistGroup) {
-        warn!("Cannot update a disk-backed playlist with an appended overlay");
-    }
-    fn get_missing_vod_info_count(&mut self) -> usize {
-        self.base.get_missing_vod_info_count() + self.added.get_missing_vod_info_count()
-    }
-    fn get_missing_series_info_count(&mut self) -> usize {
-        self.base.get_missing_series_info_count() + self.added.get_missing_series_info_count()
-    }
-    fn get_missing_vod_info_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
-        if skip.contains(&XtreamCluster::Video) {
-            0
-        } else {
-            self.get_missing_vod_info_count()
-        }
-    }
-    fn get_missing_series_info_count_excluding_clusters(&mut self, skip: &HashSet<XtreamCluster>) -> usize {
-        if skip.contains(&XtreamCluster::Series) {
-            0
-        } else {
-            self.get_missing_series_info_count()
-        }
-    }
-    fn deduplicate(&mut self, duplicates: &mut HashSet<UUIDType>) {
-        self.base.deduplicate(duplicates);
-        self.added.deduplicate(duplicates);
-    }
-    fn take_groups(&mut self) -> Vec<PlaylistGroup> {
-        let mut memory = MemoryPlaylistSource::new(self.base.take_groups());
-        memory.append_managed_groups(self.added.take_groups());
-        memory.take_groups()
-    }
-    fn clone_source(&self) -> Result<PlaylistSource, TuliproxError> {
-        Ok(PlaylistSource::new(PlaylistSourceKind::Appended(Box::new(Self {
-            base: self.base.clone_source()?,
-            added: self.added.clone_source()?,
-        }))))
-    }
-    fn release_resources(&mut self, cluster: XtreamCluster) {
-        self.base.release_resources(cluster);
-        self.added.release_resources(cluster);
-    }
-    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> {
-        Box::pin(self.base.obtain_resources()).await?;
-        Box::pin(self.added.obtain_resources()).await
-    }
-    fn sort_by_provider_ordinal(&mut self) {
-        self.base.sort_by_provider_ordinal();
-        self.added.sort_by_provider_ordinal();
     }
 }

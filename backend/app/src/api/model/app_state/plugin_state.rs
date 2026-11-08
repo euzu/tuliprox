@@ -559,7 +559,8 @@ mod tests {
         });
         let mut target = ConfigTarget::from(&shared::model::ConfigTargetDto::default());
         target.name = "TV".into();
-        target.managed_channels = vec![ManagedChannelBinding { plugin: reference, stage: Default::default() }];
+        target.managed_channels =
+            vec![ManagedChannelBinding { plugin: reference, stage: shared::model::ManagedChannelStage::default() }];
         let sources = SourcesConfig {
             inputs: vec![input.clone()],
             sources: vec![ConfigSource { inputs: vec![input.name.clone()], targets: vec![target.into()] }],

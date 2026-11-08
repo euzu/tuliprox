@@ -2,7 +2,8 @@
 //! [`shared::model::PluginNotifier`] that messaging reaches plugins through.
 //!
 //! `notification_channels` lists the plugins runnable for `SendNotification`
-//! with the `routing` object of their settings; `send_notification` opens a
+//! with the `ext.messaging.routing` object of their settings (the messaging
+//! config extension, edited on the Web UI messaging page); `send_notification` opens a
 //! fresh instance, calls `send-notification` under the normal call deadline and
 //! maps the answer onto [`PluginDelivery`]. The outbox owns every retry, so a
 //! trap, a deadline or an exhausted budget is a `Retry`, never an error to the
@@ -54,11 +55,12 @@ const fn wit_severity(severity: PluginSeverity) -> Severity {
     }
 }
 
-/// The `routing` object of a plugin's resolved settings JSON; `None` when the
-/// settings are not an object or carry no (non-null) `routing`.
+/// The `ext.messaging.routing` object of a plugin's resolved settings JSON:
+/// the routing block of its messaging config extension. `None` when the
+/// settings are not an object or carry no (non-null) routing there.
 fn routing_of(settings: &str) -> Option<Value> {
     let mut parsed: Value = serde_json::from_str(settings).ok()?;
-    match parsed.get_mut("routing").map(Value::take) {
+    match parsed.pointer_mut("/ext/messaging/routing").map(Value::take) {
         Some(Value::Null) | None => None,
         Some(routing) => Some(routing),
     }
@@ -157,14 +159,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn routing_is_the_routing_key_of_the_settings() {
-        let routing = routing_of(r#"{"mode":"ok","routing":{"min_severity":"error"}}"#).expect("routing");
+    fn routing_is_the_routing_of_the_messaging_extension() {
+        let routing =
+            routing_of(r#"{"mode":"ok","ext":{"messaging":{"routing":{"min_severity":"error"}}}}"#).expect("routing");
         assert_eq!(routing, serde_json::json!({"min_severity": "error"}));
     }
 
     #[test]
-    fn missing_null_or_unparsable_settings_have_no_routing() {
-        for settings in [r#"{"mode":"ok"}"#, r#"{"routing":null}"#, "[]", "not json", ""] {
+    fn missing_null_top_level_or_unparsable_settings_have_no_routing() {
+        for settings in [
+            r#"{"mode":"ok"}"#,
+            r#"{"routing":{"min_severity":"error"}}"#,
+            r#"{"ext":{"messaging":{"routing":null}}}"#,
+            r#"{"ext":{"messaging":{}}}"#,
+            "[]",
+            "not json",
+            "",
+        ] {
             assert!(routing_of(settings).is_none(), "{settings}");
         }
     }

@@ -3,8 +3,8 @@
 //! Notification volume was low enough that none of this mattered: six
 //! emitters, none of them chatty. Bridging the internal event bus and
 //! adding provider/stream events raises that by an order of magnitude, and
-//! the providers have hard limits - a webhook host allows about one request
-//! per second, a chat service about 20 messages per chat per minute. Shaping traffic before
+//! the providers have hard limits - Discord webhooks allow about 5 requests
+//! per 2s, Telegram 20 messages per chat per minute. Shaping traffic before
 //! the `429` beats discovering it afterwards.
 //!
 //! State lives here rather than on the channel because it must survive

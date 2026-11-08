@@ -1847,40 +1847,6 @@ pub(crate) async fn process_watch<E: EventSink>(
     true
 }
 
-#[cfg(test)]
-mod filter_plugin_tests {
-    use super::*;
-    use shared::model::NoPlugins;
-    use tuliprox_core::model::ConfigTarget;
-
-    fn target_with_filter(filter: &str) -> ConfigTarget {
-        let mut dto: shared::model::ConfigTargetDto =
-            serde_json::from_value(serde_json::json!({"name": "t1"})).expect("target fixture");
-        dto.filter.t_processing =
-            Some(shared::foundation::get_target_processing_filter(filter, None).expect("filter compiles"));
-        ConfigTarget::from(&dto)
-    }
-
-    /// A filter term whose plugin is gone must not empty the target behind a `success`: the target
-    /// fails, keeps its previous output, and the message names the plugin.
-    #[test]
-    fn a_filter_term_without_its_plugin_fails_the_target() {
-        let target = target_with_filter(r#"Group ~ ".*" and plugin.youtube-input.is_live("News")"#);
-
-        let err = ensure_filter_plugins_available(&NoPlugins, &target).expect_err("the target cannot run");
-
-        let message = err.to_string();
-        assert!(message.contains("target 't1' is inactive"), "{message}");
-        assert!(message.contains("youtube-input"), "{message}");
-    }
-
-    #[test]
-    fn a_filter_without_plugin_terms_runs() {
-        let target = target_with_filter(r#"Group ~ "News""#);
-        assert!(ensure_filter_plugins_available(&NoPlugins, &target).is_ok());
-    }
-}
-
 /// Reconcile each binding once for the entire target, then preserve its per-input playback origin.
 pub(crate) async fn reconcile_target_managed<P: PluginHost>(
     plugins: &P,
@@ -1926,4 +1892,38 @@ pub(crate) async fn reconcile_target_managed<P: PluginHost>(
         }
     }
     Ok(managed)
+}
+
+#[cfg(test)]
+mod filter_plugin_tests {
+    use super::*;
+    use shared::model::NoPlugins;
+    use tuliprox_core::model::ConfigTarget;
+
+    fn target_with_filter(filter: &str) -> ConfigTarget {
+        let mut dto: shared::model::ConfigTargetDto =
+            serde_json::from_value(serde_json::json!({"name": "t1"})).expect("target fixture");
+        dto.filter.t_processing =
+            Some(shared::foundation::get_target_processing_filter(filter, None).expect("filter compiles"));
+        ConfigTarget::from(&dto)
+    }
+
+    /// A filter term whose plugin is gone must not empty the target behind a `success`: the target
+    /// fails, keeps its previous output, and the message names the plugin.
+    #[test]
+    fn a_filter_term_without_its_plugin_fails_the_target() {
+        let target = target_with_filter(r#"Group ~ ".*" and plugin.youtube-input.is_live("News")"#);
+
+        let err = ensure_filter_plugins_available(&NoPlugins, &target).expect_err("the target cannot run");
+
+        let message = err.to_string();
+        assert!(message.contains("target 't1' is inactive"), "{message}");
+        assert!(message.contains("youtube-input"), "{message}");
+    }
+
+    #[test]
+    fn a_filter_without_plugin_terms_runs() {
+        let target = target_with_filter(r#"Group ~ "News""#);
+        assert!(ensure_filter_plugins_available(&NoPlugins, &target).is_ok());
+    }
 }

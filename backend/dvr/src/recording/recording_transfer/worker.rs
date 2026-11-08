@@ -133,11 +133,13 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
         // The listener authenticates through its recording URL and bypasses proxies.
         // Provider headers stay on the upstream client; proxied listener requests
         // receive them through the recording input configuration.
+        // Notifications retain the proxy without the recording headers.
         let clients = (
             create_client(cfg).no_proxy().redirect(reqwest::redirect::Policy::none()).build(),
             create_client(cfg).redirect(reqwest::redirect::Policy::none()).default_headers(upstream_headers).build(),
+            create_client(cfg).build(),
         );
-        if let (Ok(transfer_client), Ok(upstream_transfer_client)) = clients {
+        if let (Ok(transfer_client), Ok(upstream_transfer_client), Ok(client)) = clients {
             if let Some(active) = dq.active.read().await.iter().find(|task| task.uuid == worker_uuid) {
                 info!("Starting download worker for active download {} ({})", active.uuid, active.filename);
             }
@@ -228,7 +230,12 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                             ProviderAcquireResult::Acquired(handle) => {
                                 match commit_acquired_download(&dq, &worker_uuid).await {
                                     Ok(Some(notification)) => {
-                                        spawn_recording_notification_after_persist(&app_config, notification, true);
+                                        spawn_recording_notification_after_persist(
+                                            &app_config,
+                                            &client,
+                                            notification,
+                                            true,
+                                        );
                                         publish_recording_change(&event_manager);
                                     }
                                     Ok(None) => {
@@ -471,7 +478,12 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                     .await;
                                 match committed {
                                     Ok(Some(notification)) => {
-                                        spawn_recording_notification_after_persist(&app_config, notification, true);
+                                        spawn_recording_notification_after_persist(
+                                            &app_config,
+                                            &client,
+                                            notification,
+                                            true,
+                                        );
                                         publish_recording_change(&event_manager);
                                     }
                                     Ok(None) => {}
@@ -553,7 +565,12 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                         delay_secs
                                     }
                                     Ok(Some(RetryCommit::Failed(notification))) => {
-                                        spawn_recording_notification_after_persist(&app_config, notification, true);
+                                        spawn_recording_notification_after_persist(
+                                            &app_config,
+                                            &client,
+                                            notification,
+                                            true,
+                                        );
                                         publish_recording_change(&event_manager);
                                         if dq.active.read().await.iter().any(|task| task.uuid == worker_uuid) {
                                             continue;
@@ -661,7 +678,12 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                 .await;
                                 match committed {
                                     Ok(Some(notification)) => {
-                                        spawn_recording_notification_after_persist(&app_config, notification, true);
+                                        spawn_recording_notification_after_persist(
+                                            &app_config,
+                                            &client,
+                                            notification,
+                                            true,
+                                        );
                                         publish_recording_change(&event_manager);
                                     }
                                     Ok(None) => {}

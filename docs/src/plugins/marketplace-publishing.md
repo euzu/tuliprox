@@ -126,7 +126,7 @@ The JSON Schema of format 1 is `plugins/plugin-api/marketplace.schema.json` (JSO
 tool, for example:
 
 ```sh
-npx ajv-cli validate --spec=draft2020 -s plugins/plugin-api/marketplace.schema.json -d marketplace.json
+npx ajv-cli validate --spec=draft2020 -s plugins/plugin-api/marketplace.schema.json -d plugins/marketplace.json
 ```
 
 The schema checks the shape; a duplicate id or version across entries is only caught by Tuliprox when it syncs.

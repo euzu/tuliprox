@@ -118,7 +118,7 @@ comes about 3 s after the first (not the 5 s default backoff: a provider delay w
 ### (b5) Bad token or room is permanent
 
 `curl -s -X POST $HS/_reset; curl -s -X POST $HS/_mode -d '{"rate_limit":0,"fail":null}'`, restart
-the mock with `--token other` (or change `access_token` in the settings), `refresh`.
+the mock with `--token other` (or change `ext.messaging.access_token` in the settings), `refresh`.
 
 Expected: the mock answers 401, `plog` shows `refused`...`: homeserver answered 401: M_UNKNOWN_TOKEN: ...`,
 `server.log` shows `notification_permanently_rejected` for `plugin.matrix-notifier` ONCE, and the
@@ -173,16 +173,16 @@ There is no read route for a plugin's KV; the observable is the log line count p
 
 ## (d) Which severity floor applies first
 
-The host-side `settings.routing` runs before the plugin: `routing.min_severity` is compared with
+The host-side `settings.ext.messaging.routing` runs before the plugin: `routing.min_severity` is compared with
 the event's registry severity in the outbox, and a channel that does not want the event is never
 called (no plugin log line at all). The plugin's own `min_severity` setting runs inside
 `send-notification`, and below it the message is acknowledged without being sent (the outbox counts
 it as delivered).
 
-1. `routing.min_severity: error` (settings PUT, or edit `config.yml` and restart; the form is
+1. `ext.messaging.routing.min_severity: error` (settings PUT, or edit `config.yml` and restart; the form is
    `GET $TP/api/v1/plugins/matrix-notifier/settings`, body `{"settings": {...}}`, the token as
    `"********"` keeps the stored one). `refresh`.
    Expected: no `matrix-notifier` line in `plog`, `stats` `attempts` unchanged. The host skipped it.
-2. Remove `routing.min_severity`, set the plugin `min_severity: warn`. `refresh`.
+2. Remove `ext.messaging.routing.min_severity`, set the plugin `ext.messaging.min_severity: warn`. `refresh`.
    Expected: `plog` has `skipped`...`: INFO is below min_severity Warn`, `stats` `attempts`
    unchanged (nothing sent), the outbox entry is gone. The plugin skipped it.

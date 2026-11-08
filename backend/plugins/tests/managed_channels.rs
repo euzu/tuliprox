@@ -7,7 +7,7 @@ use shared::model::{
     ManagedChannelRequest, ManagedChannelStage, ManagedDestination, PlaylistEntry, PluginHost, PluginRunReport,
     PluginStateDto,
 };
-use std::{fs, path::PathBuf};
+use std::{fmt::Write, fs, path::PathBuf};
 use tempfile::TempDir;
 use tuliprox_core::model::PluginsConfig;
 use tuliprox_plugins::{PluginServices, PluginSystem};
@@ -27,7 +27,10 @@ fn stage(owners: &[&str]) -> Option<Staged> {
     let root = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
     let wasm = fs::read(wasm).unwrap();
-    let hash = sha2::Sha256::digest(&wasm).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let hash = sha2::Sha256::digest(&wasm).iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    });
     let mut approvals = serde_json::Map::new();
     for owner in owners {
         let dir = root.path().join(owner);
@@ -72,7 +75,7 @@ async fn target_channels(
     stage: ManagedChannelStage,
     inputs: &[&str],
 ) -> Vec<shared::model::PlaylistItem> {
-    let inputs = inputs.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+    let inputs = inputs.iter().map(ToString::to_string).collect::<Vec<_>>();
     let request =
         ManagedChannelRequest { destination: ManagedDestination::Target, name, stage: Some(stage), inputs: &inputs };
     system.managed_channels("managed-probe", &request, &mut PluginRunReport::default()).await.unwrap()

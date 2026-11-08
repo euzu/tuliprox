@@ -275,6 +275,7 @@ mod tests {
     fn target_with_m3u_and_xtream() -> ConfigTarget {
         ConfigTarget {
             curation: None,
+            managed_channels: Vec::new(),
             id: 1,
             enabled: true,
             name: "ics-target".to_string(),

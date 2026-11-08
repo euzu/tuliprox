@@ -204,7 +204,7 @@ library:
 #  repositories:
 #    - id: tuliprox-plugins
 #      name: Tuliprox plugins
-#      url: https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/marketplace.json
+#      url: https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json
 #  # Global clamps. A plugin's manifest `resources:` request is clamped to these.
 #  max_total_memory: 512MB   # all live plugin instances together; instantiation waits for room
 #  max_memory: 128MB         # ceiling for one instance (manifest max_memory_mb)

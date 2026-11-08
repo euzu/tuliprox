@@ -1,9 +1,9 @@
-//! Real wasm route handler + authentication, built by build_plugin_fixture.sh.
+//! Real wasm route handler + authentication, built by `build_plugin_fixture.sh`.
 mod common;
 use http::StatusCode;
 use serde_json::{json, Value};
 use sha2::Digest;
-use std::{fs, path::PathBuf};
+use std::{fmt::Write, fs, path::PathBuf};
 use tempfile::TempDir;
 use tuliprox_core::model::PluginsConfig;
 use tuliprox_plugins::{HostAuthorization, HttpRouteRequest, PluginServices, PluginSystem};
@@ -31,7 +31,10 @@ fn stage() -> Option<Staged> {
         include_str!("../../../plugins/plugin-api/fixtures/http-probe/manifest.yml"),
     )
     .unwrap();
-    let hash = sha2::Sha256::digest(&wasm).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let hash = sha2::Sha256::digest(&wasm).iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    });
     fs::write(
         data.path().join("approvals.json"),
         json!({"http-probe":{"wasm_sha256":hash,"capabilities":["storage","http_routes"]}}).to_string(),

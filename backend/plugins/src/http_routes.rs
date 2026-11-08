@@ -357,7 +357,7 @@ mod tests {
             ],
         };
         let vetted = vet_response(response.clone()).unwrap();
-        assert!(vetted.body.is_empty());
+        assert_eq!(vetted.body, Vec::<u8>::new());
         assert_eq!(vetted.headers, [("content-type".into(), "application/json".into())]);
         response.status = 101;
         assert!(vet_response(response.clone()).is_err());

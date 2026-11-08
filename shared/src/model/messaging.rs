@@ -284,13 +284,16 @@ mod tests {
     #[test]
     fn template_filename_uses_snake_case_wire_name() {
         // Regression test: `DiskAlert` previously resolved to
-        // `command_diskalert.templ` instead of `command_disk_alert.templ`,
+        // `telegram_diskalert.templ` instead of `telegram_disk_alert.templ`,
         // breaking on-disk template auto-discovery for the new variant.
-        assert_eq!(MsgKind::Info.template_filename("command"), "command_info.templ");
-        assert_eq!(MsgKind::Stats.template_filename("command"), "command_stats.templ");
-        assert_eq!(MsgKind::Error.template_filename("command"), "command_error.templ");
-        assert_eq!(MsgKind::Watch.template_filename("command"), "command_watch.templ");
-        assert_eq!(MsgKind::DiskAlert.template_filename("command"), "command_disk_alert.templ");
+        assert_eq!(MsgKind::Info.template_filename("telegram"), "telegram_info.templ");
+        assert_eq!(MsgKind::Stats.template_filename("telegram"), "telegram_stats.templ");
+        assert_eq!(MsgKind::Error.template_filename("telegram"), "telegram_error.templ");
+        assert_eq!(MsgKind::Watch.template_filename("telegram"), "telegram_watch.templ");
+        assert_eq!(MsgKind::DiskAlert.template_filename("telegram"), "telegram_disk_alert.templ");
+        assert_eq!(MsgKind::DiskAlert.template_filename("discord"), "discord_disk_alert.templ");
+        assert_eq!(MsgKind::DiskAlert.template_filename("rest"), "rest_disk_alert.templ");
+        assert_eq!(MsgKind::DiskAlert.template_filename("pushover"), "pushover_disk_alert.templ");
     }
 
     #[test]

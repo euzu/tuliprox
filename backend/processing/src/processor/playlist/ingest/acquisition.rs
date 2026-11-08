@@ -764,6 +764,7 @@ mod tests {
     #[derive(Clone)]
     struct ManagedOverlay;
     impl PluginHost for ManagedOverlay {
+        #[allow(clippy::unused_async_trait_impl, reason = "a scripted host answers without awaiting")]
         async fn managed_channels(
             &self,
             _plugin: &str,
@@ -818,7 +819,7 @@ mod tests {
             assert_eq!(result.get_channel_count(), 2);
             assert_eq!(result.get_group_count(), 2);
             let originals: Vec<_> =
-                result.items().filter(|item| &*item.header.id == "1").map(|item| item.into_owned()).collect();
+                result.items().filter(|item| &*item.header.id == "1").map(std::borrow::Cow::into_owned).collect();
             assert_eq!(originals.len(), 1);
             assert_eq!(&*originals[0].header.name, "Provider channel");
             assert_eq!(&*originals[0].header.url, "https://stream.test/provider.ts");

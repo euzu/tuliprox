@@ -604,11 +604,16 @@ mod tests {
             persist_repositories(&app_config, RepositoryChange::Add(dto.clone())).await.unwrap();
             let written =
                 super::super::super::plugins_repositories_store::written_repositories(&app_config).await.unwrap();
-            assert_eq!(written, vec![dto.clone()]);
+            // Without a `plugins:` block the default sources (the official
+            // catalog) stay, and the new source is appended after them.
+            let mut expected = shared::model::PluginsConfigDto::default().repositories;
+            let appended = expected.len();
+            expected.push(dto.clone());
+            assert_eq!(written, expected);
             let file = std::fs::read_to_string(dir.path().join("config.yml")).unwrap();
             assert!(file.contains("${env:TP_TEST_MARKETPLACE_URL}"));
             let runtime = app_config.plugins.load_full().unwrap();
-            assert_eq!(PluginRepositoryDto::from(&runtime.repositories[0]), dto);
+            assert_eq!(PluginRepositoryDto::from(&runtime.repositories[appended]), dto);
             let duplicate = persist_repositories(&app_config, RepositoryChange::Add(dto)).await;
             assert!(matches!(duplicate, Err(RepositoryStoreError::Duplicate(_))));
         }

@@ -41,6 +41,7 @@ fn target_with_outputs(output: Vec<TargetOutput>) -> ConfigTarget {
 fn target_with_options(name: &str, output: Vec<TargetOutput>, use_memory_cache: bool) -> ConfigTarget {
     ConfigTarget {
         curation: None,
+        managed_channels: Vec::new(),
         id: 1,
         enabled: true,
         name: name.to_string(),

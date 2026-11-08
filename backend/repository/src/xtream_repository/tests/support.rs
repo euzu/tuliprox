@@ -17,6 +17,7 @@ use uuid::Uuid;
 pub(in crate::xtream_repository::tests) fn target_writer_config() -> ConfigTarget {
     ConfigTarget {
         curation: None,
+        managed_channels: Vec::new(),
         id: 1,
         enabled: true,
         name: "target-empty-cluster-guard".to_string(),

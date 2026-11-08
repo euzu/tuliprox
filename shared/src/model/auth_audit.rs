@@ -60,7 +60,7 @@ impl AuthAuditOutcome {
 /// # What is deliberately absent
 ///
 /// The password, the token, and any part of either. This record reaches
-/// notification channels - a chat service, a webhook, a shell command - several of
+/// notification channels - Telegram, a webhook, a shell command - several of
 /// which are third-party services with their own logging. A username, an
 /// address and an outcome are what an audit trail needs; a credential is
 /// not, so it is not in the type at all rather than being redacted at each

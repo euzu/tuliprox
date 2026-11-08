@@ -797,7 +797,7 @@ async fn managed_target_binding_runs_once_and_retains_each_source_input() {
     target.name = "Sports target".into();
     target.managed_channels = vec![shared::model::ManagedChannelBinding {
         plugin: PluginRef::new("bridge").unwrap(),
-        stage: Default::default(),
+        stage: shared::model::ManagedChannelStage::default(),
     }];
     let mut prepared =
         reconcile_target_managed(&host, &target, &[&a, &b], None, &mut PluginRunReport::default()).await.unwrap();
@@ -820,7 +820,7 @@ async fn managed_target_binding_runs_once_and_retains_each_source_input() {
             &target,
             &vec![TransformStage::Filter],
             &mut fpl,
-            &mut Default::default(),
+            &mut std::collections::HashSet::default(),
             false,
             None,
             &host,
@@ -878,7 +878,7 @@ async fn managed_insertion_respects_filter_position_and_later_rename_stages() {
             &target,
             &vec![TransformStage::Filter, TransformStage::Rename, TransformStage::Map],
             &mut fpl,
-            &mut Default::default(),
+            &mut std::collections::HashSet::default(),
             false,
             None,
             &NoPlugins,

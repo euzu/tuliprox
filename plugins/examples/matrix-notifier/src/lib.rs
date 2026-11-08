@@ -7,7 +7,8 @@
 //! * `events.on-event` counts and logs the bus events it subscribed to
 //!   ([`tally`]) and never sends.
 //!
-//! The settings form is generated from `config-schema.json`; there is no UI code.
+//! The channel config is a `ui.config_extensions` fragment of the Web UI messaging page, stored under
+//! `settings.ext.messaging`; there is no UI code and no standalone settings form.
 
 mod matrix;
 mod tally;
@@ -19,10 +20,11 @@ mod plugin {
     use super::*;
     use crate::matrix::{default_homeserver, deliver, MinSeverity, Target};
 
-    /// The plugin settings (`config-schema.json`). `routing` is read by the
+    /// The channel config: the `ext.messaging` object of the plugin settings
+    /// (`ui.config_extensions` in `manifest.yml`). `routing` is read by the
     /// host, not by the plugin, so it is not a field here.
-    #[tuliprox_plugin_settings]
-    pub struct Settings {
+    #[derive(serde::Deserialize)]
+    pub struct Channel {
         #[serde(default = "default_homeserver")]
         pub homeserver: String,
         #[serde(default)]
@@ -33,7 +35,32 @@ mod plugin {
         pub min_severity: MinSeverity,
     }
 
-    impl Settings {
+    #[derive(serde::Deserialize, Default)]
+    pub struct Ext {
+        #[serde(default)]
+        pub messaging: Channel,
+    }
+
+    /// The plugin settings. Everything lives under `ext.messaging`; the plugin
+    /// has no standalone settings form.
+    #[tuliprox_plugin_settings]
+    pub struct Settings {
+        #[serde(default)]
+        pub ext: Ext,
+    }
+
+    impl Default for Channel {
+        fn default() -> Self {
+            Self {
+                homeserver: default_homeserver(),
+                room_id: String::new(),
+                access_token: Secret::default(),
+                min_severity: MinSeverity::default(),
+            }
+        }
+    }
+
+    impl Channel {
         pub fn target(&self) -> Target<'_> {
             Target {
                 homeserver: &self.homeserver,
@@ -50,6 +77,7 @@ mod plugin {
         fn send_notification(msg: Notification) -> Result<(), DeliveryError> {
             // Settings that no longer parse will not parse on a retry either.
             let settings = Settings::current().map_err(DeliveryError::Permanent)?;
+            let settings = &settings.ext.messaging;
             deliver(&settings.target(), &msg)
         }
     }
@@ -71,10 +99,11 @@ mod tests {
         mock::reset();
         mock::set_now(500);
         mock::set_config(
-            r#"{"room_id":"!demo:localhost","access_token":"tok-123","min_severity":"warn","routing":{"min_severity":"error"}}"#,
+            r#"{"ext":{"messaging":{"room_id":"!demo:localhost","access_token":"tok-123","min_severity":"warn","routing":{"min_severity":"error"}}}}"#,
         );
         assert!(plugin::Settings::reload().is_ok());
         let settings = plugin::Settings::current().unwrap();
+        let settings = &settings.ext.messaging;
         assert_eq!(settings.homeserver, "http://127.0.0.1:18972", "the homeserver defaults to the demo mock");
         assert!(!format!("{:?}", settings.access_token).contains("tok-123"), "a Secret never prints its value");
 

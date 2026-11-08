@@ -11,10 +11,10 @@ created and the pipeline behaves as it does without the plugin system. If the fi
 mount), the server logs a warning and starts with plugins off. The management API (`/api/v1/plugins`) is part of the web API, so it needs
 `web_ui.enabled: true`. To build and run a first plugin, start with the [Quickstart](./quickstart.md).
 
-Notification delivery uses plugins. Install and approve a notifier from the Marketplace, configure it in the Plugin Manager,
-and enable it. The `messaging` configuration controls global event subscriptions and disk alerts; transport credentials
-and per-channel routing belong to each notifier's settings. Built-in channel keys such as `messaging.telegram` and
-`messaging.discord` are no longer accepted.
+> **Built-in channels come first.** Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and local commands are
+> built into the server and configured under `messaging` (see the configuration reference). A plugin can add one more
+> channel. The notifier plugins under `plugins/examples/` are source examples only. They are not in the marketplace and not in
+> the Docker image. See [Notification provider](./events-notifications-inputs.md#notification-provider).
 
 ## What a plugin is
 
@@ -29,8 +29,10 @@ A plugin is shipped as a `.tlpx` package, which is a zip archive with these part
 | `rpc/*.json` | optional | Input schemas of `rpc_exports` |
 
 The package layout and limits are in [Packaging](./packaging.md). A plugin is built from the SDK crate
-`tuliprox-plugin-sdk` (`plugins/plugin-sdk/`) in Rust, from `plugins/examples/template`. The repository has three more
-examples: `sports-enricher`, `hf-epg-matcher` and `matrix-notifier`.
+`tuliprox-plugin-sdk` (`plugins/plugin-sdk/`) in Rust, from `plugins/examples/template`. The repository has more
+examples: `sports-enricher`, `hf-epg-matcher`, `matrix-notifier` and one notifier example for each built-in channel
+(`telegram-notifier`, `discord-notifier`, `slack-notifier`, `gotify-notifier`, `ntfy-notifier`, `pushover-notifier`,
+`rest-notifier`, `command-notifier`).
 
 `tuliprox-plugin-api`, `tuliprox-plugin-sdk` and `tuliprox-plugin-sdk-macros` have their own version (1.x), the
 version of the plugin contract. A tuliprox release does not change it, so a plugin's `Cargo.lock` stays valid across

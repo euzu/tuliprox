@@ -14,7 +14,8 @@ The following apply to pipeline hooks:
 - **Chaining.** When several plugins export the same hook, they run in `priority` order (default 100, lower first),
   then by id. Each plugin sees what the one before it left. Its results apply only when its whole run succeeded.
 
-Incoming `http.handle` requests are dispatched to one named plugin and fail closed; they do not chain or trip the pipeline breaker. See [Incoming HTTP routes](./http-routes.md).
+Incoming `http.handle` requests are dispatched to one named plugin and fail closed; they do not chain or trip the pipeline
+breaker. See [Incoming HTTP routes](./http-routes.md).
 
 ## Hook table
 

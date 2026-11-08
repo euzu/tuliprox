@@ -217,7 +217,10 @@ mod tests {
             include_str!("../../../../../plugins/plugin-api/fixtures/http-probe/manifest.yml"),
         )
         .unwrap();
-        let hash = sha2::Sha256::digest(&wasm).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let hash = sha2::Sha256::digest(&wasm).iter().fold(String::new(), |mut hex, byte| {
+            let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
+            hex
+        });
         let data = root.path().join("data");
         fs::create_dir(&data).unwrap();
         fs::write(
@@ -232,7 +235,7 @@ mod tests {
                 id: "http-probe".into(),
                 enabled: true,
                 priority: 0,
-                settings: Default::default(),
+                settings: serde_json::Map::default(),
                 settings_version: 1,
                 update_policy: shared::model::PluginUpdatePolicy::Auto,
             }],

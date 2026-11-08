@@ -9,11 +9,13 @@ model, see [Security Model](./security.md).
 
 ## Sources
 
-A source is the direct HTTPS URL of a repository's root `marketplace.json`. For a GitHub repository, that is the raw file URL,
+A source is the direct HTTPS URL of a repository's `marketplace.json`. For a GitHub repository, that is the raw file URL,
 for example `https://raw.githubusercontent.com/<owner>/<repo>/main/marketplace.json`. The URL must point at the file itself,
 not at the repository page.
 
-The official Tuliprox catalog (`https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/marketplace.json`) is included by default when `repositories` is omitted. Set `repositories: []` to use no sources.
+The official Tuliprox catalog
+(`https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json`) is included by default
+when `repositories` is omitted. Set `repositories: []` to use no sources.
 
 You can add sources in two places. Both edit the same list in `config.yml`:
 
@@ -71,10 +73,11 @@ entries still appear.
 The Marketplace lists plugins from all enabled sources. You can filter them by:
 
 - Search text. Every word has to start a word in the plugin's id, name, description, author or category, in any order, so
-  `slack notifier` and `notifier slack` find the same plugin, `live tv` finds the category `live-tv`, and `live` does not
-  find a plugin that merely says "delivers". A prefix is enough (`deliv`); the middle of a word does not match.
-- Category. The chips under the search list `All` and every category of the current search with its count, for example
-  `Notifiers (6)`. Choosing a category does not remove the other chips, and the counts follow the search and the source.
+  `youtube input` and `input youtube` find the same plugin, `live tv` finds the category `live-tv`, and `tube` does not
+  find a plugin that merely says "YouTube". A prefix is enough (`play` finds "playlists"); the middle of a word does not
+  match.
+- Category. The chips under the search list `All` and every category of the current search with its count. Choosing a
+  category does not remove the other chips, and the counts follow the search and the source.
 - Source.
 
 Each release has a compatibility state:
