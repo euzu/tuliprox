@@ -67,11 +67,18 @@ pub(super) fn build(raw: RawManifest, dir_name: &str) -> Result<Manifest, Vec<St
         events,
         event_names,
         tasks,
+        routes: raw.routes,
         provides,
         scope,
         ui,
         resources,
     };
+    if let Err(error) = crate::http_routes::validate_routes(&manifest.routes) {
+        errors.push(error);
+    }
+    if manifest.has_hook(HookId::HttpHandle) && manifest.routes.is_empty() {
+        errors.push("hook `http.handle` requires a non-empty `routes:` list");
+    }
     check_hook_requirements(&manifest, &mut errors);
     check_declarations_have_hooks(&manifest, &mut errors);
     check_title_keys(&manifest, &mut errors);
@@ -647,6 +654,7 @@ fn check_declarations_have_hooks(manifest: &Manifest, errors: &mut Errors) {
     };
     orphan(!manifest.event_names.is_empty(), "`events:`", HookId::EventsOnEvent);
     orphan(!manifest.tasks.is_empty(), "`tasks:`", HookId::TasksRun);
+    orphan(!manifest.routes.is_empty(), "`routes:`", HookId::HttpHandle);
     orphan(!manifest.ui.rpc_exports.is_empty(), "`ui.rpc_exports`", HookId::RpcCall);
     orphan(manifest.provides.input_type, "`provides.input_type`", HookId::InputFetch);
     orphan(manifest.provides.output_format.is_some(), "`provides.output_format`", HookId::OutputRender);

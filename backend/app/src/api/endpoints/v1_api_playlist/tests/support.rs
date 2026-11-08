@@ -24,6 +24,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn playlist_update_target(
     name: &str,
 ) -> Arc<ConfigTarget> {
     Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id,
         enabled: true,

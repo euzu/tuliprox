@@ -188,7 +188,7 @@ impl PluginEntryDto {
 }
 
 /// One `plugins.repositories[]` entry: a marketplace source. `url` is the direct HTTPS/raw URL of the repository's
-/// root `marketplace.json` and may be a `${env:VAR}` reference; it is kept
+/// `marketplace.json` and may be a `${env:VAR}` reference; it is kept
 /// unresolved here. `id` uses the plugin id shape.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -198,6 +198,15 @@ pub struct PluginRepositoryDto {
     pub url: String,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+}
+
+fn default_plugin_repositories() -> Vec<PluginRepositoryDto> {
+    vec![PluginRepositoryDto {
+        id: "tuliprox-plugins".to_string(),
+        name: "Tuliprox plugins".to_string(),
+        url: "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json".to_string(),
+        enabled: true,
+    }]
 }
 
 /// The `plugins:` block of `config.yml`.
@@ -262,8 +271,9 @@ pub struct PluginsConfigDto {
     #[serde(default = "default_boot_update_budget", skip_serializing_if = "is_default_boot_update_budget")]
     pub boot_update_budget: String,
 
-    /// Marketplace sources. Removing one leaves its installed plugins.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Marketplace sources. Defaults to the official catalog; an explicit empty list disables sources.
+    /// Removing one leaves its installed plugins.
+    #[serde(default = "default_plugin_repositories")]
     pub repositories: Vec<PluginRepositoryDto>,
 
     /// Per-plugin switches, order and settings.
@@ -286,7 +296,7 @@ impl Default for PluginsConfigDto {
             batch_size: default_batch_size(),
             auto_update_on_boot: false,
             boot_update_budget: default_boot_update_budget(),
-            repositories: Vec::new(),
+            repositories: default_plugin_repositories(),
             plugins: Vec::new(),
         }
     }
@@ -443,8 +453,11 @@ mod tests {
     }
 
     #[test]
-    fn default_block_serializes_empty_and_prepares_cleanly() {
-        assert_eq!(serde_json::to_string(&PluginsConfigDto::default()).unwrap(), "{}");
+    fn default_block_serializes_official_repository_and_prepares_cleanly() {
+        assert_eq!(
+            serde_json::to_value(PluginsConfigDto::default()).unwrap(),
+            json!({"repositories": default_plugin_repositories()})
+        );
         let mut dto = PluginsConfigDto::default();
         dto.prepare(()).unwrap();
         assert_eq!(dto, PluginsConfigDto::default());
@@ -577,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn repositories_default_to_none_and_enabled() {
+    fn repositories_default_to_official_and_enabled() {
         let dto = from_json(
             json!({"repositories": [{"id": "community", "name": "Community", "url": "https://x.test/marketplace.json"}]}),
         );
@@ -586,7 +599,19 @@ mod tests {
             serde_json::to_value(&dto.repositories[0]).unwrap(),
             json!({"id": "community", "name": "Community", "url": "https://x.test/marketplace.json"})
         );
-        assert_eq!(PluginsConfigDto::default().repositories.len(), 0);
+        let defaults = PluginsConfigDto::default();
+        assert_eq!(defaults.repositories.len(), 1);
+        assert_eq!(from_json(json!({})).repositories, defaults.repositories);
+        assert_eq!(
+            defaults.repositories[0].url,
+            "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json"
+        );
+        assert!(defaults.repositories[0].enabled);
+        let empty = from_json(json!({"repositories": []}));
+        assert_eq!(empty.repositories, Vec::new());
+        let saved = serde_json::to_value(&empty).unwrap();
+        assert_eq!(saved["repositories"], json!([]));
+        assert_eq!(from_json(saved).repositories, Vec::new());
     }
 
     #[test]

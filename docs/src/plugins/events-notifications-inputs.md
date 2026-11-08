@@ -65,7 +65,23 @@ Every other kind arrives as `Other { kind, payload }` with the raw JSON.
 A plugin can deliver notifications. It needs capability `notifications` and the hook `notifications.send`.
 
 Messaging treats the plugin as a channel with the id `plugin.<id>`. The channel uses the same routing, quiet hours,
-suppression and outbox as a built-in channel. Source: `backend/messaging/src/channels/plugin.rs`.
+suppression and outbox as a built-in channel. It runs next to the built-in channels (Telegram, Discord and so on), which
+are the primary way to send notifications. Source: `backend/messaging/src/channels/plugin.rs`.
+
+To configure the channel on the Web UI messaging page, declare a config extension in the manifest. The plugin fields then
+render in the messaging form and are stored in `plugins.plugins[].settings.ext.messaging`:
+
+```yaml
+ui:
+  config_extensions:
+    - section: messaging
+      schema:
+        type: object
+        properties:
+          routing: {type: object}
+```
+
+`plugins/examples/matrix-notifier` and the other notifier examples under `plugins/examples/` show the full pattern.
 
 - **Subscription.** The channel receives what the top-level `messaging.notify_on` list names. The list takes
   **notification ids**, not event names: a playlist refresh is `playlist.update.completed` or
@@ -81,16 +97,16 @@ suppression and outbox as a built-in channel. Source: `backend/messaging/src/cha
       - scheduled_task.failed
   ```
 
-- **Routing.** Routing values come from a `routing` object in the plugin's own settings, and tuliprox applies them
-  before the plugin runs. The block is read like a built-in channel's: `notify_on`, `min_severity`, `quiet_hours`,
-  `max_per_hour` and `dedup_window_secs` (`plugins/examples/matrix-notifier/README.md`). An invalid block is ignored
-  with a warning, and the defaults apply.
+- **Routing.** Routing values come from `ext.messaging.routing` in the plugin's settings (the `messaging` config
+  extension), and tuliprox applies them before the plugin runs. A top-level `routing` key is not read. The block is
+  read like a built-in channel's: `notify_on`, `min_severity`, `quiet_hours`, `max_per_hour` and `dedup_window_secs`
+  (`plugins/examples/matrix-notifier/README.md`). An invalid block is ignored with a warning, and the defaults apply.
 - **Severity.** `info`, `warn` and `error` map to the plugin's levels. `critical` is delivered as `error`.
 - **Content.** `title` is a one-line summary and `body` the complete plain-text fallback. `payload` is the event as
   JSON: `id`, `severity`, `timestamp` (Unix seconds), `instance` (when configured), `fields` (the typed payload of the
   event) and `sections`. `sections` is the event's detail in a neutral form, a list of
   `{ "heading": "Sources", "lines": ["..."] }` blocks of plain text without markup, for example the sources and targets
-  of a playlist update or the groups of a watch change. A plugin lays them out as it likes (Discord Notifier turns them
+  of a playlist update or the groups of a watch change. A plugin lays them out as it likes (the Discord example turns them
   into embed fields); `body` carries the same facts as one text. An event with no detail beyond its body has no
   `sections` key.
 - **Delivery results.** The guest returns one of three `DeliveryError` values, and the host maps them as follows

@@ -508,9 +508,20 @@ pub(crate) async fn prepare_playlist_for_target<
     let target_overrides =
         Arc::new(TargetOverrideSet::load_for_target(input_overrides, &ctx.config, target, &target_input_names).await);
     let pipe = get_processing_pipe(target);
+    let origins = playlists.iter().map(|fpl| fpl.input).collect::<Vec<_>>();
+    let mut managed = reconcile_target_managed(
+        &ctx.plugins,
+        target,
+        &origins,
+        bouquet_filter.as_ref(),
+        &mut aggregate_outcome.plugins,
+    )
+    .await
+    .map_err(|abort| vec![TuliproxError::Plugin(abort.to_string())])?;
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
-        let input_is_empty = provider_fpl.source.is_empty();
+        let insertion = managed.remove(&provider_fpl.input.name).unwrap_or_default();
+        let input_is_empty = provider_fpl.source.is_empty() && insertion.is_empty();
         all_inputs_empty &= input_is_empty;
         only_library_inputs &= provider_fpl.input.input_type == InputType::Library;
         non_library_inputs_populated &= provider_fpl.input.input_type == InputType::Library || !input_is_empty;
@@ -523,7 +534,7 @@ pub(crate) async fn prepare_playlist_for_target<
             format!("target '{}' input '{}' before_pipe", target.name, provider_fpl.input.name).as_str(),
         );
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
-        let (mut processed_fpl, input_outcome) = execute_pipe(
+        let (mut processed_fpl, input_outcome) = execute_pipe_with_insertions(
             target,
             &pipe,
             provider_fpl,
@@ -532,6 +543,7 @@ pub(crate) async fn prepare_playlist_for_target<
             bouquet_filter.as_ref(),
             &ctx.plugins,
             Some(&target_overrides),
+            insertion,
         )
         .await
         .map_err(|err| vec![err])?;
@@ -1833,6 +1845,53 @@ pub(crate) async fn process_watch<E: EventSink>(
     }
 
     true
+}
+
+/// Reconcile each binding once for the entire target, then preserve its per-input playback origin.
+pub(crate) async fn reconcile_target_managed<P: PluginHost>(
+    plugins: &P,
+    target: &ConfigTarget,
+    inputs: &[&tuliprox_core::model::ConfigInput],
+    bouquet_filter: Option<&tuliprox_core::model::TargetBouquetFilter>,
+    report: &mut PluginRunReport,
+) -> Result<HashMap<Arc<str>, ManagedStageItems>, PluginAbort> {
+    let allowed_inputs: Vec<String> = inputs
+        .iter()
+        .filter(|input| !super::ingest::collect_effective_skip_clusters(input).contains(&XtreamCluster::Live))
+        .map(|input| input.name.to_string())
+        .collect();
+    let mut managed: HashMap<Arc<str>, ManagedStageItems> = HashMap::new();
+    for binding in &target.managed_channels {
+        let request = shared::model::ManagedChannelRequest {
+            destination: shared::model::ManagedDestination::Target,
+            name: &target.name,
+            stage: Some(binding.stage),
+            inputs: &allowed_inputs,
+        };
+        let contribution = plugins.managed_channels(binding.plugin.id(), &request, report).await?;
+        for mut item in contribution {
+            if !allowed_inputs.iter().any(|input| input.as_str() == &*item.header.input_name) {
+                return Err(PluginAbort {
+                    plugin: binding.plugin.id().intern(),
+                    hook: PluginHook::ManagedChannels,
+                    reason: "managed channel source input is not available to this target".to_string(),
+                });
+            }
+            if bouquet_filter
+                .as_ref()
+                .is_some_and(|filter| !filter.allows(item.header.xtream_cluster, &item.header.group))
+            {
+                continue;
+            }
+            item.header.source_ordinal = u32::MAX;
+            let stages = managed.entry(Arc::clone(&item.header.input_name)).or_default();
+            match binding.stage {
+                shared::model::ManagedChannelStage::BeforeFilter => stages.before.push(item),
+                shared::model::ManagedChannelStage::AfterFilter => stages.after.push(item),
+            }
+        }
+    }
+    Ok(managed)
 }
 
 #[cfg(test)]

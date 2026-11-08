@@ -285,6 +285,7 @@ mod tests {
 
     fn target(output: Vec<TargetOutput>) -> ConfigTarget {
         ConfigTarget {
+            managed_channels: Vec::new(),
             curation: None,
             id: 1,
             enabled: true,

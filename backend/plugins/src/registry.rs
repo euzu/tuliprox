@@ -57,9 +57,9 @@ use tuliprox_core::{
 use tuliprox_plugin_api::{
     bindings::exports::tuliprox::plugin::{
         chno_hooks, dedupe_hooks, epg_enrich_hooks, epg_load_hooks, epg_match_hooks, epg_transform_hooks, event_hooks,
-        filter_hooks, group_merge_hooks, input_provider, lifecycle, metadata_hooks, metrics_hooks, notification_hooks,
-        output_generator, playlist_hooks, rpc, settings_migration, sort_hooks, sort_key_hooks, source_hooks,
-        stream_hooks, tasks,
+        filter_hooks, group_merge_hooks, http_routes, input_provider, lifecycle, managed_channel_hooks, metadata_hooks,
+        metrics_hooks, notification_hooks, output_generator, playlist_hooks, rpc, settings_migration, sort_hooks,
+        sort_key_hooks, source_hooks, stream_hooks, tasks,
     },
     ABI_VERSION, EXPORT_INTERFACES,
 };
@@ -186,6 +186,8 @@ pub(crate) struct LoadedPlugin {
     pub(crate) tasks: Option<tasks::GuestIndices>,
     /// `Some` when the component exports `rpc` (`ui.rpc_exports`).
     pub(crate) rpc: Option<rpc::GuestIndices>,
+    pub(crate) http_routes: Option<http_routes::GuestIndices>,
+    pub(crate) managed_channels: Option<managed_channel_hooks::GuestIndices>,
     /// `Some` when the component exports `settings-migration`
     /// (`settings.migrate`); called by the migration step, never by a hook site.
     pub(crate) settings_migration: Option<settings_migration::GuestIndices>,
@@ -804,6 +806,8 @@ fn load(
     let stream_hooks = bind!(stream_hooks, "stream-hooks");
     let tasks = bind!(tasks, "tasks");
     let rpc = bind!(rpc, "rpc");
+    let http_routes = bind!(http_routes, "http-routes");
+    let managed_channels = bind!(managed_channel_hooks, "managed-channel-hooks");
     let settings_migration = bind!(settings_migration, "settings-migration");
     let scope = PluginScope::new(&manifest.scope.groups, &manifest.scope.item_types)
         .map_err(|err| Rejection::invalid(format!("scope.groups: {err}")))?;
@@ -843,6 +847,8 @@ fn load(
         stream_hooks,
         tasks,
         rpc,
+        http_routes,
+        managed_channels,
         settings_migration,
         hooks: manifest.pipeline_hooks(),
         scope: Arc::new(scope),

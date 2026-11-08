@@ -226,9 +226,28 @@ pub struct XtreamPlaylistItem {
     pub input_stream_id: Arc<str>,
     #[serde(default, rename = "source_user_agent", alias = "upstream_user_agent", with = "arc_str_option_serde")]
     pub upstream_user_agent: Option<Arc<str>>,
+    /// URL captured before any target transformation; empty when it equals `url`.
+    #[serde(default, with = "arc_str_serde")]
+    pub input_url: Arc<str>,
 }
 
 impl XtreamPlaylistItem {
+    /// URL the override key is built from: the unchanged input URL when target transformations rewrote `url`.
+    /// Falls back to `url` when unchanged or for old records.
+    #[must_use]
+    pub fn override_source_url(&self) -> &Arc<str> { super::header::override_source_url(&self.input_url, &self.url) }
+
+    /// Id the override key is built from: the unchanged input stream id, because M3U-origin items without a
+    /// numeric stream id are stored with `provider_id = 0`. Falls back to `provider_id` for old records.
+    #[must_use]
+    pub fn override_source_id(&self) -> Arc<str> {
+        if self.input_stream_id.is_empty() {
+            Arc::from(self.provider_id.to_string())
+        } else {
+            Arc::clone(&self.input_stream_id)
+        }
+    }
+
     pub fn to_common(&self) -> CommonPlaylistItem {
         CommonPlaylistItem {
             virtual_id: self.virtual_id,

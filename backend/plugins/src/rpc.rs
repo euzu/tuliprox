@@ -105,7 +105,7 @@ impl RpcGate {
     fn try_take(&self, id: &str) -> Result<(), RateLimitRejection> { self.limiter.try_acquire(id) }
 
     /// Take one token of `id`'s bucket, creating the bucket on first use.
-    fn take(&self, id: &str) -> Result<(), RpcFailure> {
+    pub(crate) fn take(&self, id: &str) -> Result<(), RpcFailure> {
         let mut outcome = self.try_take(id);
         if matches!(outcome, Err(RateLimitRejection::UnknownKey)) {
             let _guard = lock(&self.registering);
@@ -137,7 +137,7 @@ impl RpcGate {
     }
 
     /// Count one call that ran to an outcome.
-    fn record(&self, id: &str, error: Option<&str>) {
+    pub(crate) fn record(&self, id: &str, error: Option<&str>) {
         self.update(id, |counts| {
             counts.calls += 1;
             if let Some(error) = error {
@@ -148,7 +148,7 @@ impl RpcGate {
     }
 
     /// Count one call the host could not start for lack of budget.
-    fn record_budget_skip(&self, id: &str) { self.update(id, |counts| counts.budget_skips += 1); }
+    pub(crate) fn record_budget_skip(&self, id: &str) { self.update(id, |counts| counts.budget_skips += 1); }
 
     pub(crate) fn counts(&self, id: &str) -> RpcCounts { lock(&self.counts).get(id).cloned().unwrap_or_default() }
 }

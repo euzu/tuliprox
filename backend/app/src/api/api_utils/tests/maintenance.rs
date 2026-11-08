@@ -122,6 +122,7 @@ fn maintenance_packet() -> Vec<u8> {
 
 fn maintenance_clip_target() -> Arc<crate::model::ConfigTarget> {
     Arc::new(crate::model::ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,

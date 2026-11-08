@@ -269,8 +269,9 @@ under `ext.<section>`, and a violation is reported at `ext.<section>.<field>`. T
 an `ext` property, and it never sees the `ext` values when it is validated. A secret in an extension fragment follows
 the same rules, with the path `ext.<section>.<field>`.
 
-None of the example plugins uses an extension. This is the spelling the manifest unit tests use
-(`backend/plugins/src/manifest/package.rs`):
+The notifier examples use the `messaging` section for their channel fields and routing (see
+[Notification provider](./events-notifications-inputs.md#notification-provider)). This is the spelling the manifest unit
+tests use (`backend/plugins/src/manifest/package.rs`):
 
 ```yaml
 ui:
@@ -452,4 +453,4 @@ ship one flat file per language in `ui/locales/<lang>.json` (the file format and
 { "properties": { "url": { "title": "settings.url.title", "description": "settings.url.description" } } }
 ```
 
-`plugins/notifiers/discord-notifier` is a complete example: every schema text is a key, in `en`, `ru`, `es` and `ar`.
+`plugins/examples/discord-notifier` is a complete example: every schema text is a key, in `en`, `ru`, `es` and `ar`.

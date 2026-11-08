@@ -279,6 +279,7 @@ fn service_with_disk(
     let input = Arc::new(tuliprox_core::model::ConfigInput { id: 7, name: "input-a".into(), ..Default::default() });
     let target = Arc::new(tuliprox_core::model::ConfigTarget {
         id: 11,
+        managed_channels: Vec::new(),
         enabled: true,
         name: "1".to_string(),
         options: None,

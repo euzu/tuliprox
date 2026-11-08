@@ -425,6 +425,15 @@ fn plugin_ref_problems<P: shared::model::PluginHost>(
     // `type: plugin` inputs: with plugins off nothing provides
     // `fetch-input`, so they are rejected here.
     for input in &sources.inputs {
+        for plugin in input.managed_channels.iter().filter(|_| input.enabled) {
+            if !plugins.provides(PluginHook::ManagedChannels, plugin.id()) {
+                problems.push(format!(
+                    "input {}: no loaded plugin {} provides managed-channels",
+                    input.name,
+                    plugin.id()
+                ));
+            }
+        }
         if let Some((hook, plugin)) = input.plugin_ref() {
             if !plugins.provides(hook, plugin) {
                 problems.push(format!("input {}: no loaded plugin {plugin} provides {}", input.name, hook.as_str()));
@@ -493,12 +502,17 @@ pub fn plugin_references(
         if input.input_type.is_plugin() && input.plugin.as_deref() == Some(id) {
             push(PluginReferenceKind::Input, input.name.to_string());
         }
+        if input.managed_channels.iter().any(|plugin| plugin.id() == id) {
+            push(PluginReferenceKind::InputManagedChannels, input.name.to_string());
+        }
     }
     for target in sources.sources.iter().flat_map(|source| source.targets.iter()) {
         for (hook, plugin) in target.plugin_refs() {
             if plugin == id {
                 let kind = if hook == PluginHook::RenderOutput {
                     PluginReferenceKind::TargetOutput
+                } else if hook == PluginHook::ManagedChannels {
+                    PluginReferenceKind::TargetManagedChannels
                 } else {
                     PluginReferenceKind::TargetStrategy
                 };
@@ -525,6 +539,45 @@ mod tests {
     use super::*;
     use shared::model::{PluginHook, PluginHost};
     use tuliprox_core::model::{ConfigSource, ConfigTarget, PluginTargetOutput, SourcesConfig, TargetOutput};
+
+    #[derive(Clone)]
+    struct ManagedHost;
+    impl PluginHost for ManagedHost {
+        fn provides(&self, hook: PluginHook, plugin: &str) -> bool {
+            hook == PluginHook::ManagedChannels && plugin == "sports-bridge"
+        }
+    }
+    #[test]
+    fn managed_bindings_are_validated_and_reported_for_uninstall() {
+        use shared::model::{ManagedChannelBinding, PluginRef, PluginReferenceKind};
+        let reference = PluginRef::new("sports-bridge").unwrap();
+        let input = std::sync::Arc::new(tuliprox_core::model::ConfigInput {
+            enabled: true,
+            name: "provider".into(),
+            managed_channels: vec![reference.clone()],
+            ..Default::default()
+        });
+        let mut target = ConfigTarget::from(&shared::model::ConfigTargetDto::default());
+        target.name = "TV".into();
+        target.managed_channels =
+            vec![ManagedChannelBinding { plugin: reference, stage: shared::model::ManagedChannelStage::default() }];
+        let sources = SourcesConfig {
+            inputs: vec![input.clone()],
+            sources: vec![ConfigSource { inputs: vec![input.name.clone()], targets: vec![target.into()] }],
+            ..Default::default()
+        };
+        assert!(validate_plugin_refs(&ManagedHost, &sources).is_ok());
+        let error = validate_plugin_refs(&shared::model::NoPlugins, &sources).unwrap_err().to_string();
+        assert!(error.contains("input provider"));
+        assert!(error.contains("target TV"));
+        let usage = plugin_references("sports-bridge", &sources, &[]);
+        assert!(usage
+            .iter()
+            .any(|entry| entry.kind == PluginReferenceKind::InputManagedChannels && entry.name == "provider"));
+        assert!(usage
+            .iter()
+            .any(|entry| entry.kind == PluginReferenceKind::TargetManagedChannels && entry.name == "TV"));
+    }
 
     #[derive(Clone)]
     struct TestHost {

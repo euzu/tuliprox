@@ -453,6 +453,7 @@ pub struct ConfigTarget {
     pub execution_plan: TargetExecutionPlan,
     pub watch: Option<Vec<ConfigWatch>>,
     pub use_memory_cache: bool,
+    pub managed_channels: Vec<shared::model::ManagedChannelBinding>,
 }
 
 impl ConfigTarget {
@@ -509,7 +510,11 @@ impl ConfigTarget {
     /// separately (see [`PluginTargetOutput::format`]).
     pub fn plugin_refs(&self) -> impl Iterator<Item = (PluginHook, &str)> {
         let outputs = self.plugin_outputs().map(|output| (PluginHook::RenderOutput, output.plugin.as_str()));
-        self.execution_plan.plugin_strategies.refs().chain(outputs)
+        self.execution_plan
+            .plugin_strategies
+            .refs()
+            .chain(outputs)
+            .chain(self.managed_channels.iter().map(|binding| (PluginHook::ManagedChannels, binding.plugin.id())))
     }
 
     pub fn epg_id_case(&self) -> EpgIdOutputCase {
@@ -564,6 +569,7 @@ impl From<&ConfigTargetDto> for ConfigTarget {
                     .collect()
             }),
             use_memory_cache: dto.use_memory_cache,
+            managed_channels: dto.managed_channels.clone(),
         }
     }
 }

@@ -1,17 +1,17 @@
 //! Plugin settings on the config page.
 //!
-//! A plugin can put three things on the config page: fields inside a built-in
-//! section (`ui.config_extensions`, stored under `ext.<section>.<field>`), a
-//! section of its own after the built-in ones (`ui.config_section`), and a tab
-//! (`ui.config_tab`, a schema form or a sandboxed frame). All of them edit the
+//! Plugins can contribute fields inside a built-in section (`ui.config_extensions`,
+//! stored under `ext.<section>.<field>`) and a tab (`ui.config_tab`, a schema form
+//! or a sandboxed frame). Standalone settings are edited in the Plugin Manager.
+//! Config page contributions edit the
 //! plugin's settings, so the page keeps one draft per plugin and saves it with
 //! one `PUT …/settings` when the page is saved.
 
 use super::config_view_context::ConfigViewContext;
 use crate::{
     app::components::{
-        plugin_available, prefill_defaults, translate_schema, use_plugin_ui, PluginBadge, PluginFrame, PluginSlot,
-        PluginUnavailable, PluginUpdateSettings, SchemaForm,
+        plugin_available, prefill_defaults, translate_schema, use_plugin_ui, PluginBadge, PluginFrame,
+        PluginUnavailable, SchemaForm,
     },
     hooks::{use_service_context, Services},
     i18n::{use_translation, YewI18n},
@@ -19,8 +19,7 @@ use crate::{
 };
 use serde_json::{Map, Value};
 use shared::model::{
-    Permission, PluginFieldErrorDto, PluginSecretDto, PluginSettingsDto, PluginSettingsSaveDto, PluginSlotDto,
-    PluginUiDto,
+    PluginFieldErrorDto, PluginSecretDto, PluginSettingsDto, PluginSettingsSaveDto, PluginSlotDto, PluginUiDto,
 };
 use std::{collections::BTreeMap, rc::Rc};
 use yew::{
@@ -503,81 +502,6 @@ pub fn PluginConfigExtensions(props: &PluginConfigExtensionsProps) -> Html {
                 }
             }) }
         </div>
-    }
-}
-
-/// The plugin sections after the built-in ones: the schema form of every
-/// plugin with `ui.config_section`, then the frames contributed to the
-/// `config-section` slot.
-#[component]
-pub fn PluginConfigSections() -> Html {
-    let ui = use_plugin_ui();
-    let context = use_context::<PluginSettingsContext>();
-    let translate = use_translation();
-    let services = use_service_context();
-    let editing = use_edit_mode();
-    // The update fields are the host's own `plugins:` settings, not a plugin's: they show even
-    // when no plugin contributes a section. They save on their own, like the Plugin Manager's.
-    let updates = html! {
-        <div class="tp__plugin-ext tp__plugin-section">
-            <h3>{ translate.t("LABEL.PLUGIN_UPDATES") }</h3>
-            <PluginUpdateSettings can_write={services.auth.has_permission(Permission::SystemWrite)} />
-        </div>
-    };
-    let (Some(ui), Some(context)) = (ui, context) else { return updates };
-    let plugins: Vec<_> = ui.plugins.iter().filter(|plugin| plugin.config_section).collect();
-    html! {
-        <>
-            { updates }
-            if !plugins.is_empty() {
-                <div class="tp__plugin-sections">
-                    { for plugins.iter().map(|plugin| {
-                        let key = format!("section:{}", plugin.id);
-                        if !plugin_available(plugin) {
-                            return html! { <PluginUnavailable key={key} plugin={Rc::clone(plugin)} title={String::new()} /> };
-                        }
-                        let Some(draft) = context.state.plugins.get(&plugin.id) else {
-                            return html! { <div key={key}><PluginBadge name={plugin.name.clone()} /><PluginSettingsNotice id={plugin.id.clone()} /></div> };
-                        };
-                        let strings = ui.strings_for(&plugin.id);
-                        let form = match draft.schema.as_ref() {
-                            Some(schema) => {
-                                let on_change = {
-                                    let dispatch = context.dispatch.clone();
-                                    let id = plugin.id.clone();
-                                    Callback::from(move |value: Value| {
-                                        dispatch.emit(PluginSettingsAction::EditMain { id: id.clone(), value });
-                                    })
-                                };
-                                html! {
-                                    <fieldset class="tp__plugin-ext__fields" disabled={!editing}>
-                                        <SchemaForm
-                                            key={draft.generation.to_string()}
-                                            schema={translate_schema(schema, &strings)}
-                                            value={main_value(&draft.draft)}
-                                            secrets={main_secrets(&draft.secrets)}
-                                            errors={main_errors(&draft.errors)}
-                                            on_change={on_change}
-                                        />
-                                    </fieldset>
-                                }
-                            }
-                            None => html! {
-                                <p class="tp__plugin-settings__note">{ translate.t("MESSAGES.PLUGIN_SETTINGS_NO_SCHEMA") }</p>
-                            },
-                        };
-                        html! {
-                            <div key={key} class="tp__plugin-ext tp__plugin-section">
-                                <div class="tp__plugin-ext__divider"><PluginBadge name={plugin.name.clone()} /></div>
-                                { render_form_errors(draft) }
-                                { form }
-                            </div>
-                        }
-                    }) }
-                </div>
-            }
-            <PluginSlot slot={PluginSlotDto::ConfigSection} />
-        </>
     }
 }
 

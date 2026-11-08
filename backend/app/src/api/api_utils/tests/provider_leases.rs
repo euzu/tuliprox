@@ -466,6 +466,7 @@ async fn dash_stream_request_remains_redirect_and_preserves_provider_affinity() 
         ..ConfigInput::default()
     });
     let target = Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         name: "target_dash".to_string(),

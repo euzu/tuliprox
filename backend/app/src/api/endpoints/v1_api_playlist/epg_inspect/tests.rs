@@ -263,6 +263,7 @@ fn output_names_are_pinned() {
 
 fn target(name: &str, outputs: Vec<TargetOutput>, lowercase_ids: bool) -> ConfigTarget {
     ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,

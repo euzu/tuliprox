@@ -202,6 +202,7 @@ fn create_timestamp_item(
             added,
             last_modified,
             chno: None,
+            ..Default::default()
         }),
     })
 }

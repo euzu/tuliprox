@@ -40,11 +40,13 @@ pub(crate) enum Capability {
     Notifications,
     StreamHeaders,
     Process,
+    HttpRoutes,
+    PlaylistWrite,
 }
 
 impl Capability {
     /// Every capability, in manifest order.
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Network,
         Self::Storage,
         Self::EpgWrite,
@@ -52,6 +54,8 @@ impl Capability {
         Self::Notifications,
         Self::StreamHeaders,
         Self::Process,
+        Self::HttpRoutes,
+        Self::PlaylistWrite,
     ];
 
     /// The manifest key.
@@ -64,6 +68,8 @@ impl Capability {
             Self::Notifications => "notifications",
             Self::StreamHeaders => "stream_headers",
             Self::Process => "process",
+            Self::HttpRoutes => "http_routes",
+            Self::PlaylistWrite => "playlist_write",
         }
     }
 }
@@ -80,6 +86,8 @@ pub(crate) struct Capabilities {
     pub notifications: bool,
     pub stream_headers: bool,
     pub process: bool,
+    pub http_routes: bool,
+    pub playlist_write: bool,
 }
 
 impl Capabilities {
@@ -92,6 +100,8 @@ impl Capabilities {
             Capability::Notifications => self.notifications,
             Capability::StreamHeaders => self.stream_headers,
             Capability::Process => self.process,
+            Capability::HttpRoutes => self.http_routes,
+            Capability::PlaylistWrite => self.playlist_write,
         }
     }
 
@@ -355,6 +365,7 @@ pub(crate) struct Manifest {
     /// `events:` as written.
     pub event_names: Vec<String>,
     pub tasks: Vec<Task>,
+    pub routes: Vec<HttpRoute>,
     pub provides: Provides,
     pub scope: Scope,
     pub ui: Ui,
@@ -416,3 +427,22 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests;
+
+/// Authentication is host-managed unless explicitly delegated to the plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RouteAuth {
+    #[default]
+    Host,
+    Plugin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HttpRoute {
+    pub id: String,
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub auth: RouteAuth,
+}

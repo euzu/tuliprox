@@ -568,6 +568,7 @@ pub(in crate::api::api_utils::tests) fn create_test_live_channel(url: &str) -> S
 
 pub(in crate::api::api_utils::tests) fn create_test_shared_target() -> ConfigTarget {
     ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,

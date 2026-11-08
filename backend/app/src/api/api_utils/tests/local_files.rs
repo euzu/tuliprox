@@ -29,6 +29,7 @@ async fn local_stream_response_registers_active_local_stream() {
     let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
     let user = ProxyUserCredentials::default();
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -89,6 +90,7 @@ async fn local_stream_response_rechecks_limits_before_registering_socket_bound_s
     user.username = "local-limit-user".to_string();
     user.max_connections = 1;
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -174,6 +176,7 @@ async fn local_stream_response_disables_response_compression() {
     let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
     let user = ProxyUserCredentials::default();
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -223,6 +226,7 @@ async fn local_stream_response_reuses_stable_playback_session_token_across_reope
     let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
     let user = ProxyUserCredentials::default();
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -298,6 +302,7 @@ async fn local_stream_response_allows_exhausted_reopen_for_same_playback_session
     user.username = "user1".to_string();
     user.max_connections = 1;
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -376,6 +381,7 @@ async fn local_stream_response_preserves_soft_kind_across_reopens() {
     user.max_connections = 1;
     user.soft_connections = 1;
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,

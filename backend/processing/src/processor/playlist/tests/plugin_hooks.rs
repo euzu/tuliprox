@@ -754,3 +754,143 @@ async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() 
     assert_eq!(report.hooks[0].hook, PluginHook::FilterEval.as_str());
     assert_eq!(report.hooks[0].kept, 1);
 }
+
+#[derive(Clone, Default)]
+struct ManagedHost {
+    calls: Arc<AtomicUsize>,
+}
+impl PluginHost for ManagedHost {
+    async fn managed_channels(
+        &self,
+        _plugin: &str,
+        request: &shared::model::ManagedChannelRequest<'_>,
+        _report: &mut PluginRunReport,
+    ) -> Result<Vec<PlaylistItem>, PluginAbort> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(request.destination, shared::model::ManagedDestination::Target);
+        assert_eq!(request.name, "Sports target");
+        assert_eq!(request.stage, Some(shared::model::ManagedChannelStage::AfterFilter));
+        Ok(request
+            .inputs
+            .iter()
+            .map(|input| {
+                let mut value = item("Injected", "News");
+                value.header.input_name = input.intern();
+                value.header.id = format!("plugin:{input}").intern();
+                value
+            })
+            .collect())
+    }
+}
+
+#[tokio::test]
+async fn managed_target_binding_runs_once_and_retains_each_source_input() {
+    use super::super::{
+        target::reconcile_target_managed,
+        transform::{execute_pipe_with_insertions, ManagedStageItems},
+    };
+    use tuliprox_core::model::ConfigInput;
+    let host = ManagedHost::default();
+    let a = ConfigInput { name: "provider-a".intern(), ..Default::default() };
+    let b = ConfigInput { name: "provider-b".intern(), ..Default::default() };
+    let mut target = filtered_target();
+    target.name = "Sports target".into();
+    target.managed_channels = vec![shared::model::ManagedChannelBinding {
+        plugin: PluginRef::new("bridge").unwrap(),
+        stage: shared::model::ManagedChannelStage::default(),
+    }];
+    let mut prepared =
+        reconcile_target_managed(&host, &target, &[&a, &b], None, &mut PluginRunReport::default()).await.unwrap();
+    assert_eq!(host.calls.load(Ordering::Relaxed), 1);
+    for input in [&a, &b] {
+        let mut provider = item("One", "News");
+        provider.header.input_name = Arc::clone(&input.name);
+        let source = MemoryPlaylistSource::new(vec![PlaylistGroup {
+            id: 1,
+            title: "News".intern(),
+            xtream_cluster: XtreamCluster::Live,
+            channels: vec![provider],
+        }])
+        .into_source();
+        let mut fpl = crate::fetched_playlist::FetchedPlaylist { input, source, epg: None };
+        let staged = prepared.remove(&input.name).unwrap();
+        assert!(staged.before.is_empty());
+        assert_eq!(staged.after.len(), 1);
+        let (mut result, _) = execute_pipe_with_insertions(
+            &target,
+            &vec![TransformStage::Filter],
+            &mut fpl,
+            &mut std::collections::HashSet::default(),
+            false,
+            None,
+            &host,
+            None,
+            staged,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.get_channel_count(), 2);
+        assert!(result.items().all(|item| item.header.input_name == input.name));
+    }
+    assert!(prepared.is_empty());
+    let mut other = ConfigTarget::from(&ConfigTargetDto::default());
+    other.name = "Other target".into();
+    assert!(reconcile_target_managed(&host, &other, &[&a, &b], None, &mut PluginRunReport::default())
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(host.calls.load(Ordering::Relaxed), 1, "unbound target must not call or receive the plugin");
+    assert!(ManagedStageItems::default().is_empty());
+}
+
+#[tokio::test]
+async fn managed_insertion_respects_filter_position_and_later_rename_stages() {
+    use super::super::transform::{execute_pipe_with_insertions, ManagedStageItems};
+    use shared::model::{ConfigRenameDto, ItemField};
+    let input = tuliprox_core::model::ConfigInput { name: "input".intern(), ..Default::default() };
+    let mut target = filtered_target();
+    target.rename = Some(vec![tuliprox_core::model::ConfigRename::from(&ConfigRenameDto {
+        field: ItemField::Name,
+        pattern: "Injected".into(),
+        new_name: "Renamed managed".into(),
+        t_pattern: Some("Injected".into()),
+    })]);
+    for after in [false, true] {
+        let mut injection = item("Injected", "News");
+        injection.header.input_name = Arc::clone(&input.name);
+        let staged = if after {
+            ManagedStageItems { after: vec![injection], ..Default::default() }
+        } else {
+            ManagedStageItems { before: vec![injection], ..Default::default() }
+        };
+        let mut fpl = crate::fetched_playlist::FetchedPlaylist {
+            input: &input,
+            source: MemoryPlaylistSource::new(vec![PlaylistGroup {
+                id: 1,
+                title: "News".intern(),
+                xtream_cluster: XtreamCluster::Live,
+                channels: items(),
+            }])
+            .into_source(),
+            epg: None,
+        };
+        let (mut result, _) = execute_pipe_with_insertions(
+            &target,
+            &vec![TransformStage::Filter, TransformStage::Rename, TransformStage::Map],
+            &mut fpl,
+            &mut std::collections::HashSet::default(),
+            false,
+            None,
+            &NoPlugins,
+            None,
+            staged,
+        )
+        .await
+        .unwrap();
+        let names = result.items().map(|item| item.header.name.to_string()).collect::<Vec<_>>();
+        assert_eq!(names.contains(&"Renamed managed".to_string()), after);
+        assert!(!names.contains(&"Injected".to_string()));
+        assert!(!names.contains(&"Drop".to_string()));
+        assert_eq!(names.len(), if after { 3 } else { 2 });
+    }
+}

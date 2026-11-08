@@ -761,6 +761,8 @@ const fn capability_description(capability: Capability) -> &'static str {
             "Stream header injection: may add HTTP headers to upstream stream requests when a client session starts."
         }
         Capability::Process => PROCESS_SENTENCE,
+        Capability::PlaylistWrite => "Managed channels: may add, update and remove its own live channels in selected inputs or targets, without changing provider snapshots.",
+        Capability::HttpRoutes => "HTTP routes: may serve incoming requests and authenticate external clients in its own URL namespace.",
     }
 }
 
@@ -1244,6 +1246,8 @@ impl PluginSystem {
             // The reload built the registry without this plugin, so its handle
             // is out of the snapshot; drop the shared one, then the files.
             self.shared().kv.forget(id);
+            remove_path(&self.shared().data_dir.join(".managed-channels").join(id))
+                .map_err(|err| InstallRejection::internal("cannot delete managed channel snapshots", &err))?;
             remove_path(&self.shared().data_dir.join(id))
                 .map_err(|err| InstallRejection::internal("cannot delete the plugin data", &err))?;
         }

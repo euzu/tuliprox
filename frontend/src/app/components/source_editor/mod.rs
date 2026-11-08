@@ -1,3 +1,5 @@
+mod managed_channels_editor;
+pub(crate) use managed_channels_editor::*;
 mod alias_item_form;
 mod block_view;
 mod editor_form;

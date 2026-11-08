@@ -625,6 +625,7 @@ pub struct ConfigInput {
     /// The plugin's settings for this input, flattened to the `options` pairs of
     /// `input-request`. Empty unless `InputType::Plugin`.
     pub plugin_options: Vec<(String, String)>,
+    pub managed_channels: Vec<shared::model::PluginRef>,
 }
 
 impl ConfigInput {
@@ -1041,6 +1042,7 @@ impl ConfigInput {
             }),
             plugin: self.plugin.clone(),
             plugin_options: self.plugin_options.clone(),
+            managed_channels: Vec::new(),
         }
     }
 
@@ -1159,6 +1161,7 @@ impl From<&ConfigInputDto> for ConfigInput {
                 .map(|s| StalkerInputConfig::from(s).with_credentials(dto.username.as_ref(), dto.password.as_ref())),
             plugin: dto.plugin.clone(),
             plugin_options: shared::model::plugin_options(&dto.plugin_config),
+            managed_channels: dto.managed_channels.clone(),
         }
     }
 }

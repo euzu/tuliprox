@@ -1,6 +1,10 @@
 # Matrix Notifier
 
-An example tuliprox plugin that delivers notifications to a Matrix room. It is
+An example tuliprox plugin that delivers notifications to a Matrix room. It is a
+source example only: it is not shipped in the Docker image and not offered in the
+marketplace. The built-in messaging channels (Telegram, Discord, Slack, Gotify, ntfy,
+Pushover, REST, command) are the supported way to notify; Matrix has no built-in channel,
+so build and install this plugin if you need it. It is
 the reference for a **notification provider**: the plugin adds a delivery channel
 (`plugin.matrix-notifier`) to the messaging pipeline, and everything else (event
 subscription, severity floors, quiet hours, suppression, hourly ceilings, the
@@ -11,9 +15,9 @@ persisted outbox with backoff and dead-lettering) is the host's.
 | Deliver a notification to a room | hook `notifications.send`, capability `notifications` + `network` |
 | Idempotent retries | deterministic Matrix transaction id, remembered in the KV (`storage`) until the message is accepted |
 | Retry / dead-letter decisions | the returned `DeliveryError`: `transient`, `retry-after` (from `retry_after_ms`), `permanent` |
-| Severity floors, quiet hours, suppression | `settings.routing`, read by the host; no plugin code |
+| Severity floors, quiet hours, suppression | `settings.ext.messaging.routing`, read by the host; no plugin code |
 | React to bus events | hook `events.on-event` for `playlist.update`, `user.connection.changed`, `stream.probe.failed`: log + KV counters only |
-| Settings form | `config-schema.json` through `ui.config_section`; no UI code |
+| Settings form | the `messaging` fragment of `ui.config_extensions` in `manifest.yml` (rendered on the Web UI messaging page); no standalone settings form, no UI code |
 
 ## Delivery contract
 
@@ -29,7 +33,7 @@ persisted outbox with backoff and dead-lettering) is the host's.
 | any other status, bad URL, missing room/token | `permanent` | dead-letters that channel, no retry |
 | anything below `min_severity` | `Ok`, nothing sent | counts it delivered |
 
-Two severity floors exist and the host's runs first: `settings.routing.min_severity`
+Two severity floors exist and the host's runs first: `ext.messaging.routing.min_severity`
 is judged by the host on the event's registry severity and the plugin is not even
 called below it; the plugin's `min_severity` setting is checked inside the plugin.
 
@@ -42,6 +46,22 @@ the message is accepted or refused for good, so a later identical notification i
 point; only the first attempt's time is used.)
 
 ## Settings
+
+All keys live under `settings.ext.messaging` of the plugin entry:
+
+```yaml
+plugins:
+  enabled: true
+  plugins:
+    - id: matrix-notifier
+      settings:
+        ext:
+          messaging:
+            room_id: "!abc:example.org"
+            access_token: "${env:MATRIX_TOKEN}"
+            routing:
+              min_severity: warn
+```
 
 | Key | Meaning |
 | --- | --- |

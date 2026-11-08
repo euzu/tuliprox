@@ -30,13 +30,12 @@ use serde_json::Value;
 use shared::{
     error::TuliproxError,
     model::{
-        InputType, M3uPlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, TargetType, XtreamCluster,
-        XtreamPlaylistItem,
+        InputType, M3uPlaylistItem, PlaylistItemType, StreamProperties, TargetType, XtreamCluster, XtreamPlaylistItem,
     },
 };
 use std::{borrow::Cow, future::Future, sync::Arc};
 use tokio_stream::StreamExt;
-use tuliprox_core::model::{override_key, InputAliasMap};
+use tuliprox_core::model::{override_key_for, InputAliasMap};
 
 query_enum! {
     /// Record fields a client can project with `fields`.
@@ -173,8 +172,8 @@ impl StoredPlaylistRecord for XtreamPlaylistItem {
     fn with_provider_id<T>(&self, visit: impl FnOnce(&str) -> T) -> T { with_decimal(self.provider_id, visit) }
 
     fn override_id(&self, aliases: &InputAliasMap) -> Option<Arc<str>> {
-        let id: Arc<str> = Arc::from(self.provider_id.to_string());
-        override_key_id(id, &self.url, &self.input_name, self.item_type, aliases)
+        let id = self.override_source_id();
+        override_key_for(&id, self.override_source_url(), &self.input_name, self.item_type, aliases).map(|key| key.id)
     }
 
     fn epg_channel_id(&self) -> Option<&str> { self.epg_channel_id.as_deref() }
@@ -202,7 +201,8 @@ impl StoredPlaylistRecord for M3uPlaylistItem {
     fn with_provider_id<T>(&self, visit: impl FnOnce(&str) -> T) -> T { visit(&self.provider_id) }
 
     fn override_id(&self, aliases: &InputAliasMap) -> Option<Arc<str>> {
-        override_key_id(Arc::clone(&self.provider_id), &self.url, &self.input_name, self.item_type, aliases)
+        let id = self.override_source_id();
+        override_key_for(&id, self.override_source_url(), &self.input_name, self.item_type, aliases).map(|key| key.id)
     }
 
     fn epg_channel_id(&self) -> Option<&str> { self.epg_channel_id.as_deref() }
@@ -218,25 +218,6 @@ impl StoredPlaylistRecord for M3uPlaylistItem {
     fn source_ordinal(&self) -> u32 { self.source_ordinal }
 
     fn additional_properties(&self) -> Option<&StreamProperties> { self.additional_properties.as_ref() }
-}
-
-/// The id under which a stored record's overrides are filed: the identity `override_key` derives from the record's
-/// provider id, url and input, exactly like the override files do.
-fn override_key_id(
-    id: Arc<str>,
-    url: &Arc<str>,
-    input_name: &Arc<str>,
-    item_type: PlaylistItemType,
-    aliases: &InputAliasMap,
-) -> Option<Arc<str>> {
-    let header = PlaylistItemHeader {
-        id,
-        url: Arc::clone(url),
-        input_name: Arc::clone(input_name),
-        item_type,
-        ..PlaylistItemHeader::default()
-    };
-    override_key(&header, aliases).map(|key| key.id)
 }
 
 /// Runs `visit` on the decimal form of `value`, which is formatted into a stack buffer.

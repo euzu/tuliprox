@@ -107,6 +107,38 @@
 .tp__status-card--warn { border-left: 3px solid var(--theme-brand-warning); }
 .tp__status-card--error { border-left: 3px solid var(--theme-brand-danger); }
 
+// Keep plugin dialog headings and actions visible while long content scrolls.
+.tp__content-dialog:has(> .tp__plugin-upload, > .tp__plugin-settings) {
+  box-sizing: border-box;
+  max-height: 80vh;
+  max-height: 80dvh;
+
+  > .tp__plugin-upload,
+  > .tp__plugin-settings {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+
+    > h2 {
+      flex-shrink: 0;
+    }
+  }
+
+  .tp__plugin-upload__body,
+  .tp__plugin-settings__body {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+  }
+
+  > .tp__dialog__toolbar {
+    flex-shrink: 0;
+  }
+}
+
 .tp__plugin-upload {
   display: flex;
   flex-direction: column;

@@ -1,4 +1,4 @@
-use super::WatchEntriesEditor;
+use super::{ManagedChannelsEditor, WatchEntriesEditor};
 use crate::{
     app::components::{
         build_options, config::HasFormData, dto_field_id, select::Select, selection_parse_first, AppIcon, BlockId,
@@ -224,6 +224,7 @@ generate_form_reducer!(
         Mapping => mapping: Option<Vec<String>>,
         Watch => watch: Option<Vec<ConfigWatchDto>>,
         UseMemoryCache => use_memory_cache: bool,
+        ManagedChannels => managed_channels: Vec<shared::model::ManagedChannelBinding>,
     }
 );
 
@@ -541,6 +542,13 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         }
     };
 
+    let render_managed = || {
+        let state = target_form_state.clone();
+        html! { <ManagedChannelsEditor target={true} allow_write={props.allow_write}
+        bindings={target_form_state.form.managed_channels.clone()}
+        on_change={Callback::from(move |bindings|state.dispatch(ConfigTargetFormAction::ManagedChannels(bindings)))}/> }
+    };
+
     let render_target = || {
         let target_form_state_1 = target_form_state.clone();
         let target_form_state_2 = target_form_state.clone();
@@ -674,6 +682,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={TargetFormPage::Main.intern()} active={view_visible.intern()}>
                 {render_target()}
+                {render_managed()}
                 </Panel>
                 <Panel value={TargetFormPage::Options.intern()} active={view_visible.intern()}>
                 {render_options()}

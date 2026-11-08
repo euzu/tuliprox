@@ -158,6 +158,14 @@ mod tests {
         PluginRepositoryDto { id: id.to_string(), name: format!("{id} name"), url: url.to_string(), enabled: true }
     }
 
+    /// A config without a `plugins:` block starts from the default sources
+    /// (the official catalog); a change applies on top of them.
+    fn defaults_with(extra: &[PluginRepositoryDto]) -> Vec<PluginRepositoryDto> {
+        let mut list = PluginsConfigDto::default().repositories;
+        list.extend_from_slice(extra);
+        list
+    }
+
     fn app_config_for(dir: &TempDir, yaml: &str) -> (Arc<AppConfig>, std::path::PathBuf) {
         let file = dir.path().join("config.yml");
         std::fs::write(&file, yaml).unwrap();
@@ -178,16 +186,17 @@ mod tests {
             persist_repositories(&app_config, RepositoryChange::Add(repo("community", "${env:TP_TEST_REPO_URL}")))
                 .await
                 .unwrap();
-        assert_eq!(saved.repositories[0].url, "${env:TP_TEST_REPO_URL}");
-        assert_eq!(app_config.plugins.load_full().unwrap().repositories.len(), 1);
-        assert_eq!(app_config.config.load().plugins.as_ref().unwrap().repositories[0].id, "community");
+        let defaults = defaults_with(&[]).len();
+        assert_eq!(saved.repositories[defaults].url, "${env:TP_TEST_REPO_URL}");
+        assert_eq!(app_config.plugins.load_full().unwrap().repositories.len(), defaults + 1);
+        assert_eq!(app_config.config.load().plugins.as_ref().unwrap().repositories[defaults].id, "community");
 
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("${env:TP_TEST_REPO_HOST}"), "{text}");
         assert!(text.contains("${env:TP_TEST_REPO_URL}"), "{text}");
         assert!(text.contains("plugins:"), "{text}");
         let written = written_repositories(&app_config).await.unwrap();
-        assert_eq!(written, vec![repo("community", "${env:TP_TEST_REPO_URL}")]);
+        assert_eq!(written, defaults_with(&[repo("community", "${env:TP_TEST_REPO_URL}")]));
     }
 
     #[tokio::test]
@@ -225,16 +234,15 @@ mod tests {
             persist_repositories(&app_config, RepositoryChange::Replace("first-repo".to_string(), changed.clone()))
                 .await
                 .unwrap();
-        assert_eq!(PluginRepositoryDto::from(&saved.repositories[0]), changed);
-        assert_eq!(written_repositories(&app_config).await.unwrap()[0], changed);
+        let second = repo("second-repo", "https://b.test/m.json");
+        let first = defaults_with(&[]).len();
+        assert_eq!(PluginRepositoryDto::from(&saved.repositories[first]), changed);
+        assert_eq!(written_repositories(&app_config).await.unwrap(), defaults_with(&[changed, second.clone()]));
 
         let saved =
             persist_repositories(&app_config, RepositoryChange::Remove("first-repo".to_string())).await.unwrap();
-        assert_eq!(saved.repositories.len(), 1);
-        assert_eq!(
-            written_repositories(&app_config).await.unwrap(),
-            vec![repo("second-repo", "https://b.test/m.json")]
-        );
+        assert_eq!(saved.repositories.len(), first + 1);
+        assert_eq!(written_repositories(&app_config).await.unwrap(), defaults_with(&[second]));
     }
 
     #[tokio::test]
@@ -268,6 +276,6 @@ mod tests {
         assert!(matches!(unknown_remove, Err(RepositoryStoreError::NotFound(_))));
 
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
-        assert_eq!(app_config.plugins.load_full().unwrap().repositories.len(), 2);
+        assert_eq!(app_config.plugins.load_full().unwrap().repositories.len(), defaults_with(&[]).len() + 2);
     }
 }

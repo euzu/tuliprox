@@ -1,4 +1,13 @@
 {
+  "MANAGED_CHANNELS": {
+    "POINT": "Insertion point",
+    "ADD_PLUGIN": "Add managed-channel plugin",
+    "TARGET_HINT": "Add plugin-managed channels to this target. The selected point follows this target's processing order; later mapping, sorting and output rules still apply.",
+    "INPUT_HINT": "Add plugin-managed channels to this input before target processing. Every target using this input can receive them.",
+    "BEFORE_FILTER": "Before filtering",
+    "AFTER_FILTER": "After filtering",
+    "NO_PLUGINS": "No managed-channel plugin is selected. Enable a plugin that provides managed channels to add one."
+  },
   "HLS_STARTUP_MODE_DESCRIPTION": "Conservative keeps the existing startup behavior. First ready waits for a processed start segment. Progressive delivers raw TS and requires suitable sources; it takes effect for new sessions.",
   "BACKOFF_JITTER_PERCENT_VALIDATION": "Backoff jitter percent must be between 0 and 95.",
   "COUNTRY": {
@@ -976,6 +985,9 @@
     "WEB_ROOT": "Web-Root: Contains the web-ui files. They are normally placed in the same directory under ./web"
   },
   "LABEL": {
+    "MANAGED_CHANNELS": "Managed channels",
+    "PLUGIN_REFERENCE_INPUT_MANAGED": "Input managed channels",
+    "PLUGIN_REFERENCE_TARGET_MANAGED": "Target managed channels",
     "HLS_STARTUP_LIMITS": "Fast start limits",
     "HLS_PROGRESSIVE_SEGMENTS": "Maximum progressive segments",
     "HLS_PROGRESSIVE_BYTES_PER_SEGMENT": "Replay memory per segment",

@@ -88,6 +88,20 @@ fn only_an_enabled_plugin_is_served() {
 }
 
 #[test]
+fn settings_locales_are_available_before_enabling_and_after_disabling() {
+    let Some(loaded) = stage(None) else { return };
+    assert_eq!(loaded.system.api_ui()[0].locales, vec!["en"]);
+    let locale = loaded.system.ui_asset(ID, "locales/en.json").expect("loaded plugin locale");
+    assert_eq!(locale.mime, "application/json");
+    assert!(loaded.system.ui_asset(ID, "index.html").is_none());
+    assert!(loaded.system.ui_asset(ID, "assets/app.js").is_none());
+    let Some(disabled) = stage(Some(true)) else { return };
+    disabled.disable();
+    assert!(disabled.system.ui_asset(ID, "locales/en.json").is_some());
+    assert!(disabled.system.ui_asset(ID, "assets/app.js").is_none());
+}
+
+#[test]
 fn the_frame_headers_are_the_frozen_six() {
     let headers = PluginSystem::frame_headers("\"0.1.0-1-2\"");
     let get =
@@ -117,7 +131,7 @@ fn the_etag_follows_the_version_the_file_and_its_length() {
 }
 
 #[test]
-fn the_ui_list_shows_enabled_and_disabled_plugins_but_not_unlisted_ones() {
+fn the_ui_list_includes_loaded_plugins_for_settings_translations() {
     let Some(enabled) = stage(Some(true)) else { return };
     let list = enabled.system.api_ui();
     assert_eq!(list.len(), 1);
@@ -133,5 +147,7 @@ fn the_ui_list_shows_enabled_and_disabled_plugins_but_not_unlisted_ones() {
     assert_eq!(disabled.system.api_ui()[0].state, PluginStateDto::Disabled, "greyed out, not hidden");
 
     let Some(unlisted) = stage(None) else { return };
-    assert_eq!(unlisted.system.api_ui(), Vec::new());
+    let list = unlisted.system.api_ui();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].state, PluginStateDto::Loaded);
 }

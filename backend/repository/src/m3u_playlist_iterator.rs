@@ -672,6 +672,7 @@ mod tests {
             additional_properties: None,
             input_stream_id: "813294".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         }
     }
 

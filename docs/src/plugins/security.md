@@ -33,6 +33,14 @@ Capability sentences, from `backend/plugins/src/install.rs`:
 | `stream_headers` | "Stream header injection: may add HTTP headers to upstream stream requests when a client session starts." |
 | `process` | "Run local programs: may start any program on this server, as the user tuliprox runs as, with arguments and input of its own choosing. Grant it only to a plugin you would trust with a shell." |
 
+The `http_routes` capability grants a plugin incoming HTTP endpoints in its own namespace, including
+explicitly delegated client authentication. See [Incoming HTTP routes](./http-routes.md) for host permissions,
+credential handling, fail-closed authentication and response isolation.
+
+The `playlist_write` capability allows a plugin to contribute its own managed live channels
+to selected inputs or targets. It cannot delete provider channels through reconciliation. See
+[Managed Channels](./managed-channels.md) for identity, snapshot storage and failure behavior.
+
 A hook that needs a capability makes the manifest invalid if the manifest does not request it: `stream.inject-headers`
 needs `stream_headers`, `epg.transform-programmes` and `epg.enrich-programmes` need `epg_write`, and
 `notifications.send` needs `notifications`.
@@ -91,6 +99,8 @@ A plugin with custom UI runs its scripts in a sandboxed frame. The frame has an 
   authenticated call itself, and only for methods the manifest declares.
 - The frame document is served without authentication. That is a design choice: an iframe `src` carries no token. The
   route serves only files under the plugin's `ui/` directory, of an allowed type, for an enabled plugin.
+  Declared locale JSON files are also available for loaded, disabled and failed plugins so settings can be translated
+  before enabling; executable UI assets still require an enabled plugin.
 
 Limits that remain:
 

@@ -2334,7 +2334,10 @@
     "CAST": "Reparto",
     "DIRECTOR": "Director",
     "RELEASE_DATE": "Fecha de estreno",
-    "RATING": "Calificación"
+    "RATING": "Calificación",
+    "MANAGED_CHANNELS": "Canales gestionados",
+    "PLUGIN_REFERENCE_INPUT_MANAGED": "Canales gestionados de la entrada",
+    "PLUGIN_REFERENCE_TARGET_MANAGED": "Canales gestionados del destino"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Portapapeles no compatible.\nSu navegador o el contexto actual no permite el acceso al portapapeles.\nUtilice HTTPS o localhost.",
@@ -2833,5 +2836,14 @@
     "invalid_group": "El grupo no puede estar vacío ni contener espacios al inicio o final",
     "invalid_type": "Tipo de campo no válido",
     "unknown_field": "Campo desconocido"
+  },
+  "MANAGED_CHANNELS": {
+    "POINT": "Punto de inserción",
+    "ADD_PLUGIN": "Añadir plugin de canales gestionados",
+    "TARGET_HINT": "Añade canales gestionados por plugins a este destino. El punto seleccionado sigue el orden de procesamiento del destino; las reglas posteriores de mapeo, ordenación y salida se siguen aplicando.",
+    "INPUT_HINT": "Añade canales gestionados por plugins a esta entrada antes del procesamiento de destinos. Todos los destinos que usan esta entrada pueden recibirlos.",
+    "BEFORE_FILTER": "Antes del filtrado",
+    "AFTER_FILTER": "Después del filtrado",
+    "NO_PLUGINS": "No hay ningún plugin de canales gestionados seleccionado. Activa un plugin que proporcione canales gestionados para añadir uno."
   }
 }

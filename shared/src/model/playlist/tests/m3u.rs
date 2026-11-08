@@ -77,6 +77,7 @@ fn m3u_to_m3u_emits_tvg_id_from_epg_channel_id() {
         t_catchup_mode: None,
         source_ordinal: 0,
         additional_properties: None,
+        input_url: "".intern(),
     };
 
     let output = item.to_m3u(None, false);
@@ -112,6 +113,7 @@ fn m3u_to_m3u_preserves_mixed_case_tvg_id() {
         t_catchup_mode: None,
         source_ordinal: 0,
         additional_properties: None,
+        input_url: "".intern(),
     };
 
     let output = item.to_m3u(None, false);
@@ -145,6 +147,7 @@ fn m3u_to_m3u_emits_tvg_chno_from_chno() {
         t_catchup_mode: None,
         source_ordinal: 0,
         additional_properties: None,
+        input_url: "".intern(),
     };
 
     let output = item.to_m3u(None, false);
@@ -178,6 +181,7 @@ fn m3u_to_m3u_omits_tvg_chno_when_chno_is_zero() {
         t_catchup_mode: None,
         source_ordinal: 0,
         additional_properties: None,
+        input_url: "".intern(),
     };
 
     let output = item.to_m3u(None, false);
@@ -222,6 +226,7 @@ fn m3u_to_m3u_preserves_catchup_attributes() {
             }),
             ..LiveStreamProperties::default()
         }))),
+        input_url: "".intern(),
     };
 
     let output = item.to_m3u(None, false);
@@ -267,6 +272,7 @@ fn m3u_to_m3u_unifies_append_to_catchup_type_only() {
             }),
             ..LiveStreamProperties::default()
         }))),
+        input_url: "".intern(),
     };
 
     let output = item.to_m3u(None, false);
@@ -310,6 +316,7 @@ fn m3u_to_m3u_uses_rewritten_catchup_mode_and_source() {
             }),
             ..LiveStreamProperties::default()
         }))),
+        input_url: "".intern(),
     };
 
     let output = item.to_m3u(None, false);
@@ -355,4 +362,57 @@ fn m3u_to_m3u_emits_only_configured_upstream_user_agent() {
     assert!(item.to_m3u(None, false).contains("#EXTVLCOPT:http-user-agent=Provider-UA\n"));
     item.upstream_user_agent = None;
     assert!(!item.to_m3u(None, false).contains("#EXTVLCOPT:http-user-agent="));
+}
+
+#[test]
+fn m3u_record_override_source_id_uses_input_stream_id_or_falls_back_to_provider_id() {
+    let mut item = M3uPlaylistItem {
+        virtual_id: VirtualId::default(),
+        provider_id: "prov1".intern(),
+        input_stream_id: "".intern(),
+        upstream_user_agent: None,
+        name: "Test Channel".intern(),
+        chno: 0,
+        logo: "".intern(),
+        logo_small: "".intern(),
+        group: "Test Group".intern(),
+        title: "Test Title".intern(),
+        parent_code: "".intern(),
+        audio_track: "".intern(),
+        time_shift: "".intern(),
+        rec: "".intern(),
+        url: "http://example.com/stream".intern(),
+        epg_channel_id: None,
+        input_name: "test".intern(),
+        item_type: PlaylistItemType::Live,
+        t_stream_url: "".intern(),
+        t_resource_url: None,
+        t_catchup_source: None,
+        t_catchup_mode: None,
+        source_ordinal: 0,
+        additional_properties: None,
+        input_url: "".intern(),
+    };
+
+    assert_eq!(item.override_source_id().as_ref(), "prov1");
+
+    item.input_stream_id = "stream-hash-123".intern();
+    assert_eq!(item.override_source_id().as_ref(), "stream-hash-123");
+}
+
+/// Builds an M3U playlist item with the given URL and input URL for override testing.
+fn test_m3u_item(url: &str, input_url: &str) -> M3uPlaylistItem {
+    M3uPlaylistItem::from(&PlaylistItem {
+        header: PlaylistItemHeader { url: url.intern(), input_url: input_url.intern(), ..Default::default() },
+    })
+}
+
+#[test]
+fn m3u_record_override_source_url_uses_input_url_or_falls_back_to_url() {
+    let mut item = test_m3u_item("http://example.com/mapped.m3u8", "");
+
+    assert_eq!(item.override_source_url().as_ref(), "http://example.com/mapped.m3u8");
+
+    item.input_url = "http://example.com/input.m3u8".intern();
+    assert_eq!(item.override_source_url().as_ref(), "http://example.com/input.m3u8");
 }

@@ -35,6 +35,8 @@ pub(super) struct RawManifest {
     #[serde(default, deserialize_with = "null_default")]
     pub tasks: Vec<RawTask>,
     #[serde(default, deserialize_with = "null_default")]
+    pub routes: Vec<super::HttpRoute>,
+    #[serde(default, deserialize_with = "null_default")]
     pub provides: RawProvides,
     #[serde(default, deserialize_with = "null_default")]
     pub scope: RawScope,

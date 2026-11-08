@@ -11,9 +11,10 @@ created and the pipeline behaves as it does without the plugin system. If the fi
 mount), the server logs a warning and starts with plugins off. The management API (`/api/v1/plugins`) is part of the web API, so it needs
 `web_ui.enabled: true`. To build and run a first plugin, start with the [Quickstart](./quickstart.md).
 
-> **Notifier plugins are optional.** Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and local commands are
-> built into the server and configured under `messaging` (see the configuration reference). The notifier plugins under
-> `plugins/notifiers/` do the same job as plugins, for anyone who prefers a channel to be one; configure either, or both.
+> **Built-in channels come first.** Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and local commands are
+> built into the server and configured under `messaging` (see the configuration reference). A plugin can add one more
+> channel. The notifier plugins under `plugins/examples/` are source examples only. They are not in the marketplace and not in
+> the Docker image. See [Notification provider](./events-notifications-inputs.md#notification-provider).
 
 ## What a plugin is
 
@@ -28,8 +29,10 @@ A plugin is shipped as a `.tlpx` package, which is a zip archive with these part
 | `rpc/*.json` | optional | Input schemas of `rpc_exports` |
 
 The package layout and limits are in [Packaging](./packaging.md). A plugin is built from the SDK crate
-`tuliprox-plugin-sdk` (`plugins/plugin-sdk/`) in Rust, from `plugins/examples/template`. The repository has three more
-examples: `sports-enricher`, `hf-epg-matcher` and `matrix-notifier`.
+`tuliprox-plugin-sdk` (`plugins/plugin-sdk/`) in Rust, from `plugins/examples/template`. The repository has more
+examples: `sports-enricher`, `hf-epg-matcher`, `matrix-notifier` and one notifier example for each built-in channel
+(`telegram-notifier`, `discord-notifier`, `slack-notifier`, `gotify-notifier`, `ntfy-notifier`, `pushover-notifier`,
+`rest-notifier`, `command-notifier`).
 
 `tuliprox-plugin-api`, `tuliprox-plugin-sdk` and `tuliprox-plugin-sdk-macros` have their own version (1.x), the
 version of the plugin contract. A tuliprox release does not change it, so a plugin's `Cargo.lock` stays valid across
@@ -168,3 +171,7 @@ adjust them.
 
 <!-- UNVERIFIED: the TinyGo and componentize-py recipes. No component was built with them in this project, so the
 flags above come from the tools' documentation, not from a run. -->
+
+Incoming REST APIs are described in [Incoming HTTP routes](./http-routes.md).
+
+Plugins can also add their own live channels to selected inputs or targets with [Managed Channels](./managed-channels.md).

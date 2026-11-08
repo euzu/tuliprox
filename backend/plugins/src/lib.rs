@@ -22,11 +22,13 @@ mod filter_batch;
 mod header_inject;
 mod host_fns;
 mod http;
+mod http_routes;
 mod image_cache;
 mod input_provider;
 mod install;
 mod kv;
 mod logs;
+mod managed_channels;
 mod manifest;
 mod marketplace;
 mod mcp_tools;
@@ -50,6 +52,7 @@ pub use activation::{
     RecoveryOutcome, ENV_PLUGIN_TEST_CRASH_AT,
 };
 pub use boot_update::{boot_report_path, read_boot_report, record_recovered, run_boot_update};
+pub use http_routes::{HostAuthorization, HttpRouteRequest, HttpRouteResponse};
 pub use install::{ActivatedUpdate, InstallGuard, InstallRejection, MarketplaceExpect};
 pub use marketplace::{
     browse, fetch_package, has_catalog, probe_source_name, remove_cache, resolve_release, source_info, source_warnings,

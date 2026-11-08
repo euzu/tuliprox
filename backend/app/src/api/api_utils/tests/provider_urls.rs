@@ -1236,6 +1236,7 @@ async fn get_query_path_strips_extension_for_live_with_flag() {
         source_ordinal: 0,
         input_stream_id: "1".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     };
 
     let hls_ext = shared::defaults::HLS_EXT.to_string();

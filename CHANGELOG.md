@@ -4,6 +4,11 @@
 
 ## ⚠️ Breaking Changes
 
+- **Notifier plugins read routing from `ext.messaging.routing`.** A notifier plugin joins the messaging config through
+  `ui.config_extensions` with `section: messaging`. Its fields appear on the Web UI messaging page and are stored in
+  `plugins.plugins[].settings.ext.messaging`. The host reads the channel routing only from `ext.messaging.routing`. The
+  top-level `routing` key in plugin settings is ignored. There is no migration; move the value by hand.
+
 - **API user database migration refuses unresolved field assignments or unverifiable recovery history.** Untracked
   legacy databases migrate automatically when every record is unambiguous. Tracked databases requiring reconstruction
   need verified field-named recovery history bound to their identity and revision.
@@ -218,11 +223,15 @@
   source URL below its short label, so sources on the same host are distinguishable. The URL is masked according to
   `sanitize_sensitive_info`. The **Plugins** sidebar entry moved into the **Settings** group.
 
-- **Notifier plugins, next to the built-in channels.** Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and
-  local commands are all still built into the server and configured under `messaging`, exactly as before. Each also exists
-  as an optional plugin under `plugins/notifiers/<id>` (`make plugin-notifiers` builds them all), for anyone who wants
-  a channel to be a plugin; nothing is removed or renamed. The plugin system and its SDK gained what these plugins needed
-  (see the entries below), so a channel can move into a plugin later without further host work.
+- **Built-in messaging channels are back; notifier plugins are examples only.** Telegram, Discord, Slack, Gotify, ntfy,
+  Pushover, REST webhooks and local commands are built into the server again. Configure them under `messaging` in the
+  Web UI or in `config.yml`, with Handlebars templates, secret masking and routing, as before the plugin system. A plugin
+  can still be a notification channel (`notifications` capability). The notifier plugins no longer ship as products:
+  they live under `plugins/examples/<id>` as source examples, they are not in the marketplace and not in the Docker
+  image, and `make plugin-examples` builds them. The official catalog moved to `plugins/marketplace.json`; the default
+  source URL is now `https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json`. A
+  config that names the old root URL explicitly must be updated. The catalog lists only `youtube-input`. The SDK
+  `notify` module (`tuliprox_plugin_sdk::notify`) stays for plugin authors. See [Plugins](docs/src/plugins/overview.md).
 
 - **The plugin SDK has its own version.** `tuliprox-plugin-api`, `tuliprox-plugin-sdk` and `tuliprox-plugin-sdk-macros`
   are versioned 1.x as the plugin contract instead of following the tuliprox release, so a plugin's `Cargo.lock` stays
@@ -271,70 +280,6 @@
   is logged by program name. See
   [Running programs](docs/src/plugins/security.md#running-programs).
 
-- **Local commands are also available as a plugin.** The `command-notifier` plugin (`plugins/notifiers/command-notifier`,
-  `make plugin-command-notifier`) runs a program for each notification with the event as JSON on its standard input, and
-  `TULIPROX_EVENT_ID`, `TULIPROX_EVENT_SEVERITY` and `TULIPROX_EVENT_TITLE` in its environment. A non-zero exit or a timeout is
-  retried with the program's first line of standard error as the reason; a program that cannot be started is dead-lettered
-  at once. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
-  [Command Notifier](docs/src/plugins/command-notifier.md).
-
-- **Telegram notifications are also available as a plugin.** The `telegram-notifier` plugin (`plugins/notifiers/telegram-notifier`,
-  `make plugin-telegram-notifier`) sends each notification to one or more Telegram chats through a bot: a bold title (marked
-  `⚠️` for a warning and `🚨` for an error), the event's sections as bold headings with their lines, and Telegram's own HTML
-  mode with only `& < >` escaped, so nothing in an event can become markup. A message that would pass Telegram's limit is
-  split between lines into up to 8 parts (counted in UTF-16 units, as Telegram counts), the last one ending in `…`; HTML
-  that Telegram still refuses is sent again as plain text. Chats are `<chat_id>`, `<chat_id>:<thread_id>` (a forum topic) or
-  `@channel`. The plugin remembers, in its key-value store, which part reached which chat, so when one chat is rate limited or
-  down the outbox's retry sends only what is missing instead of repeating the message to the others; a chat the bot was
-  removed from is given up on without failing the rest. A `429` honours Telegram's own `retry_after`. The bot token is part of
-  every request URL, so no error or log line is ever built from a URL or a transport error. Its settings form ships its own
-  translations (English, Russian, Spanish, Arabic). See [Telegram Notifier](docs/src/plugins/telegram-notifier.md).
-
-- **REST webhooks are also available as a plugin.** The `rest-notifier` plugin (`plugins/notifiers/rest-notifier`, `make plugin-rest-notifier`) sends
-  each notification to any HTTP endpoint with POST, PUT or PATCH: the event as JSON (`id`, `severity`, `timestamp`,
-  `instance`, `title`, `body`, `fields`, `sections`) or the plain-text body, your own headers, and a list of secret headers
-  (such as `Authorization: Bearer ...`) whose whole entries are masked in the Web UI. An optional `signing_secret` adds the
-  HMAC-SHA256 signature. A malformed header entry is reported by its position, never by its text, so a credential cannot
-  reach a log. The breaker, rate limit and concurrency cap the built-in channel carried are the host's own per-plugin
-  outbound limits. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
-  [REST Notifier](docs/src/plugins/rest-notifier.md).
-
-- **Pushover notifications are also available as a plugin.** The `pushover-notifier` plugin (`plugins/notifiers/pushover-notifier`,
-  `make plugin-pushover-notifier`) sends notifications to Pushover. The message carries the event's own time as the
-  Pushover timestamp, so one delivered late through the outbox still shows when it happened. With `style: html` the event's
-  sections are sent as bold headings with their lines below; the message is assembled from whole lines, so the
-  1024-character limit can never cut a tag or an entity in half. The token and the user key stay in the request body, never in a
-  URL, and in no error or log line. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
-  [Pushover Notifier](docs/src/plugins/pushover-notifier.md).
-
-- **ntfy notifications are also available as a plugin.** The `ntfy-notifier` plugin (`plugins/notifiers/ntfy-notifier`,
-  `make plugin-ntfy-notifier`) publishes to an ntfy topic through ntfy's JSON API, so a title or a message can carry any
-  Unicode text (the header form had to strip emoji from titles). Events carry their domain and, for a warning or an error,
-  a warning or alarm tag as ntfy tags; the message is cut at ntfy's 4096-byte limit on a character boundary; with
-  `style: markdown` the event's sections are sent as markdown for the ntfy web app. A protected topic's token is only sent in the
-  `Authorization` header. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
-  [ntfy Notifier](docs/src/plugins/ntfy-notifier.md). The SDK's `notify` module gained `Section`, `sections_of` and a
-  `markdown` helper (escaping, hard line breaks, sections as bold headings), which the Gotify plugin now uses too.
-
-- **Gotify notifications are also available as a plugin.** The `gotify-notifier` plugin (`plugins/notifiers/gotify-notifier`,
-  `make plugin-gotify-notifier`) pushes notifications to a Gotify server, as plain text or, with `style: markdown`, as the
-  event's sections in markdown that Gotify clients render. The application token travels in the `X-Gotify-Key` header
-  instead of the URL, so it cannot end up in a proxy log or an error. Its settings form ships its own translations
-  (English, Russian, Spanish, Arabic). See [Gotify Notifier](docs/src/plugins/gotify-notifier.md).
-
-- **Slack notifications are also available as a plugin.** The `slack-notifier` plugin (`plugins/notifiers/slack-notifier`,
-  `make plugin-slack-notifier`) delivers notifications to a Slack incoming webhook as Block Kit blocks (a header, the
-  event's sections, a footer with the event id, instance and time) or as plain text. `&`, `<` and `>` are escaped, so event
-  text cannot become a mention or a link. Its settings form ships its own translations (English, Russian, Spanish,
-  Arabic). See [Slack Notifier](docs/src/plugins/slack-notifier.md). The SDK gained `tuliprox_plugin_sdk::notify`
-  (HTTP status to `DeliveryError`, `Retry-After`, ISO 8601 times) for notification plugins, which the Discord plugin now uses too.
-
-- **Discord notifications are also available as a plugin.** The `discord-notifier` plugin (`plugins/notifiers/discord-notifier`,
-  `make plugin-discord-notifier`) delivers notifications to a Discord webhook as an embed (a colour per severity, the
-  instance name as footer, the event's detail as fields) or as plain text, with `@everyone` and role pings disabled. Routing, quiet hours,
-  suppression and the retrying outbox apply as for every channel. Its settings form ships its own translations
-  (English, Russian, Spanish, Arabic) through `ui/locales`. See [Discord Notifier](docs/src/plugins/discord-notifier.md).
-  Notification plugin calls now run under a 30 s deadline instead of `plugins.max_exec`.
 - **Manual item overrides and a redesigned Playlist Explorer.** Single playlist items can now be corrected without a
   mapper script: an override file per input (`overrides/input/<name>.yml`) or per target
   (`overrides/target/<name>.yml`, keyed by `inputs:`) stores field changes for individual live channels, movies and
@@ -1448,6 +1393,17 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **The override dialog shows the right channel for M3U items in Xtream targets.** M3U items whose stream URL has no
+  numeric id (for example HDHomeRun `.../auto/v5.2`) are stored in Xtream targets with provider id `0`. All of them
+  shared one override key, so the dialog showed the processed values of another channel. The key now comes from the
+  original input stream id. The explorer list now also uses this key, so saved overrides of these channels show and
+  apply. Override keys also stay correct when a target mapper rewrites the URL or id.
+
+- **The input playlist explorer gives every M3U channel its own row.** Stored M3U input channels have no virtual id,
+  so all rows shared one identity: selection marked every row, the open edit panel did not reload when another
+  channel was selected, and a save replaced every row. The explorer response now assigns each such channel a unique
+  explorer-local id.
 
 - **Shared HLS sessions continue on a healthy mirror after the active origin fails.** When the active origin
   failed during playback, the content check against the alternative mirror tried to pin the reference segment

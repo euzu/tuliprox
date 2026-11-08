@@ -913,6 +913,10 @@ messaging:
 | `max_per_hour`      | Circuit breaker. On tripping, the channel emits one "further notifications suppressed" audit line and then goes quiet for the rest of the hour, so the silence is distinguishable from a broken notifier. |
 | `dedup_window_secs` | Suppress a repeated event with the same dedup key for this long. Generalizes what used to be `disk_alert.repeat_interval_secs`.                                                                           |
 
+A plugin can add a notification channel next to these built-in channels. Its fields appear on the Web UI messaging page,
+and its routing block is stored in the plugin settings under `ext.messaging.routing`. See
+[Notification provider](../plugins/events-notifications-inputs.md#notification-provider).
+
 ### 5.1.2 Delivery, Retry and the Outbox
 
 Every notification goes through a durable outbox before it is sent. Entries

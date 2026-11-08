@@ -227,6 +227,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "1".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         }
     }
 
@@ -265,6 +266,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "2".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         }
     }
 

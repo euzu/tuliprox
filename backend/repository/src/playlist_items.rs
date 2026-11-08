@@ -18,7 +18,8 @@
 //! after:   PlaylistSource::into_items() -> ClusterFiltered<SourceItems<'_>>
 //! ```
 //!
-//! Nothing here allocates and nothing here dispatches dynamically: `next()` is
+//! Ordinary sources allocate nothing; an appended overlay boxes one iterator chain per traversal.
+//! Nothing dispatches dynamically: `next()` is
 //! a discriminant branch the compiler can inline through and predict.
 
 use crate::bplustree::BPlusTreeDiskIterator;
@@ -208,6 +209,7 @@ pub enum SourceItems<'a> {
     M3u(BTreeStores<'a, Arc<str>, M3uPlaylistItem, 1>),
     SingleXtream(BTreeStores<'a, UUIDType, XtreamPlaylistItem, 1>),
     Memory(MemoryDrain<'a>),
+    Appended(Box<std::iter::Chain<ClusterFiltered<SourceItems<'a>>, ClusterFiltered<SourceItems<'a>>>>),
 }
 
 impl Iterator for SourceItems<'_> {
@@ -224,6 +226,7 @@ impl Iterator for SourceItems<'_> {
                 stores.next().map(|item| PlaylistItem::from_stalker(&item, input_name))
             }
             Self::Memory(drain) => drain.next(),
+            Self::Appended(items) => items.next(),
         }
     }
 }
@@ -245,6 +248,7 @@ impl Iterator for SourceItems<'_> {
 pub enum SourceCowItems<'a> {
     Owned(SourceItems<'a>),
     Borrowed(MemoryItems<'a>),
+    Appended(Box<std::iter::Chain<ClusterFiltered<SourceCowItems<'a>>, ClusterFiltered<SourceCowItems<'a>>>>),
 }
 
 impl<'a> Iterator for SourceCowItems<'a> {
@@ -255,6 +259,7 @@ impl<'a> Iterator for SourceCowItems<'a> {
         match self {
             Self::Owned(items) => items.next().map(Cow::Owned),
             Self::Borrowed(items) => items.next().map(Cow::Borrowed),
+            Self::Appended(items) => items.next(),
         }
     }
 }
@@ -267,6 +272,7 @@ impl<'a> Iterator for SourceCowItems<'a> {
 pub enum SourceItemsMut<'a> {
     Empty,
     Memory(MemoryItemsMut<'a>),
+    Appended(Box<std::iter::Chain<ClusterFiltered<SourceItemsMut<'a>>, ClusterFiltered<SourceItemsMut<'a>>>>),
 }
 
 impl<'a> Iterator for SourceItemsMut<'a> {
@@ -277,6 +283,7 @@ impl<'a> Iterator for SourceItemsMut<'a> {
         match self {
             Self::Empty => None,
             Self::Memory(items) => items.next(),
+            Self::Appended(items) => items.next(),
         }
     }
 }

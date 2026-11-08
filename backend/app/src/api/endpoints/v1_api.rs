@@ -190,7 +190,8 @@ pub fn v1_api_register(
 
     let system_write = axum::routing::Router::new().route("/geoip/update", axum::routing::get(geoip_update));
 
-    let mut router = super::user_settings_api::user_settings_api_register(app_state);
+    let mut router = super::user_settings_api::user_settings_api_register(app_state)
+        .merge(super::plugins_http_api::plugins_http_api_register(web_auth_enabled));
 
     if web_auth_enabled {
         router = router

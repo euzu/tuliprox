@@ -1214,6 +1214,7 @@ mod tests {
             stalker: None,
             plugin: None,
             plugin_options: Vec::new(),
+            managed_channels: Vec::new(),
         }
     }
 

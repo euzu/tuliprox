@@ -5,7 +5,7 @@ round. `epg.resolve-conflict` is reserved but unsupported; a manifest that decla
 The ids are the table `HookId` in `backend/plugins/src/manifest/hook.rs`. Ids are case sensitive. The six stage ids need
 the `playlist.` prefix: the bare form `after-filter` is refused with a message that names the right spelling.
 
-Two things apply to every hook:
+The following apply to pipeline hooks:
 
 - **Fail-open.** A failing call leaves the data as the previous plugin left it. The failure is counted on the plugin's
   circuit breaker. Only `resources.fail_mode: abort-target` changes that, and only for the playlist hooks that go through
@@ -13,6 +13,9 @@ Two things apply to every hook:
   fail-open (`backend/plugins/src/epg_hooks.rs`). See [Overview](./overview.md#fail-open).
 - **Chaining.** When several plugins export the same hook, they run in `priority` order (default 100, lower first),
   then by id. Each plugin sees what the one before it left. Its results apply only when its whole run succeeded.
+
+Incoming `http.handle` requests are dispatched to one named plugin and fail closed; they do not chain or trip the pipeline
+breaker. See [Incoming HTTP routes](./http-routes.md).
 
 ## Hook table
 
@@ -23,6 +26,8 @@ relative to `backend/plugins/src/`, `backend/processing/src/` or `backend/app/sr
 
 | Hook id | Interface | SDK method: input -> output | Also requires | When it runs |
 | --- | --- | --- | --- | --- |
+| `playlist.managed-channels` | `managed-channel-hooks` | `reconcile(request)` -> complete managed channel list | `playlist_write` | Configured input or target filter point; failures retain per-binding last-good channels ([details](./managed-channels.md)) |
+| `http.handle` | `http-routes` | `authenticate(request)` -> identity; `handle(request)` -> HTTP response | `http_routes`, non-empty `routes` | A request to the plugin HTTP namespace (`http_routes.rs`, `plugins_http_api.rs`) |
 | `playlist.before-filter` | `playlist-hooks` | `on_stage(stage, target, channels)` -> sparse `ChannelChange` list | none | Before the filter stage of each target (`processor/playlist/transform.rs`) |
 | `playlist.after-filter` | `playlist-hooks` | same | none | After the filter stage |
 | `playlist.before-rename` | `playlist-hooks` | same | none | Before the rename stage |

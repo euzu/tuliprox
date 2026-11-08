@@ -61,6 +61,7 @@ fn resolve_provider_url_for_target_request_rewrites_provider_scheme() {
         ..Default::default()
     });
     let target = Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         id: 11,
         enabled: true,
         name: "target".to_string(),
@@ -127,6 +128,7 @@ fn resolve_provider_url_passthrough_for_unresolved_provider_target_request() {
         ..Default::default()
     });
     let target = Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         id: 11,
         enabled: true,
         name: "target".to_string(),
@@ -179,6 +181,7 @@ fn resolve_provider_url_passthrough_for_ambiguous_target_request() {
         ..Default::default()
     });
     let target = Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 11,
         enabled: true,
