@@ -128,7 +128,7 @@ That remains a future feature.
 | ↳ `content_type`           | Enum   | `auto`           | Classification mode. Options: `auto` (guess via PTT), `movie`, `series`.      |
 | ↳ `recursive`              | Bool   | `true`           | If true, Tuliprox crawls all subdirectories within the specified path.        |
 | ↳ `follow_symlinks`        | Bool   | `true`           | Follows symlinked files and directories. See "Symlinks and cloud mounts".     |
-| `supported_extensions`     | List   | `[...]`          | Video extensions considered playable (e.g., `mp4`, `mkv`, `mov`, `webm`).     |
+| `supported_extensions`     | List   | `[...]`          | File extensions to scan (e.g., `mp4`, `mkv`, `mp3`). Case and dot are ignored.|
 | **`metadata`**             | Object |                  | Configuration for metadata resolution and fallback logic.                     |
 | ↳ `fallback_to_filename`   | Bool   | `true`           | Uses the parsed filename if NFO or TMDB metadata is unavailable.              |
 | ↳ `read_existing.kodi`     | Bool   | `true`           | Reads Kodi-compatible `.nfo` files located alongside the media.               |

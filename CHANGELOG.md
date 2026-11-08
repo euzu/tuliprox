@@ -1407,6 +1407,10 @@
 
 ## 🐛 Fixes
 
+- **Library extensions are matched in any notation.** Entries in `library.supported_extensions` such as `.mp3`, `MP3`
+  or ` mp3 ` are normalized to `mp3`. Before, an entry with a leading dot or spaces matched no file, so the scan found
+  nothing for it. Local `.mp3` files are now served as `audio/mpeg`.
+
 - **Local library files stream when the scan directory is a symlink.** The stream check compared the resolved file path
   with the unresolved scan directory path, so every file below a symlinked scan directory returned `403 Forbidden`.
 

@@ -484,6 +484,29 @@ mod tests {
         assert_eq!(episode_numbers["MyShow.2020.1080p.mkv"], 5);
     }
 
+    /// Audio files are scanned like video files once their extension is configured.
+    #[tokio::test]
+    async fn test_scan_finds_configured_audio_extension() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(temp.path().join("Some Song.mp3"), b"content").await.expect("write mp3");
+        tokio::fs::write(temp.path().join("Movie.mkv"), b"content").await.expect("write mkv");
+
+        let mut config = create_test_config();
+        config.supported_extensions = vec!["mp3".to_string()];
+        config.scan_directories = vec![LibraryScanDirectory {
+            enabled: true,
+            path: temp.path().to_string_lossy().into_owned(),
+            content_type: LibraryContentType::Movie,
+            recursive: false,
+            follow_symlinks: false,
+        }];
+
+        let files = LibraryScanner::new(config).scan_all().await.expect("scan_all");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_name, "Some Song.mp3");
+        assert_eq!(files[0].extension, "mp3");
+    }
+
     #[cfg(unix)]
     mod symlink_tests {
         use super::*;

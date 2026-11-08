@@ -626,6 +626,7 @@ fn content_type_from_ext_maps_fragmented_mp4_extensions_case_insensitively() {
         ("cmfv", "video/mp4"),
         ("m4a", "audio/mp4"),
         ("CMFA", "audio/mp4"),
+        ("MP3", "audio/mpeg"),
         ("ts", "video/mp2t"),
         ("mkv", "video/x-matroska"),
         ("bin", "application/octet-stream"),

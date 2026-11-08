@@ -42,6 +42,7 @@ pub fn content_type_from_ext(ext: &str) -> &'static str {
     match ext.to_ascii_lowercase().as_str() {
         "mp4" | "fmp4" | "m4s" | "m4v" | "cmfv" => "video/mp4",
         "m4a" | "cmfa" => "audio/mp4",
+        "mp3" => "audio/mpeg",
         "mkv" => "video/x-matroska",
         "avi" => "video/x-msvideo",
         "mov" => "video/quicktime",

@@ -92,6 +92,17 @@ impl LibraryConfig {
 
 macros::from_impl!(LibraryConfig);
 
+/// Normalizes a configured library extension to the form the scanner compares against.
+///
+/// The scanner matches the lowercased `Path::extension` of each file, so only surrounding
+/// whitespace, one leading dot and case are dropped. Other characters (`mpeg-2`) and long
+/// extensions are kept. Returns `None` for an entry that names no extension.
+fn normalize_library_extension(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let extension = trimmed.strip_prefix('.').unwrap_or(trimmed);
+    (!extension.is_empty()).then(|| extension.to_lowercase())
+}
+
 impl From<&LibraryConfigDto> for LibraryConfig {
     fn from(dto: &LibraryConfigDto) -> Self {
         Self {
@@ -107,7 +118,11 @@ impl From<&LibraryConfigDto> for LibraryConfig {
                     follow_symlinks: d.follow_symlinks,
                 })
                 .collect(),
-            supported_extensions: dto.supported_extensions.iter().map(|ext| ext.to_lowercase()).collect(),
+            supported_extensions: dto
+                .supported_extensions
+                .iter()
+                .filter_map(|ext| normalize_library_extension(ext))
+                .collect(),
             metadata: LibraryMetadataConfig {
                 read_existing: LibraryMetadataReadConfig {
                     kodi: dto.metadata.read_existing.kodi,
@@ -158,6 +173,19 @@ mod tests {
         let nonce =
             SystemTime::now().duration_since(UNIX_EPOCH).expect("system time must be after unix epoch").as_nanos();
         std::env::temp_dir().join(format!("tuliprox-library-missing-{nonce}")).to_string_lossy().to_string()
+    }
+
+    /// Configured extensions lose dot, spaces and case but keep every scanner-matchable character.
+    #[test]
+    fn supported_extensions_are_normalized_to_bare_lowercase() {
+        let dto = LibraryConfigDto {
+            supported_extensions: [".MP3", " flac ", "mkv", ".", "MPEG-2", "longextension"]
+                .map(str::to_string)
+                .to_vec(),
+            ..Default::default()
+        };
+        let config = super::LibraryConfig::from(&dto);
+        assert_eq!(config.supported_extensions, vec!["mp3", "flac", "mkv", "mpeg-2", "longextension"]);
     }
 
     #[test]
