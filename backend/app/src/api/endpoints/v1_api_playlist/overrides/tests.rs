@@ -449,6 +449,7 @@ fn m3u_record_of(
         additional_properties: None,
         input_stream_id: provider_id.intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -474,6 +475,7 @@ fn xtream_record(virtual_id: u32, provider_id: u32, name: &str, group: &str, inp
         source_ordinal: 0,
         input_stream_id: provider_id.to_string().intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -1522,4 +1524,62 @@ async fn input_explorer_for_m3u_input_returns_distinct_nonzero_virtual_ids() {
     let non_exp2: UiPlaylistItem = serde_json::from_value(items[1].clone()).expect("non_exp2");
     assert_eq!(non_exp1.virtual_id, 0);
     assert_eq!(non_exp2.virtual_id, 0);
+}
+
+#[tokio::test]
+async fn scan_target_item_with_mapped_url_returns_processed_fields_for_input_key() {
+    let fixture = fixture();
+    let url = "http://host:5004/auto/v5.2";
+    let hash = extract_id_from_url(url);
+
+    let mut m3u_input = m3u_record_of(CONFIG_INPUT, &hash, "WRAL DT", "Group", PlaylistItemType::Live);
+    m3u_input.url = url.intern();
+    m3u_input.input_stream_id = hash.clone().intern();
+    fixture.write_input_playlist(CONFIG_INPUT, vec![m3u_input]);
+
+    let mapped_url = "http://other/live/123.ts";
+
+    // 1. Xtream target with mapped URL
+    let mut xtream_target_item = xtream_record(1, 0, "WRAL DT Processed Xtream", "Group", CONFIG_INPUT);
+    xtream_target_item.url = mapped_url.intern();
+    xtream_target_item.input_url = url.intern();
+    xtream_target_item.input_stream_id = hash.clone().intern();
+    fixture.write_xtream_target_playlist(XTREAM_TARGET, vec![xtream_target_item]);
+
+    // 2. M3U target with rewritten provider_id and mapped URL
+    let mut m3u_target_item =
+        m3u_record_of(CONFIG_INPUT, "mapped-provider-id", "WRAL DT Processed M3U", "Group", PlaylistItemType::Live);
+    m3u_target_item.url = mapped_url.intern();
+    m3u_target_item.input_url = url.intern();
+    m3u_target_item.input_stream_id = hash.clone().intern();
+    fixture.write_target_playlist(M3U_TARGET, vec![m3u_target_item]);
+
+    let sources = fixture.app_state.app_config.sources.load();
+    let aliases = tuliprox_core::model::InputAliasMap::from_inputs(&sources.inputs);
+    let key = tuliprox_core::model::override_key(
+        &shared::model::PlaylistItemHeader {
+            id: hash.intern(),
+            url: url.intern(),
+            input_name: CONFIG_INPUT.intern(),
+            item_type: PlaylistItemType::Live,
+            ..Default::default()
+        },
+        &aliases,
+    )
+    .expect("override key")
+    .id;
+
+    // Query target 2 (Xtream) using the input override key:
+    let (status, body) =
+        fixture.get(&format!("/playlist/overrides/item?target_id=2&input={CONFIG_INPUT}&kind=live&id={key}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["name"], "WRAL DT", "{body}");
+    assert_eq!(body["processed"]["name"], "WRAL DT Processed Xtream", "{body}");
+
+    // Query target 1 (M3U) using the input override key:
+    let (status, body) =
+        fixture.get(&format!("/playlist/overrides/item?target_id=1&input={CONFIG_INPUT}&kind=live&id={key}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["name"], "WRAL DT", "{body}");
+    assert_eq!(body["processed"]["name"], "WRAL DT Processed M3U", "{body}");
 }

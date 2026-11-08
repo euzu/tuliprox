@@ -42,8 +42,7 @@ use shared::{
         ItemOverridePatch, ItemPatchDto, M3uPlaylistItem, OrphanedOverrideFileDto, OverrideConflictDto,
         OverrideDiscardRequest, OverrideEntryDto, OverrideEntryState, OverrideFieldErrorsDto, OverrideFieldOp,
         OverrideFileDto, OverrideItemKind, OverrideOrphanEntryDto, OverrideOrphansDto, OverrideProvenanceDto,
-        OverrideRevisionDto, OverrideSaveRequest, OverrideScopeDto, PlaylistItemHeader, PlaylistItemType, TargetType,
-        XtreamCluster, XtreamPlaylistItem,
+        OverrideRevisionDto, OverrideSaveRequest, OverrideScopeDto, TargetType, XtreamCluster, XtreamPlaylistItem,
     },
 };
 use std::{
@@ -51,7 +50,7 @@ use std::{
     sync::Arc,
 };
 use tokio_stream::StreamExt;
-use tuliprox_core::model::{override_key, InputAliasMap, OverrideKey};
+use tuliprox_core::model::{override_key_for, InputAliasMap, OverrideKey};
 
 /// Default number of EPG channel candidates one search returns.
 const EPG_SEARCH_DEFAULT_LIMIT: u32 = 20;
@@ -327,19 +326,9 @@ fn visible_text_opt(value: &str) -> Option<String> {
     (!value.is_empty() && !looks_credential_bearing(value)).then(|| value.to_string())
 }
 
-fn header_of(id: Arc<str>, url: &Arc<str>, input_name: &Arc<str>, item_type: PlaylistItemType) -> PlaylistItemHeader {
-    PlaylistItemHeader {
-        id,
-        url: Arc::clone(url),
-        input_name: Arc::clone(input_name),
-        item_type,
-        ..PlaylistItemHeader::default()
-    }
-}
-
 fn xtream_inventory_item(item: &XtreamPlaylistItem, aliases: &InputAliasMap) -> Option<InventoryItem> {
-    let header = header_of(item.override_source_id(), &item.url, &item.input_name, item.item_type);
-    let key = override_key(&header, aliases)?;
+    let id = item.override_source_id();
+    let key = override_key_for(&id, item.override_source_url(), &item.input_name, item.item_type, aliases)?;
     Some(InventoryItem {
         key,
         fields: ItemFieldsDto {
@@ -359,8 +348,8 @@ fn xtream_inventory_item(item: &XtreamPlaylistItem, aliases: &InputAliasMap) -> 
 }
 
 fn m3u_inventory_item(item: &M3uPlaylistItem, aliases: &InputAliasMap) -> Option<InventoryItem> {
-    let header = header_of(Arc::clone(&item.provider_id), &item.url, &item.input_name, item.item_type);
-    let key = override_key(&header, aliases)?;
+    let id = item.override_source_id();
+    let key = override_key_for(&id, item.override_source_url(), &item.input_name, item.item_type, aliases)?;
     Some(InventoryItem {
         key,
         fields: ItemFieldsDto {
@@ -504,15 +493,10 @@ async fn scan_single_input_orphan_keys(
                         return Ok(None);
                     }
                 };
-                let id = Arc::from(item.provider_id.to_string());
-                let header = PlaylistItemHeader {
-                    id,
-                    url: Arc::clone(&item.url),
-                    input_name: Arc::clone(&item.input_name),
-                    item_type: item.item_type,
-                    ..Default::default()
-                };
-                if let Some(key) = override_key(&header, aliases) {
+                let id = item.override_source_id();
+                if let Some(key) =
+                    override_key_for(&id, item.override_source_url(), &item.input_name, item.item_type, aliases)
+                {
                     keys.insert((key.kind, key.id));
                 }
             }
@@ -534,8 +518,10 @@ async fn scan_single_input_orphan_keys(
                     return Ok(None);
                 }
             };
-            let header = header_of(Arc::clone(&item.provider_id), &item.url, &item.input_name, item.item_type);
-            if let Some(key) = override_key(&header, aliases) {
+            let id = item.override_source_id();
+            if let Some(key) =
+                override_key_for(&id, item.override_source_url(), &item.input_name, item.item_type, aliases)
+            {
                 keys.insert((key.kind, key.id));
             }
         }

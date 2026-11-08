@@ -274,6 +274,7 @@ mod tests {
             source_ordinal: id,
             input_stream_id: id.to_string().intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         }
     }
 

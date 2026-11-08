@@ -51,6 +51,9 @@ pub struct UiItemExplorerMeta {
     /// Internal source id for Xtream items (e.g. `input_stream_id` for M3U origin) used to compute the override key.
     #[serde(skip)]
     pub override_source_id: Option<Arc<str>>,
+    /// Internal source URL captured before any target transformation used to compute the override key.
+    #[serde(skip)]
+    pub override_source_url: Option<Arc<str>>,
 }
 
 /// Lightweight playlist item for UI streaming.
@@ -298,6 +301,7 @@ impl UiPlaylistItem {
         let explorer_meta = explorer.then(|| {
             let mut meta = explorer_meta_for(item.additional_properties.as_ref(), item.channel_no);
             meta.override_source_id = Some(item.override_source_id());
+            meta.override_source_url = (!item.input_url.is_empty()).then(|| Arc::clone(&item.input_url));
             meta
         });
         Self {
@@ -319,7 +323,12 @@ impl UiPlaylistItem {
     }
 
     pub fn from_m3u(item: M3uPlaylistItem, explorer: bool) -> Self {
-        let explorer_meta = explorer.then(|| explorer_meta_for(None, item.chno));
+        let explorer_meta = explorer.then(|| {
+            let mut meta = explorer_meta_for(None, item.chno);
+            meta.override_source_id = Some(item.override_source_id());
+            meta.override_source_url = (!item.input_url.is_empty()).then(|| Arc::clone(&item.input_url));
+            meta
+        });
         Self {
             virtual_id: item.virtual_id.get(),
             provider_id: Arc::clone(&item.provider_id),
@@ -544,11 +553,17 @@ mod tests {
     }
 
     #[test]
-    fn serialization_of_ui_item_explorer_meta_skips_override_source_id() {
-        let meta = UiItemExplorerMeta { override_source_id: Some(Arc::from("hash123")), ..Default::default() };
+    fn serialization_of_ui_item_explorer_meta_skips_override_source_id_and_url() {
+        let meta = UiItemExplorerMeta {
+            override_source_id: Some(Arc::from("hash123")),
+            override_source_url: Some(Arc::from("http://example.test/source.m3u8")),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&meta).expect("serialize meta");
         assert!(!json.contains("override_source_id"), "wire JSON must not contain override_source_id: {json}");
+        assert!(!json.contains("override_source_url"), "wire JSON must not contain override_source_url: {json}");
         let deserialized: UiItemExplorerMeta = serde_json::from_str(&json).expect("deserialize meta");
         assert_eq!(deserialized.override_source_id, None);
+        assert_eq!(deserialized.override_source_url, None);
     }
 }

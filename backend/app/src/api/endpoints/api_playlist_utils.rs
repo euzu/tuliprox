@@ -47,6 +47,7 @@ fn stalker_refresh_pending_response(accept: Option<&str>) -> axum::response::Res
     response
 }
 
+/// Collects the mapped explorer rows of `stream`; unreadable records are skipped and logged.
 async fn collect_explorer_items<S, T, E, F>(mut stream: S, map_fn: F, source_name: &str) -> Vec<UiPlaylistItem>
 where
     S: tokio_stream::Stream<Item = Result<T, E>> + Unpin,
@@ -74,6 +75,8 @@ where
     items
 }
 
+/// Gives every explorer row with `virtual_id == 0` (raw input records) a unique explorer-local id above the
+/// largest existing one. The ids are unique only within one response, which covers one cluster.
 fn assign_explorer_virtual_ids(items: &mut [UiPlaylistItem]) {
     let mut next_id = items.iter().map(|item| item.virtual_id).max().unwrap_or(0).saturating_add(1);
     for item in items.iter_mut() {

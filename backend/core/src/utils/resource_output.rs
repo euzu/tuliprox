@@ -261,6 +261,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "41".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
         let options = XtreamMappingOptions {
             flags: XtreamMappingFlagsSet::new(),

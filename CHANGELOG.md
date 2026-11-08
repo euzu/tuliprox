@@ -1453,7 +1453,7 @@
   numeric id (for example HDHomeRun `.../auto/v5.2`) are stored in Xtream targets with provider id `0`. All of them
   shared one override key, so the dialog showed the processed values of another channel. The key now comes from the
   original input stream id. The explorer list now also uses this key, so saved overrides of these channels show and
-  apply.
+  apply. Override keys also stay correct when a target mapper rewrites the URL or id.
 
 - **The input playlist explorer gives every M3U channel its own row.** Stored M3U input channels have no virtual id,
   so all rows shared one identity: selection marked every row, the open edit panel did not reload when another

@@ -102,6 +102,7 @@ pub(crate) fn xtream_playlist_item(id: u32) -> XtreamPlaylistItem {
         source_ordinal: 0,
         input_stream_id: id.to_string().intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 

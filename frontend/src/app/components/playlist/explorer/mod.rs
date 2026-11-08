@@ -928,7 +928,9 @@ pub fn PlaylistExplorer() -> Html {
                 patched_items.into_iter().map(|it| (it.virtual_id, it)).collect();
 
             if let Some(ref sel) = *selected_item {
-                if let Some(patched) = patch_map.get(&sel.virtual_id) {
+                if let Some(patched) =
+                    patch_map.get(&sel.virtual_id).filter(|it| it.xtream_cluster == sel.xtream_cluster)
+                {
                     selected_item.set(Some(Rc::new(patched.clone())));
                 }
             }

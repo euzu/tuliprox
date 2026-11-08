@@ -506,6 +506,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "813563".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         }
     }
 

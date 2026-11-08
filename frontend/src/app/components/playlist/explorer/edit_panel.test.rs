@@ -533,3 +533,51 @@ fn patch_from_patch_updates_channel_number_meta() {
     let cleared = patch_playlist_item_from_patch(&item, &clear, None, true);
     assert_eq!(cleared.explorer_meta.as_ref().and_then(|m| m.chno), None);
 }
+
+#[test]
+fn apply_bulk_patches_to_categories_ignores_same_virtual_id_in_other_cluster() {
+    let make_item = |name: &str, group: &str, item_type: PlaylistItemType, cluster: XtreamCluster| {
+        Rc::new(UiPlaylistItem {
+            virtual_id: 1,
+            provider_id: Arc::from(name),
+            name: Arc::from(name),
+            title: Arc::from(name),
+            group: Arc::from(group),
+            logo: Arc::from(""),
+            url: Arc::from(""),
+            item_type,
+            xtream_cluster: cluster,
+            category_id: 1,
+            rating: 0.0,
+            input_name: Arc::from("in"),
+            epg_channel_id: None,
+            explorer_meta: None,
+        })
+    };
+    let live = make_item("Live", "Live Group", PlaylistItemType::Live, XtreamCluster::Live);
+    let vod = make_item("Movie", "Vod Group", PlaylistItemType::Video, XtreamCluster::Video);
+    let group_of = |item: &Rc<UiPlaylistItem>, cluster: XtreamCluster| {
+        vec![Rc::new(UiPlaylistGroup {
+            id: 1,
+            title: Arc::clone(&item.group),
+            channels: vec![Rc::clone(item)],
+            xtream_cluster: cluster,
+        })]
+    };
+    let categories = UiPlaylistCategories {
+        live: Some(group_of(&live, XtreamCluster::Live)),
+        vod: Some(group_of(&vod, XtreamCluster::Video)),
+        series: None,
+    };
+
+    let mut patched = (*live).clone();
+    patched.name = Arc::from("Live Patched");
+    let patch_map = HashMap::from([(1, patched)]);
+
+    let updated = apply_bulk_patches_to_categories(&categories, &patch_map);
+    assert_eq!(&*updated.live.as_ref().unwrap()[0].channels[0].name, "Live Patched");
+    let vod_groups = updated.vod.as_ref().unwrap();
+    assert_eq!(vod_groups.len(), 1);
+    assert_eq!(vod_groups[0].channels.len(), 1);
+    assert_eq!(&*vod_groups[0].channels[0].name, "Movie");
+}

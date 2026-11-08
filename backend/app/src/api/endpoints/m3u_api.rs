@@ -1288,6 +1288,7 @@ mod tests {
             }))),
             input_stream_id: "59".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         }
     }
 

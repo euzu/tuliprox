@@ -329,6 +329,7 @@ mod tests {
             additional_properties: None,
             input_stream_id: provider_id.intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         }
     }
 
@@ -384,6 +385,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "52568".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
 
         let value = to_human_readable_json_value(&item).expect("dump value should serialize");

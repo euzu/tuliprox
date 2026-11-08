@@ -392,6 +392,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "1".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
 
         let stream_channel = create_stream_channel_with_type(1, &playlist_item, PlaylistItemType::Video);
@@ -423,6 +424,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "1".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
 
         let stream_channel = playlist_item.to_stream_channel(1);
@@ -453,6 +455,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "1".intern(),
             upstream_user_agent: Some("secret-provider-agent".intern()),
+            input_url: "".intern(),
         };
         let stream_channel = playlist_item.to_stream_channel(1);
         playlist_item.upstream_user_agent = None;
@@ -488,6 +491,7 @@ mod tests {
             additional_properties: None,
             input_stream_id: "42".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
 
         let channel = pli.to_stream_channel(7).with_epg_reference_ts(Some(1_700_000_000));
@@ -525,6 +529,7 @@ mod tests {
             additional_properties: None,
             input_stream_id: "42".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
 
         // to_stream_channel() defaults to None, and with_epg_reference_ts(None)
