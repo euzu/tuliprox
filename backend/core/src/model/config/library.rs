@@ -3,7 +3,7 @@ use shared::{
     defaults::DEFAULT_STORAGE_DIR,
     error::TuliproxError,
     model::{ConfigDto, LibraryConfigDto, LibraryContentType, LibraryMetadataFormat},
-    utils::Internable,
+    utils::{normalize_container_extension, Internable},
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -107,7 +107,11 @@ impl From<&LibraryConfigDto> for LibraryConfig {
                     follow_symlinks: d.follow_symlinks,
                 })
                 .collect(),
-            supported_extensions: dto.supported_extensions.iter().map(|ext| ext.to_lowercase()).collect(),
+            supported_extensions: dto
+                .supported_extensions
+                .iter()
+                .filter_map(|ext| normalize_container_extension(ext).map(std::borrow::Cow::into_owned))
+                .collect(),
             metadata: LibraryMetadataConfig {
                 read_existing: LibraryMetadataReadConfig {
                     kodi: dto.metadata.read_existing.kodi,
@@ -158,6 +162,16 @@ mod tests {
         let nonce =
             SystemTime::now().duration_since(UNIX_EPOCH).expect("system time must be after unix epoch").as_nanos();
         std::env::temp_dir().join(format!("tuliprox-library-missing-{nonce}")).to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn supported_extensions_are_normalized_to_bare_lowercase() {
+        let dto = LibraryConfigDto {
+            supported_extensions: vec![".MP3".to_string(), " flac ".to_string(), "mkv".to_string(), ".".to_string()],
+            ..Default::default()
+        };
+        let config = super::LibraryConfig::from(&dto);
+        assert_eq!(config.supported_extensions, vec!["mp3", "flac", "mkv"]);
     }
 
     #[test]
