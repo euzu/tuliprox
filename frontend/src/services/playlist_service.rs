@@ -1,8 +1,8 @@
 use crate::{
     error::Error,
     services::{
-        get_base_href, request_get, request_get_binary, request_post, request_post_with_error_body, Encoding,
-        WriteFailure,
+        get_base_href, request_get, request_get_binary, request_post, request_post_meta, request_post_with_error_body,
+        Encoding, WriteFailure,
     },
 };
 use futures::join;
@@ -14,11 +14,11 @@ use shared::{
         EpgTv, FieldError, InputRefreshOverride, OperationRunAccepted, OverrideConflictDto, OverrideDiscardRequest,
         OverrideFieldErrorsDto, OverrideFileDto, OverrideItemKind, OverrideOrphansDto, OverrideProvenanceDto,
         OverrideRevisionDto, OverrideSaveRequest, OverrideScopeDto, PlaylistEpgRequest, PlaylistRequest,
-        PlaylistUpdateRequestDto, PlaylistUpdateStatusDto, PlaylistUrlResolveRequest, SeriesStreamProperties,
+        PlaylistUpdateRequestDto, PlaylistUpdateViewSnapshotDto, PlaylistUrlResolveRequest, SeriesStreamProperties,
         StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto, UiPlaylistCategories,
         UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
-    utils::concat_path_leading_slash,
+    utils::{concat_path_leading_slash, HEADER_IF_MATCH},
 };
 use std::rc::Rc;
 
@@ -86,6 +86,15 @@ impl PlaylistService {
         self.submit_update_request(&request).await.is_ok()
     }
 
+    pub async fn update_target_ids(
+        &self,
+        target_ids: &[u16],
+        revision: Option<&str>,
+    ) -> Result<OperationRunAccepted, Error> {
+        let request = build_target_id_update_request(target_ids)?;
+        self.submit_update_request_with_revision(&request, revision).await
+    }
+
     pub async fn update_all_inputs(&self) -> Result<OperationRunAccepted, Error> {
         self.submit_update_request(&build_playlist_update_bulk_request()).await
     }
@@ -95,14 +104,15 @@ impl PlaylistService {
         target_ids: &[u16],
         input_id: u16,
         action: shared::model::InputUpdateAction,
+        revision: Option<&str>,
     ) -> Result<OperationRunAccepted, Error> {
         let request =
             build_manual_input_update_request(target_ids, shared::model::InputUpdateRequest { input_id, action });
-        self.submit_update_request(&request).await
+        self.submit_update_request_with_revision(&request, revision).await
     }
 
-    pub async fn get_update_status(&self) -> Result<Option<PlaylistUpdateStatusDto>, crate::error::Error> {
-        request_get(&self.playlist_update_status_path, None, None).await
+    pub async fn get_update_status(&self) -> Result<Option<PlaylistUpdateViewSnapshotDto>, Error> {
+        request_get(&format!("{}?include_scope=true", self.playlist_update_status_path), None, None).await
     }
 
     pub async fn get_target_analytics(&self) -> Result<Option<TargetAnalyticsResponseDto>, Error> {
@@ -129,20 +139,29 @@ impl PlaylistService {
     }
 
     pub async fn update_target_by_id(&self, target_id: u16) -> Result<OperationRunAccepted, Error> {
-        let request =
-            PlaylistUpdateRequestDto { target_ids: Some(vec![target_id]), ..PlaylistUpdateRequestDto::default() };
-        self.submit_update_request(&request).await
+        self.update_target_ids(&[target_id], None).await
     }
 
     async fn submit_update_request(&self, request: &PlaylistUpdateRequestDto) -> Result<OperationRunAccepted, Error> {
-        request_post::<&PlaylistUpdateRequestDto, OperationRunAccepted>(
+        self.submit_update_request_with_revision(request, None).await
+    }
+
+    async fn submit_update_request_with_revision(
+        &self,
+        request: &PlaylistUpdateRequestDto,
+        revision: Option<&str>,
+    ) -> Result<OperationRunAccepted, Error> {
+        let headers = revision.map(|revision| [(HEADER_IF_MATCH.to_owned(), revision.to_owned())]);
+        request_post_meta::<&PlaylistUpdateRequestDto, OperationRunAccepted>(
             &self.target_update_api_path,
             request,
             None,
             None,
+            headers.as_ref().map(<[_; 1]>::as_slice),
+            &[],
         )
         .await
-        .and_then(|response| response.ok_or(Error::RequestError))
+        .and_then(|response| response.body.ok_or(Error::RequestError))
     }
 
     pub fn playlist_content_url(&self, cluster: XtreamCluster, explorer: bool) -> String {
@@ -437,6 +456,16 @@ fn build_playlist_update_request(targets: &[&str]) -> PlaylistUpdateRequestDto {
 
 fn build_playlist_update_bulk_request() -> PlaylistUpdateRequestDto { PlaylistUpdateRequestDto::default() }
 
+fn build_target_id_update_request(target_ids: &[u16]) -> Result<PlaylistUpdateRequestDto, Error> {
+    if target_ids.is_empty() {
+        return Err(Error::BadRequest("A target update requires at least one target ID".to_owned()));
+    }
+    Ok(PlaylistUpdateRequestDto {
+        target_ids: Some(target_ids.iter().copied().collect::<indexmap::IndexSet<_>>().into_iter().collect()),
+        ..PlaylistUpdateRequestDto::default()
+    })
+}
+
 fn build_manual_input_update_request(
     target_ids: &[u16],
     request: shared::model::InputUpdateRequest,
@@ -487,6 +516,16 @@ mod tests {
     };
     use crate::model::{InputUpdateCapabilities, InputUpdateCapabilitiesExt};
     use shared::model::{ConfigInputDto, InputRefreshOverride, InputRefreshPolicy, InputType, XtreamCluster};
+
+    #[test]
+    fn playlist_update_request_batch_target_ids_exclude_input_overrides_and_global_scope() {
+        let request = super::build_target_id_update_request(&[21, 9, 21]).unwrap();
+        let wire = serde_json::to_value(request).unwrap();
+        assert_eq!(wire["target_ids"], serde_json::json!([21, 9]));
+        assert!(wire.get("input_action").is_none());
+        assert!(wire.get("input_refresh").is_none());
+        assert!(super::build_target_id_update_request(&[]).is_err());
+    }
 
     #[test]
     fn playlist_update_action_rescan_sends_selected_ids_without_a_provider_policy() {

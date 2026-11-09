@@ -32,7 +32,7 @@ pub struct VerifiedClaims(pub Claims);
 /// schema version and subject id, and finally the principal's password
 /// version. That last check is why a password change now invalidates live
 /// tokens instead of leaving them valid until expiry.
-async fn authenticate(app_state: &Arc<AppState>, token: &str) -> Result<Claims, AuthError> {
+pub(super) async fn authenticate(app_state: &Arc<AppState>, token: &str) -> Result<Claims, AuthError> {
     let claims = verify_claims(app_state, token)?;
     // Last, because it is the only check that touches shared state: a token
     // that fails any of the cheap checks above never reaches it.
@@ -77,7 +77,7 @@ fn verify_claims(app_state: &Arc<AppState>, token: &str) -> Result<Claims, AuthE
 ///
 /// A principal the web-auth config has never heard of - a proxy API user -
 /// has no live set to intersect with, and keeps its claim.
-fn effective_permissions(app_state: &Arc<AppState>, claims: &Claims) -> PermissionSet {
+pub(super) fn effective_permissions(app_state: &Arc<AppState>, claims: &Claims) -> PermissionSet {
     let config = app_state.app_config.config.load();
     config
         .web_ui

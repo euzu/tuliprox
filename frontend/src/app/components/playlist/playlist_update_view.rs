@@ -8,8 +8,9 @@ use crate::{
     html_if,
     i18n::use_translation,
     model::{
-        build_input_update_card_models, build_input_update_run_views, playlist_update_bulk_scope, EventMessage,
-        PlaylistUpdateAcceptedScope, PlaylistUpdateCardStatusAction, PlaylistUpdateCardStatuses,
+        build_input_update_card_models, build_input_update_run_views, playlist_update_bulk_scope,
+        playlist_update_sources, EventMessage, PlaylistUpdateAcceptedScope, PlaylistUpdateCardStatusAction,
+        PlaylistUpdateCardStatuses,
     },
     services::WebSocketConnectionContext,
 };
@@ -19,6 +20,7 @@ use shared::{
     model::{
         permission::Permission, InputRefreshPolicy, InputUpdateCapabilities, LibraryScanProgressEvent,
         LibraryScanSummaryStatus, LibraryStatus, OperationRunAccepted, PlaylistUpdateRunId, PlaylistUpdateStatusDto,
+        PlaylistUpdateViewSnapshotDto,
     },
     utils::current_time_secs,
 };
@@ -142,20 +144,26 @@ pub fn PlaylistUpdateView() -> Html {
     let initial_connection_context = services_ctx.websocket.connection_context();
     let connection_context = use_state(|| initial_connection_context);
     let card_statuses = use_reducer(move || PlaylistUpdateCardStatuses::for_connection(initial_connection_context));
-    let update_status = use_state(PlaylistUpdateStatusDto::default);
+    let update_snapshot = use_state(|| None::<PlaylistUpdateViewSnapshotDto>);
+    let scope_load_failed = use_state(|| false);
+    let scope_revision = use_mut_ref(|| None::<Rc<str>>);
     let status_request_revision = use_mut_ref(|| 0_u64);
     let library_catalog = use_state(|| None::<LibraryStatus>);
     let now = use_state(current_time_secs);
 
     let reload_update_status = {
         let services = services_ctx.clone();
-        let update_status = update_status.clone();
+        let update_snapshot = update_snapshot.clone();
+        let scope_load_failed = scope_load_failed.clone();
+        let scope_revision = scope_revision.clone();
         let library_catalog = library_catalog.clone();
         let card_statuses = card_statuses.clone();
         let status_request_revision = status_request_revision.clone();
         Callback::from(move |(): ()| {
             let services = services.clone();
-            let update_status = update_status.clone();
+            let update_snapshot = update_snapshot.clone();
+            let scope_load_failed = scope_load_failed.clone();
+            let scope_revision = scope_revision.clone();
             let library_catalog = library_catalog.clone();
             let card_statuses = card_statuses.clone();
             let status_request_revision = status_request_revision.clone();
@@ -166,7 +174,11 @@ pub fn PlaylistUpdateView() -> Html {
                 *revision
             };
             spawn_local(async move {
-                let response = services.playlist.get_update_status().await;
+                let response = if services.auth.has_permission(Permission::SourceRead) {
+                    services.playlist.get_update_status().await
+                } else {
+                    Ok(None)
+                };
                 if !current_status_response(
                     request_connection,
                     services.websocket.connection_context(),
@@ -176,15 +188,27 @@ pub fn PlaylistUpdateView() -> Html {
                     return;
                 }
                 match response {
-                    Ok(Some(mut status)) => {
+                    Ok(Some(mut snapshot)) => {
+                        scope_load_failed.set(false);
+                        if scope_revision.borrow().as_deref() != Some(&snapshot.revision) {
+                            let revision: Rc<str> = Rc::from(snapshot.revision.as_str());
+                            *scope_revision.borrow_mut() = Some(revision.clone());
+                            card_statuses.dispatch(PlaylistUpdateCardStatusAction::ResetScope {
+                                connection_context: request_connection,
+                                revision,
+                            });
+                        }
                         card_statuses.dispatch(PlaylistUpdateCardStatusAction::RestoreActive {
                             connection_context: request_connection,
-                            progress: std::mem::take(&mut status.active_updates),
+                            progress: std::mem::take(&mut snapshot.status.active_updates),
                         });
-                        update_status.set(status);
+                        update_snapshot.set(Some(snapshot));
                     }
-                    Ok(None) => {}
-                    Err(err) => warn!("Failed to load playlist update status: {err}"),
+                    Ok(None) => scope_load_failed.set(services.auth.has_permission(Permission::SourceRead)),
+                    Err(err) => {
+                        scope_load_failed.set(true);
+                        warn!("Failed to load playlist update status: {err}");
+                    }
                 }
                 if services.auth.has_permission(Permission::LibraryRead) {
                     let response = services.config.get_library_status().await;
@@ -244,7 +268,7 @@ pub fn PlaylistUpdateView() -> Html {
                             reload_update_status.emit(());
                         }
                     }
-                    EventMessage::PlaylistUpdate(_) => {
+                    EventMessage::PlaylistUpdate(_) | EventMessage::ConfigChange(_) => {
                         reload_update_status.emit(());
                     }
                     EventMessage::LibraryScanProgress(progress) => {
@@ -275,14 +299,35 @@ pub fn PlaylistUpdateView() -> Html {
     let (input_update_cards, input_update_run_views, bulk_scope) = config_ctx.config.as_ref().map_or_else(
         || (Vec::new(), Vec::new(), crate::model::PlaylistUpdateBulkScope::default()),
         |config| {
-            let cards = build_input_update_card_models(&config.sources, &update_status);
-            let scope = playlist_update_bulk_scope(&config.sources, &cards);
-            let views = build_input_update_run_views(&config.sources, &cards, &card_statuses, &update_status);
+            let runtime_sources =
+                update_snapshot.as_ref().map(|snapshot| playlist_update_sources(&config.sources, &snapshot.scope));
+            let sources = runtime_sources.as_ref().unwrap_or(&config.sources);
+            let fallback_status = PlaylistUpdateStatusDto::default();
+            let fallback_card_statuses = PlaylistUpdateCardStatuses::default();
+            let (statuses, card_statuses) = update_snapshot
+                .as_ref()
+                .map_or((&fallback_status, &fallback_card_statuses), |snapshot| (&snapshot.status, &*card_statuses));
+            let cards = build_input_update_card_models(sources, statuses);
+            let mut scope = playlist_update_bulk_scope(sources, &cards);
+            if runtime_sources.is_none() {
+                scope.visible_input_ids.clear();
+            }
+            let views = build_input_update_run_views(sources, &cards, card_statuses, statuses);
             (cards, views, scope)
         },
     );
     let input_update_cards_by_id =
         input_update_cards.into_iter().map(|model| (model.input_id, Rc::new(model))).collect::<HashMap<_, _>>();
+    let update_revision = update_snapshot.as_ref().map(|snapshot| Rc::<str>::from(snapshot.revision.as_str()));
+    let available_revision = if *scope_load_failed { None } else { update_revision.clone() };
+    let on_scope_changed = {
+        let scope_load_failed = scope_load_failed.clone();
+        let reload_update_status = reload_update_status.clone();
+        Callback::from(move |()| {
+            scope_load_failed.set(true);
+            reload_update_status.emit(());
+        })
+    };
 
     let handle_update = {
         let translate = translate.clone();
@@ -291,6 +336,8 @@ pub fn PlaylistUpdateView() -> Html {
         let bulk_scope = bulk_scope.clone();
         let bulk_submission = bulk_submission.clone();
         let connection_context = connection_context.clone();
+        let scope_revision = scope_revision.clone();
+        let rendered_revision = available_revision.clone();
         Callback::from(move |_| {
             let request_connection_context = *connection_context;
             if !can_write_playlist
@@ -306,6 +353,8 @@ pub fn PlaylistUpdateView() -> Html {
             let card_statuses = card_statuses.clone();
             let input_ids = bulk_scope.visible_input_ids.clone();
             let bulk_submission = bulk_submission.clone();
+            let scope_revision = scope_revision.clone();
+            let rendered_revision = rendered_revision.clone();
             spawn_local(async move {
                 let Some(outcome) = current_bulk_outcome(
                     request_connection_context,
@@ -316,12 +365,16 @@ pub fn PlaylistUpdateView() -> Html {
                 };
                 match outcome {
                     PlaylistUpdateBulkOutcome::Accepted { run_id: Some(run_id), input_ids } => {
-                        card_statuses.dispatch(PlaylistUpdateCardStatusAction::Accepted(PlaylistUpdateAcceptedScope {
-                            connection_context: request_connection_context,
-                            run_id,
-                            input_ids,
-                            refresh_policy: InputRefreshPolicy::NORMAL,
-                        }));
+                        if rendered_revision.is_some() && *scope_revision.borrow() == rendered_revision {
+                            card_statuses.dispatch(PlaylistUpdateCardStatusAction::Accepted(
+                                PlaylistUpdateAcceptedScope {
+                                    connection_context: request_connection_context,
+                                    run_id,
+                                    input_ids,
+                                    refresh_policy: InputRefreshPolicy::NORMAL,
+                                },
+                            ));
+                        }
                         services.toastr.success(translate.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS"));
                     }
                     PlaylistUpdateBulkOutcome::Accepted { run_id: None, .. } => {
@@ -341,8 +394,12 @@ pub fn PlaylistUpdateView() -> Html {
 
     let on_request_accepted = {
         let card_statuses = card_statuses.clone();
+        let scope_revision = scope_revision.clone();
+        let rendered_revision = update_revision.clone();
         Callback::from(move |accepted| {
-            card_statuses.dispatch(PlaylistUpdateCardStatusAction::Accepted(accepted));
+            if rendered_revision.is_some() && *scope_revision.borrow() == rendered_revision {
+                card_statuses.dispatch(PlaylistUpdateCardStatusAction::Accepted(accepted));
+            }
         })
     };
 
@@ -363,6 +420,13 @@ pub fn PlaylistUpdateView() -> Html {
                    onclick={handle_update}></TextButton>
         })}
         </div>
+         {html_if!(*scope_load_failed, {
+             <section class="tp__playlist-update-view__library-status tp__playlist-update-view__library-status--error">
+                 <p role="alert">{translate.t("MESSAGES.PLAYLIST_UPDATE.SCOPE_LOAD_FAILED")}</p>
+                 <TextButton name="retry_playlist_update_scope" icon="Refresh" title={translate.t("LABEL.RETRY")}
+                     onclick={reload_update_status.reform(|_: String| ())} />
+             </section>
+         })}
          {if let Some((message, is_error)) = library_progress_view {
              html! {
                  <section
@@ -385,12 +449,14 @@ pub fn PlaylistUpdateView() -> Html {
                 let input_id = view.input_id;
                 input_update_cards_by_id.get(&input_id).map(|model| html! {
                     <InputUpdateCard
-                        key={input_id}
+                        key={format!("{input_id}:{}:{}", model.input_name, update_revision.as_deref().unwrap_or_default())}
                         model={Rc::clone(model)}
                         view={Rc::new(view)}
                         now={*now}
                         connection_context={*connection_context}
                         on_request_accepted={on_request_accepted.clone()}
+                        update_revision={available_revision.clone()}
+                        on_scope_changed={on_scope_changed.clone()}
                         can_submit={can_write_playlist && (model.capabilities != InputUpdateCapabilities::Rescan
                             || (can_write_library && library_enabled))}
                     />
@@ -449,7 +515,7 @@ mod tests {
             .split_once("<div class=\"tp__playlist-update-view__header\">")
             .unwrap()
             .1
-            .split_once("{if let Some((message, is_error)) = library_progress_view")
+            .split_once("{html_if!(*scope_load_failed")
             .unwrap()
             .0;
         assert_eq!(header.matches("<TextButton").count(), 1, "only the existing bulk action belongs in the header");
@@ -995,9 +1061,8 @@ mod tests {
         let source = include_str!("playlist_update_view.rs").split("#[cfg(test)]").next().unwrap();
         let card_source = include_str!("input_update_card.rs").split("#[cfg(test)]").next().unwrap();
 
-        assert!(
-            source.contains("build_input_update_run_views(&config.sources, &cards, &card_statuses, &update_status)")
-        );
+        assert!(source.contains("playlist_update_sources(&config.sources, &snapshot.scope)"));
+        assert!(source.contains("build_input_update_run_views(sources, &cards, card_statuses, statuses)"));
         assert!(source.contains("(model.input_id, Rc::new(model))"));
         assert!(source.contains("input_update_cards_by_id.get(&input_id)"));
         assert!(source.contains("view={Rc::new(view)}"));

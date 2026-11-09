@@ -753,6 +753,7 @@ mod tests {
             completed: PlaylistUpdateRunStateEvent {
                 run_id: Some(run.into()),
                 execution_order: Some(order.into()),
+                scope_revision: None,
                 state,
             },
         };

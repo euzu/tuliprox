@@ -96,6 +96,9 @@ pub struct PlaylistUpdateProgressEvent {
     /// Actual serial execution order. Missing on accepted responses and legacy events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_order: Option<PlaylistUpdateRunOrder>,
+    /// Source snapshot that assigned the numeric input ID for this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_revision: Option<String>,
     /// Stable input identity for input-scoped progress. Global and target-scoped
     /// processing steps leave this empty because they cannot be assigned to one input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,6 +131,7 @@ impl PlaylistUpdateProgressEvent {
         Self {
             run_id: Some(run_id),
             execution_order: Some(execution_order),
+            scope_revision: None,
             input_id: Some(input_id),
             state: None,
             input_telemetry: None,
@@ -150,6 +154,7 @@ impl PlaylistUpdateProgressEvent {
         Self {
             run_id: Some(run_id),
             execution_order: Some(execution_order),
+            scope_revision: None,
             input_id: Some(input_id),
             state: Some(state),
             input_telemetry: None,
@@ -174,6 +179,7 @@ impl PlaylistUpdateProgressEvent {
         Self {
             run_id: Some(run_id),
             execution_order: Some(execution_order),
+            scope_revision: None,
             input_id: None,
             state: None,
             input_telemetry: None,
@@ -189,6 +195,7 @@ impl PlaylistUpdateProgressEvent {
         Self {
             run_id: None,
             execution_order: None,
+            scope_revision: None,
             input_id: Some(input_id),
             state: None,
             input_telemetry: None,
@@ -204,6 +211,7 @@ impl PlaylistUpdateProgressEvent {
         Self {
             run_id: None,
             execution_order: None,
+            scope_revision: None,
             input_id: None,
             state: None,
             input_telemetry: None,

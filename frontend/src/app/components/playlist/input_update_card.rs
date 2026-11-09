@@ -264,9 +264,10 @@ fn selected_current_target_ids(model: &InputUpdateCardModel, selected_target_ids
 
 fn can_start_update(state: &InputUpdateCardInteractionState, model: &InputUpdateCardModel, can_submit: bool) -> bool {
     can_submit
-        && model.capabilities.supports_action(model.capabilities.selected_action(state.controls.policy))
-        && (model.capabilities != InputUpdateCapabilities::Rescan
-            || state.controls.policy == InputRefreshPolicy::NORMAL)
+        && (model.updates_targets_only()
+            || (model.capabilities.supports_action(model.capabilities.selected_action(state.controls.policy))
+                && (model.capabilities != InputUpdateCapabilities::Rescan
+                    || state.controls.policy == InputRefreshPolicy::NORMAL)))
         && !state.is_submitting()
         && !selected_current_target_ids(model, &state.controls.selected_target_ids).is_empty()
 }
@@ -971,6 +972,10 @@ pub struct InputUpdateCardProps {
     pub connection_context: WebSocketConnectionContext,
     #[prop_or_default]
     pub on_request_accepted: Callback<PlaylistUpdateAcceptedScope>,
+    #[prop_or_default]
+    pub update_revision: Option<Rc<str>>,
+    #[prop_or_default]
+    pub on_scope_changed: Callback<()>,
     #[prop_or(true)]
     pub can_submit: bool,
 }
@@ -983,6 +988,10 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
     let model = Rc::clone(&props.model);
     let view = Rc::clone(&props.view);
     let state = use_reducer(|| InputUpdateCardInteractionState::from_model(&model));
+    let pending_submission = use_mut_ref(|| None::<WebSocketConnectionContext>);
+    let target_update_only = model.updates_targets_only();
+    let can_submit = props.can_submit && props.update_revision.is_some();
+    let rebuilds_targets = target_update_only || model.capabilities.rebuilds_targets();
     let target_ids = view.target_results.iter().map(|target| target.target_id).collect::<Vec<_>>();
     let all_selection = target_selection_state(&state.controls.selected_target_ids, &target_ids);
 
@@ -1032,32 +1041,46 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
         let model = Rc::clone(&model);
         let services = services.clone();
         let state = state.clone();
+        let pending_submission = pending_submission.clone();
         let translate = translate.clone();
-        let can_submit = props.can_submit;
+        let update_revision = props.update_revision.clone();
+        let on_scope_changed = props.on_scope_changed.clone();
         let connection_context = props.connection_context;
         let on_request_accepted = props.on_request_accepted.clone();
         Callback::from(move |_: String| {
+            let Some(update_revision) = update_revision.clone() else { return };
             if !can_start_update(&state, &model, can_submit)
                 || !services.websocket.is_current_connection(connection_context)
+                || *pending_submission.borrow() == Some(connection_context)
             {
                 return;
             }
-            let request_state = state.controls.clone();
-            let target_ids = selected_current_target_ids(&model, &request_state.selected_target_ids);
+            let request_policy = if target_update_only { InputRefreshPolicy::NORMAL } else { state.controls.policy };
+            let target_ids = selected_current_target_ids(&model, &state.controls.selected_target_ids);
             if target_ids.is_empty() {
                 return;
             }
+            *pending_submission.borrow_mut() = Some(connection_context);
             state.dispatch(InputUpdateCardAction::BeginSubmission(connection_context));
             let dialog = dialog.clone();
             let model = Rc::clone(&model);
             let services = services.clone();
             let state = state.clone();
+            let pending_submission = pending_submission.clone();
             let translate = translate.clone();
             let on_request_accepted = on_request_accepted.clone();
+            let on_scope_changed = on_scope_changed.clone();
             spawn_local(async move {
-                let confirmation = if requires_confirmation(request_state.policy) {
+                let release_submission = || {
+                    let mut pending = pending_submission.borrow_mut();
+                    if *pending == Some(connection_context) {
+                        *pending = None;
+                    }
+                };
+                let confirmation = if requires_confirmation(request_policy) {
                     let Some(dialog) = dialog else {
                         log::error!("Dialog service is unavailable");
+                        release_submission();
                         state.dispatch(InputUpdateCardAction::CancelSubmission(connection_context));
                         return;
                     };
@@ -1068,21 +1091,32 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                 match confirmation_submission_decision(
                     connection_context,
                     services.websocket.connection_context(),
-                    request_state.policy,
+                    request_policy,
                     confirmation,
                 ) {
                     ConfirmationSubmissionDecision::Continue => {}
                     ConfirmationSubmissionDecision::Cancel => {
+                        release_submission();
                         state.dispatch(InputUpdateCardAction::CancelSubmission(connection_context));
                         return;
                     }
                     ConfirmationSubmissionDecision::IgnoreStale => return,
                 }
 
-                let result = services
-                    .playlist
-                    .update_input(&target_ids, model.input_id, model.capabilities.selected_action(request_state.policy))
-                    .await;
+                let result = if target_update_only {
+                    services.playlist.update_target_ids(&target_ids, Some(&update_revision)).await
+                } else {
+                    services
+                        .playlist
+                        .update_input(
+                            &target_ids,
+                            model.input_id,
+                            model.capabilities.selected_action(request_policy),
+                            Some(&update_revision),
+                        )
+                        .await
+                };
+                let scope_changed = matches!(&result, Err(Error::PreconditionFailed(_)));
                 let Some(outcome) = current_submission_outcome(
                     connection_context,
                     services.websocket.connection_context(),
@@ -1090,6 +1124,10 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                 ) else {
                     return;
                 };
+                release_submission();
+                if scope_changed {
+                    on_scope_changed.emit(());
+                }
                 state
                     .dispatch(InputUpdateCardAction::FinishSubmission { connection_context, outcome: outcome.clone() });
                 if let PlaylistUpdateActionOutcome::Accepted(Some(run_id)) = &outcome {
@@ -1097,14 +1135,14 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                         connection_context,
                         run_id: run_id.clone(),
                         input_ids: vec![model.input_id],
-                        refresh_policy: request_state.policy,
+                        refresh_policy: request_policy,
                     });
                 }
 
                 let action = translate.t(if model.capabilities == InputUpdateCapabilities::Rescan {
                     "LABEL.RESCAN"
                 } else {
-                    policy_label_key(request_state.policy)
+                    policy_label_key(request_policy)
                 });
                 let message_key = match outcome {
                     PlaylistUpdateActionOutcome::Accepted(_) => "MESSAGES.PLAYLIST_UPDATE.INPUT_ACCEPTED",
@@ -1134,7 +1172,11 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
         action_message(translate.t("MESSAGES.PLAYLIST_UPDATE.POLICY_LABEL"), &view.input_name, &action_label);
     let start_aria_label =
         action_message(translate.t("MESSAGES.PLAYLIST_UPDATE.START_LABEL"), &view.input_name, &start_label);
-    let policy_description = translate.t(model.capabilities.description_key(effective_policy));
+    let policy_description = translate.t(if target_update_only {
+        "MESSAGES.PLAYLIST_UPDATE.BATCH_TARGET_DESCRIPTION"
+    } else {
+        model.capabilities.description_key(effective_policy)
+    });
     let last_update = last_update_view_model(view.last_update_at, props.now);
     let last_update_text = match last_update.relative {
         LastUpdateRelative::Never => translate.t("LABEL.LAST_UPDATE_NEVER"),
@@ -1193,7 +1235,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                         title={translate.t("LABEL.ALL")}
                                         aria_label={Some(translate.t("LABEL.ALL"))}
                                         aria_pressed={Some(all_selection.aria_pressed().to_string())}
-                                        disabled={state.is_submitting() || !model.capabilities.rebuilds_targets()}
+                                        disabled={state.is_submitting() || !rebuilds_targets}
                                         onclick={on_select_all}
                                     />
                                     {for view.target_results.iter().map(|target| {
@@ -1212,7 +1254,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                                 title={target.target_name.clone()}
                                                 aria_label={Some(target.target_name.clone())}
                                                 aria_pressed={Some(selection.aria_pressed().to_string())}
-                                                disabled={state.is_submitting() || !model.capabilities.rebuilds_targets()}
+                                                disabled={state.is_submitting() || !rebuilds_targets}
                                                 onclick={move |_| state.dispatch(InputUpdateCardAction::ToggleTarget(target_id))}
                                             />
                                         }
@@ -1225,7 +1267,9 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                     <div class="tp__playlist-update-view__action-area">
                         <div class="tp__playlist-update-view__input-actions">
                         <div class="tp__playlist-update-view__policy-control">
-                            if model.capabilities.rebuilds_targets() {
+                            if target_update_only {
+                                <span>{translate.t("LABEL.UPDATE")}</span>
+                            } else if model.capabilities.rebuilds_targets() {
                                 <Select
                                     name={select_label}
                                     icon={Some("ChevronDown".to_string())}
@@ -1246,14 +1290,14 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                 />
                             }
                         </div>
-                        if model.capabilities.rebuilds_targets() {
+                        if rebuilds_targets {
                             <TextButton
                                 name={format!("input_update_{}", model.input_id)}
                                 icon="Refresh"
                                 title={start_label.clone()}
                                 aria_label={Some(start_aria_label)}
                                 disabled={!props.connection_context.is_connected()
-                                    || !can_start_update(&state, &model, props.can_submit)}
+                                    || !can_start_update(&state, &model, can_submit)}
                                 onclick={on_start}
                             />
                         }
@@ -2035,6 +2079,32 @@ mod tests {
                     assert!(!can_start_update(&empty_selection, &model, true));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn input_update_card_batch_targets_use_ids_and_require_an_enabled_card_with_a_current_selection() {
+        for input_type in [InputType::M3uBatch, InputType::XtreamBatch, InputType::StalkerBatch] {
+            let mut model = card(7, &[11, 22, 33]);
+            model.input_type = input_type;
+            model.capabilities = InputUpdateCapabilities::for_input_type(input_type, true);
+            model.targets[1].name = model.targets[0].name.clone();
+            let state = InputUpdateCardInteractionState::from_model(&model);
+            assert!(model.updates_targets_only());
+            assert_eq!(model.capabilities.policies(), []);
+            assert!(can_start_update(&state, &model, true));
+            assert!(!can_start_update(&state, &model, false));
+
+            let state = reduce(state, InputUpdateCardAction::ToggleTarget(22));
+            assert_eq!(selected_current_target_ids(&model, &state.controls.selected_target_ids), [11, 33]);
+            model.targets.retain(|target| target.id != 33);
+            assert_eq!(selected_current_target_ids(&model, &state.controls.selected_target_ids), [11]);
+            let empty = reduce(state.clone(), InputUpdateCardAction::ToggleTarget(11));
+            assert!(!can_start_update(&empty, &model, true));
+            let submitting = reduce(state.clone(), InputUpdateCardAction::BeginSubmission(connection(1)));
+            assert!(!can_start_update(&submitting, &model, true));
+            model.capabilities = InputUpdateCapabilities::for_input_type(input_type, false);
+            assert!(!can_start_update(&state, &model, true));
         }
     }
 

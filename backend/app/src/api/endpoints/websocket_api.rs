@@ -480,6 +480,7 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
                 ProtocolMessage::PlaylistUpdateResponse(PlaylistUpdateRunStateEvent {
                     run_id: summary.run_id,
                     execution_order: summary.execution_order,
+                    scope_revision: summary.scope_revision,
                     state: summary.state,
                 }),
                 "Playlist update event",

@@ -1247,7 +1247,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                     {
                         if services
                             .playlist
-                            .update_input(&[], input.id, InputUpdateAction::Provider(InputRefreshPolicy::NORMAL))
+                            .update_input(&[], input.id, InputUpdateAction::Provider(InputRefreshPolicy::NORMAL), None)
                             .await
                             .is_ok()
                         {

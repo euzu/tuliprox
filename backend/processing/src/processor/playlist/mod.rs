@@ -30,9 +30,9 @@ use shared::{
         FieldSet, HookCtx, InputRefreshOverride, InputRefreshPolicy, InputStats, InputType, InputUpdateAction,
         InputUpdateRequest, MappingStage, NoPlugins, PipelineStats, PlaylistEntry, PlaylistGroup, PlaylistItem,
         PlaylistItemType, PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PlaylistUpdateRunId,
-        PlaylistUpdateRunOrder, PlaylistUpdateState, PlaylistUpdateSummary, PluginAbort, PluginGroupMerge, PluginHook,
-        PluginHost, PluginKeepers, PluginRunReport, PluginSortKeys, StreamProperties, TargetStats, UUIDType,
-        WatchContext, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        PlaylistUpdateRunOrder, PlaylistUpdateScopeDto, PlaylistUpdateState, PlaylistUpdateSummary, PluginAbort,
+        PluginGroupMerge, PluginHook, PluginHost, PluginKeepers, PluginRunReport, PluginSortKeys, StreamProperties,
+        TargetStats, UUIDType, WatchContext, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, Internable},
 };
@@ -123,6 +123,35 @@ where
 /// A value of this type is never constructed; the field is always `None`.
 pub type NoBootstrap = fn() -> std::future::Ready<()>;
 
+#[derive(Clone)]
+struct ScopedUpdateEvents<E> {
+    sink: E,
+    revision: Option<String>,
+}
+
+impl<E: EventSink> EventSink for ScopedUpdateEvents<E> {
+    fn emit(&self, mut event: EventMessage) {
+        match &mut event {
+            EventMessage::PlaylistUpdateProgress(progress) if progress.input_id.is_some() => {
+                progress.scope_revision.clone_from(&self.revision);
+            }
+            EventMessage::PlaylistUpdate(summary) => summary.scope_revision.clone_from(&self.revision),
+            _ => {}
+        }
+        self.sink.emit(event);
+    }
+
+    fn observe_provider_account(
+        &self,
+        name: Arc<str>,
+        identity: shared::model::ProviderAccountIdentity,
+        status: Option<shared::model::ProxyUserStatus>,
+        exp_date: Option<i64>,
+    ) {
+        self.sink.observe_provider_account(name, identity, status, exp_date);
+    }
+}
+
 /// Everything one playlist update run needs.
 ///
 /// `exec_processing` took twelve positional arguments, seven of them
@@ -157,6 +186,7 @@ pub struct ProcessingRun<
     maintenance: Option<Arc<dyn tuliprox_core::model::MaintenanceGate>>,
     plugins: P,
     override_status: Option<Arc<tuliprox_repository::OverrideStatusStore>>,
+    expected_scope: Option<PlaylistUpdateScopeDto>,
 }
 
 impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataSink> {
@@ -192,6 +222,7 @@ impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataS
             maintenance: None,
             plugins: NoPlugins,
             override_status: None,
+            expected_scope: None,
         }
     }
 }
@@ -224,6 +255,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
             maintenance: self.maintenance,
             plugins: self.plugins,
             override_status: self.override_status,
+            expected_scope: self.expected_scope,
         }
     }
 
@@ -286,6 +318,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
             maintenance: self.maintenance,
             plugins: self.plugins,
             override_status: self.override_status,
+            expected_scope: self.expected_scope,
         }
     }
 
@@ -313,6 +346,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
             maintenance: self.maintenance,
             plugins,
             override_status: self.override_status,
+            expected_scope: self.expected_scope,
         }
     }
 
@@ -362,6 +396,12 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
         self.input_refresh = input_refresh.into();
         self
     }
+
+    #[must_use]
+    pub fn with_expected_scope(mut self, expected_scope: Option<PlaylistUpdateScopeDto>) -> Self {
+        self.expected_scope = expected_scope;
+        self
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -392,7 +432,10 @@ pub async fn exec_processing<
         maintenance,
         plugins,
         override_status,
+        expected_scope,
     } = run;
+    let mut events =
+        ScopedUpdateEvents { sink: events, revision: expected_scope.as_ref().map(PlaylistUpdateScopeDto::revision) };
 
     let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
     let playlist_guard = if let Some(permit) = acquired_permit {
@@ -437,6 +480,23 @@ pub async fn exec_processing<
     } else {
         None
     };
+
+    let sources = app_config.sources.load_full();
+    let scope = sources.playlist_update_scope();
+    if expected_scope.is_some_and(|expected| scope != expected) {
+        warn!("Playlist update scope changed while the request was queued; update skipped");
+        events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
+            run_id,
+            execution_order,
+            shared::model::PlaylistUpdateState::Failure,
+        )));
+        return;
+    }
+    events.revision = Some(scope.revision());
+    // Progress and writes share the source snapshot for the life of the run.
+    let mut config = (*app_config).clone();
+    config.sources = Arc::new(arc_swap::ArcSwap::from(sources));
+    let app_config = Arc::new(config);
 
     info!("🌷 Update process started.");
 
@@ -536,6 +596,7 @@ pub async fn exec_processing<
     events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary {
         run_id: Some(run_id.clone()),
         execution_order: Some(execution_order),
+        scope_revision: None,
         state: outcome,
         stats,
         error,

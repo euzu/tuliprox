@@ -59,6 +59,8 @@ pub struct PlaylistUpdateRunStateEvent {
     pub run_id: Option<PlaylistUpdateRunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_order: Option<PlaylistUpdateRunOrder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_revision: Option<String>,
     pub state: PlaylistUpdateState,
 }
 
@@ -69,12 +71,12 @@ impl PlaylistUpdateRunStateEvent {
         execution_order: PlaylistUpdateRunOrder,
         state: PlaylistUpdateState,
     ) -> Self {
-        Self { run_id: Some(run_id), execution_order: Some(execution_order), state }
+        Self { run_id: Some(run_id), execution_order: Some(execution_order), scope_revision: None, state }
     }
 
     #[must_use]
     pub const fn uncorrelated(state: PlaylistUpdateState) -> Self {
-        Self { run_id: None, execution_order: None, state }
+        Self { run_id: None, execution_order: None, scope_revision: None, state }
     }
 }
 
@@ -92,13 +94,17 @@ impl<'de> Deserialize<'de> for PlaylistUpdateRunStateEvent {
                 run_id: Option<PlaylistUpdateRunId>,
                 #[serde(default)]
                 execution_order: Option<PlaylistUpdateRunOrder>,
+                #[serde(default)]
+                scope_revision: Option<String>,
                 state: PlaylistUpdateState,
             },
         }
 
         Ok(match CompatiblePayload::deserialize(deserializer)? {
             CompatiblePayload::Legacy(state) => Self::uncorrelated(state),
-            CompatiblePayload::Correlated { run_id, execution_order, state } => Self { run_id, execution_order, state },
+            CompatiblePayload::Correlated { run_id, execution_order, scope_revision, state } => {
+                Self { run_id, execution_order, scope_revision, state }
+            }
         })
     }
 }
