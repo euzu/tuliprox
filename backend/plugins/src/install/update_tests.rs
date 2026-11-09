@@ -142,11 +142,54 @@ async fn a_staged_update_can_be_reviewed_again_without_uploading_it() {
     upload_and_approve(&env, "1.0.0", &[]).await;
     let guard = env.system.install_lock().await;
     let rejection = env.system.api_staged_review(&guard, "demo").await.unwrap_err();
-    assert_eq!(rejection.status, StatusCode::NOT_FOUND, "nothing staged yet");
+    assert_eq!(rejection.status, StatusCode::CONFLICT, "nothing staged, and the installed one is approved");
     let uploaded = env.system.api_upload(&guard, package("1.1.0", &["network"])).await.unwrap();
     let again = env.system.api_staged_review(&guard, "demo").await.unwrap();
     assert_eq!(again, uploaded);
     assert_eq!(again.capability_diff.unwrap().added, ["network"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_shipped_in_the_plugins_directory_is_reviewed_and_approved_in_place() {
+    let root = tempfile::tempdir().unwrap();
+    let plugins = root.path().join("plugins");
+    let shipped = plugins.join("demo");
+    fs::create_dir_all(&shipped).unwrap();
+    fs::write(
+        shipped.join("manifest.yml"),
+        "id: demo\nname: Demo\nversion: 1.0.0\napi_version: 1\ncapabilities:\n  storage: true\n",
+    )
+    .unwrap();
+    let config =
+        PluginsConfig { enabled: true, directory: plugins.to_string_lossy().to_string(), ..PluginsConfig::default() };
+    let system = PluginSystem::load(&config, PluginServices::new(reqwest::Client::new(), root.path().join("data")))
+        .expect("plugin system loads")
+        .expect("plugins are enabled");
+    let guard = system.install_lock().await;
+
+    let review = system.api_staged_review(&guard, "demo").await.expect("the shipped plugin can be reviewed");
+    assert_eq!(review.version, "1.0.0");
+    assert_eq!(review.capabilities.iter().map(|capability| capability.name.as_str()).collect::<Vec<_>>(), ["storage"]);
+    assert!(review.replaces.is_none() && review.capability_diff.is_none(), "it replaces nothing");
+
+    system.api_approve(&guard, "demo", &body(&["storage"]), &config).await.expect("approve");
+    assert!(shipped.join("manifest.yml").is_file(), "approved in place");
+    let rejection = system.api_staged_review(&guard, "demo").await.unwrap_err();
+    assert_eq!(rejection.status, StatusCode::CONFLICT, "nothing is waiting for approval any more");
+    assert_eq!(system.api_staged_review(&guard, "missing").await.unwrap_err().status, StatusCode::NOT_FOUND);
+
+    // A changed capability list puts it back to `pending_approval`; the review
+    // shows what changed against the earlier approval.
+    fs::write(
+        shipped.join("manifest.yml"),
+        "id: demo\nname: Demo\nversion: 1.0.1\napi_version: 1\ncapabilities:\n  network: true\n",
+    )
+    .unwrap();
+    system.reload(&config);
+    let again = system.api_staged_review(&guard, "demo").await.expect("the changed plugin can be reviewed");
+    assert!(again.replaces.is_none(), "still approved in place");
+    let diff = again.capability_diff.expect("the earlier approval is compared");
+    assert_eq!((diff.added, diff.removed), (vec!["network".to_string()], vec!["storage".to_string()]));
 }
 
 #[tokio::test(flavor = "multi_thread")]

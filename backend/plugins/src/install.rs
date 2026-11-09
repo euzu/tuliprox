@@ -958,12 +958,15 @@ impl PluginSystem {
         answer
     }
 
-    /// `GET /api/v1/plugins/{id}/staged`: the review of the package staged for
-    /// `id`, validated again, so an update waiting in staging can be reviewed
-    /// after the upload dialog is gone. Nothing changes.
+    /// `GET /api/v1/plugins/{id}/staged`: the review of the package an approve
+    /// of `id` would pin, validated again: the staged one, so an update waiting
+    /// in staging can be reviewed after the upload dialog is gone, or the
+    /// installed `pending_approval` one when nothing is staged. Nothing changes.
     ///
     /// # Errors
-    /// `404` when nothing is staged for `id`, `422` when it no longer validates.
+    /// `404` for an unknown id, `409` for an installed plugin that is not
+    /// waiting for approval and has nothing staged, `422` when the package no
+    /// longer validates.
     pub async fn api_staged_review(
         &self,
         _guard: &InstallGuard<'_>,
@@ -972,12 +975,19 @@ impl PluginSystem {
         let system = self.clone();
         let id = id.to_string();
         tokio::task::spawn_blocking(move || {
-            let staged = system.staging_root().join(&id);
-            if !is_installable_id(&id) || !is_real_dir(&staged) {
-                return Err(InstallRejection::new(StatusCode::NOT_FOUND, "nothing is staged for this plugin"));
+            let (dir, is_staged) = system.approval_package(&id)?;
+            let validated = system.validate_package(&dir, &id).map_err(InstallRejection::invalid)?;
+            if is_staged {
+                return Ok(system.review_of(&validated, &id));
             }
-            let validated = system.validate_package(&staged, &id).map_err(InstallRejection::invalid)?;
-            Ok(system.review_of(&validated, &id))
+            // An installed package waiting for approval replaces nothing. When it
+            // was approved before and changed on disk since, the diff against
+            // that pin shows what the new approval adds.
+            let mut answer = review(&validated, None);
+            let pins = read_approvals(&approvals_path(&system.shared().data_dir));
+            answer.capability_diff =
+                pins.get(&id).map(|pin| capability_diff(&capability_names(validated.manifest.capabilities), Some(pin)));
+            Ok(answer)
         })
         .await
         .map_err(|err| InstallRejection::internal("the review task failed", &err))?
@@ -1070,34 +1080,44 @@ impl PluginSystem {
         .await
     }
 
+    /// The package an approve pins and a review shows, and whether it is the
+    /// staged one: the staged package of `id`, or the installed
+    /// `pending_approval` one when nothing is staged (a plugin shipped in the
+    /// plugins directory, for example with a Docker image).
+    ///
+    /// # Errors
+    /// `404` for an unknown id, `409` for an installed plugin that is not
+    /// waiting for approval.
+    fn approval_package(&self, id: &str) -> Result<(PathBuf, bool), InstallRejection> {
+        if !is_installable_id(id) {
+            return Err(InstallRejection::new(StatusCode::NOT_FOUND, "unknown plugin"));
+        }
+        let staged = self.staging_root().join(id);
+        if is_real_dir(&staged) {
+            return Ok((staged, true));
+        }
+        let snapshot = self.registry().snapshot();
+        let Some(record) = snapshot.get(id) else {
+            return Err(InstallRejection::new(StatusCode::NOT_FOUND, "unknown plugin"));
+        };
+        if record.state() != PluginState::PendingApproval {
+            return Err(InstallRejection::new(
+                StatusCode::CONFLICT,
+                format!("plugin `{id}` is not waiting for approval ({})", record.state().as_str()),
+            ));
+        }
+        Ok((record.dir.clone(), false))
+    }
+
     fn approve_blocking(
         &self,
         id: &str,
         body: &PluginApproveDto,
         config: &PluginsConfig,
     ) -> Result<Option<Replacement>, InstallRejection> {
-        if !is_installable_id(id) {
-            return Err(InstallRejection::new(StatusCode::NOT_FOUND, "unknown plugin"));
-        }
+        let (dir, is_staged) = self.approval_package(id)?;
         let registry = self.registry();
-        let staged = self.staging_root().join(id);
-        let is_staged = is_real_dir(&staged);
         let plugins_dir = registry.directory();
-        let dir = if is_staged {
-            staged.clone()
-        } else {
-            let snapshot = registry.snapshot();
-            let Some(record) = snapshot.get(id) else {
-                return Err(InstallRejection::new(StatusCode::NOT_FOUND, "unknown plugin"));
-            };
-            if record.state() != PluginState::PendingApproval {
-                return Err(InstallRejection::new(
-                    StatusCode::CONFLICT,
-                    format!("plugin `{id}` is not waiting for approval ({})", record.state().as_str()),
-                ));
-            }
-            record.dir.clone()
-        };
 
         let validated = self.validate_package(&dir, id).map_err(InstallRejection::invalid)?;
         if body.wasm_sha256 != validated.wasm_sha256 {
@@ -1132,7 +1152,7 @@ impl PluginSystem {
             let target_version = validated.manifest.version.to_string();
             let mut replacement = self.begin_replacement(
                 id,
-                Incoming::Staged(staged),
+                Incoming::Staged(dir.clone()),
                 pin.clone(),
                 (validated.wasm_sha256.is_some(), target_version, ActivationKind::Approve),
                 config,
@@ -1154,7 +1174,7 @@ impl PluginSystem {
             .update_approvals(|approvals| previous = approvals.insert(id.to_string(), pin.clone()))
             .map_err(|err| InstallRejection::internal("cannot write the approvals", &err))?;
         if is_staged {
-            if let Err(err) = install_staged(&staged, &plugins_dir, id) {
+            if let Err(err) = install_staged(&dir, &plugins_dir, id) {
                 let restored = registry.update_approvals(|approvals| match previous {
                     Some(old) => {
                         approvals.insert(id.to_string(), old);

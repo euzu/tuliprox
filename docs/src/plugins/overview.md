@@ -128,6 +128,12 @@ with `enabled: true` in `config.yml`. With no approval recorded for that id, the
 sight, without a review. **A config entry is an approval.** See [Security Model](./security.md#trust-on-first-use).
 The demo configs of the example plugins use this path.
 
+A package placed in `<config dir>/plugins/<id>/` without such a config entry, for example one shipped inside a Docker
+image, shows `pending_approval`. Reviewing it needs no upload: `GET /api/v1/plugins/{id}/staged` returns the review of
+the installed package when nothing is staged for that id, and `PUT /api/v1/plugins/{id}/approve` pins it in place. A
+plugin that was approved before and changed on disk since shows the capabilities it adds or drops against that approval.
+In the Web UI, click the **Pending approval** chip of the plugin to open that review.
+
 Disable and uninstall are `PUT /api/v1/plugins/{id}/disable` and `DELETE /api/v1/plugins/{id}`. Uninstall can also
 delete the plugin's storage with `?purge_kv=true`.
 
