@@ -3,14 +3,15 @@ use crate::{
         components::{
             config::{ConfigView, PlansView},
             failover_groups::FailoverGroupsView,
+            is_plugin_route,
             loading_indicator::BusyIndicator,
             map_sources_to_playlist_rows,
             recording::{RecordingLibraryView, RecordingRulesView},
             theme::Theme,
             AppIcon, DashboardView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker, LogsView,
             NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistStatsView,
-            PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView,
-            ThemePicker, ToastrView, UserlistView, WebsocketStatus,
+            PlaylistUpdateView, PluginMenuPage, PluginUiProvider, PluginsView, RbacView, Setup, Sidebar, SourceEditor,
+            StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, FailoverGroupsNavigation, PlaylistContext, StatusContext},
     },
@@ -34,12 +35,14 @@ use shared::{
     },
     utils::Internable,
 };
-use std::{cell::Cell, future, rc::Rc, str::FromStr};
+use std::{cell::Cell, future, rc::Rc, str::FromStr, sync::Arc};
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::window;
 use yew::{platform::spawn_local, prelude::*, suspense::use_future};
 
 const LAST_HOME_VIEW_STORAGE_KEY: &str = "tp_last_home_view";
+/// The panel of a plugin menu page; it is shown while a `#plugin/...` route is active.
+const PLUGIN_PAGE_PANEL: &str = "plugin_page";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HomeViewAccess {
@@ -101,6 +104,7 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::PlaylistEpg => access.can_read_epg,
         ViewType::FailoverGroups => access.can_read_playlist,
         ViewType::Rbac => access.is_admin,
+        ViewType::Plugins => access.can_read_system_status,
         ViewType::RecordingLibrary | ViewType::RecordingRules | ViewType::RecordingRuleForm => {
             access.show_recording && access.can_read_recordings
         }
@@ -125,6 +129,7 @@ fn first_allowed_home_view(access: HomeViewAccess) -> ViewType {
         ViewType::PlaylistEpg,
         ViewType::FailoverGroups,
         ViewType::Rbac,
+        ViewType::Plugins,
         ViewType::RecordingLibrary,
         ViewType::RecordingRules,
     ]
@@ -189,6 +194,8 @@ pub fn Home() -> Html {
     let failover_groups_pending = use_state(|| None);
     let theme = use_state(Theme::get_current_theme);
     let force_update = use_force_update();
+    // A plugin menu page is addressed by `#plugin/{id}/{element}`, which is no `ViewType`.
+    let plugin_route = use_state(|| get_location_hash().filter(|hash| is_plugin_route(hash)));
 
     let handle_theme_select = {
         let set_theme = theme.clone();
@@ -205,9 +212,19 @@ pub fn Home() -> Html {
 
     let handle_view_change_sidebar = {
         let view_vis = view_visible.clone();
+        let plugin_route = plugin_route.clone();
         Callback::from(move |view: ViewType| {
             set_location_hash(view.as_str());
+            plugin_route.set(None);
             view_vis.set(Some(view));
+        })
+    };
+
+    let handle_plugin_route_sidebar = {
+        let plugin_route = plugin_route.clone();
+        Callback::from(move |route: String| {
+            set_location_hash(&route);
+            plugin_route.set(Some(route));
         })
     };
 
@@ -389,7 +406,10 @@ pub fn Home() -> Html {
         use_effect_with(
             (*view_visible, configured_landing_page, stored_last_home_view, home_access),
             move |(current, configured_landing_page, stored_last_home_view, access)| {
-                if !setup_mode {
+                // A plugin page keeps its own hash; only readers of the system may open one.
+                let on_plugin_page =
+                    can_read_system_status && get_location_hash().is_some_and(|hash| is_plugin_route(&hash));
+                if !setup_mode && !on_plugin_page {
                     if let Some(resolved) =
                         resolve_visible_home_view(*current, *configured_landing_page, *stored_last_home_view, *access)
                     {
@@ -406,6 +426,7 @@ pub fn Home() -> Html {
 
     {
         let view_vis = view_visible.clone();
+        let plugin_route = plugin_route.clone();
         use_effect_with(
             (configured_landing_page, stored_last_home_view, home_access),
             move |(configured_landing_page, stored_last_home_view, access)| {
@@ -413,6 +434,7 @@ pub fn Home() -> Html {
                 let stored_last_home_view = *stored_last_home_view;
                 let access = *access;
                 let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| {
+                    plugin_route.set(get_location_hash().filter(|hash| is_plugin_route(hash)));
                     let requested = get_location_hash().and_then(|hash| ViewType::from_str(&hash).ok());
                     let resolved =
                         resolve_visible_home_view(requested, configured_landing_page, stored_last_home_view, access);
@@ -502,12 +524,17 @@ pub fn Home() -> Html {
     let resolved_view =
         resolve_visible_home_view(*view_visible, configured_landing_page, stored_last_home_view, home_access)
             .unwrap_or(ViewType::Dashboard);
-    let view_page = resolved_view.intern();
+    let view_page = if plugin_route.is_some() && can_read_system_status {
+        Arc::<str>::from(PLUGIN_PAGE_PANEL)
+    } else {
+        resolved_view.intern()
+    };
     let failover_groups_navigation = FailoverGroupsNavigation { pending: failover_groups_pending };
     html! {
         <ContextProvider<ConfigContext> context={config_context}>
         <ContextProvider<StatusContext> context={status_context}>
         <ContextProvider<PlaylistContext> context={playlist_context}>
+        <PluginUiProvider>
         <ContextProvider<FailoverGroupsNavigation> context={failover_groups_navigation}>
         <DialogProvider>
             <ToastrView />
@@ -516,7 +543,7 @@ pub fn Home() -> Html {
                { if setup_mode {
                     html! {}
                  } else {
-                    html! { <Sidebar active_page={resolved_view} onview={handle_view_change_sidebar} show_streams_page={show_streams_page} show_stream_history={show_stream_history} show_recording={show_recording}/> }
+                    html! { <Sidebar active_page={resolved_view} onview={handle_view_change_sidebar} show_streams_page={show_streams_page} show_stream_history={show_stream_history} show_recording={show_recording} onplugin={handle_plugin_route_sidebar} active_plugin={(*plugin_route).clone().filter(|_| can_read_system_status)}/> }
                  }
                }
 
@@ -597,6 +624,26 @@ pub fn Home() -> Html {
                                                 </ErrorBoundary>
                                             </Panel>
                                         })}
+                                        { html_if!(can_read_system_status, {
+                                            <Panel class="tp__full-width" value={ViewType::Plugins.intern()} active={view_page.clone()}>
+                                                <ErrorBoundary name={translate.t("LABEL.PLUGINS")}>
+                                                  // Mounted only while open, so the list loads when the page is shown.
+                                                  { html_if!(view_page == ViewType::Plugins.intern(), { <PluginsView /> }) }
+                                                </ErrorBoundary>
+                                            </Panel>
+                                        })}
+                                        { html_if!(can_read_system_status, {
+                                            <Panel class="tp__full-width" value={Arc::<str>::from(PLUGIN_PAGE_PANEL)} active={view_page.clone()}>
+                                                <ErrorBoundary name={translate.t("LABEL.PLUGINS")}>
+                                                  // Mounted only while a plugin page is open, so its frame is gone when you leave.
+                                                  { if let Some(route) = (*plugin_route).clone() {
+                                                      html! { <PluginMenuPage route={route} /> }
+                                                  } else {
+                                                      html! {}
+                                                  } }
+                                                </ErrorBoundary>
+                                            </Panel>
+                                        })}
                                         { html_if!(can_read_system_status && show_stream_history, {
                                             <Panel class="tp__full-width" value={ViewType::StreamHistory.intern()} active={view_page.clone()}>
                                                 <ErrorBoundary name={translate.t("LABEL.STREAM_HISTORY")}>
@@ -656,7 +703,9 @@ pub fn Home() -> Html {
                                        { html_if!(can_read_playlist, {
                                        <Panel class="tp__full-width" value={ViewType::FailoverGroups.intern()} active={view_page.clone()}>
                                          <ErrorBoundary name={translate.t("LABEL.FAILOVER_GROUPS")}>
-                                           <FailoverGroupsView/>
+                                           { html_if!(view_page == ViewType::FailoverGroups.intern(), {
+                                             <FailoverGroupsView/>
+                                           })}
                                          </ErrorBoundary>
                                        </Panel>
                                        })}
@@ -697,6 +746,7 @@ pub fn Home() -> Html {
             </div>
         </DialogProvider>
         </ContextProvider<FailoverGroupsNavigation>>
+        </PluginUiProvider>
         </ContextProvider<PlaylistContext>>
         </ContextProvider<StatusContext>>
         </ContextProvider<ConfigContext>>

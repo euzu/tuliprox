@@ -7,7 +7,10 @@ use super::{
     user_with_network_access, NetworkAccessDecision, PlaybackSource,
 };
 use crate::{
-    api::model::{SharedStreamCtx, SharedStreamManager},
+    api::{
+        api_utils::streaming::session_headers_belong_to_allocation,
+        model::{SharedStreamCtx, SharedStreamManager},
+    },
     model::{ConfigInput, NetworkAccess, ProxyUserCredentials},
     repository::GeoIp,
 };
@@ -82,6 +85,20 @@ fn media_server_proxy_response_header_filter_drops_hop_by_hop_headers() {
     assert!(!is_hop_by_hop_response_header(&header::CONTENT_TYPE));
 }
 
+/// Session headers follow the account they were captured for: a fallback away from the forced provider or from the
+/// stream URL owner drops them.
+#[test]
+fn session_headers_are_dropped_when_allocation_leaves_owner_or_forced_provider() {
+    let main = "main".intern();
+    let alias = "alias".intern();
+    assert!(session_headers_belong_to_allocation(Some(&main), None, None));
+    assert!(session_headers_belong_to_allocation(None, Some(&main), Some(&main)));
+    assert!(session_headers_belong_to_allocation(Some(&main), Some(&main), Some(&main)));
+    assert!(!session_headers_belong_to_allocation(Some(&alias), Some(&main), None));
+    assert!(!session_headers_belong_to_allocation(Some(&alias), None, Some(&main)));
+    assert!(!session_headers_belong_to_allocation(Some(&alias), Some(&alias), Some(&main)));
+}
+
 #[test]
 fn media_server_playback_urls_are_proxy_only_redirect_guard_candidates() {
     let plex_input = ConfigInput { input_type: InputType::Plex, ..ConfigInput::default() };
@@ -132,14 +149,17 @@ fn test_resolve_request_url_for_logging_respects_sanitization_setting() {
     let m3u_input = ConfigInput { input_type: InputType::M3u, ..ConfigInput::default() };
     let media_ref = "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fsecret_key";
     let standard_url = "http://provider.example/live/stream.m3u8";
+    let transport_stream_url = "http://provider.example/session/auth-path/stream.ts?opaque=synthetic-opaque";
 
     // 1. When sanitization is enabled:
     shared::utils::set_sanitize_sensitive_info(true);
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, transport_stream_url).as_ref(), transport_stream_url);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, media_ref).as_ref(), "media-server://<redacted>");
     assert_eq!(resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(), standard_url);
 
     // 2. When sanitization is disabled:
     shared::utils::set_sanitize_sensitive_info(false);
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, transport_stream_url).as_ref(), transport_stream_url);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, media_ref).as_ref(), media_ref);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(), standard_url);
 }

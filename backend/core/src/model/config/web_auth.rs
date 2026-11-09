@@ -155,17 +155,17 @@ impl WebAuthConfig {
 
     pub fn resolve_permissions(&self, username: &str) -> PermissionSet {
         let Some(users) = &self.t_users else {
-            debug!("Web auth resolve_permissions('{username}'): no users loaded");
+            trace!("Web auth resolve_permissions('{username}'): no users loaded");
             return PermissionSet::new();
         };
 
         let Some(user) = users.iter().find(|candidate| candidate.username.eq_ignore_ascii_case(username)) else {
-            debug!("Web auth resolve_permissions('{username}'): user not found");
+            trace!("Web auth resolve_permissions('{username}'): user not found");
             return PermissionSet::new();
         };
 
         if user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")) {
-            debug!("Web auth resolve_permissions('{username}'): admin user -> all permissions");
+            trace!("Web auth resolve_permissions('{username}'): admin user -> all permissions");
             return PERM_ALL;
         }
 
@@ -175,13 +175,13 @@ impl WebAuthConfig {
                 if let Some(group) = groups.iter().find(|candidate| candidate.name.eq_ignore_ascii_case(group_name)) {
                     permissions.union(group.permissions);
                 } else {
-                    debug!("Web auth resolve_permissions('{username}'): group '{group_name}' not found");
+                    trace!("Web auth resolve_permissions('{username}'): group '{group_name}' not found");
                 }
             }
         } else {
-            debug!("Web auth resolve_permissions('{username}'): no groups loaded");
+            trace!("Web auth resolve_permissions('{username}'): no groups loaded");
         }
-        debug!(
+        trace!(
             "Web auth resolve_permissions('{username}'): user_groups={:?}, resolved_permissions={permissions}",
             user.groups
         );

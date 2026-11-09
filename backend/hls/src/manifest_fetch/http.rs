@@ -17,7 +17,7 @@ use crate::{
     manifest_origin_binding::HlsManifestOriginBinding, safe_session_key, HlsOriginContentCodingObjectKind,
     HlsOriginContentCodingSource, MAX_MANUAL_REDIRECTS,
 };
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap};
 use futures::FutureExt;
 use log::debug;
 use reqwest::Client;
@@ -323,7 +323,7 @@ pub fn resolved_hls_manifest_request_url_from_input(
 
 pub(super) fn origin_manifest_fetch_error_from_request_error(err: &impl ToString) -> OriginManifestFetchError {
     let message = sanitize_sensitive_info(err.to_string().as_str()).to_string();
-    let Some(status) = request_failed_status_from_message(&message) else {
+    let Some(status) = tuliprox_core::utils::request::request_failed_status(&message) else {
         return OriginManifestFetchError::Request(message);
     };
     match classify_origin_manifest_status(status) {
@@ -348,14 +348,6 @@ pub(super) fn origin_manifest_fetch_error_from_io_error(err: &io::Error) -> Orig
     } else {
         origin_manifest_fetch_error_from_request_error(err)
     }
-}
-
-pub(super) fn request_failed_status_from_message(message: &str) -> Option<StatusCode> {
-    let marker = "Request failed (";
-    let status_start = message.find(marker)?.checked_add(marker.len())?;
-    let status_text = message.get(status_start..)?.split(')').next()?;
-    let status_code = status_text.split_whitespace().next()?.parse::<u16>().ok()?;
-    StatusCode::from_u16(status_code).ok()
 }
 
 pub(super) fn same_origin(lhs: &Url, rhs: &Url) -> bool {

@@ -55,7 +55,7 @@ fn handoff_startup_account(session: &mut crate::HlsSession, generation: u64, now
     ));
 }
 
-// Sliding live windows keep stable resource identities while request tokens change.
+// Sliding live windows with unchanged queries preserve their verified overlap.
 fn reentry_manifest(first: u64, short_segment: Option<u64>, token: &str) -> super::FetchedOriginManifest {
     use std::fmt::Write as _;
     let mut body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
@@ -96,7 +96,7 @@ async fn assert_reentry_commits_sliding_windows(first: u64, rebase: u64, proxy_s
     request.manifest_commit_requirement = super::HlsManifestCommitRequirement::FreshCommitRequired {
         reason: crate::HlsFreshManifestRequiredReason::ExpiredRevalidation,
     };
-    super::commit_fetched_manifest(&mut state, &reentry_manifest(rebase, short, "rebound"), &request, 22_000)
+    super::commit_fetched_manifest(&mut state, &reentry_manifest(rebase, short, "original"), &request, 22_000)
         .expect("same-host reentry keeps its complete four-segment window");
     let expected_start = proxy_start + rebase - first;
     assert_eq!(state.live_origin_sequences(), (expected_start..expected_start + 4).collect::<Vec<_>>());
@@ -112,7 +112,7 @@ async fn assert_reentry_commits_sliding_windows(first: u64, rebase: u64, proxy_s
     let anchor = state.origin_account_binding.as_ref().unwrap().startup_protection;
     request.manifest_commit_requirement = super::HlsManifestCommitRequirement::CommittedManifestAllowed;
     for now in [26_000, 27_000] {
-        super::commit_fetched_manifest(&mut state, &reentry_manifest(rebase + 1, short, "next"), &request, now)
+        super::commit_fetched_manifest(&mut state, &reentry_manifest(rebase + 1, short, "original"), &request, now)
             .expect("the successor window must not become contradictory replay");
         for segment in state.segments.values_mut() {
             segment.status = crate::SegmentCacheStatus::Ready { content_length: 1_024, ready_at_ms: now };

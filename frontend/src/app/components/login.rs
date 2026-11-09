@@ -17,6 +17,10 @@ pub fn Login() -> Html {
     let auth_success = use_state(|| true);
     let translation = use_translation();
     let theme = use_state(Theme::get_current_theme);
+    let clear_auth_error = {
+        let auth_success = auth_success.clone();
+        Callback::from(move |_: String| auth_success.set(true))
+    };
 
     let app_title = services.config.ui_config.app_title.as_ref().map_or("tuliprox", |v| v.as_str());
 
@@ -50,22 +54,26 @@ pub fn Login() -> Html {
 
     let handle_login = {
         let authenticator = authenticate.clone();
+        let username_ref = username_ref.clone();
+        let password_ref = password_ref.clone();
         Callback::from(move |_: String| {
             if !authenticator.loading {
-                authenticator.run();
+                let fields_valid = username_ref.cast::<HtmlInputElement>().is_some_and(|input| input.report_validity())
+                    && password_ref.cast::<HtmlInputElement>().is_some_and(|input| input.report_validity());
+                if fields_valid {
+                    authenticator.run();
+                }
             }
         })
     };
 
     let handle_key_down = {
-        let authenticator = authenticate.clone();
+        let handle_login = handle_login.clone();
         Callback::from(move |e: KeyboardEvent| {
             if e.key() == "Enter" {
                 e.prevent_default();
                 e.stop_propagation();
-                if !authenticator.loading {
-                    authenticator.run();
-                }
+                handle_login.emit(String::new());
             }
         })
     };
@@ -83,7 +91,10 @@ pub fn Login() -> Html {
 
     {
         let input_ref = username_ref.clone();
-        use_effect(move || {
+        // Focus the username field once on mount only. Running this on every render
+        // stole focus back to username whenever the component re-rendered (e.g. on the
+        // first keystroke in the password field).
+        use_effect_with((), move |()| {
             if let Some(input) = input_ref.cast::<HtmlInputElement>() {
                 let _ = input.focus();
             }
@@ -105,8 +116,14 @@ pub fn Login() -> Html {
             <div class="tp__login-view__message">{translation.t("MESSAGES.LOGIN.MESSAGE")}</div>
             <form>
                 <div class="tp__login-view__form">
-                    <Input placeholder={translation.t("LABEL.USERNAME")} input_ref={username_ref} name="username" autocomplete={true} onkeydown={handle_key_down.clone()} icon="User"/>
-                    <Input placeholder={translation.t("LABEL.PASSWORD")} input_ref={password_ref} name="password" hidden={true}  autocomplete={false} onkeydown={handle_key_down} icon="Lock"/>
+                    <div class="tp__login-view__field">
+                        <label class="tp__login-view__field-label" for="username">{translation.t("LABEL.USERNAME")}</label>
+                        <Input aria_label={translation.t("LABEL.USERNAME")} input_ref={username_ref} name="username" required=true autocomplete={true} on_change={clear_auth_error.clone()} onkeydown={handle_key_down.clone()} icon="User"/>
+                    </div>
+                    <div class="tp__login-view__field">
+                        <label class="tp__login-view__field-label" for="password">{translation.t("LABEL.PASSWORD")}</label>
+                        <Input aria_label={translation.t("LABEL.PASSWORD")} input_ref={password_ref} name="password" hidden={true} required=true autocomplete={true} on_change={clear_auth_error} onkeydown={handle_key_down} icon="Lock"/>
+                    </div>
                     <div class="tp__login-view__form-action">
                         <TextButton class="primary" name="login" disabled={authenticate.loading} title={ translation.t("LABEL.LOGIN")} onclick={handle_login}></TextButton>
                         <span role="alert" class={if *auth_success { "tp__hidden" }  else { "tp__error-text" }}>{ translation.t("MESSAGES.LOGIN.FAILED") }</span>

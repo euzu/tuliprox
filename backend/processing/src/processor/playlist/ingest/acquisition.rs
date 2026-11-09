@@ -1,4 +1,5 @@
 use super::{
+    super::transform::group_mapped_items,
     apply_playlist_fetch_outcome, apply_staged_overlay_groups, cluster_is_configured, collect_effective_skip_clusters,
     filter_skipped_clusters_from_source, neutralize_overlaid_cluster_facts, report_force_updates,
     should_apply_staged_overlay, stalker_checkpoint_message,
@@ -18,8 +19,9 @@ use log::{debug, warn};
 use shared::{
     error::TuliproxError,
     model::{
-        ClusterFlags, EventMessage, EventSink, InputRefreshPolicy, InputType, PlaylistUpdateDataSource,
-        PlaylistUpdateProgressEvent, ProviderFetchFailure,
+        ClusterFlags, EventMessage, EventSink, HookCtx, InputRefreshPolicy, InputType, PlaylistItem,
+        PlaylistUpdateDataSource, PlaylistUpdateProgressEvent, PluginAbort, PluginHook, PluginHost, PluginInputRequest,
+        PluginRunReport, ProviderFetchFailure, VirtualId,
     },
     utils::sanitize_sensitive_info,
 };
@@ -28,8 +30,8 @@ use tuliprox_core::model::{AppConfig, ConfigInput};
 use tuliprox_iptv::{
     error::ProviderErrorKind,
     provider::{
-        BatchContainerProvider, M3uProvider, PlaylistFetchRequest, PlaylistProvider, UnsupportedProvider,
-        XtreamProvider,
+        BatchContainerProvider, M3uProvider, PlaylistFetch, PlaylistFetchRequest, PlaylistProvider,
+        UnsupportedProvider, XtreamProvider,
     },
     xtream,
 };
@@ -61,11 +63,12 @@ impl InputAcquisition {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn playlist_download_from_input<E: EventSink>(
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+async fn playlist_download_from_input<E: EventSink, P: PluginHost>(
     client: &reqwest::Client,
     app_config: &Arc<AppConfig>,
     events: &E,
+    plugins: &P,
     execution: PlaylistUpdateExecutionRef<'_>,
     input: &ConfigInput,
     stalker_refresh_mode: StalkerRefreshMode,
@@ -77,7 +80,7 @@ async fn playlist_download_from_input<E: EventSink>(
 
     // Check Status
     let storage_path = input_cache::resolve_input_storage_path(storage_dir, &input.name).await;
-    let mut status = input_cache::load_input_status(&storage_path);
+    let status = input_cache::load_input_status(&storage_path);
     let cache_duration = input.cache_duration_seconds;
 
     // Ensure data directory exists
@@ -118,13 +121,9 @@ async fn playlist_download_from_input<E: EventSink>(
         ClusterStatusSource::Default
     };
 
+    let mut pending_status = PendingInputStatusUpdate::new(storage_path, status, cluster_status_source);
     if fully_cached {
-        return cached_playlist_download_result(input, refresh_policy).with_pending_status(PendingInputStatusUpdate {
-            storage_path,
-            status,
-            status_changed: false,
-            cluster_status_source,
-        });
+        return cached_playlist_download_result(input, refresh_policy).with_pending_status(pending_status);
     }
 
     let provider_clusters = if is_cluster_input(download_input_type) {
@@ -172,6 +171,7 @@ async fn playlist_download_from_input<E: EventSink>(
         }
         InputType::Library => LibraryProvider.fetch(&request).await,
         InputType::Plex | InputType::Emby | InputType::Jellyfin => MediaServerProvider.fetch(&request).await,
+        InputType::Plugin => plugin_playlist_fetch(plugins, input).await,
         InputType::Staged => {
             UnsupportedProvider::new(
                 "staged",
@@ -208,12 +208,12 @@ async fn playlist_download_from_input<E: EventSink>(
     } else {
         CacheStatusScope::Default
     };
-    let save_status = apply_playlist_fetch_outcome(
+    apply_playlist_fetch_outcome(
         events,
         execution.run_id,
         execution.execution_order,
         input,
-        &mut status,
+        &mut pending_status.status,
         cache_scope,
         &fetch,
     );
@@ -225,30 +225,74 @@ async fn playlist_download_from_input<E: EventSink>(
         &provider_clusters,
         Some(&fetch),
     );
-    PlaylistDownloadResult::from(fetch).with_input_telemetry(input_telemetry).with_pending_status(
-        PendingInputStatusUpdate { storage_path, status, status_changed: save_status, cluster_status_source },
-    )
+    PlaylistDownloadResult::from(fetch).with_input_telemetry(input_telemetry).with_pending_status(pending_status)
 }
 
-/// `invalidate_input_cache_status` performs a non-atomic file I/O sequence
-/// (`input_cache::load_input_status` + `input_cache::save_input_status`).
-/// Call this only while holding the per-input lock from
+/// `type: plugin`: the playlist is whatever the named plugin's `fetch-playlist` returns, grouped the
+/// way a parsed M3U is. The plugin gets the input's `url` and credentials as configured (all optional
+/// for a plugin input). A plugin `Err`, trap or timeout fails the input like an unreachable provider;
+/// the downstream path (persist, cache status, `on-playlist-loaded`) is the M3U one.
+async fn plugin_playlist_fetch<P: PluginHost>(plugins: &P, input: &ConfigInput) -> PlaylistFetch {
+    let Some(plugin) = input.plugin.as_deref() else {
+        return PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
+            "plugin input '{}' does not name a plugin",
+            input.name
+        )));
+    };
+    // A plugin that was uninstalled or disabled leaves the input inactive: say so once, in the words of
+    // the operator's own fix, instead of failing on the provider's generic answer. The input keeps its
+    // last playlist (an empty result is never persisted) and every other input and target runs.
+    if !plugins.provides(PluginHook::FetchInput, plugin) {
+        warn!(
+            "plugin input '{}' is inactive: plugin '{plugin}' is not installed or not enabled. Install it under \
+             Plugins, or remove the input.",
+            input.name
+        );
+        return PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
+            "plugin input '{}' is inactive: plugin '{plugin}' is not installed or not enabled",
+            input.name
+        )));
+    }
+    let ctx = HookCtx::new("").with_input(&input.name);
+    let request = PluginInputRequest {
+        input_name: &input.name,
+        url: &input.url,
+        username: input.username.as_deref(),
+        password: input.password.as_deref(),
+        options: &input.plugin_options,
+    };
+    match plugins.fetch_playlist(plugin, &ctx, &request).await {
+        Ok(items) => PlaylistFetch::groups(group_mapped_items(items)),
+        Err(err) => PlaylistFetch::failed(TuliproxError::Download(format!(
+            "plugin input '{}': {}",
+            input.name,
+            sanitize_sensitive_info(&err)
+        ))),
+    }
+}
+
+/// This read-modify-write operation requires holding the per-input lock from
 /// `PlaylistProcessingContext::get_input_lock` (as done in `download_input`).
-pub(crate) async fn invalidate_input_cache_status<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn invalidate_input_cache_status<
+    E: EventSink + Clone + 'static,
+    M: MetadataUpdateSink,
+    P: PluginHost,
+>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
 ) {
     let storage_dir = { ctx.config.config.load().storage_dir.clone() };
     let storage_path = input_cache::resolve_input_storage_path(&storage_dir, &input.name).await;
-    let mut status = input_cache::load_input_status(&storage_path);
-    if !status.clusters.is_empty() {
+    input_cache::update_input_status(&storage_path, |status| {
+        let changed = !status.clusters.is_empty();
         status.clusters.clear();
-        input_cache::save_input_status(&storage_path, &status);
-    }
+        changed
+    })
+    .await;
 }
 
-pub(crate) async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &Arc<ConfigInput>,
 ) -> (PlaylistSource, Option<TuliproxError>) {
     match load_input_playlist(&ctx.config, input, None).await {
@@ -258,8 +302,8 @@ pub(crate) async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &Arc<ConfigInput>,
     allow_staged_input: bool,
 ) -> InputDownloadResult {
@@ -273,6 +317,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
             quality_rejections: Vec::new(),
             accepted_empty_clusters: ClusterFlags::empty(),
             input_telemetry: None,
+            plugins: PluginRunReport::default(),
         };
     }
 
@@ -316,6 +361,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
                 &ctx.client,
                 &ctx.config,
                 &ctx.events,
+                &ctx.plugins,
                 PlaylistUpdateExecutionRef { run_id: &ctx.run_id, execution_order: ctx.execution_order },
                 input,
                 ctx.stalker_refresh_mode,
@@ -363,6 +409,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
                         &ctx.client,
                         &ctx.config,
                         &ctx.events,
+                        &ctx.plugins,
                         PlaylistUpdateExecutionRef { run_id: &ctx.run_id, execution_order: ctx.execution_order },
                         input,
                         ctx.stalker_refresh_mode,
@@ -457,6 +504,33 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         }
     }
 
+    // `on-playlist-loaded`, once per input, after the staged overlay so a plugin
+    // sees what the targets would otherwise consume. A staged input is hooked as
+    // part of the provider input it overlays, never on its own.
+    let mut plugins = PluginRunReport::default();
+    if error.is_none() && input.staged.is_none() {
+        match apply_playlist_loaded_hook(&ctx.plugins, &input.name, playlist, &mut plugins).await {
+            Ok(hooked) => playlist = hooked,
+            Err((original, abort)) => {
+                playlist = original;
+                error = Some(TuliproxError::Plugin(abort.to_string()));
+            }
+        }
+    }
+
+    // Managed contributions are processing overlays, not provider-cache writes. Run on
+    // cached inputs too, after inventory hooks, so providers never ingest their own output.
+    if error.is_none() && input.staged.is_none() {
+        match apply_managed_channels(&ctx.plugins, &input.name, &input.managed_channels, playlist, &mut plugins).await {
+            Ok(overlaid) => playlist = overlaid,
+            Err((original, abort)) => {
+                playlist = original;
+                error = Some(TuliproxError::Plugin(abort.to_string()));
+            }
+        }
+        playlist = filter_skipped_clusters_from_source(playlist, input);
+    }
+
     if input.input_type == InputType::M3u {
         let alias_errors = download_m3u_alias_playlists(ctx, input).await;
         playlist_download_result.download_err.extend(alias_errors);
@@ -486,7 +560,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         .input_refresh
         .filter(|input_refresh| input_refresh.input_id == input.id)
         .map(|input_refresh| input_refresh.policy);
-    persist_finalized_cluster_snapshots(&mut playlist_download_result, request_policy, error.as_ref());
+    persist_finalized_cluster_snapshots(&mut playlist_download_result, request_policy, error.as_ref()).await;
 
     // Explicitly release per-input lock after load/persist/mark steps are completed.
     drop(input_lock);
@@ -500,11 +574,145 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         quality_rejections: playlist_download_result.quality_rejections,
         accepted_empty_clusters,
         input_telemetry: playlist_download_result.input_telemetry,
+        plugins,
     }
 }
 
-async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+/// Append a complete managed view, preserving disk-backed providers as lazy sources.
+pub(crate) async fn apply_managed_channels<P: PluginHost>(
+    plugins: &P,
+    input_name: &str,
+    bindings: &[shared::model::PluginRef],
+    playlist: PlaylistSource,
+    report: &mut PluginRunReport,
+) -> Result<PlaylistSource, (PlaylistSource, PluginAbort)> {
+    let inputs = vec![input_name.to_string()];
+    let request = shared::model::ManagedChannelRequest {
+        destination: shared::model::ManagedDestination::Input,
+        name: input_name,
+        stage: None,
+        inputs: &inputs,
+    };
+    let mut items = Vec::new();
+    for binding in bindings {
+        match plugins.managed_channels(binding.id(), &request, report).await {
+            Ok(mut contribution) => items.append(&mut contribution),
+            Err(abort) => return Err((playlist, abort)),
+        }
+    }
+    for item in &mut items {
+        item.header.source_ordinal = u32::MAX;
+    }
+    Ok(playlist.append_groups(group_mapped_items(items)))
+}
+
+/// Run `on-playlist-loaded` over the items of `playlist` that a plugin's scope
+/// matches (plan §7 *Sync/async boundary*).
+///
+/// Disk-backed sources are only scanned (`items()`) to find out whether
+/// anything matches; when nothing does, the source is returned untouched.
+/// Otherwise the groups are materialized, the matching items alone go to the
+/// hook, and the result is written back into an in-memory source: dropped
+/// items disappear, edited items stay in their original position and are
+/// regrouped by their (possibly rewritten) group. Survivors keep their
+/// relative order and are re-associated with their original slot by a per-call
+/// handle assigned before the call (plugins cannot change host-owned fields).
+///
+/// A [`PluginAbort`] hands the unchanged source back with the abort, so the
+/// input fails through the normal error path with its data intact.
+///
+/// A disk-backed source cannot be written back item by item, so the hook has to
+/// hold the whole playlist in memory, and the result stays in memory. Above
+/// [`DISK_PLAYLIST_HOOK_CEILING`] items the hook is skipped with one warning
+/// and the playlist stays on disk: a plugin never costs more memory than that.
+pub(crate) async fn apply_playlist_loaded_hook<P: PluginHost>(
+    plugins: &P,
+    input_name: &str,
+    playlist: PlaylistSource,
+    report: &mut PluginRunReport,
+) -> Result<PlaylistSource, (PlaylistSource, PluginAbort)> {
+    apply_playlist_loaded_hook_within(plugins, input_name, playlist, report, DISK_PLAYLIST_HOOK_CEILING).await
+}
+
+/// Items a disk-backed playlist may have for `on-playlist-loaded` to run over it.
+/// About 100 MiB of interned items at most, which the smallest supported hosts
+/// (armv7) can still take next to a processing run.
+const DISK_PLAYLIST_HOOK_CEILING: usize = 250_000;
+
+async fn apply_playlist_loaded_hook_within<P: PluginHost>(
+    plugins: &P,
+    input_name: &str,
+    mut playlist: PlaylistSource,
+    report: &mut PluginRunReport,
+    disk_ceiling: usize,
+) -> Result<PlaylistSource, (PlaylistSource, PluginAbort)> {
+    let ctx = HookCtx::new("").with_input(input_name);
+    let Some(scopes) = plugins.scope(PluginHook::PlaylistLoaded, &ctx) else {
+        return Ok(playlist);
+    };
+    // Checked before the scope scan, which would read a huge disk playlist in full.
+    if !playlist.is_memory() {
+        let count = playlist.get_channel_count();
+        if count > disk_ceiling {
+            warn!(
+                "Input '{input_name}': on-playlist-loaded skipped, the disk-backed playlist has {count} items (limit \
+                 {disk_ceiling})"
+            );
+            return Ok(playlist);
+        }
+    }
+    if !scopes.is_all() && !playlist.items().any(|item| scopes.matches(&item)) {
+        return Ok(playlist);
+    }
+
+    let groups = playlist.take_groups();
+    let mut slots: Vec<Option<PlaylistItem>> = Vec::new();
+    let mut matched: Vec<usize> = Vec::new();
+    let mut selected: Vec<PlaylistItem> = Vec::new();
+    let mut original_virtual_ids: Vec<VirtualId> = Vec::new();
+    for mut item in groups.into_iter().flat_map(|group| group.channels) {
+        if scopes.matches(&item) {
+            matched.push(slots.len());
+            original_virtual_ids.push(item.header.virtual_id);
+            // Safe to borrow virtual_id as the per-call handle: virtual ids are not
+            // assigned yet at ingest, guests never see or change virtual_id (WIT carries
+            // its own `handle`), and the original value is restored on every path.
+            let handle = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+            item.header.virtual_id = VirtualId::new(handle);
+            selected.push(item);
+            slots.push(None);
+        } else {
+            slots.push(Some(item));
+        }
+    }
+
+    let outcome = plugins.on_playlist_loaded(&ctx, &mut selected, report).await;
+    if let Err(abort) = outcome {
+        // The input fails; hand back whatever is left so nothing is lost.
+        for mut item in selected {
+            let orig_idx = usize::try_from(item.header.virtual_id.get()).unwrap_or(usize::MAX);
+            if orig_idx < matched.len() {
+                item.header.virtual_id = original_virtual_ids[orig_idx];
+                slots[matched[orig_idx]] = Some(item);
+            }
+        }
+        let rest = group_mapped_items(slots.into_iter().flatten().collect());
+        return Err((MemoryPlaylistSource::new(rest).into_source(), abort));
+    }
+
+    for mut survivor in selected {
+        let orig_idx = usize::try_from(survivor.header.virtual_id.get()).unwrap_or(usize::MAX);
+        if orig_idx < matched.len() {
+            survivor.header.virtual_id = original_virtual_ids[orig_idx];
+            slots[matched[orig_idx]] = Some(survivor);
+        }
+    }
+    let items: Vec<PlaylistItem> = slots.into_iter().flatten().collect();
+    Ok(MemoryPlaylistSource::new(group_mapped_items(items)).into_source())
+}
+
+async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
 ) -> Vec<TuliproxError> {
     let Some(aliases) = input.get_enabled_aliases() else { return vec![] };
@@ -545,4 +753,128 @@ async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: Metadat
     }
 
     errors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::NoPlugins;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct ManagedOverlay;
+    impl PluginHost for ManagedOverlay {
+        #[allow(clippy::unused_async_trait_impl, reason = "a scripted host answers without awaiting")]
+        async fn managed_channels(
+            &self,
+            _plugin: &str,
+            request: &shared::model::ManagedChannelRequest<'_>,
+            _report: &mut PluginRunReport,
+        ) -> Result<Vec<PlaylistItem>, PluginAbort> {
+            if request.name != "provider" {
+                return Ok(vec![]);
+            }
+            Ok(vec![PlaylistItem {
+                header: shared::model::PlaylistItemHeader {
+                    id: "plugin:managed".into(),
+                    input_stream_id: "plugin:managed".into(),
+                    input_name: "provider".into(),
+                    name: "Team channel".into(),
+                    title: "Team channel".into(),
+                    group: "Sports".into(),
+                    url: "https://stream.test/team.ts".into(),
+                    ..Default::default()
+                },
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_overlay_refreshes_a_cached_input_without_accumulating_or_modifying_provider_items() {
+        let provider = PlaylistItem {
+            header: shared::model::PlaylistItemHeader {
+                id: "1".into(),
+                input_stream_id: "1".into(),
+                input_name: "provider".into(),
+                name: "Provider channel".into(),
+                title: "Provider channel".into(),
+                group: "News".into(),
+                url: "https://stream.test/provider.ts".into(),
+                ..Default::default()
+            },
+        };
+        let mut cached = MemoryPlaylistSource::new(group_mapped_items(vec![provider])).into_source();
+        for _ in 0..2 {
+            let source = cached.clone_source().unwrap();
+            let mut result = apply_managed_channels(
+                &ManagedOverlay,
+                "provider",
+                &[shared::model::PluginRef::new("bridge").unwrap()],
+                source,
+                &mut PluginRunReport::default(),
+            )
+            .await
+            .ok()
+            .unwrap();
+            assert_eq!(result.get_channel_count(), 2);
+            assert_eq!(result.get_group_count(), 2);
+            let originals: Vec<_> =
+                result.items().filter(|item| &*item.header.id == "1").map(std::borrow::Cow::into_owned).collect();
+            assert_eq!(originals.len(), 1);
+            assert_eq!(&*originals[0].header.name, "Provider channel");
+            assert_eq!(&*originals[0].header.url, "https://stream.test/provider.ts");
+        }
+        assert_eq!(cached.get_channel_count(), 1, "cached provider source must remain unchanged");
+        let mut other = apply_managed_channels(
+            &ManagedOverlay,
+            "other",
+            &[shared::model::PluginRef::new("bridge").unwrap()],
+            cached.clone_source().unwrap(),
+            &mut PluginRunReport::default(),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert_eq!(other.get_channel_count(), 1);
+        let mut empty = apply_managed_channels(
+            &ManagedOverlay,
+            "provider",
+            &[shared::model::PluginRef::new("bridge").unwrap()],
+            PlaylistSource::default(),
+            &mut PluginRunReport::default(),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert_eq!(empty.get_channel_count(), 1, "empty provider playlists still accept managed channels");
+    }
+
+    fn plugin_input(plugin: Option<&str>) -> ConfigInput {
+        ConfigInput {
+            name: Arc::from("youtbepl"),
+            input_type: InputType::Plugin,
+            plugin: plugin.map(Arc::from),
+            ..ConfigInput::default()
+        }
+    }
+
+    /// A plugin input whose plugin was uninstalled or disabled fails only itself, with a message that
+    /// says what to do. It never reaches the fetch, so it cannot disturb the other inputs.
+    #[tokio::test]
+    async fn a_plugin_input_without_its_plugin_reports_itself_inactive() {
+        let fetch = plugin_playlist_fetch(&NoPlugins, &plugin_input(Some("youtube-input"))).await;
+
+        assert!(fetch.groups.is_empty());
+        let message = fetch.errors.first().map(ToString::to_string).unwrap_or_default();
+        assert!(message.contains("youtbepl"), "the input is named: {message}");
+        assert!(message.contains("youtube-input"), "the plugin is named: {message}");
+        assert!(message.contains("is not installed or not enabled"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_plugin_input_must_name_a_plugin() {
+        let fetch = plugin_playlist_fetch(&NoPlugins, &plugin_input(None)).await;
+        let message = fetch.errors.first().map(ToString::to_string).unwrap_or_default();
+        assert!(message.contains("does not name a plugin"), "{message}");
+    }
 }

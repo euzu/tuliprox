@@ -14,12 +14,26 @@ use super::messaging::{MessageContent, RecordingLifecycleMessage};
 use chrono::Utc;
 use shared::{
     model::{
+        format_elapsed_time,
         notification::{registry, EventId, Severity},
-        DiskAlert, MsgKind, WatchChange, WatchChanges, WatchItems,
+        DiskAlert, MsgKind, SourceStats, WatchChange, WatchChanges, WatchItems,
     },
     utils::human_readable_byte_size,
 };
 use std::{fmt::Write, sync::Arc};
+
+/// A titled block of plain-text lines: the structured detail of an event.
+///
+/// Sections are the channel-neutral form of what a rich message shows beyond
+/// its title and body (per-source statistics, the target list, the groups of a
+/// watch change). They carry no markup, so a Discord embed, a Telegram message
+/// or a plugin can each lay them out in its own format; the producer is this
+/// module, once, instead of one template per channel and event.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EventSection {
+    pub heading: String,
+    pub lines: Vec<String>,
+}
 
 /// One thing that happened, in the shape every channel can render.
 ///
@@ -49,6 +63,11 @@ pub struct NotificationEvent {
     /// The typed payload, serialized. Templates reach it as `event.fields.*`.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub fields: serde_json::Value,
+    /// The event's detail as neutral sections, for channels and plugins that lay
+    /// out more than a title and a body. Empty for an event with no detail beyond
+    /// its body; `body` stays the complete plain-text fallback either way.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<EventSection>,
 }
 
 impl NotificationEvent {
@@ -63,6 +82,7 @@ impl NotificationEvent {
             title: title.into(),
             body: body.into(),
             fields: serde_json::Value::Null,
+            sections: Vec::new(),
         }
     }
 
@@ -111,6 +131,7 @@ impl NotificationEvent {
         let body = body_for(content);
         let mut event = Self::new(id, title, body);
         event.fields = fields_for(content);
+        event.sections = sections_for(content);
         event
     }
 
@@ -122,6 +143,7 @@ impl NotificationEvent {
     pub fn from_watch_changes(changes: &WatchChanges) -> Self {
         let mut event = Self::new(registry::PLAYLIST_WATCH_CHANGED, watch_title(changes), watch_body(changes));
         event.fields = serde_json::to_value(changes).unwrap_or(serde_json::Value::Null);
+        event.sections = watch_sections(changes);
         event
     }
 }
@@ -324,6 +346,92 @@ fn body_for(content: &MessageContent) -> String {
         MessageContent::DiskAlert(alert) => disk_alert_text(alert),
         MessageContent::RecordingLifecycle(recording) => recording_lifecycle_text(recording),
     }
+}
+
+/// The structured detail of a message; empty when its body says it all.
+fn sections_for(content: &MessageContent) -> Vec<EventSection> {
+    match content {
+        MessageContent::ProcessingStats(stats) => {
+            let mut sections = Vec::new();
+            if let Some(sources) = &stats.stats {
+                let numbered = sources.len() > 1;
+                for (index, source) in sources.iter().enumerate() {
+                    let suffix = if numbered { format!(" {}", index + 1) } else { String::new() };
+                    sections.extend(source_sections(source, &suffix));
+                }
+            }
+            if let Some(errors) = stats.errors.as_deref().filter(|errors| !errors.trim().is_empty()) {
+                sections.push(EventSection {
+                    heading: "Errors".to_string(),
+                    lines: errors.lines().map(str::to_string).collect(),
+                });
+            }
+            sections
+        }
+        MessageContent::Watch(changes) => watch_sections(changes),
+        _ => Vec::new(),
+    }
+}
+
+/// The inputs and the targets of one source of a playlist update.
+fn source_sections(source: &SourceStats, suffix: &str) -> Vec<EventSection> {
+    let mut sections = Vec::new();
+    if !source.inputs.is_empty() {
+        let mut lines = Vec::with_capacity(source.inputs.len() * 2);
+        for input in &source.inputs {
+            lines.push(format!("{} ({:?})", input.name, input.input_type));
+            lines.push(format!(
+                "{}/{} -> {}/{} groups/channels, {} error(s), {}",
+                input.raw_stats.group_count,
+                input.raw_stats.channel_count,
+                input.processed_stats.group_count,
+                input.processed_stats.channel_count,
+                input.error_count,
+                format_elapsed_time(input.secs_took),
+            ));
+        }
+        sections.push(EventSection { heading: format!("Sources{suffix}"), lines });
+    }
+    if !source.targets.is_empty() {
+        let lines = source
+            .targets
+            .iter()
+            .map(|target| format!("{}: {}", target.name, if target.success { "ok" } else { "failed" }))
+            .collect();
+        sections.push(EventSection { heading: format!("Targets{suffix}"), lines });
+    }
+    sections
+}
+
+/// One section per changed list of a watch change, as [`watch_body`] lists them.
+fn watch_sections(changes: &WatchChanges) -> Vec<EventSection> {
+    let mut sections = Vec::new();
+    for change in &changes.changes {
+        match change {
+            WatchChange::GroupsAdded(items) => push_watch_list(&mut sections, "New groups", items),
+            WatchChange::GroupsRemoved(items) => push_watch_list(&mut sections, "Removed groups", items),
+            WatchChange::ChannelsAdded(group) => {
+                push_watch_list(&mut sections, &format!("{} - added", group.group), &group.items);
+            }
+            WatchChange::ChannelsRemoved(group) => {
+                push_watch_list(&mut sections, &format!("{} - removed", group.group), &group.items);
+            }
+        }
+    }
+    sections
+}
+
+fn push_watch_list(sections: &mut Vec<EventSection>, label: &str, list: &WatchItems) {
+    if list.total == 0 {
+        return;
+    }
+    let mut lines: Vec<String> = list.items.iter().map(ToString::to_string).collect();
+    if lines.is_empty() {
+        lines.push("(list suppressed for a large update)".to_string());
+    } else if let Some(omitted) = list.total.checked_sub(list.items.len()).filter(|omitted| *omitted > 0) {
+        lines.push(format!("... {omitted} more not listed"));
+    }
+    sections.push(EventSection { heading: format!("{label} ({})", list.total), lines });
 }
 
 /// The typed payload, serialized for template access.
@@ -531,5 +639,55 @@ mod tests {
         assert_eq!(restored.id, event.id);
         assert_eq!(restored.title, event.title);
         assert_eq!(restored.dedup_key, event.dedup_key);
+    }
+
+    #[test]
+    fn a_playlist_update_carries_its_sources_targets_and_errors_as_sections() {
+        let input = InputStats {
+            name: "demo-in".to_string(),
+            input_type: InputType::M3u,
+            error_count: 2,
+            raw_stats: PlaylistStats { group_count: 10, channel_count: 100 },
+            processed_stats: PlaylistStats { group_count: 5, channel_count: 50 },
+            secs_took: 125,
+        };
+        let targets = vec![TargetStats::success("main"), TargetStats::failure("kids")];
+        let mut stats = ProcessingStats::new_stats(vec![SourceStats { inputs: vec![input], targets }]);
+        stats.errors = Some("first\nsecond".to_string());
+        let event = NotificationEvent::from_content(&MessageContent::ProcessingStats(stats));
+        let headings: Vec<_> = event.sections.iter().map(|section| section.heading.as_str()).collect();
+        assert_eq!(headings, ["Sources", "Targets", "Errors"]);
+        assert_eq!(event.sections[0].lines, ["demo-in (M3u)", "10/100 -> 5/50 groups/channels, 2 error(s), 2:05 mins"]);
+        assert_eq!(event.sections[1].lines, ["main: ok", "kids: failed"]);
+        assert_eq!(event.sections[2].lines, ["first", "second"]);
+        // The body is still the complete plain-text fallback.
+        assert!(event.body.contains("demo-in (M3u)"));
+    }
+
+    #[test]
+    fn several_sources_are_numbered_and_an_event_without_detail_has_no_sections() {
+        let source = || SourceStats {
+            inputs: vec![InputStats {
+                name: "i".to_string(),
+                input_type: InputType::Xtream,
+                error_count: 0,
+                raw_stats: PlaylistStats { group_count: 1, channel_count: 1 },
+                processed_stats: PlaylistStats { group_count: 1, channel_count: 1 },
+                secs_took: 1,
+            }],
+            targets: vec![TargetStats::success("t")],
+        };
+        let event =
+            NotificationEvent::from_content(&MessageContent::ProcessingStats(ProcessingStats::new_stats(vec![
+                source(),
+                source(),
+            ])));
+        let headings: Vec<_> = event.sections.iter().map(|section| section.heading.as_str()).collect();
+        assert_eq!(headings, ["Sources 1", "Targets 1", "Sources 2", "Targets 2"]);
+
+        let info = NotificationEvent::from_content(&MessageContent::Info("hello".to_string()));
+        assert_eq!(info.sections, Vec::<EventSection>::new());
+        // No sections, no key: an older reader and an unchanged payload see the same JSON.
+        assert!(serde_json::to_value(&info).unwrap().get("sections").is_none());
     }
 }

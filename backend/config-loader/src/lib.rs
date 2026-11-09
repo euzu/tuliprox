@@ -518,7 +518,10 @@ pub async fn get_batch_aliases(
     input_type: InputType,
     url: &str,
 ) -> Result<Option<(PathBuf, Vec<ConfigInputAliasDto>)>, TuliproxError> {
-    if matches!(input_type, InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch) {
+    // An inline batch has no CSV; its aliases are in the source file.
+    if matches!(input_type, InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch)
+        && !url.trim().is_empty()
+    {
         if url.starts_with(PROVIDER_SCHEME_PREFIX) {
             return Err(TuliproxError::Config(format!(
                 "Batch input type '{input_type}' does not support provider:// URLs. \
@@ -663,6 +666,7 @@ pub async fn read_initial_app_config(
         config: Arc::new(ArcSwap::from_pointee(config)),
         sources: Arc::new(ArcSwap::from_pointee(sources)),
         hdhomerun: Arc::new(ArcSwapAny::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapAny::default()),
         paths: Arc::new(ArcSwap::from_pointee(paths.clone())),
         file_locks: Arc::new(FileLockManager::default()),
@@ -1475,6 +1479,7 @@ mod tests {
             config: Arc::new(ArcSwap::from_pointee(Config::default())),
             sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
             hdhomerun: Arc::new(ArcSwapAny::default()),
+            plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapAny::from(Some(Arc::clone(&active)))),
             paths: Arc::new(ArcSwap::from_pointee(paths)),
             file_locks: Arc::new(FileLockManager::default()),

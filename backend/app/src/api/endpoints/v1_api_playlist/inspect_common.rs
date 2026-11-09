@@ -171,6 +171,16 @@ impl CaseInsensitiveNeedle {
             haystack.to_lowercase().contains(&self.needle)
         }
     }
+
+    /// Whether `haystack` is the needle itself rather than merely containing it; for id searches, where a
+    /// substring of a hash is a false positive.
+    pub(super) fn is_exact(&self, haystack: &str) -> bool {
+        if self.ascii {
+            haystack.eq_ignore_ascii_case(&self.needle)
+        } else {
+            haystack.to_lowercase() == self.needle
+        }
+    }
 }
 
 #[cfg(test)]

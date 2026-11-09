@@ -5,17 +5,22 @@ use crate::{
                 config_page::{ConfigForm, ConfigFormSlots, ConfigPage},
                 config_update::apply_and_prepare_config,
                 config_view_context::ConfigViewContext,
+                plugin_config::{
+                    save_modified_plugins, use_plugin_settings, PluginConfigExtensions, PluginConfigTab,
+                    PluginSettingsContext,
+                },
                 ApiConfigView, FailoverGroupsConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView,
                 LogConfigView, MainConfigView, McpConfigView, MessagingConfigView, MetadataUpdateConfigView,
                 PanelConfigView, ProxyConfigView, RecordingConfigView, ReverseProxyConfigView, SchedulesConfigView,
                 WebUiConfigView,
             },
             input::Input,
-            validate_credentials, Card, NoSubmitForm, TabItem, TabSet, TextButton,
+            plugin_available, plugin_id_of_tab, use_plugin_ui, validate_credentials, Card, NoSubmitForm, TabItem,
+            TabSet, TextButton,
         },
         ConfigContext,
     },
-    hooks::{use_key_down, use_service_context, use_unsaved_changes_guard},
+    hooks::{use_icon_context, use_key_down, use_service_context, use_unsaved_changes_guard},
     html_if,
     i18n::use_translation,
     services::{get_base_href, SetupCompleteRequestDto, SetupWebUserCredentialDto},
@@ -23,7 +28,7 @@ use crate::{
 };
 use log::warn;
 use shared::model::{permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
-use std::str::FromStr;
+use std::{rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
 
 const LABEL_CONFIG: &str = "LABEL.CONFIG";
@@ -39,7 +44,17 @@ const LABEL_SETUP_WEBUI_PASSWORD_REPEAT: &str = "SETUP.LABEL.WEBUI_PASSWORD_REPE
 const DEFAULT_SETUP_USERNAME: &str = "admin";
 
 const ACTION_UPDATE_GEO_IP: &str = "update_geo_ip";
+/// The built-in page, followed by the fields plugins inject into its section.
 fn config_page_view(page: ConfigPage) -> Html {
+    html! {
+        <>
+            { builtin_config_page_view(page) }
+            <PluginConfigExtensions section={page.to_string()} />
+        </>
+    }
+}
+
+fn builtin_config_page_view(page: ConfigPage) -> Html {
     match page {
         ConfigPage::Main => html! { <MainConfigView/> },
         ConfigPage::Api => html! { <ApiConfigView/> },
@@ -74,7 +89,8 @@ pub fn ConfigView() -> Html {
     let can_edit_config =
         setup_mode || services_ctx.auth.has_any_permissions(Permission::ConfigWrite | Permission::SourceWrite);
 
-    let active_tab = use_state(|| ConfigPage::Main);
+    // A `ConfigPage` id, or `plugin:<id>` for a tab a plugin contributes.
+    let active_tab = use_state(|| ConfigPage::Main.to_string());
     let edit_mode = use_state(|| setup_mode);
     let form_state = use_state(ConfigFormState::default);
     let setup_username = use_state(|| DEFAULT_SETUP_USERNAME.to_string());
@@ -84,47 +100,78 @@ pub fn ConfigView() -> Html {
     let handle_tab_change = {
         let active_tab = active_tab.clone();
         Callback::from(move |tab_id: String| {
-            if let Ok(page) = ConfigPage::from_str(&tab_id) {
-                active_tab.set(page);
+            // Plugin tabs first: their ids are not `ConfigPage` ids.
+            if plugin_id_of_tab(&tab_id).is_some() || ConfigPage::from_str(&tab_id).is_ok() {
+                active_tab.set(tab_id);
             }
         })
     };
+
+    let plugin_ui = use_plugin_ui();
+    let icons = use_icon_context();
+    let plugin_tabs =
+        if setup_mode { Vec::new() } else { plugin_ui.as_ref().map(|ui| ui.config_tabs(&icons)).unwrap_or_default() };
+    let plugin_settings = use_plugin_settings(*edit_mode, !setup_mode);
+    let plugin_modified_sections = plugin_settings.modified_sections();
 
     let tabs = {
         let form_state_value = (*form_state).clone();
         let translate = translate.clone();
         let edit_value = *edit_mode;
+        let plugin_tabs = plugin_tabs.clone();
+        let plugin_modified_sections = plugin_modified_sections.clone();
 
-        use_memo((form_state_value, edit_value, translate.clone()), move |(forms, editing, translate)| {
-            let forms: &ConfigFormState = forms;
-            let modified_pages = forms
-                .slots
-                .collect_modified_forms()
-                .into_iter()
-                .filter(|form| !matches!(form, ConfigForm::ApiProxy(_, _)))
-                .map(|form| form.page())
-                .collect::<Vec<ConfigPage>>();
+        use_memo(
+            (form_state_value, edit_value, translate.clone(), plugin_tabs, plugin_modified_sections),
+            move |(forms, editing, translate, plugin_tabs, plugin_modified_sections)| {
+                let forms: &ConfigFormState = forms;
+                let modified_pages = forms
+                    .slots
+                    .collect_modified_forms()
+                    .into_iter()
+                    .filter(|form| !matches!(form, ConfigForm::ApiProxy(_, _)))
+                    .map(|form| form.page())
+                    .collect::<Vec<ConfigPage>>();
 
-            let editing = *editing;
-            ConfigPage::ALL
-                .into_iter()
-                .map(|page| {
-                    let is_modified = editing && modified_pages.contains(&page);
+                let editing = *editing;
+                let mut tabs = ConfigPage::ALL
+                    .into_iter()
+                    .map(|page| {
+                        let is_modified = editing
+                            && (modified_pages.contains(&page) || plugin_modified_sections.contains(&page.to_string()));
+                        TabItem {
+                            id: page.to_string(),
+                            title: translate.t(page.title_key()),
+                            icon: page.icon().to_string(),
+                            children: config_page_view(page),
+                            active_class: if is_modified {
+                                Some("tp__tab__modified__active".to_string())
+                            } else {
+                                None
+                            },
+                            inactive_class: if is_modified {
+                                Some("tp__tab__modified__inactive".to_string())
+                            } else {
+                                None
+                            },
+                        }
+                    })
+                    .collect::<Vec<TabItem>>();
+                // Plugin tabs sit beside the closed `ConfigPage` set, after it.
+                tabs.extend(plugin_tabs.iter().map(|tab| {
+                    let class = (!plugin_available(&tab.plugin)).then(|| "tp__plugin--disabled".to_string());
                     TabItem {
-                        id: page.to_string(),
-                        title: translate.t(page.title_key()),
-                        icon: page.icon().to_string(),
-                        children: config_page_view(page),
-                        active_class: if is_modified { Some("tp__tab__modified__active".to_string()) } else { None },
-                        inactive_class: if is_modified {
-                            Some("tp__tab__modified__inactive".to_string())
-                        } else {
-                            None
-                        },
+                        id: tab.id.clone(),
+                        title: tab.title.clone(),
+                        icon: tab.icon.clone(),
+                        children: html! { <PluginConfigTab plugin={Rc::clone(&tab.plugin)} element={tab.element.clone()} /> },
+                        active_class: class.clone(),
+                        inactive_class: class,
                     }
-                })
-                .collect::<Vec<TabItem>>()
-        })
+                }));
+                tabs
+            },
+        )
     };
 
     let handle_config_edit = {
@@ -146,11 +193,34 @@ pub fn ConfigView() -> Html {
         let setup_username = setup_username.clone();
         let setup_password = setup_password.clone();
         let setup_password_repeat = setup_password_repeat.clone();
+        let plugin_settings = plugin_settings.clone();
+        let plugin_ui = plugin_ui.clone();
 
         Callback::from(move |_| {
             let modified_forms: Vec<ConfigForm> = get_form_state.slots.collect_modified_forms();
+            // One entry per plugin with unsaved edits: id, display name, the merged settings.
+            let plugin_saves: Vec<(String, String, serde_json::Value)> = if setup_mode {
+                Vec::new()
+            } else {
+                plugin_settings
+                    .plugins
+                    .iter()
+                    .filter(|(_, draft)| draft.is_modified())
+                    .map(|(id, draft)| {
+                        let name = plugin_ui
+                            .as_ref()
+                            .and_then(|ui| ui.plugin(id))
+                            .map_or_else(|| id.clone(), |plugin| plugin.name.clone());
+                        (id.clone(), name, draft.draft.clone())
+                    })
+                    .collect()
+            };
+            let plugin_dispatch = {
+                let dispatcher = plugin_settings.dispatcher();
+                Callback::from(move |action| dispatcher.dispatch(action))
+            };
 
-            if !setup_mode && modified_forms.is_empty() {
+            if !setup_mode && modified_forms.is_empty() && plugin_saves.is_empty() {
                 set_edit_mode.set(false);
                 services.toastr.info(translate.t("MESSAGES.SAVE.NO_CHANGES"));
                 return;
@@ -326,6 +396,13 @@ pub fn ConfigView() -> Html {
                     }
                 }
 
+                // The plugins' settings go with the page: one `PUT` per plugin, after the core config.
+                if !plugin_saves.is_empty()
+                    && !save_modified_plugins(services.clone(), translate.clone(), plugin_saves, plugin_dispatch).await
+                {
+                    ok = false;
+                }
+
                 if ok {
                     let (app_config, api_proxy_config) = services.config.get_server_config().await;
                     if app_config.is_none() {
@@ -416,7 +493,9 @@ pub fn ConfigView() -> Html {
             || !setup_password.is_empty()
             || !setup_password_repeat.is_empty());
     let has_unsaved_changes = (*edit_mode || setup_mode)
-        && (!form_state.slots.collect_modified_forms().is_empty() || setup_credentials_dirty);
+        && (!form_state.slots.collect_modified_forms().is_empty()
+            || setup_credentials_dirty
+            || plugin_settings.has_changes());
     use_unsaved_changes_guard(has_unsaved_changes);
 
     // Save shortcut (Ctrl/Cmd+S) while editing
@@ -442,10 +521,19 @@ pub fn ConfigView() -> Html {
         on_form_change: on_form_change.clone(),
     };
 
+    let plugin_settings_context = PluginSettingsContext {
+        state: Rc::new((*plugin_settings).clone()),
+        dispatch: {
+            let dispatcher = plugin_settings.dispatcher();
+            Callback::from(move |action| dispatcher.dispatch(action))
+        },
+    };
+
     let geo_ip_enabled = !setup_mode && config_ctx.config.as_ref().is_some_and(|c| c.config.is_geoip_enabled());
 
     html! {
         <ContextProvider<ConfigViewContext> context={context}>
+        <ContextProvider<PluginSettingsContext> context={plugin_settings_context}>
         <div class="tp__config-view">
            { html_if!(setup_mode, {
                     <div class="tp__webui-config-view__info tp__config-view-page__info">
@@ -509,7 +597,7 @@ pub fn ConfigView() -> Html {
                     </NoSubmitForm>
                     </div>
                 })}
-                 <TabSet tabs={tabs.clone()} active_tab={Some((*active_tab).to_string())}
+                 <TabSet tabs={tabs.clone()} active_tab={Some((*active_tab).clone())}
                      on_tab_change={Some(handle_tab_change)}
                      class="tp__config-view__tabset"/>
 
@@ -524,6 +612,7 @@ pub fn ConfigView() -> Html {
             </Card>
             </div>
         </div>
+        </ContextProvider<PluginSettingsContext>>
         </ContextProvider<ConfigViewContext>>
     }
 }

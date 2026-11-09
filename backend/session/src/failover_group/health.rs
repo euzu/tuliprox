@@ -22,11 +22,11 @@ pub fn member_key(member: &GroupMember) -> MemberKey {
     (Arc::clone(&member.input_name), Arc::clone(&member.input_stream_id))
 }
 
-pub fn qos_key(target_name: &Arc<str>, member: &GroupMember) -> QosKey {
+pub fn qos_key(target_name: &str, member: &GroupMember) -> QosKey {
     if member.provider_id > 0 {
         QosKey::Provider { input: Arc::clone(&member.input_name), provider_id: member.provider_id }
     } else {
-        QosKey::TargetMember { target: Arc::clone(target_name), member_vid: member.member_vid.get() }
+        QosKey::TargetMember { target: Arc::from(target_name), member_vid: member.member_vid.get() }
     }
 }
 
@@ -93,7 +93,7 @@ impl MemberHealthIndex {
         }
     }
 
-    pub fn health(&self, target_name: &Arc<str>, member: &GroupMember, now: Instant) -> MemberHealth {
+    pub fn health(&self, target_name: &str, member: &GroupMember, now: Instant) -> MemberHealth {
         let q_key = qos_key(target_name, member);
         let qos = self.qos.load().get(&q_key).copied();
         let m_key = member_key(member);
@@ -488,6 +488,8 @@ mod tests {
             archive: None,
             epg_channel_id: None,
             additional_properties: None,
+            input_url: Arc::from(""),
+            upstream_user_agent: None,
         }
     }
 

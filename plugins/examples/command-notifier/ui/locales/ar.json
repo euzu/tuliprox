@@ -1,0 +1,21 @@
+{
+  "settings.title": "مُخطِر الأوامر",
+  "settings.program.title": "البرنامج",
+  "settings.program.description": "البرنامج المراد تشغيله بمساره الكامل (/config/scripts/notify.sh). يُشغَّل مباشرة دون صدفة (shell) وبصلاحيات المستخدم الذي يعمل به tuliprox، ويستلم الحدث بصيغة JSON على الإدخال القياسي.",
+  "settings.args.title": "المعاملات",
+  "settings.args.description": "إدخال واحد لكل معامل، يُمرَّر كما هو مكتوب. لا تفسّره أي صدفة، فلا حاجة إلى الهروب من الرموز. لا تضع هنا بيانات اعتماد: المعاملات ظاهرة في قائمة العمليات.",
+  "settings.timeout_secs.title": "المهلة (بالثواني)",
+  "settings.timeout_secs.description": "المدة التي يُسمح للبرنامج بالعمل خلالها قبل إيقافه وإعادة محاولة الإشعار. من 1 إلى 25؛ الافتراضي 20.",
+  "settings.routing.title": "التوجيه (تطبّقه tuliprox وليس الإضافة)",
+  "settings.routing.description": "توجيه القناة في صندوق الإشعارات الصادرة، وهو الكتلة نفسها التي تقبلها أي قناة. جميع الحقول اختيارية؛ الكتلة الفارغة ترث notify_on العام.",
+  "settings.routing.notify_on.title": "تجاوز notify_on",
+  "settings.routing.notify_on.description": "أنماط معرّفات الأحداث التي تحلّ محل notify_on العام لهذه القناة (مثل playlist.update.*).",
+  "settings.routing.min_severity.title": "الحد الأدنى للخطورة (التوجيه)",
+  "settings.routing.min_severity.description": "حد الخطورة على جانب المضيف، يُقيَّم بحسب خطورة الحدث في السجل قبل استدعاء الإضافة.",
+  "settings.routing.quiet_hours.title": "ساعات الهدوء",
+  "settings.routing.quiet_hours.description": "HH:MM-HH:MM بالتوقيت المحلي. تُؤجَّل الإشعارات داخل هذه الفترة ولا تُحذف أبداً.",
+  "settings.routing.max_per_hour.title": "الحد الأقصى في الساعة",
+  "settings.routing.max_per_hour.description": "قاطع الدائرة: بعد هذا العدد من الإشعارات في الساعة ترسل القناة إشعار كتم واحداً ثم تصمت.",
+  "settings.routing.dedup_window_secs.title": "نافذة إزالة التكرار (ثوانٍ)",
+  "settings.routing.dedup_window_secs.description": "كتم مفتاح إزالة التكرار المتكرر لهذا العدد من الثواني."
+}

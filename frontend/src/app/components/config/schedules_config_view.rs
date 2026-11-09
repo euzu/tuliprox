@@ -190,15 +190,23 @@ pub fn SchedulesConfigView() -> Html {
                 };
                 match Schedule::from_str(schedule) {
                     Ok(_) => {
-                        let dto = ScheduleConfigDto { schedule: schedule.clone(), task_type, targets };
                         let mut new_schedules = form_state.data().schedules.clone().unwrap_or_default();
                         let edited_index = *editing_index;
+                        // The editor offers no plugin task type yet (W6b); plugin tasks come
+                        // from config.yml. Editing one keeps its plugin and task.
+                        let (plugin, task) = edited_index
+                            .and_then(|idx| new_schedules.get(idx))
+                            .filter(|entry| task_type == ScheduleTaskType::PluginTask && entry.task_type == task_type)
+                            .map_or((None, None), |entry| (entry.plugin.clone(), entry.task.clone()));
+                        let dto = ScheduleConfigDto { schedule: schedule.clone(), task_type, targets, plugin, task };
 
                         let exists = new_schedules.iter().enumerate().any(|(idx, s)| {
                             Some(idx) != edited_index
                                 && s.schedule == dto.schedule
                                 && s.task_type == dto.task_type
                                 && s.targets.as_deref() == dto.targets.as_deref()
+                                && s.plugin == dto.plugin
+                                && s.task == dto.task
                         });
                         if exists {
                             services.toastr.warning(translate.t("MESSAGES.SCHEDULE_EXISTS"));
@@ -324,6 +332,7 @@ pub fn SchedulesConfigView() -> Html {
                                         ScheduleTaskType::PlaylistUpdate => "LABEL.PLAYLIST_UPDATE",
                                         ScheduleTaskType::LibraryScan => "LABEL.LIBRARY",
                                         ScheduleTaskType::GeoIpUpdate => "LABEL.GEOIP",
+                                        ScheduleTaskType::PluginTask => "LABEL.PLUGINS",
                                     })},
                                     ScheduleColumn::Targets => html! {<div class="tp__config-view__tags">
                                         {match entry.targets.as_ref() {

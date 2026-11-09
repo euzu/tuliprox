@@ -1,0 +1,31 @@
+# Fragment of source.yml for the Sports Enricher demo.
+inputs:
+  # Live sport channels with and without logos, EPG ids that match demo/guide.xml, and non-sport groups.
+  - name: sports-m3u
+    type: m3u
+    url: http://127.0.0.1:18970/demo/playlist.m3u
+    epg:
+      sources:
+        - url: http://127.0.0.1:18970/demo/guide.xml
+  # Two sports documentaries and one cooking show as VOD (enrich-metadata), one live tennis channel.
+  - name: sports-xtream
+    type: xtream
+    url: http://127.0.0.1:18973
+    username: demo
+    password: demo
+    options:
+      resolve_vod: true          # fetch get_vod_info; this is where enrich-metadata runs
+      resolve_background: true   # the background worker resolves (and enrich-metadata runs there); inline
+                                 # resolve (false) works too
+      resolve_delay: 1
+
+sources:
+  - inputs:
+      - sports-m3u
+      - sports-xtream
+    targets:
+      - name: sports
+        filter: 'Group ~ ".*"'   # keep everything; the plugin does the regrouping
+        output:
+          - type: xtream         # needed for the VOD resolve options and for xmltv.php / player_api.php
+          - type: m3u

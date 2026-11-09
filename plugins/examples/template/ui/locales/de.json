@@ -1,0 +1,5 @@
+{
+  "menu.title": "Mein Plugin",
+  "menu.hint": "Diese Seite wird vom Plugin in einem abgeschotteten Frame ausgeliefert.",
+  "menu.toast": "Hallo von meinem Plugin"
+}

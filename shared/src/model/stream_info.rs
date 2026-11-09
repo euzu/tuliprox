@@ -305,6 +305,18 @@ fn parse_audio_channels(audio: &Value) -> Option<String> {
     Some(mapped)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct StreamMemberInfo {
+    #[serde(default, with = "arc_str_serde")]
+    pub title: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub input_name: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub provider: Arc<str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_vid: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StreamInfo {
     #[serde(default)]
@@ -331,6 +343,8 @@ pub struct StreamInfo {
     pub preserved: bool,
     #[serde(default)]
     pub previous_session_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_info: Option<StreamMemberInfo>,
 }
 
 pub struct StreamInfoParams<'a> {
@@ -364,6 +378,7 @@ impl StreamInfo {
             session_token: params.session_token.map(std::string::ToString::to_string),
             preserved: false,
             previous_session_id: None,
+            member_info: None,
         }
     }
 }
@@ -399,6 +414,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "1".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
 
         let stream_channel = create_stream_channel_with_type(1, &playlist_item, PlaylistItemType::Video);
@@ -430,6 +446,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "1".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
 
         let stream_channel = playlist_item.to_stream_channel(1);
@@ -460,6 +477,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "1".intern(),
             upstream_user_agent: Some("secret-provider-agent".intern()),
+            input_url: "".intern(),
         };
         let stream_channel = playlist_item.to_stream_channel(1);
         playlist_item.upstream_user_agent = None;
@@ -495,6 +513,7 @@ mod tests {
             additional_properties: None,
             input_stream_id: "42".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
 
         let channel = pli.to_stream_channel(7).with_epg_reference_ts(Some(1_700_000_000));
@@ -532,6 +551,7 @@ mod tests {
             additional_properties: None,
             input_stream_id: "42".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
 
         // to_stream_channel() defaults to None, and with_epg_reference_ts(None)
@@ -541,5 +561,56 @@ mod tests {
 
         assert_eq!(default_channel.epg_reference_ts, None);
         assert_eq!(cleared_channel.epg_reference_ts, None);
+    }
+
+    #[test]
+    fn stream_info_serde_defaults_without_member_info() {
+        use super::{StreamInfo, StreamMemberInfo};
+
+        let json = r#"{
+            "uid": 12,
+            "meter_uid": 34,
+            "username": "alice",
+            "channel": {
+                "target_id": 1,
+                "virtual_id": 100,
+                "provider_id": 2,
+                "input_name": "input_a",
+                "item_type": "Live",
+                "cluster": "Live",
+                "group": "News",
+                "title": "Channel 1",
+                "url": "http://example.com/1.ts",
+                "shared": false
+            },
+            "provider": "acc1",
+            "addr": "127.0.0.1:8080",
+            "client_ip": "127.0.0.1",
+            "user_agent": "VLC",
+            "ts": 1000,
+            "started_at": 1000,
+            "preserved": false
+        }"#;
+
+        let parsed: StreamInfo = serde_json::from_str(json).expect("deserialize stream info without member_info");
+        assert_eq!(parsed.member_info, None);
+
+        let serialized = serde_json::to_string(&parsed).expect("serialize stream info");
+        assert!(!serialized.contains("member_info"), "omits member_info when None");
+
+        let mut with_member = parsed.clone();
+        with_member.member_info = Some(StreamMemberInfo {
+            title: "Channel 1 HD".intern(),
+            input_name: "input_b".intern(),
+            provider: "acc2".intern(),
+            member_vid: Some(200),
+        });
+
+        let serialized_with_member = serde_json::to_string(&with_member).expect("serialize stream info with member");
+        assert!(serialized_with_member.contains("member_info"));
+
+        let roundtrip: StreamInfo =
+            serde_json::from_str(&serialized_with_member).expect("deserialize stream info with member");
+        assert_eq!(roundtrip.member_info, with_member.member_info);
     }
 }

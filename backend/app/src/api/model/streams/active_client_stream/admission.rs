@@ -1,8 +1,9 @@
 use super::{
-    create_deferred_provider_open_future, create_timed_stream_context, resolve_grace_period_provisioning,
-    should_use_direct_body_idle_timeout, stream_grace_period, wrap_timed_client_stream_if_needed, ActiveClientStream,
-    ActiveClientStreamParams, CustomVideoBuffers, DeferredProviderOpenState, DirectBodyIdleTimeout,
-    GraceProvisioningInfo, StreamAdmissionError, StreamMode, TimedStreamContext,
+    create_deferred_provider_open_future, create_timed_stream_context, deferred_open_plugin_headers,
+    resolve_grace_period_provisioning, should_use_direct_body_idle_timeout, stream_grace_period,
+    wrap_timed_client_stream_if_needed, ActiveClientStream, ActiveClientStreamParams, CustomVideoBuffers,
+    DeferredProviderOpenState, DirectBodyIdleTimeout, GraceProvisioningInfo, StreamAdmissionError, StreamMode,
+    TimedStreamContext,
 };
 use crate::{
     api::{
@@ -113,6 +114,7 @@ pub(super) struct ActiveClientStreamState {
     /// Runtime member failover of a direct group playback. Boxed: most streams are not group
     /// streams and should not carry it inline.
     pub(super) group_switcher: Option<Box<GroupSwitcher>>,
+    pub(super) _group_switch_guard: Option<crate::api::api_utils::failover_group_runtime::DirectSwitchGuard>,
     /// Lease owner re-armed for the confirmation of every member a switch opens.
     pub(super) group_lease_owner: Option<Arc<str>>,
 }
@@ -286,8 +288,16 @@ pub(crate) async fn create_active_client_stream(
     // Compute deferred-open metadata before taking the handle: the grace snapshot only
     // needs the provider identity, while the body owns the actual release.
     let has_deferred_open = stream_details.has_deferred_provider_open();
-    let deferred_provider_open =
-        create_deferred_provider_open_future(app_state, &stream_details, fingerprint, &stream_channel, req_headers);
+    let deferred_plugin_headers =
+        deferred_open_plugin_headers(app_state, &stream_details, &stream_channel, &user.username).await;
+    let deferred_provider_open = create_deferred_provider_open_future(
+        app_state,
+        &stream_details,
+        fingerprint,
+        &stream_channel,
+        req_headers,
+        deferred_plugin_headers.as_deref(),
+    );
     let timed_stream_context = deferred_provider_open
         .as_ref()
         .and_then(|_| create_timed_stream_context(app_state, VirtualId::new(virtual_id)));
@@ -378,6 +388,14 @@ pub(crate) async fn create_active_client_stream(
         send_custom_stream_flag = Some(Arc::new(AtomicU8::new(StreamMode::Inner as u8)));
     }
 
+    let (group_switcher, group_switch_guard) = if let Some(driver) = group_failover {
+        let switcher = GroupSwitcher::new(driver);
+        let guard = app_state.failover_switch_registry.register_direct(request_uid, switcher.switch_sender());
+        (Some(Box::new(switcher)), Some(guard))
+    } else {
+        (None, None)
+    };
+
     let state = ActiveClientStreamState {
         response_mode,
         inner: stream,
@@ -407,8 +425,9 @@ pub(crate) async fn create_active_client_stream(
         provider_error_class: None,
         provider_http_status: None,
         provider_reconnect_count: AtomicU8::new(0),
-        group_lease_owner: group_failover.as_ref().and(lease_owner.clone()),
-        group_switcher: group_failover.map(|driver| Box::new(GroupSwitcher::new(driver))),
+        group_lease_owner: group_switcher.as_ref().and(lease_owner.clone()),
+        _group_switch_guard: group_switch_guard,
+        group_switcher,
         lease_owner,
         media_started,
         lease_confirmed: false,

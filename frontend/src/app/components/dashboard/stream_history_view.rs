@@ -1,7 +1,7 @@
 use crate::{
     app::{
         components::{
-            Country, DateInput, DropDownOption, PagedTable, RevealContent, Search, TabItem, TabSet, Table,
+            Country, DateInput, DropDownOption, NoContent, PagedTable, RevealContent, Search, TabItem, TabSet, Table,
             TableDefinition, TextButton, PAGE_SIZES, TP_PAGE_SIZE_KEY,
         },
         context::ConfigContext,
@@ -841,9 +841,7 @@ pub fn StreamHistoryView(props: &StreamHistoryViewProps) -> Html {
                     <h1>{translate.t("LABEL.STREAM_HISTORY")}</h1>
                 </div>
                 <div class="tp__stream-history__body">
-                    <div class="tp__empty-state">
-                        <p>{translate.t("LABEL.STREAM_HISTORY_DISABLED_HINT")}</p>
-                    </div>
+                    <NoContent text={translate.t("LABEL.STREAM_HISTORY_DISABLED_HINT")} />
                 </div>
             </div>
         };

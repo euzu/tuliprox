@@ -178,7 +178,12 @@ pub(super) fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> b
 
     for schedule in a {
         let Some(found_idx) = b.iter().enumerate().find_map(|(idx, candidate)| {
-            if used[idx] || candidate.schedule != schedule.schedule || candidate.task_type != schedule.task_type {
+            if used[idx]
+                || candidate.schedule != schedule.schedule
+                || candidate.task_type != schedule.task_type
+                || candidate.plugin != schedule.plugin
+                || candidate.task != schedule.task
+            {
                 return None;
             }
             let targets_match = match (schedule.targets.as_ref(), candidate.targets.as_ref()) {

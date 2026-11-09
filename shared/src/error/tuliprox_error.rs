@@ -129,6 +129,7 @@ error_kinds! {
     Crypto => "crypto error",
     Server => "server error",
     Probe => "probe error",
+    Plugin => "plugin error",
     Task => "task error",
     Parse => "parse error",
     ProxyUser => "proxy user error",

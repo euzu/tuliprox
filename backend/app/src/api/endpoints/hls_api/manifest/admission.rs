@@ -312,6 +312,11 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
         url_failover_provider,
         prepared_origin.runtime_provider_config.clone(),
     )?;
+    let profile_recovery_failover =
+        origin.input.playback_provider.as_deref().is_some_and(|name| {
+            origin_entry.url_failover_provider().is_some_and(|profile| profile.name.as_ref() == name)
+        });
+    let origin_entry = origin_entry.with_profile_recovery_failover(profile_recovery_failover);
     {
         let session_guard = session.read().await;
         if session_guard.is_gc_marked_for_removal() {

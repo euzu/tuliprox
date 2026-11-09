@@ -1,4 +1,7 @@
-use super::{create_stream_response_details, resolve_initial_stalker_playback_url};
+use super::{
+    accepts_requested_stream_url, create_stream_response_details, resolve_stalker_stream_for_account,
+    should_refresh_stalker_playback, stalker_stream_kind,
+};
 use crate::{
     api::model::{AppState, BoxedProviderStream, ProviderStreamCustomReason, StreamDetails, StreamError},
     auth::Fingerprint,
@@ -21,11 +24,13 @@ use tuliprox_session::{
     stream_options::StreamOptions,
 };
 
+#[derive(Clone)]
 pub(crate) enum PlaybackSource<'a> {
     Single { input: &'a Arc<ConfigInput>, stream_url: &'a str },
     Group { group: Arc<FailoverGroupRecord>, mode: SelectionMode, prefer: Option<usize> },
 }
 
+#[allow(dead_code)]
 pub(crate) struct ResolvedGroupPlayback {
     pub acquired: AcquiredMember,
     pub member: GroupMember,
@@ -36,7 +41,7 @@ pub(crate) struct ResolvedGroupPlayback {
 pub(crate) fn group_shared_key(target_id: u16, group_vid: u32) -> String { format!("group:{target_id}:{group_vid}") }
 
 pub(crate) struct GroupSelectionRequest<'a> {
-    pub target_name: &'a Arc<str>,
+    pub target_name: &'a str,
     pub group: &'a FailoverGroupRecord,
     pub policy: FailoverGroupPolicy,
     pub mode: SelectionMode,
@@ -59,7 +64,7 @@ pub(crate) struct GroupSelectionRequest<'a> {
 impl<'a> GroupSelectionRequest<'a> {
     /// A start selection: live mode, grace and preemption allowed, nothing excluded.
     pub(crate) fn new(
-        target_name: &'a Arc<str>,
+        target_name: &'a str,
         group: &'a FailoverGroupRecord,
         start: FailoverGroupStartConfig,
         addr: &'a SocketAddr,
@@ -166,50 +171,43 @@ where
     F: Fn(CapacityTier) -> Option<bool>,
 {
     loop {
-        let mut tried_candidate = false;
-        let candidate_indices: Vec<(usize, bool)> = probed_tiers
+        let candidate = probed_tiers
             .iter()
-            .filter_map(|(idx, tier)| filter_tier(*tier).map(|allow_grace| (*idx, allow_grace)))
-            .collect();
+            .copied()
+            .find_map(|(idx, tier)| filter_tier(tier).map(|allow_grace| (idx, tier, allow_grace)));
 
-        for (cand_idx, allow_grace) in candidate_indices {
-            let Some((_, tier)) = probed_tiers.iter().find(|(idx, _)| *idx == cand_idx).copied() else {
-                continue;
-            };
+        let Some((cand_idx, tier, allow_grace)) = candidate else {
+            break;
+        };
 
-            let (can_try, half_open_guard) =
-                check_member_circuit(app_state, req, cand_idx, remaining[0].index, all_circuits_open);
-            if !can_try {
-                continue;
-            }
-
-            tried_candidate = true;
-            let handle_opt = app_state.active_provider.try_acquire_connection_no_preempt(
-                &req.group.members[cand_idx].input_name,
-                allow_grace,
-                req.addr,
-                req.priority,
-                req.kind,
-                req.lease,
-            );
-
-            if let Some(handle) = handle_opt {
-                return Some(AcquiredMember {
-                    index: cand_idx,
-                    handle: ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), handle),
-                    tier,
-                    half_open: half_open_guard,
-                });
-            }
-
+        let (can_try, half_open_guard) =
+            check_member_circuit(app_state, req, cand_idx, remaining[0].index, all_circuits_open);
+        if !can_try {
             remaining.retain(|c| c.index != cand_idx);
-            *probed_tiers = remaining.iter().map(|c| (c.index, probe_tier(c.index))).collect();
-            break;
+            probed_tiers.retain(|(idx, _)| *idx != cand_idx);
+            continue;
         }
 
-        if !tried_candidate {
-            break;
+        let handle_opt = app_state.active_provider.try_acquire_connection_no_preempt(
+            &req.group.members[cand_idx].input_name,
+            allow_grace,
+            req.addr,
+            req.priority,
+            req.kind,
+            req.lease,
+        );
+
+        if let Some(handle) = handle_opt {
+            return Some(AcquiredMember {
+                index: cand_idx,
+                handle: ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), handle),
+                tier,
+                half_open: half_open_guard,
+            });
         }
+
+        remaining.retain(|c| c.index != cand_idx);
+        *probed_tiers = remaining.iter().map(|c| (c.index, probe_tier(c.index))).collect();
     }
     None
 }
@@ -423,14 +421,35 @@ pub(crate) fn group_playback_settings(app_state: &AppState, target: &ConfigTarge
     app_state.app_config.config.load().failover_groups.playback(target_cfg)
 }
 
+/// Member indices ordered for archive playback (best first), capped by target's max start attempts.
+pub(crate) fn archive_member_order(
+    app_state: &AppState,
+    target: &ConfigTarget,
+    group: &FailoverGroupRecord,
+    start_ts: i64,
+) -> Vec<usize> {
+    let now_ts = chrono::Utc::now().timestamp();
+    let ranked = rank_members(
+        target.name.as_str(),
+        &group.members,
+        group.policy,
+        &app_state.member_health,
+        &SelectionMode::Archive { start_ts, now_ts },
+        std::time::Instant::now(),
+    );
+    let playback = group_playback_settings(app_state, target);
+    let max_attempts = (playback.start.max_attempts.max(1) as usize).min(ranked.len());
+    ranked.into_iter().take(max_attempts).map(|c| c.index).collect()
+}
+
 /// First member whose input is configured, with its URL; it stands in for the group until a
 /// member is selected.
-pub(crate) fn group_representative(
+pub(crate) fn group_representative<'a>(
     app_state: &AppState,
-    group: &FailoverGroupRecord,
-) -> Option<(Arc<ConfigInput>, Arc<str>)> {
+    group: &'a FailoverGroupRecord,
+) -> Option<(Arc<ConfigInput>, &'a str)> {
     group.members.iter().find_map(|member| {
-        app_state.app_config.get_input_by_name(&member.input_name).map(|input| (input, Arc::clone(&member.url)))
+        app_state.app_config.get_input_by_name(&member.input_name).map(|input| (input, member.url.as_ref()))
     })
 }
 
@@ -624,31 +643,38 @@ fn is_adaptive_content_type(details: &StreamDetails) -> bool {
     })
 }
 
-/// The URL to request for `member`; a Stalker member needs its playback link resolved first.
-async fn member_playback_url(
-    req: &GroupOpenRequest<'_>,
+/// A group member reads its URLs from the input's own playlist. A Stalker link belongs to one account,
+/// so an empty link or a link owned by another account must be resolved for `allocated`.
+pub(crate) fn member_needs_stalker_resolution(input: &ConfigInput, stored_url: &str, allocated: &str) -> bool {
+    input.input_type.is_stalker()
+        && (stored_url.is_empty() || !accepts_requested_stream_url(input, None, None, false, allocated))
+}
+
+/// The URL to request for `member`: a Stalker member gets a link of the account that holds the lease.
+pub(crate) async fn member_playback_url(
+    app_state: &Arc<AppState>,
     input: &Arc<ConfigInput>,
     member: &GroupMember,
+    allocated: &Arc<str>,
 ) -> Option<Arc<str>> {
-    if !input.input_type.is_stalker() {
+    if !member_needs_stalker_resolution(input, &member.url, allocated) {
         return Some(Arc::clone(&member.url));
     }
-    resolve_initial_stalker_playback_url(
-        req.app_state,
+    resolve_stalker_stream_for_account(
+        app_state,
         input,
-        req.user,
+        allocated,
         member.provider_id,
-        member.cluster,
-        member.item_type,
-        &member.url,
+        stalker_stream_kind(member.cluster, member.item_type),
+        false,
     )
     .await
-    .ok()
+    .map(|(_, url)| Arc::<str>::from(url))
 }
 
 /// Why an open produced no usable provider body, `None` when it did. A custom video in place of
 /// the body counts as a failure.
-fn open_failure_class(details: &StreamDetails) -> Option<FailureClass> {
+pub(crate) fn open_failure_class(details: &StreamDetails) -> Option<FailureClass> {
     let exhausted_class = || {
         if details.custom_reason == Some(ProviderStreamCustomReason::ProviderExhausted) {
             FailureClass::Capacity
@@ -661,6 +687,70 @@ fn open_failure_class(details: &StreamDetails) -> Option<FailureClass> {
         _ if details.stream.is_some() => None,
         Some((_, status, _, None)) => Some(FailureClass::from_status(*status)),
         None => Some(exhausted_class()),
+    }
+}
+
+/// One provider open for `member` at `url`, bounded by `deadline`. Without `preacquired` the open
+/// acquires exactly `allocated`; that is the retry after a rejected Stalker link.
+#[allow(clippy::too_many_arguments)]
+async fn open_member_details(
+    req: &GroupOpenRequest<'_>,
+    input: &Arc<ConfigInput>,
+    member: &GroupMember,
+    channel: &StreamChannel,
+    url: &str,
+    allocated: &Arc<str>,
+    preacquired: Option<ManagedProviderHandle>,
+    deadline: tokio::time::Instant,
+) -> Result<StreamDetails, FailureClass> {
+    let content_representation = if member.item_type == PlaylistItemType::Catchup {
+        crate::api::model::ProviderContentRepresentationMode::Identity
+    } else {
+        crate::api::model::ProviderContentRepresentationMode::PreserveOrigin
+    };
+    // A Stalker link was resolved for the account holding the lease, so it is the requested URL. Any
+    // other stored URL is reused only by the input's own account; another account maps or rejects it.
+    let accept_requested_stream_url = input.input_type.is_stalker() || allocated == &input.name;
+    let (force_provider, allow_forced_provider_fallback) =
+        if preacquired.is_none() { (Some(Arc::clone(allocated)), false) } else { (None, true) };
+    let opened = tokio::time::timeout_at(
+        deadline,
+        create_stream_response_details(
+            req.app_state,
+            req.stream_options,
+            url,
+            &req.user.username,
+            req.fingerprint,
+            req.req_headers,
+            input,
+            channel,
+            member.item_type,
+            content_representation,
+            req.share_stream,
+            req.connection_permission,
+            force_provider.as_ref(),
+            None,
+            allow_forced_provider_fallback,
+            true,
+            VirtualId::new(member.member_vid.get()),
+            req.priority,
+            req.connection_kind,
+            req.is_reopen,
+            Some(req.session_token),
+            None,
+            accept_requested_stream_url,
+            None,
+            None,
+            None,
+            preacquired,
+        ),
+    )
+    .await;
+    match opened {
+        Ok(Ok(details)) => Ok(details),
+        Ok(Err(_)) => Err(FailureClass::Stream),
+        // The dropped open released the provider slot it held.
+        Err(_) => Err(FailureClass::Transport),
     }
 }
 
@@ -684,58 +774,64 @@ pub(crate) async fn open_group_member(
         return Err(fail(FailureClass::Stream, half_open));
     };
     let channel = member_stream_channel(req.base_channel, req.group, &member);
+    // Group selection acquired a slot of one account of the member's input lineup.
+    let allocated = handle
+        .handle()
+        .and_then(|handle| handle.allocation.get_provider_name())
+        .unwrap_or_else(|| Arc::clone(&member.input_name));
 
     // Neither the Stalker link nor the provider response may outlive the budget: a provider that
     // accepts the connection and never answers must not hold the start or the switch.
     let open_deadline = req.deadline.min(tokio::time::Instant::now() + PROVIDER_OPEN_TIMEOUT);
-    let Ok(Some(url)) = tokio::time::timeout_at(open_deadline, member_playback_url(req, &input, &member)).await else {
+    let Ok(Some(mut url)) =
+        tokio::time::timeout_at(open_deadline, member_playback_url(req.app_state, &input, &member, &allocated)).await
+    else {
         drop(handle);
         return Err(fail(FailureClass::Transport, half_open));
     };
 
-    let content_representation = if member.item_type == PlaylistItemType::Catchup {
-        crate::api::model::ProviderContentRepresentationMode::Identity
-    } else {
-        crate::api::model::ProviderContentRepresentationMode::PreserveOrigin
-    };
-    let opened = tokio::time::timeout_at(
+    let mut details = match open_member_details(
+        req,
+        &input,
+        &member,
+        &channel,
+        url.as_ref(),
+        &allocated,
+        Some(handle),
         open_deadline,
-        create_stream_response_details(
-            app_state,
-            req.stream_options,
-            url.as_ref(),
-            &req.user.username,
-            req.fingerprint,
-            req.req_headers,
-            &input,
-            &channel,
-            member.item_type,
-            content_representation,
-            req.share_stream,
-            req.connection_permission,
-            None,
-            true,
-            true,
-            VirtualId::new(member.member_vid.get()),
-            req.priority,
-            req.connection_kind,
-            req.is_reopen,
-            Some(req.session_token),
-            None,
-            true,
-            None,
-            None,
-            None,
-            Some(handle),
-        ),
     )
-    .await;
-    let mut details = match opened {
-        Ok(Ok(details)) => details,
-        Ok(Err(_)) => return Err(fail(FailureClass::Stream, half_open)),
-        // The dropped open released the provider slot it held.
-        Err(_) => return Err(fail(FailureClass::Transport, half_open)),
+    .await
+    {
+        Ok(details) => details,
+        Err(class) => return Err(fail(class, half_open)),
     };
+
+    // A portal that rejects the cached Stalker link gets one fresh link for the same account, like
+    // single-channel playback; only a second failure declares the member failed.
+    if input.input_type.is_stalker() {
+        let status = details.stream_info.as_ref().map(|(_, status, _, _)| *status);
+        if should_refresh_stalker_playback(input.input_type, true, status) {
+            let fresh = resolve_stalker_stream_for_account(
+                app_state,
+                &input,
+                &allocated,
+                member.provider_id,
+                stalker_stream_kind(member.cluster, member.item_type),
+                true,
+            )
+            .await;
+            if let Some((_, fresh)) = fresh.filter(|(_, fresh)| fresh.as_str() != url.as_ref()) {
+                match open_member_details(req, &input, &member, &channel, &fresh, &allocated, None, open_deadline).await
+                {
+                    Ok(retried) => {
+                        details = retried;
+                        url = Arc::from(fresh);
+                    }
+                    Err(class) => return Err(fail(class, half_open)),
+                }
+            }
+        }
+    }
 
     let release =
         |details: StreamDetails| app_state.connection_manager.release_managed_provider_handle(details.provider_handle);

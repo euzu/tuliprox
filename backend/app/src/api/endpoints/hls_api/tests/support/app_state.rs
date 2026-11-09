@@ -19,6 +19,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn path_has_extension(path: &str, 
     std::path::Path::new(path).extension().is_some_and(|actual| actual.eq_ignore_ascii_case(extension))
 }
 
+/// App config with one `hls-user` limited to one connection.
 pub(in crate::api::endpoints::hls_api::tests) fn test_app_config() -> Arc<AppConfig> {
     let mut hls_user = ProxyUserCredentials::default();
     hls_user.username = "hls-user".to_string();
@@ -41,6 +42,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_config() -> Arc<AppCon
         config: Arc::new(ArcSwap::from_pointee(Config { custom_stream_response_enabled: true, ..Default::default() })),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::empty()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::from(Some(Arc::new(api_proxy)))),
         file_locks: Arc::new(crate::utils::FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -63,6 +65,17 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_config() -> Arc<AppCon
         media_tools: Arc::new(crate::model::MediaToolCapabilities::default()),
         failover: Arc::default(),
     })
+}
+
+/// Returns the test app config with `storage_dir` set to the given path.
+pub(in crate::api::endpoints::hls_api::tests) fn test_app_config_with_storage_dir(
+    storage_dir: &std::path::Path,
+) -> Arc<AppConfig> {
+    let app_config = test_app_config();
+    let mut config = (**app_config.config.load()).clone();
+    config.storage_dir = storage_dir.to_string_lossy().to_string();
+    app_config.config.store(Arc::new(config));
+    app_config
 }
 
 pub(in crate::api::endpoints::hls_api::tests) fn hls_custom_video_test_user() -> ProxyUserCredentials {
@@ -220,6 +233,16 @@ pub(in crate::api::endpoints::hls_api::tests) fn enable_hls_cache(app_state: &Ar
     app_state.app_config.config.store(Arc::new(config));
 }
 
+pub(in crate::api::endpoints::hls_api::tests) async fn configure_test_hls_strip(
+    app_state: &Arc<AppState>,
+    strip: &tuliprox_core::model::StripConfig,
+) {
+    let mut config = app_state.app_config.config.load().as_ref().clone();
+    config.reverse_proxy.as_mut().unwrap().hls_cache.as_mut().unwrap().strip = strip.clone();
+    app_state.app_config.config.store(Arc::new(config));
+    app_state.hls.proxy.update_config(&app_state.app_config).await;
+}
+
 pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy(
     hls_proxy: Arc<HlsProxyManager>,
 ) -> Arc<AppState> {
@@ -289,8 +312,11 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
         metadata_manager,
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
+        overrides: crate::api::model::OverrideState::default(),
         maintenance: crate::api::model::create_test_maintenance(""),
         member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
+        failover_switch_registry: Arc::default(),
+        plugins: crate::api::model::AppPlugins::default(),
     })
 }
 
@@ -412,7 +438,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn publish_test_transient_re
     let publication = app_state
         .hls
         .proxy
-        .prepare_access_lease_manifest_publication(&access_lease_id, &proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(&access_lease_id, &proxy_session_id, now_ms)
         .await
         .expect("test resource lease accepts manifest publication");
     let snapshot = HlsLeaseManifestSnapshot {

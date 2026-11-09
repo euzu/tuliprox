@@ -26,9 +26,10 @@ macro_rules! create_player_api_for_cluster {
         async fn $fn_name(
             ExtractAcceptHeader(accept): ExtractAcceptHeader,
             axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+            axum::extract::Query(query): axum::extract::Query<shared::model::PlaylistContentQuery>,
             axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
         ) -> impl IntoResponse + Send {
-            playlist_content(accept.clone(), &app_state, &playlist_req, $cluster).await.into_response()
+            playlist_content(accept.clone(), &app_state, &playlist_req, $cluster, query.explorer).await.into_response()
         }
     };
 }
@@ -53,10 +54,12 @@ mod analytics;
 mod content;
 mod epg;
 pub(in crate::api::endpoints) mod epg_inspect;
+pub(in crate::api::endpoints) mod epg_status;
 mod error;
 mod filter_preview;
 mod inspect_common;
 pub(in crate::api::endpoints) mod items;
+mod overrides;
 mod recording;
 mod resources;
 mod routes;
@@ -89,6 +92,10 @@ use self::{
     epg_inspect::{get_target_epg_channel, query_target_epg_channels},
     filter_preview::playlist_filter_preview,
     items::{list_playlist_sources, query_playlist_items},
+    overrides::{
+        playlist_epg_search, playlist_override_item, playlist_overrides_discard, playlist_overrides_get,
+        playlist_overrides_orphans, playlist_overrides_save,
+    },
     recording::playlist_recording_stream,
     resources::{
         create_config_input_for_m3u, create_config_input_for_xtream, playlist_resolve_url, playlist_resource,

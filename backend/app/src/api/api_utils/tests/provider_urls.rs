@@ -893,6 +893,7 @@ async fn xtream_vod_m3u_reverse_proxies_external_sources_and_alias_redirects_wit
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .into_response();
@@ -1072,6 +1073,7 @@ async fn resolve_streaming_strategy_rewrites_url_on_fallback_even_when_accept_re
         &input,
         StreamingAcquireOptions {
             force_provider: Some(&pinned_provider),
+            stream_url_owner: None,
             allow_forced_provider_fallback: true,
             allow_provider_grace: false,
             user_priority: 0,
@@ -1127,6 +1129,7 @@ async fn resolve_pinned_fallback_strategy(
         &input,
         StreamingAcquireOptions {
             force_provider: Some(&pinned_provider),
+            stream_url_owner: None,
             allow_forced_provider_fallback: true,
             allow_provider_grace: false,
             user_priority: 0,
@@ -1235,6 +1238,7 @@ async fn get_query_path_strips_extension_for_live_with_flag() {
         source_ordinal: 0,
         input_stream_id: "1".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     };
 
     let hls_ext = shared::defaults::HLS_EXT.to_string();

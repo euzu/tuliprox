@@ -24,6 +24,11 @@ pub struct McpConfigDto {
     /// Tool results larger than this are truncated.
     #[serde(default = "default_mcp_max_response_bytes", skip_serializing_if = "is_default_mcp_max_response_bytes")]
     pub max_response_bytes: usize,
+
+    /// Offer plugin `rpc_exports` as MCP tools (switch 3 of 3, plan §7). Each
+    /// export also needs `mcp: true` in its manifest and the admin's approval.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plugin_tools: bool,
 }
 
 impl Default for McpConfigDto {
@@ -33,6 +38,7 @@ impl Default for McpConfigDto {
             read_only: true,
             allowed_origins: Vec::new(),
             max_response_bytes: default_mcp_max_response_bytes(),
+            plugin_tools: false,
         }
     }
 }
@@ -108,6 +114,7 @@ mod tests {
             read_only: false,
             allowed_origins: vec!["https://claude.ai".to_string()],
             max_response_bytes: 4096,
+            plugin_tools: true,
         };
         let json = serde_json::to_string(&dto).unwrap();
         assert_eq!(serde_json::from_str::<McpConfigDto>(&json).unwrap(), dto);

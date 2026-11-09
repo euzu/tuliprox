@@ -131,7 +131,10 @@ impl ProviderErrorKind {
             | ErrorKind::RepositoryStorage
             | ErrorKind::RepositoryNetwork
             | ErrorKind::RepositoryPlaylist
-            | ErrorKind::RepositoryTrakt => Self::Transient,
+            | ErrorKind::RepositoryTrakt
+            // A plugin under `fail_mode: abort-target` refused the target. The
+            // provider is not at fault, and the next run is the right retry.
+            | ErrorKind::Plugin => Self::Transient,
         }
     }
 

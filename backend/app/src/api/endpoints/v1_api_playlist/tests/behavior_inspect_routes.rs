@@ -30,7 +30,7 @@ use shared::{
         ConfigTargetOptions, EpgChannel, EpgOutputOptions, EpgProgramme, InputType, M3uPlaylistItem, Permission,
         PlaylistItemType, ProcessingOrder, UserId, WebAuthConfigDto, WebUiConfigDto, XtreamCluster, XtreamPlaylistItem,
     },
-    utils::Internable,
+    utils::{extract_id_from_url, Internable},
 };
 use std::{path::Path, sync::Arc};
 use tower::ServiceExt;
@@ -45,6 +45,7 @@ struct Fixture {
 
 fn target(id: u16, name: &str, output: TargetOutput, lowercase_ids: bool) -> Arc<ConfigTarget> {
     Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id,
         enabled: true,
@@ -717,4 +718,53 @@ async fn protected_register_mirrors_the_inspection_routes() {
             .expect("response");
         assert_eq!(response.status(), expected, "{uri}");
     }
+}
+
+#[tokio::test]
+async fn items_project_and_search_the_override_id() {
+    let fixture = fixture();
+    let hash_url = "http://provider.example:8080/live/secret-user/secret-pass/channel.m3u8";
+    let mut hash_item = m3u_item(2, &extract_id_from_url(hash_url), "Hash Chan", "UK", None);
+    hash_item.url = hash_url.intern();
+    hash_item.input_name = "m3u-input".intern();
+    let mut plain = m3u_item(1, "p1", "BBC One", "UK", Some("bbc.one"));
+    plain.input_name = "m3u-input".intern();
+    fixture.write_m3u_target("m3u-target", vec![plain, hash_item]);
+
+    let (status, body) = fixture
+        .get("/playlist/items?target=m3u-target&cluster=live&fields=name&fields=provider_id&fields=override_id")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items[0]["override_id"], "p1");
+    assert_eq!(items[1]["provider_id"], extract_id_from_url(hash_url));
+    let hash_override = items[1]["override_id"].as_str().expect("a url-hash override id").to_string();
+    assert!(hash_override.starts_with("urlhash-v1:"), "{hash_override}");
+
+    // The override id is the searchable identity of the item, matched exactly.
+    let (status, body) = fixture
+        .get(&format!(
+            "/playlist/items?target=m3u-target&cluster=live&search={hash_override}&search_field=override_id&fields=name"
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!((body["total_matched"].clone(), body["items"][0]["name"].clone()), (1.into(), "Hash Chan".into()));
+
+    let (status, body) =
+        fixture.get("/playlist/items?target=m3u-target&cluster=live&search=urlhash-v1&search_field=override_id").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total_matched"], 0, "a substring of the hash is not the item");
+
+    // Not requested, not computed: the default projection has no override_id.
+    let (_, body) = fixture.get("/playlist/items?target=m3u-target&cluster=live").await;
+    assert!(body["items"][0].get("override_id").is_none(), "{body}");
+
+    // An xtream item's override id is its provider id.
+    let mut xtream = xtream_item(1, 77, "Xt", "G", None);
+    xtream.input_name = "xtream-input".intern();
+    fixture.write_xtream_target("xtream-target", XtreamCluster::Live, vec![xtream]);
+    let (status, body) =
+        fixture.get("/playlist/items?target=xtream-target&cluster=live&fields=provider_id&fields=override_id").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"][0]["override_id"], "77");
 }

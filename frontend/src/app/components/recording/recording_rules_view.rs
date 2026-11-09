@@ -6,7 +6,7 @@
 use super::recording_rule_form::RecordingRuleForm;
 use crate::{
     app::{
-        components::{text_button::TextButton, Table, TableDefinition, ToggleSwitch},
+        components::{text_button::TextButton, NoContent, Table, TableDefinition, ToggleSwitch},
         ConfigContext,
     },
     hooks::use_service_context,
@@ -509,9 +509,7 @@ pub fn recording_rules_view(props: &RecordingRulesViewProps) -> Html {
                             <h1>{ translate.t("LABEL.RECORDING_RULES") }</h1>
                         </div>
                         <div class="tp__recording-rules__body tp__list-list__body">
-                            <p class="tp__recording-list__empty">
-                                { translate.t("LABEL.RECORDING_DISABLED_HINT") }
-                            </p>
+                            <NoContent text={translate.t("LABEL.RECORDING_DISABLED_HINT")} />
                         </div>
                     </div>
                 </div>
@@ -530,9 +528,7 @@ pub fn recording_rules_view(props: &RecordingRulesViewProps) -> Html {
                     <div class="tp__recording-rules__body tp__list-list__body">
                         { form }
                         if is_empty {
-                            <p class="tp__recording-list__empty">
-                                { translate.t("MESSAGES.RECORDING.EMPTY_RULES") }
-                            </p>
+                            <NoContent text={translate.t("MESSAGES.RECORDING.EMPTY_RULES")} />
                         } else {
                             <Table::<RecordingRuleResponse> definition={table_def} />
                         }

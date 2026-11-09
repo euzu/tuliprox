@@ -8,6 +8,7 @@ mod json_utils;
 mod m3u_url;
 mod net_utils;
 mod number_utils;
+mod plugin_schema;
 mod recording_filename;
 mod request;
 mod serde_utils;
@@ -29,6 +30,7 @@ pub use self::{
     m3u_url::*,
     net_utils::*,
     number_utils::*,
+    plugin_schema::*,
     recording_filename::*,
     request::*,
     serde_utils::*,

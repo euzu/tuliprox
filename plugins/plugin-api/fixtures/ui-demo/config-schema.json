@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "title": "UI demo",
+  "properties": {
+    "greeting": {
+      "type": "string",
+      "title": "Greeting",
+      "description": "Returned by the echo rpc method.",
+      "default": "Hello from ui-demo"
+    },
+    "api_token": {
+      "type": "string",
+      "title": "API token",
+      "description": "A write-only secret: it is masked when read back and has no default.",
+      "writeOnly": true
+    }
+  }
+}

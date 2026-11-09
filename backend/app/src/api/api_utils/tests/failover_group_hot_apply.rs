@@ -33,6 +33,8 @@ fn member(vid: VirtualId, input: &str, stream_id: &str) -> GroupMember {
         archive: None,
         epg_channel_id: None,
         additional_properties: None,
+        input_url: Arc::from(""),
+        upstream_user_agent: None,
     }
 }
 

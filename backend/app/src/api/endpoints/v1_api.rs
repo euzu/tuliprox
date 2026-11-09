@@ -72,6 +72,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
         active_user_streams,
         cache,
         reentry_suppressed_total: app_state.active_users.reentry_suppressed_total(),
+        plugin_metrics: super::plugins_metrics_api::plugin_metrics(app_state).await,
     }
 }
 async fn status(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> axum::response::Response {
@@ -177,6 +178,10 @@ pub fn v1_api_register(
     let system_read = axum::routing::Router::new()
         .route("/status", axum::routing::get(status))
         .route("/streams", axum::routing::get(streams))
+        .route(
+            "/streams/{stream_id}/failover-members",
+            axum::routing::get(super::stream_failover_api::get_stream_failover_members),
+        )
         .route("/ipinfo", axum::routing::get(ipinfo))
         .route("/events/stats", axum::routing::get(event_bus))
         .route("/stream-history", axum::routing::get(super::stream_history_api::stream_history_page_query))
@@ -188,9 +193,13 @@ pub fn v1_api_register(
             axum::routing::get(super::stream_history_api::qos_snapshot_detail_query),
         );
 
-    let system_write = axum::routing::Router::new().route("/geoip/update", axum::routing::get(geoip_update));
+    let system_write = axum::routing::Router::new().route("/geoip/update", axum::routing::get(geoip_update)).route(
+        "/streams/{stream_id}/failover-switch",
+        axum::routing::post(super::stream_failover_api::post_stream_failover_switch),
+    );
 
-    let mut router = super::user_settings_api::user_settings_api_register(app_state);
+    let mut router = super::user_settings_api::user_settings_api_register(app_state)
+        .merge(super::plugins_http_api::plugins_http_api_register(web_auth_enabled));
 
     if web_auth_enabled {
         router = router
@@ -203,6 +212,9 @@ pub fn v1_api_register(
             .merge(target_bouquet_api_register_with_permissions(app_state))
             .merge(failover_api_register_with_permissions(app_state))
             .merge(super::maintenance_api::maintenance_api_register_with_permissions(app_state))
+            .merge(super::plugins_api::plugins_api_register_with_permissions(app_state))
+            .merge(super::plugins_rpc_api::plugins_rpc_api_register_with_permissions(app_state))
+            .merge(super::plugins_ui_api::plugins_ui_api_register_with_permissions(app_state))
             .merge(rbac_api_register(Arc::clone(app_state)))
             .merge(recording_availability_register(axum::routing::Router::new()))
             // `recording.enabled: false` turns the DVR off end to end:
@@ -225,6 +237,9 @@ pub fn v1_api_register(
             .merge(target_bouquet_api_register_unprotected())
             .merge(failover_api_register_unprotected())
             .merge(super::maintenance_api::maintenance_api_register_unprotected())
+            .merge(super::plugins_api::plugins_api_register_unprotected())
+            .merge(super::plugins_rpc_api::plugins_rpc_api_register_unprotected())
+            .merge(super::plugins_ui_api::plugins_ui_api_register_unprotected())
             .merge(rbac_api_register_unprotected(Arc::clone(app_state)))
             .merge(recording_availability_register(axum::routing::Router::new()))
             .merge(

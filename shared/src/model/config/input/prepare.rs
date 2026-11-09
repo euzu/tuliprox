@@ -2,7 +2,7 @@ use super::{ConfigInputAliasDto, ConfigInputDto, InputType, StagedInputType};
 use crate::{
     check_input_connections, check_input_credentials,
     error::TuliproxError,
-    model::{PatternTemplate, Prepare},
+    model::{is_valid_plugin_id, PatternTemplate, Prepare},
     utils::{
         get_credentials_from_url_str, get_trimmed_string, is_non_blank_optional_string, parse_duration_seconds,
         parse_provider_scheme_url_parts, sanitize_sensitive_info, trim_last_slash, Internable, BATCH_SCHEME_PREFIX,
@@ -13,8 +13,17 @@ use log::warn;
 use std::{collections::HashSet, sync::Arc};
 
 impl ConfigInputDto {
+    /// Main URL and credentials left empty while aliases define the accounts: an inline batch. Like a `batch://`
+    /// input, its first enabled alias becomes the main account at runtime.
+    pub fn is_inline_batch(&self) -> bool {
+        self.url.trim().is_empty()
+            && self.username.as_deref().is_none_or(|value| value.trim().is_empty())
+            && self.password.as_deref().is_none_or(|value| value.trim().is_empty())
+            && self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty())
+    }
+
     pub(super) fn normalize_input_type_from_batch_url(&mut self) {
-        let is_batch_url = self.url.trim().starts_with(BATCH_SCHEME_PREFIX);
+        let is_batch_url = self.url.trim().starts_with(BATCH_SCHEME_PREFIX) || self.is_inline_batch();
         self.input_type = match self.input_type {
             InputType::M3u | InputType::M3uBatch => {
                 if is_batch_url {
@@ -42,6 +51,7 @@ impl ConfigInputDto {
             InputType::Jellyfin => InputType::Jellyfin,
             InputType::Plex => InputType::Plex,
             InputType::Staged => InputType::Staged,
+            InputType::Plugin => InputType::Plugin,
         };
     }
 
@@ -140,9 +150,72 @@ impl ConfigInputDto {
             | InputType::Stalker
             | InputType::StalkerBatch
             | InputType::Library
-            | InputType::Staged => {}
+            | InputType::Staged
+            | InputType::Plugin => {}
         }
 
+        Ok(())
+    }
+
+    /// `input_type == Plugin <=> plugin.is_some()`, with the id checked against the plugin id
+    /// grammar. A plugin input has no provider account, so the account-shaped blocks are rejected
+    /// rather than silently ignored. Whether the plugin exists and provides an input type is checked
+    /// after plugin load (`ConfigInput::plugin_ref`), since plugins load after the config.
+    pub(super) fn validate_plugin_self(&mut self) -> Result<(), TuliproxError> {
+        if let Some(raw_id) = self.plugin.as_deref().map(str::trim) {
+            if !self.input_type.is_plugin() {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "plugin is only allowed for input type plugin, not {} (input: {})",
+                    self.input_type, self.name
+                )));
+            }
+            if !is_valid_plugin_id(raw_id) {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "plugin id '{raw_id}' is not valid, expected lowercase letters, digits and '-' (input: {})",
+                    self.name
+                )));
+            }
+            self.plugin = Some(raw_id.intern());
+        } else if self.input_type.is_plugin() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "input type plugin requires the `plugin` attribute naming the providing plugin (input: {})",
+                self.name
+            )));
+        }
+
+        if self.input_type.is_plugin() {
+            for (present, what) in [
+                (self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty()), "aliases"),
+                (self.media_server.is_some(), "media_server"),
+                (self.panel_api.is_some(), "panel_api"),
+                (self.stalker.is_some(), "stalker"),
+                (self.provider.as_ref().is_some_and(|provider| !provider.is_empty()), "provider failover definitions"),
+            ] {
+                if present {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "plugin input does not support {what} (input: {})",
+                        self.name
+                    )));
+                }
+            }
+            // A dot is the nesting separator of `plugin_options`, so a key holding one would be
+            // indistinguishable from a nested property.
+            if let Some(bad) = self
+                .plugin_config
+                .keys()
+                .find(|key| key.trim().is_empty() || key.trim() != key.as_str() || key.contains('.'))
+            {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "plugin_config key '{bad}' must be a non-empty name without dots or surrounding spaces (input: {})",
+                    self.name
+                )));
+            }
+        } else if !self.plugin_config.is_empty() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "plugin_config is only allowed for input type plugin, not {} (input: {})",
+                self.input_type, self.name
+            )));
+        }
         Ok(())
     }
 
@@ -212,6 +285,12 @@ impl ConfigInputDto {
         provider_names: &HashSet<String>,
         templates: Option<&[PatternTemplate]>,
     ) -> Result<u16, TuliproxError> {
+        crate::model::validate_managed_channel_refs(&self.managed_channels).map_err(TuliproxError::ConfigInput)?;
+        if !self.managed_channels.is_empty() && (self.input_type == InputType::Staged || self.staged.is_some()) {
+            return Err(TuliproxError::ConfigInput(
+                "attach managed channels to a provider input or target, not a staged overlay".to_string(),
+            ));
+        }
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return Err(TuliproxError::ConfigInput("name for input is mandatory".to_string()));
@@ -245,6 +324,7 @@ impl ConfigInputDto {
 
         self.url = self.url.trim().to_string();
         self.normalize_input_type_from_batch_url();
+        self.validate_plugin_self()?;
         if let Some(options) = self.options.as_ref() {
             if options.disable_hls_streaming && !self.input_type.is_xtream() {
                 return Err(TuliproxError::ConfigInput(format!(
@@ -266,7 +346,10 @@ impl ConfigInputDto {
             )));
         }
 
-        check_input_credentials!(self, self.input_type, true, false);
+        // An inline batch has no main account of its own; its aliases are validated one by one.
+        if !self.is_inline_batch() {
+            check_input_credentials!(self, self.input_type, true, false);
+        }
         check_input_connections!(self, self.input_type, false);
         // Always run stalker validation: it rejects a stray `stalker` block on
         // non-stalker inputs and surfaces a malformed MAC at config load even
@@ -462,5 +545,143 @@ impl ConfigInputDto {
             *enabled = false;
         }
         Ok(changed)
+    }
+}
+
+#[cfg(test)]
+mod plugin_input_tests {
+    use super::*;
+
+    fn prepare(dto: &mut ConfigInputDto) -> Result<u16, TuliproxError> { dto.prepare(0, false, &HashSet::new(), None) }
+
+    fn plugin_input(plugin: Option<&str>) -> ConfigInputDto {
+        ConfigInputDto {
+            name: "from-plugin".intern(),
+            input_type: InputType::Plugin,
+            plugin: plugin.map(Internable::intern),
+            ..ConfigInputDto::default()
+        }
+    }
+
+    #[test]
+    fn plugin_config_belongs_to_plugin_inputs_and_has_plain_keys() {
+        let mut dto = ConfigInputDto {
+            plugin_config: serde_json::Map::from_iter([("mode".to_string(), serde_json::json!("live_only"))]),
+            ..plugin_input(Some("youtube-input"))
+        };
+        assert!(prepare(&mut dto).is_ok());
+
+        let mut dotted = ConfigInputDto {
+            plugin_config: serde_json::Map::from_iter([("a.b".to_string(), serde_json::json!(1))]),
+            ..plugin_input(Some("youtube-input"))
+        };
+        let err = prepare(&mut dotted).unwrap_err().to_string();
+        assert!(err.contains("without dots"), "{err}");
+
+        let mut built_in = ConfigInputDto {
+            name: "m3u".intern(),
+            url: "http://host/list.m3u".to_string(),
+            plugin_config: serde_json::Map::from_iter([("mode".to_string(), serde_json::json!("x"))]),
+            ..ConfigInputDto::default()
+        };
+        let err = prepare(&mut built_in).unwrap_err().to_string();
+        assert!(err.contains("only allowed for input type plugin"), "{err}");
+    }
+
+    #[test]
+    fn plugin_input_requires_the_plugin_id() {
+        let err = prepare(&mut plugin_input(None)).unwrap_err().to_string();
+        assert!(err.contains("requires the `plugin` attribute"), "{err}");
+    }
+
+    #[test]
+    fn plugin_id_is_only_allowed_for_plugin_inputs() {
+        let mut dto = ConfigInputDto {
+            name: "m3u".intern(),
+            url: "http://host/list.m3u".to_string(),
+            plugin: Some("my-plugin".intern()),
+            ..ConfigInputDto::default()
+        };
+        let err = prepare(&mut dto).unwrap_err().to_string();
+        assert!(err.contains("only allowed for input type plugin"), "{err}");
+    }
+
+    #[test]
+    fn plugin_id_must_be_a_valid_plugin_id() {
+        for bad in ["", "  ", "Upper", "x", "has space", "-lead"] {
+            let err = prepare(&mut plugin_input(Some(bad))).unwrap_err().to_string();
+            assert!(err.contains("is not valid"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_plugin_input_needs_neither_url_nor_credentials() {
+        let mut dto = plugin_input(Some(" my-plugin "));
+        prepare(&mut dto).unwrap();
+        assert_eq!(dto.plugin.as_deref(), Some("my-plugin"), "the id is trimmed");
+        assert_eq!(dto.input_type, InputType::Plugin, "the batch:// URL normalization leaves it alone");
+        assert_eq!(dto.url, "");
+        assert!(dto.username.is_none() && dto.password.is_none());
+    }
+
+    #[test]
+    fn url_and_credentials_are_kept_for_the_plugin() {
+        let mut dto = plugin_input(Some("my-plugin"));
+        dto.url = " http://host/feed ".to_string();
+        dto.username = Some(" user ".to_string());
+        dto.password = Some("secret".to_string());
+        prepare(&mut dto).unwrap();
+        assert_eq!(dto.url, "http://host/feed");
+        assert_eq!(dto.username.as_deref(), Some("user"));
+        assert_eq!(dto.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn account_shaped_blocks_are_rejected_for_a_plugin_input() {
+        let mut with_alias = plugin_input(Some("my-plugin"));
+        with_alias.aliases = Some(vec![ConfigInputAliasDto::default()]);
+        let err = prepare(&mut with_alias).unwrap_err().to_string();
+        assert!(err.contains("does not support aliases"), "{err}");
+
+        let mut with_panel = plugin_input(Some("my-plugin"));
+        with_panel.panel_api = Some(crate::model::PanelApiConfigDto::default());
+        let err = prepare(&mut with_panel).unwrap_err().to_string();
+        assert!(err.contains("does not support panel_api"), "{err}");
+    }
+
+    #[test]
+    fn the_yaml_shape_round_trips() {
+        let yaml = "name: from-plugin\ntype: plugin\nplugin: my-plugin\nurl: http://host/feed\n";
+        let dto: ConfigInputDto = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(dto.input_type, InputType::Plugin);
+        assert_eq!(dto.plugin.as_deref(), Some("my-plugin"));
+
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["type"], "plugin");
+        assert_eq!(json["plugin"], "my-plugin");
+        let back: ConfigInputDto = serde_json::from_value(json).unwrap();
+        assert_eq!(back, dto);
+
+        let without = serde_json::to_value(ConfigInputDto::default()).unwrap();
+        assert!(without.get("plugin").is_none(), "an input without a plugin does not serialize the key");
+    }
+
+    #[test]
+    fn plugin_spells_plugin_in_serde_and_strum() {
+        assert_eq!(serde_json::to_value(InputType::Plugin).unwrap(), serde_json::json!("plugin"));
+        assert_eq!(serde_json::from_value::<InputType>(serde_json::json!("plugin")).unwrap(), InputType::Plugin);
+        assert_eq!(InputType::Plugin.to_string(), "plugin");
+        assert_eq!(InputType::Plugin.as_ref(), "plugin");
+        assert_eq!("plugin".parse::<InputType>().unwrap(), InputType::Plugin);
+        assert_eq!(InputType::default(), InputType::M3u, "the default is unchanged");
+    }
+
+    #[test]
+    fn plugin_capabilities_are_explicit() {
+        let capabilities = InputType::Plugin.capabilities();
+        assert_eq!(capabilities.persistence, super::super::InputPersistence::M3u);
+        assert!(!capabilities.requires_provider_connection_for_probe);
+        assert!(!capabilities.served_on_custom_provider_endpoint);
+        assert!(!InputType::Plugin.uses_standard_input_url());
     }
 }

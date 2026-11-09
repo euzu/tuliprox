@@ -141,6 +141,8 @@ mod identity_serialization;
 
 mod pipeline_transparency;
 
+mod plugin_hooks;
+
 mod probe_details;
 
 mod scheduling;
@@ -148,6 +150,8 @@ mod scheduling;
 mod staged_overlay;
 
 mod support;
+
+mod overrides;
 
 use self::support::{
     apply_staged_overlay_groups, catalog_membership, catalog_test_item, complete_catalog_evaluation,

@@ -67,6 +67,7 @@ pub(in crate::manager::tests) fn test_app_config(config: Config) -> AppConfig {
         config: Arc::new(ArcSwap::from_pointee(config)),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(empty_paths())),
@@ -167,7 +168,8 @@ pub(in crate::manager::tests) async fn publish_manifest_snapshot(
     for segment in Arc::make_mut(&mut snapshot.visible_segments) {
         segment.uri = format!("/hls/shared/live/{}/{}/{}.ts", proxy_session_id.0, lease_id.0, segment.proxy_seq).into();
     }
-    let Some(guard) = manager.prepare_access_lease_manifest_publication(lease_id, proxy_session_id, now_ms).await
+    let Some(guard) =
+        manager.prepare_access_lease_manifest_publication_for_test(lease_id, proxy_session_id, now_ms).await
     else {
         return false;
     };

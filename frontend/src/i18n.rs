@@ -141,6 +141,56 @@ pub fn i18n_provider(props: &I18nProviderProps) -> Html {
 #[hook]
 pub fn use_translation() -> YewI18n { use_context::<YewI18n>().expect("No I18n context provided") }
 
+/// The language the UI is shown in and its text direction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveLocale {
+    /// The language code, such as `en` or `pt-BR`.
+    pub code: String,
+    /// `ltr` or `rtl`.
+    pub dir: &'static str,
+}
+
+impl ActiveLocale {
+    fn from_state(state: &LanguageState) -> Self {
+        let rtl = state.languages.iter().any(|language| language.code == state.active && language.is_rtl());
+        Self { code: state.active.clone(), dir: if rtl { "rtl" } else { "ltr" } }
+    }
+}
+
+impl Default for ActiveLocale {
+    fn default() -> Self { Self { code: "en".to_string(), dir: "ltr" } }
+}
+
+/// The active locale, which changes when the user switches the language.
+#[hook]
+pub fn use_active_locale() -> ActiveLocale {
+    use_context::<LanguageState>().as_ref().map(ActiveLocale::from_state).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod active_locale_tests {
+    use super::{ActiveLocale, LanguageInfo, LanguageState};
+    use std::rc::Rc;
+    use yew::Callback;
+
+    fn state(active: &str) -> LanguageState {
+        let language =
+            |code: &str, dir: &str| LanguageInfo { code: code.to_string(), label: String::new(), dir: dir.to_string() };
+        LanguageState {
+            languages: Rc::new(vec![language("en", "ltr"), language("ar", "rtl")]),
+            active: active.to_string(),
+            on_change: Callback::noop(),
+        }
+    }
+
+    #[test]
+    fn the_direction_follows_the_language_manifest() {
+        assert_eq!(ActiveLocale::from_state(&state("ar")), ActiveLocale { code: "ar".to_string(), dir: "rtl" });
+        assert_eq!(ActiveLocale::from_state(&state("en")).dir, "ltr");
+        assert_eq!(ActiveLocale::from_state(&state("xx")).dir, "ltr");
+    }
+}
+
 #[cfg(test)]
 mod locale_file_tests {
     use serde::de::{Deserializer, MapAccess, Visitor};
@@ -160,33 +210,65 @@ mod locale_file_tests {
     /// text that looks translated.
     struct Keys(BTreeSet<String>);
 
-    impl<'de> serde::Deserialize<'de> for Keys {
+    enum Entry {
+        Map(Keys),
+        Leaf,
+    }
+
+    struct EntryVisitor;
+
+    impl<'de> Visitor<'de> for EntryVisitor {
+        type Value = Entry;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("a translation object or scalar") }
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            KeysVisitor.visit_map(map).map(Entry::Map)
+        }
+        fn visit_str<E: serde::de::Error>(self, _v: &str) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_string<E: serde::de::Error>(self, _v: String) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_bool<E: serde::de::Error>(self, _v: bool) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_i64<E: serde::de::Error>(self, _v: i64) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_u64<E: serde::de::Error>(self, _v: u64) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_f64<E: serde::de::Error>(self, _v: f64) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
+            Ok(Entry::Leaf)
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for Entry {
         fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            struct KeysVisitor;
-            impl<'de> Visitor<'de> for KeysVisitor {
-                type Value = Keys;
-                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("a translation object") }
-                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
-                    let mut keys = BTreeSet::new();
-                    let mut own = BTreeSet::new();
-                    while let Some(key) = map.next_key::<String>()? {
-                        if !own.insert(key.clone()) {
-                            return Err(serde::de::Error::custom(format!("duplicate key {key}")));
-                        }
-                        match map.next_value::<serde_json::Value>()? {
-                            serde_json::Value::Object(nested) => {
-                                let nested: Keys = serde_json::from_value(serde_json::Value::Object(nested))
-                                    .map_err(serde::de::Error::custom)?;
-                                keys.extend(nested.0.into_iter().map(|child| format!("{key}.{child}")));
-                            }
-                            _ => {
-                                keys.insert(key);
-                            }
-                        }
+            deserializer.deserialize_any(EntryVisitor)
+        }
+    }
+
+    struct KeysVisitor;
+    impl<'de> Visitor<'de> for KeysVisitor {
+        type Value = Keys;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("a translation object") }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+            let mut keys = BTreeSet::new();
+            let mut own = BTreeSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !own.insert(key.clone()) {
+                    return Err(serde::de::Error::custom(format!("duplicate key {key}")));
+                }
+                match map.next_value::<Entry>()? {
+                    Entry::Map(nested) => {
+                        keys.extend(nested.0.into_iter().map(|child| format!("{key}.{child}")));
                     }
-                    Ok(Keys(keys))
+                    Entry::Leaf => {
+                        keys.insert(key);
+                    }
                 }
             }
+            Ok(Keys(keys))
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for Keys {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
             deserializer.deserialize_map(KeysVisitor)
         }
     }

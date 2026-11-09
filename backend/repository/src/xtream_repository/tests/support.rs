@@ -17,6 +17,7 @@ use uuid::Uuid;
 pub(in crate::xtream_repository::tests) fn target_writer_config() -> ConfigTarget {
     ConfigTarget {
         curation: None,
+        managed_channels: Vec::new(),
         id: 1,
         enabled: true,
         name: "target-empty-cluster-guard".to_string(),
@@ -103,6 +104,7 @@ pub(in crate::xtream_repository::tests) fn make_live_item(
         source_ordinal: 0,
         input_stream_id: provider_id.to_string().intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 

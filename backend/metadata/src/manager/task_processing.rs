@@ -373,6 +373,7 @@ impl InputWorker {
                 let tmdb_and_date_present = AtomicBool::new(false);
                 let probe_pending = AtomicBool::new(false);
                 match update_vod_metadata(
+                    &ctx.plugins,
                     &ctx.app_config,
                     client,
                     input,
@@ -423,6 +424,7 @@ impl InputWorker {
                 let tmdb_and_date_present = AtomicBool::new(false);
                 let probe_pending = AtomicBool::new(false);
                 match update_series_metadata(
+                    &ctx.plugins,
                     &ctx.app_config,
                     client,
                     input,
@@ -456,6 +458,7 @@ impl InputWorker {
                 db_handles.remove(&XtreamCluster::Live);
 
                 match update_live_stream_metadata(
+                    &ctx.events,
                     &ctx.app_config,
                     client,
                     input,

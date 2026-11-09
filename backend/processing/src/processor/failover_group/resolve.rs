@@ -136,7 +136,8 @@ fn split_epg_buckets(catalog: &[CatalogEntry<'_>], buckets: IndexMap<String, Buc
 }
 
 /// Rule 1: manual groups claim their refs, first claim wins. A group with too few resolvable refs is
-/// inactive and releases its claims again.
+/// inactive and releases its claims again. Duplicate manual ids are ignored after the first group, so
+/// two entries with the same id cannot materialize the same group uuid twice.
 fn resolve_manual_groups(
     config: &FailoverGroupsConfig,
     overrides: &TargetFailoverOverridesDto,
@@ -144,7 +145,11 @@ fn resolve_manual_groups(
     taken: &mut [bool],
     out: &mut FailoverGroupResolution,
 ) {
+    let mut seen_ids: HashSet<&str> = HashSet::with_capacity(overrides.groups.len());
     for group in &overrides.groups {
+        if !seen_ids.insert(group.id.as_str()) {
+            continue;
+        }
         let mut matched = Vec::with_capacity(group.members.len());
         let mut unresolved = Vec::new();
         for member in &group.members {

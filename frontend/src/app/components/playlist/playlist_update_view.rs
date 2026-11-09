@@ -228,6 +228,9 @@ pub fn PlaylistUpdateView() -> Html {
         use_effect_with((), move |()| {
             let services_for_cleanup = services.clone();
             let services_for_events = services.clone();
+            let current_connection_context = services.websocket.connection_context();
+            connection_context.set(current_connection_context);
+            card_statuses.dispatch(PlaylistUpdateCardStatusAction::ConnectionChanged(current_connection_context));
             let sub_id = services.event.subscribe(move |msg| {
                 let current_connection_context = services_for_events.websocket.connection_context();
                 if let Some(action) = playlist_update_card_status_action(&msg, current_connection_context) {
@@ -377,6 +380,7 @@ pub fn PlaylistUpdateView() -> Html {
              Html::default()
          }}
          <div class="tp__playlist-update-view__cards">
+         <div class="tp__playlist-update-view__cards-grid">
             {for input_update_run_views.into_iter().map(|view| view.with_library_catalog(library_catalog.as_ref())).filter_map(|view| {
                 let input_id = view.input_id;
                 input_update_cards_by_id.get(&input_id).map(|model| html! {
@@ -392,6 +396,7 @@ pub fn PlaylistUpdateView() -> Html {
                     />
                 })
             })}
+         </div>
          </div>
       </div>
     }
@@ -857,11 +862,12 @@ mod tests {
         let styles = include_str!("../../../../scss/app/components/playlist/_playlist_update_view.scss");
 
         for declaration in [
-            "flex: 999 1 18rem;",
-            "flex: 1 1 20rem;",
+            "container: update-list / inline-size;",
+            "@container update-list (min-width: 1100px)",
+            "@container update-card (width < 480px)",
+            "grid-template-columns: repeat(2, minmax(0, 1fr));",
             "@media (max-width: size.$mobile-breakpoint)",
             "grid-template-columns: minmax(0, 1fr);",
-            "border: 1px solid var(--border-color);",
             "flex-flow: row wrap;",
             "min-height: 0;",
             "overflow-y: auto;",
@@ -886,22 +892,18 @@ mod tests {
     }
 
     #[test]
-    fn input_update_card_capability_notes_follow_select_and_precede_action_button() {
+    fn input_update_card_action_hint_follows_controls_and_is_accessibly_linked() {
         let source = include_str!("input_update_card.rs");
-        let actions = source.split_once("<section class=\"tp__playlist-update-view__input-actions\">").unwrap().1;
+        let actions = source.split_once("<div class=\"tp__playlist-update-view__action-area\">").unwrap().1;
         let select = actions.find("<Select").unwrap();
-        let notes = actions.find("<TitledCard title={translate.t(\"LABEL.NOTES\")}").unwrap();
-        let start = notes + actions[notes..].find("<TextButton").unwrap();
-        assert!(select < notes && notes < start);
+        let start = actions.find("name={format!(\"input_update_{}\", model.input_id)}").unwrap();
+        let hint = actions.find("<p id={policy_description_id}").unwrap();
+        assert!(select < start && start < hint);
         assert!(actions.contains("aria_describedby={policy_description_id.clone()}"));
-        assert!(actions.contains("<p id={policy_description_id}"));
         assert!(actions.contains("{policy_description}"));
-        assert!(source.contains("translate.t(model.capabilities.description_key(effective_policy))"));
-        assert!(!source.contains("tp__playlist-update-view__policy-option"));
-
-        let styles = include_str!("../../../../scss/app/components/playlist/_playlist_update_view.scss");
-        assert!(!styles.contains("&__policy-option"));
-        assert!(styles.contains("padding-block-start: max(var(--padding-mini), 0.5rem);"));
+        assert!(!source.contains("TitledCard"));
+        assert!(!source.contains("tp__playlist-update-view__action-label"));
+        assert!(actions.contains("effective_policy.bypasses_quality().then_some"));
     }
 
     #[test]
@@ -971,50 +973,21 @@ mod tests {
         assert!(buttons.split_once(".tp__text-button.active,").unwrap().0.contains("font-weight: bold;"));
         assert!(!buttons.split_once(".tp__text-button.active,").unwrap().1.contains("font-weight"));
         assert!(!radio_buttons.contains("font-weight"));
-        let target_styles = cards.split_once("&__target-toggle {").unwrap().1.split_once("&__empty-targets").unwrap().0;
+        let target_styles = cards.split_once("&__target-toggle {").unwrap().1.split_once("&__action-area").unwrap().0;
         assert!(!target_styles.contains("font-weight"));
         assert!(!target_styles.contains("font:"));
     }
 
     #[test]
-    fn playlist_update_view_spacing_separates_groups_controls_and_last_update() {
+    fn playlist_update_view_shared_columns_keep_targets_and_controls_aligned() {
         let styles = include_str!("../../../../scss/app/components/playlist/_playlist_update_view.scss");
-
-        for selector in
-            ["&__cards", "&__input-card article", "&__input-card-body", "&__input-content", "&__input-actions"]
-        {
-            let rule = styles.split_once(&format!("{selector} {{")).unwrap().1.split('}').next().unwrap();
-            assert!(rule.contains("gap: max(var(--gap-large), 1rem);"), "missing group spacing for {selector}");
-        }
-        for selector in ["&__input-targets", "&__target-toggles", "&__policy-control", "&__input-card-footer"] {
-            let rule = styles.split_once(&format!("{selector} {{")).unwrap().1.split('}').next().unwrap();
-            assert!(rule.contains("gap: max(var(--gap-default), 0.5rem);"), "missing control spacing for {selector}");
-        }
-        let actions = styles.split_once("&__input-actions {").unwrap().1.split('}').next().unwrap();
-        // The panel keeps its own border and padding, so it reads the same beside or below the content.
-        assert!(actions.contains("padding: var(--padding-default);"));
-        assert!(actions.contains("border: 1px solid var(--border-color);"));
-        let card_styles = include_str!("../../../../scss/app/components/_card.scss");
-        assert!(card_styles.contains("padding: var(--padding-default);"));
-        assert!(styles.contains("padding: max(var(--padding-default), 0.75rem);"));
-        let card_source = include_str!("input_update_card.rs");
-        let policy_control = card_source
-            .split_once("<div class=\"tp__playlist-update-view__policy-control\">")
-            .unwrap()
-            .1
-            .split_once("</div>")
-            .unwrap()
-            .0;
-        assert!(policy_control.contains("tp__playlist-update-view__action-label"));
-        assert!(policy_control.contains("<Select"));
-        assert!(!policy_control.contains("<TitledCard"));
-        // Only disabled inputs render the existing grey control. Every enabled input uses
-        // the same Select, including update-only and separate Library workflows.
-        assert_eq!(policy_control.matches("<TextButton").count(), 1);
-        assert!(policy_control.contains("model.capabilities.rebuilds_targets()"));
-        assert!(policy_control.contains("disabled={true}"));
-        assert!(policy_control.contains("onclick={Callback::noop()}"));
-        assert!(policy_control.contains("<Select"));
+        assert!(styles.contains("&__input-facts,\n  &__input-actions"));
+        assert!(styles.contains("grid-template-columns: minmax(0, 1fr) var(--update-action-width);"));
+        assert!(styles.contains("--update-action-width: 220px;"));
+        assert!(styles.contains("--update-control-gap: 12px;"));
+        assert!(styles.contains("--update-card-spacing: 20px;"));
+        assert!(styles.contains("--update-card-spacing: 16px;"));
+        assert!(!styles.contains("&__policy-notes"));
     }
 
     #[test]

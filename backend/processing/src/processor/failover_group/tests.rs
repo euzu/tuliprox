@@ -166,6 +166,38 @@ fn archive_is_max_of_members() {
 }
 
 #[test]
+fn assemble_group_gets_tv_archive_and_catchup_of_first_archive_member_even_when_representative_has_none() {
+    let a = live("solis", "1", "ZDF HD"); // representative has no archive or catchup
+    let mut b = live("korath", "7", "ZDF FHD");
+    let catchup = shared::model::CatchupProperties {
+        mode: Some("default".intern()),
+        days: Some("7".intern()),
+        source: Some("?utc=${start}".intern()),
+        ..Default::default()
+    };
+    b.header.time_shift = "7".intern();
+    b.header.additional_properties = Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+        tv_archive: Some(1),
+        tv_archive_duration: Some(7),
+        catchup: Some(catchup.clone()),
+        ..Default::default()
+    })));
+
+    let mut playlist = vec![group("News", vec![a, b])];
+    group_playlist(&cfg(), None, "T", &mut playlist);
+
+    let group_channel = &playlist[0].channels[0];
+    let StreamProperties::Live(live_props) = group_channel.header.additional_properties.as_ref().expect("live props")
+    else {
+        panic!("expected live properties");
+    };
+    assert_eq!(live_props.tv_archive, Some(1));
+    assert_eq!(live_props.tv_archive_duration, Some(7));
+    assert_eq!(live_props.catchup.as_ref(), Some(&catchup));
+    assert_eq!(group_channel.header.time_shift.as_ref(), "7");
+}
+
+#[test]
 fn vod_and_series_are_never_grouped() {
     let mut a = live("solis", "1", "Film");
     a.header.item_type = PlaylistItemType::Video;
@@ -671,4 +703,235 @@ fn derive_group_metadata_prefers_representative_and_overrides() {
     assert_eq!(derived.logo, "http://logo/own.png");
     assert_eq!(derived.epg_channel_id.as_deref(), Some("own.de"));
     assert_eq!(derived.playlist_group.as_deref(), Some("Sport"));
+}
+
+fn mapper_copy(item: &PlaylistItem, group: &str) -> PlaylistItem {
+    let mut copy = item.clone();
+    copy.header.group = group.intern();
+    copy.header.uuid = shared::utils::create_alias_uuid(&item.header.uuid, group);
+    copy
+}
+
+#[test]
+fn auto_group_with_mapper_copy_in_another_group_becomes_group_copy() {
+    let member_a = live("solis", "1", "ZDF HD");
+    let copy_a = mapper_copy(&member_a, "Favourites");
+    let member_b = live("korath", "7", "ZDF FHD");
+    let mut playlist = vec![group("News", vec![member_a, member_b]), group("Favourites", vec![copy_a])];
+    let batch = group_playlist(&cfg(), None, "T", &mut playlist);
+    assert_eq!(batch.groups.len(), 1);
+    let group = &batch.groups[0];
+    assert_eq!(group.members.len(), 2, "members contain the stream once per input");
+    let member_inputs: Vec<_> = group.members.iter().map(|m| m.header.input_name.as_ref()).collect();
+    assert_eq!(member_inputs, vec!["solis", "korath"]);
+
+    // Original position holds group channel
+    assert_eq!(playlist[0].channels.len(), 1);
+    let group_item = &playlist[0].channels[0];
+    assert_eq!(group_item.header.uuid, group.group_uuid);
+    assert_eq!(group_item.header.failover_group_uuid, Some(group.group_uuid));
+    assert_eq!(group_item.header.group.as_ref(), "News");
+
+    // Copy slot in Favourites holds group copy
+    assert_eq!(playlist[1].channels.len(), 1);
+    let copy_item = &playlist[1].channels[0];
+    let expected_alias_uuid = shared::utils::create_alias_uuid(&group.group_uuid, "Favourites");
+    assert_eq!(copy_item.header.uuid, expected_alias_uuid);
+    assert_eq!(copy_item.header.failover_group_uuid, Some(group.group_uuid));
+    assert_eq!(copy_item.header.group.as_ref(), "Favourites");
+    assert_eq!(copy_item.header.title, group_item.header.title);
+}
+
+#[test]
+fn manual_group_with_mapper_copy_in_another_group_becomes_group_copy() {
+    let member_a = live("solis", "1", "ZDF HD");
+    let copy_a = mapper_copy(&member_a, "Favourites");
+    let member_b = live("korath", "7", "Zweites Deutsches Fernsehen");
+    let mut playlist = vec![group("News", vec![member_a, member_b]), group("Favourites", vec![copy_a])];
+    let overrides = overrides_with_manual("zdf-manual", &[("solis", "1"), ("korath", "7")]);
+    let batch = group_playlist(&cfg(), Some(&overrides), "T", &mut playlist);
+    assert_eq!(batch.groups.len(), 1);
+    let group = &batch.groups[0];
+    assert_eq!(group.members.len(), 2, "members contain the stream once");
+
+    // Original position holds group channel
+    assert_eq!(playlist[0].channels.len(), 1);
+    let group_item = &playlist[0].channels[0];
+    assert_eq!(group_item.header.uuid, group.group_uuid);
+    assert_eq!(group_item.header.failover_group_uuid, Some(group.group_uuid));
+    assert_eq!(group_item.header.group.as_ref(), "News");
+
+    // Copy slot in Favourites holds group copy
+    assert_eq!(playlist[1].channels.len(), 1);
+    let copy_item = &playlist[1].channels[0];
+    let expected_alias_uuid = shared::utils::create_alias_uuid(&group.group_uuid, "Favourites");
+    assert_eq!(copy_item.header.uuid, expected_alias_uuid);
+    assert_eq!(copy_item.header.failover_group_uuid, Some(group.group_uuid));
+    assert_eq!(copy_item.header.group.as_ref(), "Favourites");
+}
+
+#[test]
+fn copy_in_same_playlist_group_as_group_channel_is_dropped() {
+    let member_a = live("solis", "1", "ZDF HD");
+    let copy_a = mapper_copy(&member_a, "News");
+    let member_b = live("korath", "7", "ZDF FHD");
+    let mut playlist = vec![group("News", vec![member_a, copy_a, member_b])];
+    let batch = group_playlist(&cfg(), None, "T", &mut playlist);
+    assert_eq!(batch.groups.len(), 1);
+    let group = &batch.groups[0];
+    assert_eq!(group.members.len(), 2);
+
+    // Copy in the same group is dropped so News has only the group channel
+    assert_eq!(playlist[0].channels.len(), 1);
+    assert_eq!(playlist[0].channels[0].header.uuid, group.group_uuid);
+}
+
+#[test]
+fn copy_of_ungrouped_channel_is_unchanged() {
+    let single = live("solis", "1", "ZDF HD");
+    let copy = mapper_copy(&single, "Favourites");
+    let other = live("solis", "2", "ARD");
+    let mut playlist = vec![group("News", vec![single, other]), group("Favourites", vec![copy])];
+    let original_copy_uuid = playlist[1].channels[0].header.uuid;
+    let batch = group_playlist(&cfg(), None, "T", &mut playlist);
+    assert!(batch.groups.is_empty(), "no groups formed");
+
+    assert_eq!(playlist[0].channels.len(), 2);
+    assert_eq!(playlist[1].channels.len(), 1);
+    let copy_after = &playlist[1].channels[0];
+    assert_eq!(copy_after.header.uuid, original_copy_uuid);
+    assert_eq!(copy_after.header.failover_group_uuid, None);
+    assert_eq!(copy_after.header.group.as_ref(), "Favourites");
+}
+
+#[test]
+fn catalog_records_contain_each_member_ref_once() {
+    let member_a = live("solis", "1", "ZDF HD");
+    let copy_a = mapper_copy(&member_a, "Favourites");
+    let member_b = live("korath", "7", "ZDF FHD");
+    let mut playlist = vec![group("News", vec![member_a, member_b]), group("Favourites", vec![copy_a])];
+    let batch = group_playlist(&cfg(), None, "T", &mut playlist);
+    let solis_records: Vec<_> =
+        batch.catalog.iter().filter(|rec| rec.member_ref.input == "solis" && rec.member_ref.stream_id == "1").collect();
+    assert_eq!(solis_records.len(), 1, "catalog contains each member ref once");
+    assert_eq!(batch.catalog.len(), 2, "solis:1 and korath:7");
+}
+
+#[test]
+fn multiple_copies_in_different_groups_each_become_group_copy() {
+    let member_a = live("solis", "1", "ZDF HD");
+    let copy_fav = mapper_copy(&member_a, "Favourites");
+    let copy_kids = mapper_copy(&member_a, "Kids");
+    let member_b = live("korath", "7", "ZDF FHD");
+    let mut playlist = vec![
+        group("News", vec![member_a, member_b]),
+        group("Favourites", vec![copy_fav]),
+        group("Kids", vec![copy_kids]),
+    ];
+    let batch = group_playlist(&cfg(), None, "T", &mut playlist);
+    assert_eq!(batch.groups.len(), 1);
+    let group = &batch.groups[0];
+
+    assert_eq!(playlist[1].channels.len(), 1);
+    assert_eq!(playlist[1].channels[0].header.uuid, shared::utils::create_alias_uuid(&group.group_uuid, "Favourites"));
+    assert_eq!(playlist[1].channels[0].header.group.as_ref(), "Favourites");
+
+    assert_eq!(playlist[2].channels.len(), 1);
+    assert_eq!(playlist[2].channels[0].header.uuid, shared::utils::create_alias_uuid(&group.group_uuid, "Kids"));
+    assert_eq!(playlist[2].channels[0].header.group.as_ref(), "Kids");
+}
+
+#[test]
+fn multiple_copies_in_same_alias_group_keep_only_one_group_channel_copy() {
+    let member_a = live("solis", "1", "ZDF HD");
+    let copy_a = mapper_copy(&member_a, "Favourites");
+    let member_b = live("korath", "7", "ZDF FHD");
+    let copy_b = mapper_copy(&member_b, "Favourites");
+    let mut playlist = vec![group("News", vec![member_a, member_b]), group("Favourites", vec![copy_a, copy_b])];
+    let batch = group_playlist(&cfg(), None, "T", &mut playlist);
+    assert_eq!(batch.groups.len(), 1);
+    let group = &batch.groups[0];
+
+    // Favourites should have only ONE group copy, not two duplicate rows
+    assert_eq!(playlist[1].channels.len(), 1);
+    assert_eq!(playlist[1].channels[0].header.uuid, shared::utils::create_alias_uuid(&group.group_uuid, "Favourites"));
+}
+
+#[test]
+fn copy_in_deferred_placement_destination_group_is_dropped() {
+    let member_a = live("solis", "1", "ZDF HD");
+    let copy_a = mapper_copy(&member_a, "Favourites");
+    let member_b = live("korath", "7", "ZDF FHD");
+    let mut playlist = vec![group("News", vec![member_a, member_b]), group("Favourites", vec![copy_a])];
+    let mut overrides = TargetFailoverOverridesDto::new("T");
+    overrides.auto_overrides.push(AutoGroupOverrideDto {
+        auto_key: "zdf".into(),
+        playlist_group: Some("Favourites".into()),
+        ..Default::default()
+    });
+    let batch = group_playlist(&cfg(), Some(&overrides), "T", &mut playlist);
+    assert_eq!(batch.groups.len(), 1);
+    let group = &batch.groups[0];
+
+    // Group channel is placed in Favourites, so the copy in Favourites is dropped
+    let fav_group = playlist.iter().find(|g| g.title.as_ref() == "Favourites").expect("favourites");
+    assert_eq!(fav_group.channels.len(), 1);
+    assert_eq!(fav_group.channels[0].header.uuid, group.group_uuid);
+}
+
+#[test]
+fn duplicate_manual_group_ids_keep_the_first_group() {
+    let mut overrides = TargetFailoverOverridesDto::new("T");
+    overrides.groups.push(ManualFailoverGroupDto {
+        id: "zdf".into(),
+        name: "zdf".into(),
+        members: vec![
+            ChannelMemberRefDto { input: "solis".into(), stream_id: "1".into() },
+            ChannelMemberRefDto { input: "korath".into(), stream_id: "7".into() },
+        ],
+        ..Default::default()
+    });
+    overrides.groups.push(ManualFailoverGroupDto {
+        id: "zdf".into(),
+        name: "zdf".into(),
+        members: vec![
+            ChannelMemberRefDto { input: "veyra".into(), stream_id: "3".into() },
+            ChannelMemberRefDto { input: "other".into(), stream_id: "4".into() },
+        ],
+        ..Default::default()
+    });
+    let mut playlist = vec![group(
+        "News",
+        vec![
+            live("solis", "1", "ZDF HD"),
+            live("korath", "7", "ZDF FHD"),
+            live("veyra", "3", "ARD"),
+            live("other", "4", "RTL"),
+        ],
+    )];
+
+    let pending = group_playlist(&cfg(), Some(&overrides), "T", &mut playlist).groups;
+
+    let manual: Vec<_> = pending.iter().filter(|group| group.key.as_ref() == "zdf").collect();
+    assert_eq!(manual.len(), 1, "a duplicate manual id must materialize only once");
+    let inputs: Vec<_> = manual[0].members.iter().map(|m| m.header.input_name.to_string()).collect();
+    assert_eq!(inputs, vec!["solis", "korath"], "the first group with this id wins");
+    assert!(playlist[0].channels.iter().any(|c| c.header.title.as_ref() == "ARD"));
+    assert!(playlist[0].channels.iter().any(|c| c.header.title.as_ref() == "RTL"));
+}
+
+#[test]
+fn copy_in_a_differently_cased_group_merges_with_the_group_channel() {
+    let first = live("solis", "1", "ZDF HD");
+    let mut copy = first.clone();
+    copy.header.group = "news".intern();
+    let mut playlist = vec![group("News", vec![first, live("korath", "7", "ZDF FHD")]), group("news", vec![copy])];
+
+    let pending = group_playlist(&cfg(), None, "T", &mut playlist).groups;
+
+    assert_eq!(pending.len(), 1);
+    assert!(
+        playlist.iter().all(|group| group.title.as_ref() != "news"),
+        "a copy in a group that normalizes to the group channel's group must be dropped"
+    );
 }

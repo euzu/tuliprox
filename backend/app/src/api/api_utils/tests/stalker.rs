@@ -1,11 +1,12 @@
 use super::{
-    create_test_app_state_for_config, create_test_dual_provider_app_config, create_test_fingerprint,
-    create_test_provider_app_config, needs_initial_stalker_resolution, resolve_streaming_strategy,
-    should_refresh_stalker_playback, stalker_stream_kind, StreamingAcquireOptions,
+    accepts_requested_stream_url, create_test_app_state_for_config, create_test_dual_provider_app_config,
+    create_test_fingerprint, create_test_provider_app_config, member_needs_stalker_resolution,
+    needs_initial_stalker_resolution, resolve_streaming_strategy, should_refresh_stalker_playback, stalker_stream_kind,
+    StreamingAcquireOptions,
 };
 use crate::{
     api::model::{ProviderStreamCustomReason, ProviderStreamState},
-    model::SourcesConfig,
+    model::{ConfigInput, SourcesConfig},
 };
 use axum::http::StatusCode;
 use shared::{
@@ -20,6 +21,80 @@ fn stalker_playback_refreshes_invalid_or_rejected_urls() {
     assert!(should_refresh_stalker_playback(InputType::Stalker, true, Some(StatusCode::UNAUTHORIZED)));
     assert!(!should_refresh_stalker_playback(InputType::Stalker, true, Some(StatusCode::OK)));
     assert!(!should_refresh_stalker_playback(InputType::Xtream, false, None));
+}
+
+/// Input named `main` of the given type.
+fn input_of_type(input_type: InputType) -> ConfigInput {
+    ConfigInput { name: "main".intern(), input_type, ..ConfigInput::default() }
+}
+
+/// A Stalker URL is kept only when the allocated account owns it: the forced provider, else the input.
+#[test]
+fn stalker_url_is_accepted_only_for_the_account_that_owns_it() {
+    let input = input_of_type(InputType::Stalker);
+    let main = "main".intern();
+    let alias = "saray8".intern();
+
+    // Main account allocated without a forced provider keeps its URL.
+    assert!(accepts_requested_stream_url(&input, None, None, false, "main"));
+    // Alias allocated without a forced provider needs its own link.
+    assert!(!accepts_requested_stream_url(&input, None, None, false, "saray8"));
+    // Forced provider equals allocation.
+    assert!(accepts_requested_stream_url(&input, Some(&alias), None, false, "saray8"));
+    // Forced provider differs from allocation (fallback), including the main account.
+    assert!(!accepts_requested_stream_url(&input, Some(&alias), None, false, "main"));
+    assert!(!accepts_requested_stream_url(&input, Some(&main), None, false, "saray8"));
+}
+
+/// A replayed alias URL stays owned by the alias after the pin was cleared.
+#[test]
+fn stalker_url_owner_survives_a_cleared_pin() {
+    let input = input_of_type(InputType::Stalker);
+    let main = "main".intern();
+    let alias = "saray8".intern();
+
+    // The alias URL is never handed to the main account, with or without a pin.
+    assert!(!accepts_requested_stream_url(&input, None, Some(&alias), false, "main"));
+    assert!(!accepts_requested_stream_url(&input, Some(&main), Some(&alias), false, "main"));
+    // Only the owning alias keeps it.
+    assert!(accepts_requested_stream_url(&input, None, Some(&alias), false, "saray8"));
+    // A main-account URL is not handed to the alias.
+    assert!(!accepts_requested_stream_url(&input, Some(&alias), Some(&main), false, "saray8"));
+}
+
+/// A non-Stalker URL is kept only with the accept flag and a matching (or absent) forced provider.
+#[test]
+fn non_stalker_url_acceptance_follows_the_accept_flag_and_forced_provider() {
+    let input = input_of_type(InputType::Xtream);
+    let forced = "saray8".intern();
+
+    assert!(!accepts_requested_stream_url(&input, None, None, false, "main"));
+    assert!(accepts_requested_stream_url(&input, None, None, true, "main"));
+    assert!(accepts_requested_stream_url(&input, Some(&forced), None, true, "saray8"));
+    assert!(!accepts_requested_stream_url(&input, Some(&forced), None, true, "main"));
+    assert!(!accepts_requested_stream_url(&input, Some(&forced), None, false, "saray8"));
+}
+
+/// A group member's Stalker link is account-bound: an empty link or a link owned by another account
+/// resolves for the account that holds the lease.
+#[test]
+fn group_member_stalker_link_resolves_for_the_allocated_account() {
+    let input = input_of_type(InputType::Stalker);
+    let main = "main".intern();
+    let alias = "saray8".intern();
+    let stored = "https://stream.example/live.ts";
+
+    // An empty stored link resolves for whichever account holds the lease.
+    assert!(member_needs_stalker_resolution(&input, "", &main));
+    assert!(member_needs_stalker_resolution(&input, "", &alias));
+    // A stored link is kept only by the account that owns it.
+    assert!(!member_needs_stalker_resolution(&input, stored, &main));
+    assert!(member_needs_stalker_resolution(&input, stored, &alias));
+
+    // Non-Stalker URLs are mapped by the provider selection, never resolved.
+    let xtream = input_of_type(InputType::Xtream);
+    assert!(!member_needs_stalker_resolution(&xtream, stored, &alias));
+    assert!(!member_needs_stalker_resolution(&xtream, "", &alias));
 }
 
 #[test]
@@ -55,6 +130,7 @@ async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
         &input,
         StreamingAcquireOptions {
             force_provider: None,
+            stream_url_owner: None,
             allow_forced_provider_fallback: false,
             allow_provider_grace: false,
             user_priority: 0,
@@ -109,6 +185,7 @@ async fn resolve_streaming_strategy_rejects_stalker_url_after_forced_provider_fa
         &input,
         StreamingAcquireOptions {
             force_provider: Some(&pinned_provider),
+            stream_url_owner: None,
             allow_forced_provider_fallback: true,
             allow_provider_grace: false,
             user_priority: 0,

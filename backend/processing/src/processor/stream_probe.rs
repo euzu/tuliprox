@@ -155,7 +155,7 @@ pub async fn probe_generic_stream_metadata<E: EventSink>(
 /// The URL is sanitized here rather than by the caller: it is a resolved
 /// provider URL carrying account credentials, and this record is rendered
 /// into notification channels.
-fn emit_probe_failure<E: EventSink>(
+pub(crate) fn emit_probe_failure<E: EventSink>(
     events: &E,
     input: &ConfigInput,
     unique_id: &str,
@@ -221,7 +221,9 @@ async fn prepare_generic_stream_metadata<E: EventSink>(
         | InputType::Plex
         | InputType::Stalker
         | InputType::StalkerBatch
-        | InputType::Staged => return Ok(PreparedGenericProbeOutcome::Noop),
+        // A plugin input has no provider connection to probe through, same as capabilities() says.
+        | InputType::Staged
+        | InputType::Plugin => return Ok(PreparedGenericProbeOutcome::Noop),
     };
 
     if !db_path.exists() {

@@ -3,8 +3,8 @@ use super::maintenance_state::{
 };
 use crate::{
     app::components::{
-        input::Input, selection_first_owned, CustomDialog, DropDownOption, DropDownSelection, IconButton, Select,
-        TextButton,
+        input::Input, selection_first_owned, CustomDialog, DropDownOption, DropDownSelection, IconButton, NoContent,
+        Select, TextButton,
     },
     config_field_child,
     hooks::use_service_context,
@@ -223,7 +223,7 @@ pub fn MaintenanceDialog(props: &MaintenanceDialogProps) -> Html {
             }
             <div class="tp__maintenance-dialog__list">
                 if draft.is_empty() {
-                    <p class="tp__maintenance-dialog__empty">{translate.t("LABEL.MAINTENANCE_NONE")}</p>
+                    <NoContent text={translate.t("LABEL.MAINTENANCE_NONE")} />
                 } else {
                     <table class="tp__maintenance-dialog__table">
                         <thead><tr>

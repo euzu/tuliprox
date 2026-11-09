@@ -19,9 +19,10 @@ use crate::{
 use log::warn;
 use shared::{
     error::TuliproxError,
-    model::{ClusterFlags, PlaylistGroup, StreamProperties, VirtualId, XtreamCluster},
+    model::{archive_info, ClusterFlags, PlaylistGroup, UUIDType, VirtualId, XtreamCluster},
 };
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -117,15 +118,28 @@ pub(super) async fn persist_playlist_with_mode(
     .await
 }
 
+fn collect_published_group_uuids(playlist: &[PlaylistGroup], published: &mut HashSet<UUIDType>) {
+    for group in playlist {
+        for channel in &group.channels {
+            if let Some(cg_uuid) = channel.header.failover_group_uuid {
+                if channel.header.uuid == cg_uuid {
+                    published.insert(cg_uuid);
+                }
+            }
+        }
+    }
+}
+
 fn collect_failover_group_aliases(
     playlist: &[PlaylistGroup],
     mapping: &TargetIdMapping,
+    published_group_uuids: &HashSet<UUIDType>,
     aliases: &mut Vec<(VirtualId, VirtualId)>,
 ) {
     for group in playlist {
         for channel in &group.channels {
             if let Some(cg_uuid) = channel.header.failover_group_uuid {
-                if channel.header.uuid != cg_uuid {
+                if channel.header.uuid != cg_uuid && published_group_uuids.contains(&cg_uuid) {
                     if let Some(group_vid) = mapping.get_virtual_id_by_uuid(&cg_uuid) {
                         aliases.push((channel.header.virtual_id, group_vid));
                     }
@@ -138,22 +152,27 @@ fn collect_failover_group_aliases(
 fn build_failover_group_records(
     failover_groups: &[PendingFailoverGroup],
     mapping: &TargetIdMapping,
+    published_group_uuids: &HashSet<UUIDType>,
 ) -> Vec<FailoverGroupRecord> {
     failover_groups
         .iter()
-        .map(|pending| {
-            let group_vid = mapping.get_virtual_id_by_uuid(&pending.group_uuid).unwrap_or_default();
+        .filter(|pending| published_group_uuids.contains(&pending.group_uuid))
+        .filter_map(|pending| {
+            let group_vid = mapping.get_virtual_id_by_uuid(&pending.group_uuid)?;
+            if group_vid.is_unset() {
+                return None;
+            }
             let members = pending
                 .members
                 .iter()
                 .map(|member| {
-                    let archive = if let Some(StreamProperties::Live(live)) = &member.header.additional_properties {
-                        live.tv_archive_duration
-                            .and_then(|d| u32::try_from(d).ok())
-                            .map(|duration_days| MemberArchive { duration_days })
-                    } else {
-                        None
-                    };
+                    const DEFAULT_ARCHIVE_DURATION_DAYS: u32 = 1;
+                    let (has_archive, duration_days) =
+                        archive_info(member.header.additional_properties.as_ref(), member.header.time_shift.as_ref());
+                    // Default to 1 day (minimum standard replay window) when duration is unspecified.
+                    let archive = has_archive.then(|| MemberArchive {
+                        duration_days: duration_days.unwrap_or(DEFAULT_ARCHIVE_DURATION_DAYS),
+                    });
                     GroupMember {
                         member_vid: member.header.virtual_id,
                         input_name: Arc::clone(&member.header.input_name),
@@ -166,17 +185,19 @@ fn build_failover_group_records(
                         archive,
                         epg_channel_id: member.header.epg_channel_id.as_ref().map(Arc::clone),
                         additional_properties: member.header.additional_properties.clone(),
+                        input_url: Arc::clone(&member.header.input_url),
+                        upstream_user_agent: member.header.upstream_user_agent.as_ref().map(Arc::clone),
                     }
                 })
                 .collect();
-            FailoverGroupRecord {
+            Some(FailoverGroupRecord {
                 group_vid,
                 key: Arc::clone(&pending.key),
                 origin: pending.origin,
                 policy: pending.policy,
                 members,
                 orphaned: pending.orphaned.clone(),
-            }
+            })
         })
         .collect()
 }
@@ -231,11 +252,24 @@ async fn persist_playlist_views_with_mode(
         return Err(vec![error]);
     }
 
-    let records = build_failover_group_records(&failover_groups.groups, &target_id_mapping);
+    // A group is only playable through the view that publishes its group channel. Output filters can
+    // drop that channel from every view while the mapping still knows its id.
+    let published_group_uuids = {
+        let mut published = HashSet::new();
+        for (output, prepared_output) in target.output.iter().zip(&prepared_outputs) {
+            let source: &[PlaylistGroup] = match output {
+                TargetOutput::Xtream(_) => xtream_playlist.as_deref().unwrap_or(&*base_playlist),
+                _ => base_playlist,
+            };
+            collect_published_group_uuids(prepared_output.as_deref().unwrap_or(source), &mut published);
+        }
+        published
+    };
+    let records = build_failover_group_records(&failover_groups.groups, &target_id_mapping, &published_group_uuids);
     let mut aliases = Vec::new();
-    collect_failover_group_aliases(base_playlist, &target_id_mapping, &mut aliases);
+    collect_failover_group_aliases(base_playlist, &target_id_mapping, &published_group_uuids, &mut aliases);
     if let Some(xtream_view) = xtream_playlist.as_deref() {
-        collect_failover_group_aliases(xtream_view, &target_id_mapping, &mut aliases);
+        collect_failover_group_aliases(xtream_view, &target_id_mapping, &published_group_uuids, &mut aliases);
     }
 
     let staged_groups =
@@ -336,7 +370,9 @@ async fn persist_playlist_views_with_mode(
             TargetOutput::Strm(strm_output) => {
                 write_strm_playlist(app_config, target, strm_output, pl, allows_empty_base).await
             }
-            TargetOutput::HdHomeRun(_hdhomerun_output) => Ok(()),
+            // Rendered afterwards by the processing crate, which owns the plugin host (plan §18
+            // *W6a seam freeze*, output providers); like HdHomeRun there is nothing to persist here.
+            TargetOutput::HdHomeRun(_) | TargetOutput::Plugin(_) => Ok(()),
         };
 
         match result {
@@ -383,12 +419,9 @@ async fn persist_playlist_views_with_mode(
     if let Err(err) = target_id_mapping.persist() {
         errors.push(TuliproxError::Config(format!("{err}")));
     }
-    // Keep lock until all outputs are persisted to prevent concurrent writers
-    // from interleaving mapping and output state for the same target.
-    // We must release it before loading caches below (which may acquire read locks).
-    drop(target_id_mapping);
-    drop(file_lock);
 
+    // Publish while the write guard is held: playback readers take the read lock on the same file
+    // and must not observe a half-replaced failover store.
     if errors.is_empty() {
         if let Err(err) = staged_groups.publish() {
             errors.push(TuliproxError::RepositoryPlaylist(format!(
@@ -401,6 +434,12 @@ async fn persist_playlist_views_with_mode(
     } else {
         staged_groups.discard();
     }
+
+    // Keep lock until all outputs are persisted to prevent concurrent writers
+    // from interleaving mapping and output state for the same target.
+    // We must release it before loading caches below (which may acquire read locks).
+    drop(target_id_mapping);
+    drop(file_lock);
 
     if errors.is_empty() && target.use_memory_cache {
         match playlist_state {

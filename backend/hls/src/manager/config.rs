@@ -397,6 +397,9 @@ impl HlsProxyManager {
             .update_config(runtime_config.segment_fetch_policy.clone(), Arc::clone(&global_fetch_semaphore));
         self.map_worker_pool.update_config(runtime_config.segment_fetch_policy.clone(), global_fetch_semaphore);
         self.gc.update_config(runtime_config.gc_policy.clone(), runtime_config.rewrite_secret_fingerprint.clone());
+        // Publish policy reloads under the same lease-store lock as manifest commits.
+        // An entry cannot commit a checked old policy while the new policy becomes current.
+        let _publication = self.access_leases.write().await;
         self.runtime_config.store(Arc::new(runtime_config));
     }
 }

@@ -1,3 +1,4 @@
+use super::ManagedChannelsEditor;
 mod common;
 mod library;
 mod m3u;
@@ -101,6 +102,7 @@ const LABEL_PROBE_LIVE_INTERVAL_HOURS: &str = "LABEL.PROBE_LIVE_INTERVAL_HOURS";
 const LABEL_PROBE_LIVE: &str = "LABEL.PROBE_LIVE";
 const LABEL_PROBE_VOD: &str = "LABEL.PROBE_VOD";
 const LABEL_PROBE_SERIES: &str = "LABEL.PROBE_SERIES";
+const LABEL_CONTAINER_EXTENSION: &str = "LABEL.CONTAINER_EXTENSION";
 const LABEL_RESOLVE_VOD: &str = "LABEL.RESOLVE_VOD";
 const LABEL_RESOLVE_SERIES: &str = "LABEL.RESOLVE_SERIES";
 const LABEL_METADATA: &str = "LABEL.METADATA";
@@ -154,9 +156,12 @@ fn options_kind_for(input_type: InputType, staged_type: StagedInputType) -> Opti
         InputType::Staged if staged_type == StagedInputType::Xtream => OptionsKind::Xtream,
         InputType::M3u | InputType::M3uBatch => OptionsKind::M3u,
         InputType::Staged if staged_type == StagedInputType::M3u => OptionsKind::M3u,
-        InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex | InputType::Staged => {
-            OptionsKind::Basic
-        }
+        InputType::Library
+        | InputType::Emby
+        | InputType::Jellyfin
+        | InputType::Plex
+        | InputType::Staged
+        | InputType::Plugin => OptionsKind::Basic,
     }
 }
 
@@ -385,6 +390,7 @@ generate_form_reducer!(
       ResolveFilter => resolve_filter: Option<String>,
       ProbeFilter => probe_filter: Option<String>,
       StalkerBulkEpg => stalker_bulk_epg: bool,
+      DefaultContainerExtension => default_container_extension: Option<String>,
     }
 );
 
@@ -393,6 +399,7 @@ generate_form_reducer!(
     action_name: ConfigInputFormAction,
     fields {
         Name => name: String,
+        ManagedChannels => managed_channels: Vec<shared::model::PluginRef>,
         Url => url: String,
         Username => username: Option<String>,
         Password => password: Option<String>,
@@ -869,9 +876,14 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let options_input = !library_input && !media_server_input;
 
     let render_main = || match input_form_state.form.input_type {
-        shared::model::InputType::M3u | shared::model::InputType::M3uBatch => html! {
-            <M3uInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
-        },
+        // A plugin input has its own view (`PluginInputView`), chosen in `SourceEditorForm`; this
+        // form only renders the built-in downloaders.
+        shared::model::InputType::Plugin => html! {},
+        shared::model::InputType::M3u | shared::model::InputType::M3uBatch => {
+            html! {
+                <M3uInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
+            }
+        }
         shared::model::InputType::Xtream | shared::model::InputType::XtreamBatch => html! {
             <XtreamInputForm state={input_form_state.clone()} providers={(*providers_state).clone()} allow_write={props.allow_write} />
         },
@@ -1330,6 +1342,15 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         })
     };
 
+    let render_managed = || {
+        if input_form_state.form.input_type == InputType::Staged || input_form_state.form.staged.is_some() {
+            return Html::default();
+        }
+        html! {<ManagedChannelsEditor target={false} allow_write={props.allow_write}
+        bindings={input_form_state.form.managed_channels.iter().cloned().map(|plugin|shared::model::ManagedChannelBinding{plugin,stage:shared::model::ManagedChannelStage::AfterFilter}).collect::<Vec<_>>()}
+        on_change={{let state=input_form_state.clone();Callback::from(move |bindings:Vec<shared::model::ManagedChannelBinding>|state.dispatch(ConfigInputFormAction::ManagedChannels(bindings.into_iter().map(|binding|binding.plugin).collect())))}}/>}
+    };
+
     let render_edit_mode = || {
         html! {
             <div class="tp__source-editor-form__body">
@@ -1337,6 +1358,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={InputFormPage::Main.intern()} active={view_visible.intern()}>
                     {render_main()}
+                    {render_managed()}
+
                 </Panel>
                 { html_if!(stalker_input, {
                     <Panel value={InputFormPage::Device.intern()} active={view_visible.intern()}>

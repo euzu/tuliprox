@@ -95,7 +95,7 @@ pub async fn classify_resource_hop(resource_url: &str, proxy_configured: bool) -
 /// This decides what a client may reach, so the URL is read with the same parser a client uses rather
 /// than with the cheaper scan [`resource_host`] offers for the hint path.
 pub async fn classify_output_resource_url(resource_url: &str) -> ResourceOutputPolicy {
-    if resource_url.starts_with("/api/v1/library/thumbnail/") {
+    if shared::model::is_internal_resource_path(resource_url) {
         return ResourceOutputPolicy::Direct;
     }
     if resource_url.starts_with("media-server://image/") {
@@ -261,6 +261,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "41".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         };
         let options = XtreamMappingOptions {
             flags: XtreamMappingFlagsSet::new(),
@@ -273,6 +274,7 @@ mod tests {
             web_ui_request: false,
             encrypt_secret: [0; 16],
             resource_host_policies: Arc::default(),
+            default_container_extensions: Arc::default(),
         };
 
         prepare_xtream_resource_hosts(&item, &options).await;

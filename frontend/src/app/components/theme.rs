@@ -30,6 +30,7 @@ const THEME_NORD: &str = "nord";
 const THEME_GRAPEROOT_DARK: &str = "graperoot-dark";
 const THEME_CVD_FRIENDLY_DARK: &str = "cvd-friendly-dark";
 const THEME_CVD_FRIENDLY_BRIGHT: &str = "cvd-friendly-bright";
+const THEME_VIBRANT_ELEGANCE: &str = "vibrant-elegance";
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Theme {
@@ -52,6 +53,7 @@ pub enum Theme {
     VintageNeutral,
     CvdFriendlyDark,
     CvdFriendlyBright,
+    VibrantElegance,
 }
 
 impl Display for Theme {
@@ -79,6 +81,7 @@ impl Display for Theme {
                 Theme::VintageNeutral => THEME_VINTAGE_NEUTRAL,
                 Theme::CvdFriendlyDark => THEME_CVD_FRIENDLY_DARK,
                 Theme::CvdFriendlyBright => THEME_CVD_FRIENDLY_BRIGHT,
+                Theme::VibrantElegance => THEME_VIBRANT_ELEGANCE,
             }
         )
     }
@@ -108,13 +111,14 @@ impl FromStr for Theme {
             THEME_VINTAGE_NEUTRAL => Ok(Theme::VintageNeutral),
             THEME_CVD_FRIENDLY_DARK => Ok(Theme::CvdFriendlyDark),
             THEME_CVD_FRIENDLY_BRIGHT => Ok(Theme::CvdFriendlyBright),
+            THEME_VIBRANT_ELEGANCE => Ok(Theme::VibrantElegance),
             _ => Err(TuliproxError::Config(format!("Unknown theme: {s}"))),
         }
     }
 }
 
 impl Theme {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Theme::Dark,
         Theme::RefinedDark,
         Theme::GraperootDark,
@@ -126,6 +130,7 @@ impl Theme {
         Theme::Mermaidcore,
         Theme::ClubroomContrast,
         Theme::CvdFriendlyDark,
+        Theme::VibrantElegance,
         Theme::Bright,
         Theme::Paper,
         Theme::NaturePure,
@@ -159,6 +164,7 @@ impl Theme {
             Theme::VintageNeutral => "Vintage Neutral",
             Theme::CvdFriendlyDark => "CVD Friendly Dark",
             Theme::CvdFriendlyBright => "CVD Friendly Bright",
+            Theme::VibrantElegance => "Vibrant Elegance",
         }
     }
 
@@ -209,6 +215,7 @@ impl Theme {
             | Theme::ClubroomContrast
             | Theme::CvdFriendlyDark
             | Theme::CvdFriendlyBright
+            | Theme::VibrantElegance
             | Theme::SunWashedSoft
             | Theme::VintageNeutral
             | Theme::Bright => set_local_storage_item(TP_THEME_KEY, &self.to_string()),
@@ -239,6 +246,231 @@ impl Theme {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod scss_tests {
+    use super::Theme;
+
+    const DARK_THEME_STYLES: [(&str, &str); 12] = [
+        ("aurora", include_str!("../../../scss/themes/_theme-aurora.scss")),
+        ("clubroom-contrast", include_str!("../../../scss/themes/_theme-clubroom-contrast.scss")),
+        ("cvd-friendly-dark", include_str!("../../../scss/themes/_theme-cvd-friendly-dark.scss")),
+        ("dark", include_str!("../../../scss/themes/_theme-dark.scss")),
+        ("dopamine", include_str!("../../../scss/themes/_theme-dopamine.scss")),
+        ("dracula", include_str!("../../../scss/themes/_theme-dracula.scss")),
+        ("graperoot-dark", include_str!("../../../scss/themes/_theme-graperoot-dark.scss")),
+        ("mermaidcore", include_str!("../../../scss/themes/_theme-mermaidcore.scss")),
+        ("monokai", include_str!("../../../scss/themes/_theme-monokai.scss")),
+        ("nord", include_str!("../../../scss/themes/_theme-nord.scss")),
+        ("refined-dark", include_str!("../../../scss/themes/_theme-refined-dark.scss")),
+        ("vibrant-elegance", include_str!("../../../scss/themes/_theme-vibrant-elegance.scss")),
+    ];
+
+    fn declared_value<'a>(scss: &'a str, name: &str) -> &'a str {
+        let prefix = format!("{name}:");
+        scss.lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix))
+            .map(str::trim)
+            .map(|value| value.strip_suffix(';').unwrap_or(value))
+            .unwrap_or_else(|| panic!("{name} is not declared"))
+    }
+
+    fn resolved_value<'a>(scss: &'a str, name: &str) -> &'a str {
+        let value = declared_value(scss, name);
+        match value.strip_prefix("var(").and_then(|inner| inner.strip_suffix(')')) {
+            Some(reference) => declared_value(scss, reference),
+            None => value,
+        }
+    }
+
+    fn hex_rgb(value: &str) -> (f64, f64, f64) {
+        let hex = value.strip_prefix('#').unwrap_or_else(|| panic!("{value} is not a hex color"));
+        let channel = |index: usize| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex channel") as f64;
+        (channel(0), channel(2), channel(4))
+    }
+
+    fn rgba_alpha(value: &str) -> f64 {
+        value
+            .strip_prefix("rgba(")
+            .and_then(|inner| inner.strip_suffix(')'))
+            .and_then(|channels| channels.split(',').nth(3))
+            .unwrap_or_else(|| panic!("{value} is not an rgba color"))
+            .trim()
+            .parse()
+            .expect("alpha")
+    }
+
+    fn luminance((r, g, b): (f64, f64, f64)) -> f64 {
+        fn linear(channel: f64) -> f64 {
+            let channel = channel / 255.0;
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+
+    fn contrast(foreground: (f64, f64, f64), background: (f64, f64, f64)) -> f64 {
+        let foreground = luminance(foreground);
+        let background = luminance(background);
+        let (lighter, darker) =
+            if foreground >= background { (foreground, background) } else { (background, foreground) };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn explorer_font_sizes_are_defined_in_the_theme() {
+        let theme = include_str!("../../../scss/_theme.scss");
+        let explorer = include_str!("../../../scss/app/components/playlist/_playlist_explorer.scss");
+        let mut defined = std::collections::HashSet::new();
+        for line in theme.lines() {
+            let line = line.trim();
+            if let Some((name, _)) = line.split_once(':') {
+                if name.starts_with("--font-size-") {
+                    defined.insert(name);
+                }
+            }
+        }
+        for usage in explorer.split("var(").skip(1) {
+            if let Some(name) = usage.split(')').next() {
+                if name.starts_with("--font-size-") {
+                    assert!(defined.contains(name), "undefined font-size variable {name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dark_theme_rating_badges_stay_readable_on_white_artwork() {
+        assert_eq!(
+            DARK_THEME_STYLES.len(),
+            Theme::ALL.iter().filter(|theme| !theme.is_light()).count(),
+            "every dark theme must be checked"
+        );
+        for (name, scss) in DARK_THEME_STYLES {
+            let surface = declared_value(scss, "--theme-palette-explorer-rating-surface");
+            let alpha = rgba_alpha(surface);
+            let component = 255.0 * (1.0 - alpha);
+            let background = (component, component, component);
+            let text = hex_rgb(resolved_value(scss, "--theme-palette-explorer-rating-text"));
+            let ratio = contrast(text, background);
+            assert!(ratio >= 4.5, "{name}: rating text contrast is {ratio:.3}, expected at least 4.5");
+        }
+    }
+
+    #[test]
+    fn sun_washed_soft_secondary_text_meets_contrast() {
+        let scss = include_str!("../../../scss/themes/_theme-sun-washed-soft.scss");
+        let text = hex_rgb(resolved_value(scss, "--theme-palette-explorer-text-secondary"));
+        let surface = hex_rgb(resolved_value(scss, "--theme-palette-neutral-surface-920"));
+        let ratio = contrast(text, surface);
+        assert!(ratio >= 4.5, "secondary text contrast is {ratio:.3}, expected at least 4.5");
+    }
+
+    /// Every theme file, by the `data-theme` value it serves.
+    const ALL_THEME_STYLES: [(&str, &str); 20] = [
+        ("aurora", include_str!("../../../scss/themes/_theme-aurora.scss")),
+        ("banana-yellow", include_str!("../../../scss/themes/_theme-banana-yellow.scss")),
+        ("bright", include_str!("../../../scss/themes/_theme-bright.scss")),
+        ("clubroom-contrast", include_str!("../../../scss/themes/_theme-clubroom-contrast.scss")),
+        ("cool-elegance", include_str!("../../../scss/themes/_theme-cool-elegance.scss")),
+        ("cvd-friendly-bright", include_str!("../../../scss/themes/_theme-cvd-friendly-bright.scss")),
+        ("cvd-friendly-dark", include_str!("../../../scss/themes/_theme-cvd-friendly-dark.scss")),
+        ("dark", include_str!("../../../scss/themes/_theme-dark.scss")),
+        ("dopamine", include_str!("../../../scss/themes/_theme-dopamine.scss")),
+        ("dracula", include_str!("../../../scss/themes/_theme-dracula.scss")),
+        ("graperoot-dark", include_str!("../../../scss/themes/_theme-graperoot-dark.scss")),
+        ("mermaidcore", include_str!("../../../scss/themes/_theme-mermaidcore.scss")),
+        ("monokai", include_str!("../../../scss/themes/_theme-monokai.scss")),
+        ("nature-pure", include_str!("../../../scss/themes/_theme-nature-pure.scss")),
+        ("nord", include_str!("../../../scss/themes/_theme-nord.scss")),
+        ("paper", include_str!("../../../scss/themes/_theme-paper.scss")),
+        ("refined-dark", include_str!("../../../scss/themes/_theme-refined-dark.scss")),
+        ("sun-washed-soft", include_str!("../../../scss/themes/_theme-sun-washed-soft.scss")),
+        ("vibrant-elegance", include_str!("../../../scss/themes/_theme-vibrant-elegance.scss")),
+        ("vintage-neutral", include_str!("../../../scss/themes/_theme-vintage-neutral.scss")),
+    ];
+
+    /// The hue of a hex colour, or `None` for a grey (its hue carries no identity).
+    fn hue(value: &str) -> Option<f64> {
+        let (r, g, b) = hex_rgb(value);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let delta = max - min;
+        if delta < 1.0 {
+            return None;
+        }
+        let hue = if max == r {
+            60.0 * (((g - b) / delta) % 6.0)
+        } else if max == g {
+            60.0 * ((b - r) / delta + 2.0)
+        } else {
+            60.0 * ((r - g) / delta + 4.0)
+        };
+        Some(if hue < 0.0 { hue + 360.0 } else { hue })
+    }
+
+    fn hue_distance(a: f64, b: f64) -> f64 {
+        let delta = (a - b).abs() % 360.0;
+        delta.min(360.0 - delta)
+    }
+
+    #[test]
+    fn every_theme_colours_plugin_bricks_and_no_plugin_hue_meets_a_built_in_one() {
+        const BUILT_IN_BRICKS: [&str; 13] = [
+            "--theme-palette-graph-input-xtream",
+            "--theme-palette-graph-input-m3u",
+            "--theme-palette-graph-input-library",
+            "--theme-palette-graph-input-staged",
+            "--theme-palette-graph-input-stalker",
+            "--theme-palette-graph-input-jellyfin",
+            "--theme-palette-graph-input-emby",
+            "--theme-palette-graph-input-plex",
+            "--theme-palette-graph-target",
+            "--theme-palette-graph-output-xtream",
+            "--theme-palette-graph-output-m3u",
+            "--theme-palette-graph-output-hdhomerun",
+            "--theme-palette-graph-output-strm",
+        ];
+        assert_eq!(ALL_THEME_STYLES.len(), Theme::ALL.len(), "every theme must be checked");
+        for (name, scss) in ALL_THEME_STYLES {
+            let plugin = hue(resolved_value(scss, "--theme-palette-graph-plugin"))
+                .unwrap_or_else(|| panic!("{name}: the plugin brick colour must not be a grey"));
+            for brick in BUILT_IN_BRICKS {
+                let built_in =
+                    hue(resolved_value(scss, brick)).unwrap_or_else(|| panic!("{name}: {brick} must not be a grey"));
+                let distance = hue_distance(plugin, built_in);
+                assert!(
+                    distance >= 20.0,
+                    "{name}: the plugin brick hue {plugin:.0}° is {distance:.0}° from {brick}; give the plugin \
+                     bricks a colour of their own"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_plugin_brick_variables_are_wired_for_bricks_and_blocks() {
+        let theme = include_str!("../../../scss/_theme.scss");
+        let bricks = include_str!("../../../scss/app/components/source_editor/_source_editor_block.scss");
+        assert!(theme.contains("--theme-brand-brick-plugin: var(--theme-palette-graph-plugin)"));
+        // The palette declares the same three derivatives every built-in brick has; the rules use
+        // the border and the fill (the shadow is reserved, like the built-ins').
+        for suffix in ["border", "background", "shadow"] {
+            let name = format!("--brick-plugin-{suffix}-color");
+            assert!(theme.contains(&format!("{name}:")), "{name} is not derived from the plugin colour");
+        }
+        for suffix in ["border", "background"] {
+            let name = format!("--brick-plugin-{suffix}-color");
+            assert!(bricks.contains(&name), "no brick or block rule uses {name}");
+        }
+        for block_type in ["InputPlugin", "OutputPlugin"] {
+            assert!(bricks.contains(&format!("&-{block_type}")), "{block_type} has no brick rule");
         }
     }
 }

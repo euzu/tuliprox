@@ -270,6 +270,45 @@ async fn member_keeps_vid_of_previously_ungrouped_channel() {
 }
 
 #[tokio::test]
+async fn member_with_catchup_but_no_duration_is_archive_capable() {
+    let (app_config, target, _dir) = persist_test_env(r#"{"failover_groups":{"enabled":true}}"#);
+    let (mut playlist, mut pending) = grouped_fixture();
+    // member1 has catchup properties but no tv_archive_duration and no catchup-days
+    let catchup = shared::model::CatchupProperties {
+        mode: Some("default".intern()),
+        source: Some("?utc=${start}".intern()),
+        ..Default::default()
+    };
+    pending.groups[0].members[0].header.additional_properties =
+        Some(StreamProperties::Live(Box::new(shared::model::LiveStreamProperties {
+            tv_archive: Some(1),
+            tv_archive_duration: None,
+            catchup: Some(catchup),
+            ..Default::default()
+        })));
+
+    persist_playlist_views_with_groups(
+        &app_config,
+        &mut playlist,
+        None,
+        None,
+        &target,
+        None,
+        TargetPlaylistPersistOptions::default(),
+        &mut pending,
+    )
+    .await
+    .unwrap();
+
+    let record =
+        FailoverGroupStore::read_group(&target_path(&app_config, &target), playlist[0].channels[0].header.virtual_id)
+            .unwrap()
+            .unwrap();
+    let member = &record.members[0];
+    assert!(member.archive.is_some(), "member with catchup must be archive-capable even without duration");
+}
+
+#[tokio::test]
 async fn favourite_copy_of_group_item_is_registered_as_alias() {
     let (app_config, target, _dir) = persist_test_env(r#"{"failover_groups":{"enabled":true}}"#);
     let (mut playlist, mut pending) = grouped_fixture_with_favourite_copy();
@@ -716,4 +755,66 @@ async fn publication_clears_display_stale() {
     assert_eq!(FailoverGroupStore::read_meta(&path).expect("meta").display_stale_groups.len(), 0);
     let json = std::fs::read_to_string(path.join("failover_groups.meta.json")).expect("json");
     assert!(!json.contains("display_stale_groups"), "{json}");
+}
+
+#[tokio::test]
+async fn output_filter_dropping_the_group_channel_persists_no_group_or_alias() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app_config = app_config_in(dir.path());
+    let target = ConfigTarget::from(&ConfigTargetDto {
+        name: "target-groups-filter-test".to_string(),
+        output: vec![TargetOutputDto::M3u(M3uTargetOutputDto {
+            filename: Some("playlist.m3u".to_string()),
+            t_filter: Some(shared::foundation::get_filter(r#"Group = "My Favourites""#, None).expect("output filter")),
+            ..M3uTargetOutputDto::default()
+        })],
+        ..ConfigTargetDto::default()
+    });
+    let (mut playlist, mut pending) = grouped_fixture_with_favourite_copy();
+
+    persist_playlist_views_with_groups(
+        &app_config,
+        &mut playlist,
+        None,
+        None,
+        &target,
+        None,
+        TargetPlaylistPersistOptions::default(),
+        &mut pending,
+    )
+    .await
+    .expect("persists");
+
+    let path = target_path(&app_config, &target);
+    assert!(
+        FailoverGroupStore::read_all_groups(&path).expect("reads groups").is_empty(),
+        "a group whose group channel is filtered out must not be persisted"
+    );
+    assert!(
+        FailoverGroupStore::read_all_aliases(&path).expect("reads aliases").is_empty(),
+        "copies of an unpublished group must not be persisted as aliases"
+    );
+    assert!(!path.join("failover_groups.db").exists());
+}
+
+#[tokio::test]
+async fn failed_group_store_read_is_logged_and_not_cached() {
+    let (app_config, mut target, _dir) = persist_test_env("");
+    enable_groups(&mut target);
+    let state = Arc::new(PlaylistStorageState::new());
+    persist_grouped(&app_config, &target, &state).await;
+
+    let path = target_path(&app_config, &target);
+    std::fs::write(path.join(crate::storage_const::FILE_FAILOVER_GROUPS), b"not a b-tree").expect("corrupt store");
+
+    let loads_before = state.failover_groups.load_count();
+    let first = state.failover_groups.get_or_load(&app_config, &state, &target).await;
+    let second = state.failover_groups.get_or_load(&app_config, &state, &target).await;
+    assert!(first.groups.is_empty());
+    assert!(second.groups.is_empty());
+    assert_eq!(
+        state.failover_groups.load_count() - loads_before,
+        2,
+        "a failed store read must be retried instead of cached as empty"
+    );
 }

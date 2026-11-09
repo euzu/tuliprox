@@ -1,0 +1,26 @@
+{
+  "format_version": 1,
+  "name": "Tuliprox plugins",
+  "plugins": [
+    {
+      "id": "youtube-input",
+      "name": "YouTube Input",
+      "description": "Ingests YouTube channels, playlists, and live streams as native playlist channels.",
+      "author": "tuliprox",
+      "category": "input",
+      "homepage": "https://github.com/euzu/tuliprox/tree/develop/plugins/inputs/youtube-input",
+      "releases": [
+        {
+          "version": "0.1.0",
+          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/youtube-input-0.1.0.tlpx",
+          "min_tuliprox_version": "3.3.186",
+          "plugin_api": 1,
+          "capabilities": [
+            "network",
+            "storage"
+          ]
+        }
+      ]
+    }
+  ]
+}

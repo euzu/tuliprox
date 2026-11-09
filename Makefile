@@ -226,6 +226,60 @@ testkit-scenario: ## Run one testkit scenario: make testkit-scenario SCENARIO=<n
 		$(if $(RUN_ID),--run-id $(RUN_ID),)
 	@echo "==> Report: testkit-report/$(SCENARIO)/summary.txt"
 
+.PHONY: plugin-sdk-version
+plugin-sdk-version: ## Set the plugin API/SDK/macros version (VERSION=x.y.z) and refresh every plugin Cargo.lock
+	@test -n "$(VERSION)" || { echo "usage: make plugin-sdk-version VERSION=x.y.z" >&2; exit 2; }
+	@./bin/plugin-sdk-version.sh "$(VERSION)"
+
+.PHONY: plugin-fixtures
+plugin-fixtures: ## Build the wasm plugin test fixtures (wasm32-wasip2) into target/plugin-fixtures
+	@echo "==> Building plugin test fixtures (wasm32-wasip2)"
+	@./bin/build_plugin_fixture.sh
+	@echo "✅ Plugin fixtures written to target/plugin-fixtures/plugins"
+
+PLUGIN_EXAMPLES := sports-enricher hf-epg-matcher matrix-notifier discord-notifier slack-notifier gotify-notifier \
+	ntfy-notifier pushover-notifier rest-notifier telegram-notifier command-notifier
+
+.PHONY: plugin-examples
+plugin-examples: ## Build + package the example plugins and the rendered template (wasm32-wasip2) into target/plugin-examples
+	@echo "==> Building example plugins (wasm32-wasip2)"
+	@for example in $(PLUGIN_EXAMPLES); do ./bin/package-plugin.sh plugins/examples/$$example || exit 1; done
+	@echo "==> Rendering and building the plugin template"
+	@rm -rf target/plugin-examples/template
+	@./bin/new-plugin.sh my-plugin target/plugin-examples/template/my-plugin
+	@./bin/package-plugin.sh target/plugin-examples/template/my-plugin
+	@echo "✅ Example plugins written to target/plugin-examples/*.tlpx"
+
+# The input plugins that live in this repository, under plugins/inputs/<id>.
+INPUT_PLUGINS := youtube-input
+
+.PHONY: plugin-inputs
+plugin-inputs: ## Build + package every input plugin (wasm32-wasip2) into target/plugin-<id>/<id>.tlpx
+	@echo "==> Building the input plugins (wasm32-wasip2): $(INPUT_PLUGINS)"
+	@for id in $(INPUT_PLUGINS); do \
+		mkdir -p target/plugin-$$id; \
+		./bin/package-plugin.sh plugins/inputs/$$id --out target/plugin-$$id/$$id.tlpx || exit 1; \
+	done
+	@echo "✅ Input plugins written to target/plugin-<id>/<id>.tlpx"
+
+.PHONY: plugin-youtube-input
+plugin-youtube-input: ## Build + package the youtube-input plugin (wasm32-wasip2) into target/plugin-youtube-input
+	@echo "==> Building youtube-input (wasm32-wasip2)"
+	@mkdir -p target/plugin-youtube-input
+	@./bin/package-plugin.sh plugins/inputs/youtube-input --out target/plugin-youtube-input/youtube-input.tlpx
+	@echo "✅ youtube-input written to target/plugin-youtube-input/youtube-input.tlpx"
+
+.PHONY: plugins
+plugins: plugin-inputs ## Build + stage every bundled plugin into target/staged-plugins/<id>/
+	@echo "==> Staging bundled plugins into target/staged-plugins"
+	@rm -rf target/staged-plugins
+	@mkdir -p target/staged-plugins
+	@for id in $(INPUT_PLUGINS); do \
+		mkdir -p target/staged-plugins/$$id; \
+		unzip -qo target/plugin-$$id/$$id.tlpx -d target/staged-plugins/$$id || exit 1; \
+	done
+	@echo "✅ Bundled plugins staged into target/staged-plugins"
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
@@ -256,6 +310,8 @@ architecture-check: ## Verify workspace dependency direction and Docker crate li
 	./bin/check-workspace-deps.sh
 	@echo "==> Checking Docker skeleton crate lists"
 	./bin/check-docker-crates.sh
+	@echo "==> Checking the plugin SDK version"
+	./bin/plugin-sdk-version.sh --check
 
 .PHONY: i18n-check
 i18n-check: ## Report every locale whose keys drift from en.json
@@ -285,13 +341,31 @@ lint-fix: ## Automatically fix clippy suggestions (Nightly)
 fmt: ## Format all code using nightly rules (Compact)
 	@echo "==> Formatting code (nightly)"
 	$(CARGO_NIGHTLY) fmt --all
+	@$(MAKE) --no-print-directory plugin-fmt
+
+.PHONY: plugin-fmt
+plugin-fmt: ## Format all plugin crates using nightly rules
+	@for d in plugins/inputs/* plugins/examples/*-notifier; do \
+		if [ -d "$$d" ] && [ -f "$$d/Cargo.toml" ]; then \
+			$(CARGO_NIGHTLY) fmt --manifest-path "$$d/Cargo.toml"; \
+		fi; \
+	done
 
 .PHONY: fmt-check
 fmt-check: ## Check if code follows formatting rules (Nightly)
 	@echo "==> Checking formatting (nightly)"
 	$(CARGO_NIGHTLY) fmt --all -- --check
+	@$(MAKE) --no-print-directory plugin-fmt-check
 	@echo "==> Checking git diff for whitespace errors"
 	git diff --check
+
+.PHONY: plugin-fmt-check
+plugin-fmt-check: ## Check formatting on all plugin crates
+	@for d in plugins/inputs/* plugins/examples/*-notifier; do \
+		if [ -d "$$d" ] && [ -f "$$d/Cargo.toml" ]; then \
+			$(CARGO_NIGHTLY) fmt --manifest-path "$$d/Cargo.toml" -- --check || exit 1; \
+		fi; \
+	done
 
 .PHONY: markdown-lint mdlint
 markdown-lint: ## Lint markdown files

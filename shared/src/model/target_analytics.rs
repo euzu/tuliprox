@@ -22,6 +22,9 @@ pub struct GroupCount {
 pub struct EpgSourceAnalytics {
     pub input: String,
     pub label: String,
+    /// Configured source URL, sanitized like log output (credentials masked when enabled).
+    #[serde(default)]
+    pub url: String,
     pub kind: EpgSourceTypeDto,
     #[serde(default)]
     pub mapped_channels: usize,
@@ -124,6 +127,7 @@ mod tests {
                 sources: vec![EpgSourceAnalytics {
                     input: "provider1".to_string(),
                     label: "guide.xml".to_string(),
+                    url: "http://example.com/guide.xml".to_string(),
                     kind: EpgSourceTypeDto::Xmltv,
                     mapped_channels: 110,
                     guide_days: Some(7),

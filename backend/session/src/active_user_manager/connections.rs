@@ -101,6 +101,20 @@ impl UserSession {
         SessionIdentity { incarnation: self.incarnation, binding_generation: self.binding_generation }
     }
 
+    /// Updates the session's stream URL, resetting provider headers when the URL host changes.
+    ///
+    /// Provider cookies are host scoped: alternating child playlists on one host keep them.
+    pub(super) fn set_stream_url(&mut self, stream_url: &str) {
+        if &*self.stream_url == stream_url {
+            return;
+        }
+        if url_host_key(&self.stream_url) != url_host_key(stream_url) {
+            self.provider_session_headers.clear();
+            self.provider_session_headers_host = None;
+        }
+        self.stream_url = stream_url.intern();
+    }
+
     pub(super) fn switch_provider(&mut self, provider: Arc<str>) {
         self.provider = provider;
         self.binding_generation = self.binding_generation.wrapping_add(1);

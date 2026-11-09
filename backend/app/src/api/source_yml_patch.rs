@@ -1009,6 +1009,8 @@ pub(crate) fn merge_runtime_document(
         .unwrap_or(0);
     for (input, updated) in next.inputs.iter_mut().zip(doc.inputs) {
         let input = Arc::make_mut(input);
+        let root_changed =
+            input.url != updated.url || input.username != updated.username || input.password != updated.password;
         input.url = updated.url;
         input.username = updated.username;
         input.password = updated.password;
@@ -1044,6 +1046,9 @@ pub(crate) fn merge_runtime_document(
                 converted.push(runtime);
             }
             input.aliases = Some(converted);
+        }
+        if root_changed {
+            input.refresh_auto_epg_sources()?;
         }
     }
     next.group_lookup = shared::model::provider_saturation::build_group_lookup(&next.inputs);
@@ -1358,6 +1363,7 @@ mod tests {
                 })),
                 sources: Arc::new(ArcSwap::from_pointee(sources)),
                 hdhomerun: Arc::new(arc_swap::ArcSwapOption::default()),
+                plugins: Arc::default(),
                 api_proxy: Arc::new(arc_swap::ArcSwapOption::default()),
                 file_locks: Arc::new(FileLockManager::default()),
                 paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {

@@ -1,12 +1,15 @@
 use super::{
-    step_api_users::ApiUsersStep, step_config::ConfigStep, step_finish::FinishStep, step_sources::SourcesStep,
-    step_welcome::WelcomeStep, SetupConfigFormState, SetupContext, SetupStep,
+    step_api_users::ApiUsersStep, step_config::ConfigStep, step_finish::FinishStep, step_plugins::PluginsStep,
+    step_sources::SourcesStep, step_welcome::WelcomeStep, SetupConfigFormState, SetupContext, SetupStep,
 };
 use crate::{
-    app::{components::Panel, ConfigContext},
+    app::{
+        components::{use_plugin_ui, Panel},
+        ConfigContext,
+    },
     i18n::use_translation,
 };
-use shared::utils::Internable;
+use shared::{model::PluginSlotDto, utils::Internable};
 use yew::prelude::*;
 
 #[component]
@@ -25,6 +28,24 @@ pub fn Setup() -> Html {
     let is_submitting = use_state(|| false);
     let is_completed = use_state(|| false);
     let submit_error = use_state(|| None::<String>);
+    // The plugin step exists only while some plugin contributes a wizard step.
+    let plugin_step = use_plugin_ui().is_some_and(|ui| ui.has_contributions(PluginSlotDto::SetupWizardStep));
+
+    {
+        let active_step = active_step.clone();
+        let max_unlocked_step = max_unlocked_step.clone();
+        use_effect_with(plugin_step, move |plugin_step| {
+            // A plugin that went away takes its step with it: do not stay on a step that is gone.
+            if !*plugin_step {
+                if *active_step == SetupStep::Plugins {
+                    active_step.set(SetupStep::Finish);
+                }
+                if *max_unlocked_step == SetupStep::Plugins {
+                    max_unlocked_step.set(SetupStep::Finish);
+                }
+            }
+        });
+    }
 
     {
         let sources = sources.clone();
@@ -69,6 +90,7 @@ pub fn Setup() -> Html {
         config_forms: config_forms.clone(),
         sources: sources.clone(),
         api_users: api_users.clone(),
+        plugin_step,
         is_submitting: is_submitting.clone(),
         is_completed: is_completed.clone(),
         submit_error: submit_error.clone(),
@@ -92,6 +114,11 @@ pub fn Setup() -> Html {
                 <ApiUsersStep/>
             </Panel>
         },
+        SetupStep::Plugins => html! {
+            <Panel value={value.clone()} active={value.clone()}>
+                <PluginsStep/>
+            </Panel>
+        },
         SetupStep::Finish => html! {
             <Panel value={value.clone()} active={value.clone()}>
                 <FinishStep/>
@@ -111,7 +138,7 @@ pub fn Setup() -> Html {
                     <div class="tp__setup-sidebar__title">{translate.t("SETUP.LABEL.STEPS")}</div>
                     <ol class="tp__setup-sidebar__list">
                         {
-                            for SetupStep::all().iter().copied().map(|step| {
+                            for SetupStep::visible(plugin_step).into_iter().enumerate().map(|(index, step)| {
                                 let is_active = step == *active_step;
                                 let is_unlocked = step.index() <= max_unlocked_step.index();
                                 let onclick = {
@@ -129,7 +156,7 @@ pub fn Setup() -> Html {
                                             disabled={!is_unlocked}
                                             onclick={onclick}
                                         >
-                                            <span class="tp__setup-sidebar__index">{step.position()}</span>
+                                            <span class="tp__setup-sidebar__index">{index + 1}</span>
                                             <span class="tp__setup-sidebar__label">{translate.t(step.title_key())}</span>
                                         </button>
                                     </li>

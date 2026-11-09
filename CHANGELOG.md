@@ -4,6 +4,27 @@
 
 ## ⚠️ Breaking Changes
 
+- **Notifier plugins read routing from `ext.messaging.routing`.** A notifier plugin joins the messaging config through
+  `ui.config_extensions` with `section: messaging`. Its fields appear on the Web UI messaging page and are stored in
+  `plugins.plugins[].settings.ext.messaging`. The host reads the channel routing only from `ext.messaging.routing`. The
+  top-level `routing` key in plugin settings is ignored. There is no migration; move the value by hand.
+
+- **API user database migration refuses unresolved field assignments or unverifiable recovery history.** Untracked
+  legacy databases migrate automatically when every record is unambiguous. Tracked databases requiring reconstruction
+  need verified field-named recovery history bound to their identity and revision.
+  Unresolved `plan`/`filter` assignments and missing, invalid, foreign, or stale bound history require offline repair;
+  refused migrations preserve the original database. Back up the complete configuration directory, including
+  the database, WAL files and `api_user_recovery/`, before upgrading. Use the following repair workflow:
+  `--user-db-get /app/config/api_user.db --user-db-output users.json`, edit unresolved field assignments,
+  `--user-db-check /app/config/api_user.db --user-db-input users.json`, then
+  `--user-db-set /app/config/api_user.db --user-db-input users.json`. Get exports all users without passwords or tokens.
+  Check is read-only; set repeats validation, creates a backup and publishes the complete repaired user set. A database
+  whose records are already unambiguous is repaired by `--user-db-set` alone. A pending write-ahead log blocks get and
+  check; set archives the database, log and recovery history first and then replays it. Stale exports, open
+  assignments and missing or duplicate users prevent replacement. Each assignment requires a reliable field-named
+  source; otherwise restore a complete matching backup or explicitly establish a new access policy. See
+  [API User Database Offline Repair](docs/src/operations-debugging.md#api-user-database-offline-repair).
+
 - **The in-memory log ring buffer behind the Web-UI Live Logs now follows the root log filter.** Previously,
   the ring buffer stored every record that passed the global maximum log level, exposing noisy dependency logs
   and foreign-crate debug records even when stdout filtered them out. The ring buffer is now gated directly on the
@@ -214,8 +235,15 @@
   underneath the open response, spliced at PAT/PMT and a keyframe; this works for direct and shared streams. Failing
   members and inputs are paused for a while, and an outage limit and a switch limit bound the switching. The settings
   live once in `config.yml` (`failover_groups`, Web UI: Settings → Failover groups); a target turns the feature on and
-  can override matching, source order, grace and failover on its own Failover groups page. Off by default. See
-  [Failover Groups & Stream Failover](docs/src/configuration/failover-groups.md).
+  can override matching, source order, grace and failover on its own Failover groups page. Off by default. Active
+  streams show the group name and active member (title, input, provider) in the Active Streams dashboard, and admins
+  can manually switch the active stream to another member via row actions. Catch-up and timeshift (Xtream, M3U and
+  HLS) on a group channel use the archive-capable members that cover the requested time, whatever their position in
+  the group, with start failover to the next archive member; the group channel advertises the archive of its members.
+  Channels the mapper copies into other groups (`add_favourite`, `ctx.favourite`) are grouped once and the copies
+  become copies of the group channel. A group channel gets its channel number from the target's numbering, not from a
+  member's provider number, so it follows the target sort order; a locked number or name of the first member stays on
+  the group channel. See [Failover Groups & Stream Failover](docs/src/configuration/failover-groups.md).
 
 - **Failover groups editor and failover files.** Automatic failover groups can be corrected and your own groups can
   be created, either on the new Web UI page **Failover groups** (sidebar → Playlist) or by editing YAML files. The
@@ -237,6 +265,111 @@
   event `failover.overrides_changed` serve the editor. See
   [Corrections and own groups](docs/src/configuration/failover-groups.md#corrections-and-own-groups-failover-files)
   and the [REST API Cookbook](docs/src/rest-api-cookbook.md#failover-groups-editor).
+- **Notification templates can format numbers and sizes.** Two Handlebars helpers join `json_escape`:
+  `{{bytes disk.free_bytes}}` renders a byte count as `45.30 GB`, and `{{round disk.percent}}` (or
+  `{{round disk.percent decimals=1}}`) rounds a number. A custom `system.disk.alert` template can now match the
+  built-in disk alert text. The disk alert docs now list the real `disk.*` variables and the `system.disk.alert`
+  template key.
+
+- **The local library follows symlinks.** Media linked into a scan directory from another drive or a cloud mount
+  (rclone, NFS, SMB) is now scanned and streamed. Symlinked files and directories are followed; directory loops are
+  detected, so every directory is scanned once. A dangling link, for example on an offline mount, is logged and
+  skipped; a target rebuild stops instead, so an offline mount never drops catalog entries. Symlinks that already
+  exist in scan directories are picked up on the next scan; disable it per scan directory with
+  `follow_symlinks: false`. When scan directories are nested, the innermost one decides.
+
+- **Playlist stats show the full EPG source URL.** Each row in the EPG coverage source list now shows the configured
+  source URL below its short label, so sources on the same host are distinguishable. The URL is masked according to
+  `sanitize_sensitive_info`. The **Plugins** sidebar entry moved into the **Settings** group.
+
+- **Built-in messaging channels are back; notifier plugins are examples only.** Telegram, Discord, Slack, Gotify, ntfy,
+  Pushover, REST webhooks and local commands are built into the server again. Configure them under `messaging` in the
+  Web UI or in `config.yml`, with Handlebars templates, secret masking and routing, as before the plugin system. A plugin
+  can still be a notification channel (`notifications` capability). The notifier plugins no longer ship as products:
+  they live under `plugins/examples/<id>` as source examples, they are not in the marketplace and not in the Docker
+  image, and `make plugin-examples` builds them. The official catalog moved to `plugins/marketplace.json`; the default
+  source URL is now `https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json`. A
+  config that names the old root URL explicitly must be updated. The catalog lists only `youtube-input`. The SDK
+  `notify` module (`tuliprox_plugin_sdk::notify`) stays for plugin authors. See [Plugins](docs/src/plugins/overview.md).
+
+- **The plugin SDK has its own version.** `tuliprox-plugin-api`, `tuliprox-plugin-sdk` and `tuliprox-plugin-sdk-macros`
+  are versioned 1.x as the plugin contract instead of following the tuliprox release, so a plugin's `Cargo.lock` stays
+  valid across tuliprox updates and `cargo build --locked` no longer breaks after a release. The three crates share
+  one version: `make plugin-sdk-version VERSION=x.y.z` bumps all of them together and refreshes the plugin lock files.
+- **Source editor: one sidebar tile per input and output plugin.** Every enabled plugin that provides inputs
+  (`input.fetch`) or renders outputs (`output.render`) now has its own tile in the source editor sidebar, titled with
+  the plugin's name, in place of the single generic **Plugin** tile. Dropping it adds a block that already names the
+  plugin, so its form opens with the plugin's fields. A plugin block shows the plugin's name on the canvas, and a block
+  whose plugin is not chosen, not installed, disabled, failed or no longer a provider gets a red badge saying why.
+  Plugins can set the tile's title, icon and tooltip, translated or not, with the new optional manifest entries
+  `ui.input_tile` / `ui.output_tile` (see `docs/src/plugins/settings.md#source-editor-tiles`). `youtube-input` uses
+  it. `GET /api/v1/plugins/ui` now lists every provider, also one without a `ui:` part, with its resolved
+  `inputTile` / `outputTile`.
+
+- **`youtube-input` plugin: Ingest YouTube channels, playlists, and live streams as playlist channels.**
+  The `youtube-input` plugin (`plugins/inputs/youtube-input`) provides an input source (`type: plugin`) that discovers
+  YouTube videos via lightweight Atom feeds and resolves streams using standard Invidious REST endpoints with instance
+  failover, accurate live status extraction, and automatic stream URL caching in the plugin's KV store.
+
+- **Plugin categories: filter and search the Marketplace by what a plugin does.** A plugin declares its kind in its
+  manifest (`category: notifier`; one lowercase id, optional), the Plugin Manager shows it as a badge, and the Marketplace
+  replaces the category dropdown with chips: `All` and every category of the current search with its count (`Notifiers (6)`).
+  Choosing a category keeps the other chips, and the counts follow the search and the source. The ids the Web UI knows are
+  `notifier`, `playlist`, `epg`, `metadata`, `input`, `output`, `stream`, `automation` and `monitoring`, each with a name in
+  English, Russian, Spanish and Arabic; any other valid id is shown with its words capitalised. Catalog categories are now
+  normalised (lower case, separators become `-`), so `EPG`, `epg` and `Live TV` / `live_tv` are one filter each instead of
+  separate entries. The search now takes several words, all of which must start a word in the id, name, description, author or
+  category, in any order (`live` finds the category `live-tv`, not "delivers"), and it applies a moment after the last keystroke.
+  The in-repository plugins and examples declare their category.
+  API: `GET /api/v1/plugins/marketplace` returns `categories` as `[{id, count}]` and a `total` (it was a list of names),
+  and `GET /api/v1/plugins` rows carry `category`. See [Publishing a Marketplace](docs/src/plugins/marketplace-publishing.md#categories).
+
+- **Notification events carry their detail as neutral `sections`.** A playlist update lists its sources, targets and
+  errors, and a watch change its groups, as blocks of plain-text lines (`heading`, `lines`) built once by the host. They
+  are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
+  can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
+  `sections` key.
+
+- **Plugins can run local programs: the `process` capability.** A new host function, `run-process`
+  (SDK: `tuliprox_plugin_sdk::process`), starts a program on the server and waits for it. It is the one capability that
+  leaves the sandbox, so it has its own entry in the admin's review ("Run local programs: ... Grant it only to a plugin you
+  would trust with a shell"). The program is started directly, never through a shell, with an empty environment except
+  `PATH` and what the plugin passes; input is at most 1 MiB, stdout and stderr are each cut to 64 KiB, the wait is 1 to 300
+  seconds and then the child is killed (on Unix with its whole process group, background jobs included), and every run
+  is logged by program name. See
+  [Running programs](docs/src/plugins/security.md#running-programs).
+
+- **Manual item overrides and a redesigned Playlist Explorer.** Single playlist items can now be corrected without a
+  mapper script: an override file per input (`overrides/input/<name>.yml`) or per target
+  (`overrides/target/<name>.yml`, keyed by `inputs:`) stores field changes for individual live channels, movies and
+  series, keyed by a stable item id. Per field, an absent key keeps the provider value, a value replaces it and
+  `null` clears it; `name`, `title` and `group` can be set or kept but not cleared, and the allowed fields and their
+  validation depend on the item kind (`chno` 1-999999 and an EPG id only for live items, `tmdb`, `release_date`
+  (`YYYY-MM-DD`) and a 0-10 `rating` only for video and series, logos must be `http(s)` URLs). Input overrides apply
+  in every target that uses the input, target overrides in one target only and win field by field. Both are applied
+  before the target pipeline, so filters and renames see the edited values, and target override fields are re-applied
+  after every later stage (VOD/series resolution, EPG assignment, mapping, curation, appearance merge, sorting,
+  channel-number and counter assignment), so no later rule can undo them. Items are identified by their provider id,
+  which stays valid across alias accounts of the same panel; M3U items without a usable id use
+  `urlhash-v1:<blake3>` over a canonical URL with scheme, host, port and credentials removed. Override files carry a
+  content revision and every write is an optimistic, atomic replace, so a stale save answers `409` instead of
+  overwriting a concurrent edit; malformed or unsupported files are skipped and never rewritten. Edits apply on the
+  next playlist update, and `storage_dir/override_status.json` tracks which revision each target's last successful
+  run applied, so a pending edit is reported per target. New endpoints: `GET`/`POST /api/v1/playlist/overrides`,
+  `GET /api/v1/playlist/overrides/item` (provider, input override, target override and processed record of one item),
+  `GET /api/v1/playlist/overrides/orphans` (entries classified `active`/`orphaned`/`unknown`, plus orphaned files) and
+  `POST /api/v1/playlist/overrides/discard`; `GET /api/v1/playlist/items` gained the `override_id` field, and
+  `GET /api/v1/playlist/epg/search` suggests EPG channel ids. The same feature is available over MCP with
+  `get_overrides`, `get_override_item`, `save_overrides`, `discard_overrides`, `list_override_orphans` and
+  `search_epg_ids`. The Playlist Explorer was redesigned around it: Live list and VOD/Series poster grids with
+  per-cluster sorting defaults, EPG states per live item, the virtual groups `Without EPG` and `Edited`, provider-id
+  search, a detail panel that edits fields for the input (all targets) or for the selected target only with
+  per-field provenance, bulk edit, an EPG id picker, image preview and an override cleanup view. New theme tokens
+  `--theme-palette-explorer-*` / `--theme-brand-explorer-*` style it in every theme. See
+  [Playlist Item Overrides & Playlist Explorer](docs/src/configuration/playlist-overrides.md).
+
+- **Theme `vibrant-elegance` is selectable.** Its stylesheet existed but was never included, so the theme could not
+  be chosen; it is now part of the theme picker.
 
 - **Playlist target analytics and stats view.** A new Web UI page "Playlist > Stats" (directly below "Update",
   requiring `playlist.read`) displays per-target statistics computed on every playlist update:
@@ -1321,6 +1454,21 @@
 
 ## 🐛 Fixes
 
+- **An input with aliases can be saved without a main account.** Leaving `url`, `username` and `password` of an
+  Xtream (or M3U/Stalker) input empty while aliases exist was rejected as "url for input is mandatory". Such an input now
+  works like a batch input: its first enabled alias becomes the main account. A partly filled main account still needs
+  all three fields.
+
+- **Channels with a `+` suffix are no longer treated as the same channel.** Deduplication and failover grouping
+  dropped the `+` when they built the match key, so "Viaplay TV" and "Viaplay TV+" (or "RTL" and "RTL+") were merged.
+  `+` is now part of the word.
+
+- **Web auth no longer floods the debug log.** The permission lookup that runs on every Web UI request logs at `trace`
+  level instead of `debug`.
+
+- **The "Pending approval" plugin pill is readable on hover.** The inverted pill used a translucent text color on the
+  solid warning color; it now uses a dark text color in every theme.
+
 - **`.yaml` files in watched config directories now trigger a hot reload.** `mapping_path` and `template_path`
   directories were loaded with `.yml` and `.yaml` files at start, but the file watcher only reacted to `.yml`, so a
   `.yaml` file in `mapping.d` or `template.d` was never hot reloaded.
@@ -1328,6 +1476,73 @@
 - **Hidden files and editor temporary files in `mapping.d` and `template.d` are skipped.** Files starting with `.`
   and names ending in `~` or `.swp` are no longer read as mapping or template files, so a half-saved editor file no
   longer breaks a reload.
+- **A plugin shipped in the plugins directory can be approved from the Web UI.** A package placed in
+  `<config dir>/plugins/<id>/` without a config entry, for example one shipped inside a Docker image, showed
+  **Pending approval** with no way to review or approve it. The chip now opens the capability review as **Approve plugin**,
+  and approving pins the installed package in place. A plugin that changed on disk since
+  an earlier approval shows the added and dropped capabilities. `GET /api/v1/plugins/{id}/staged` returns the review of the installed
+  `pending_approval` package when nothing is staged, and answers `409` instead of `404` for an installed plugin that is
+  not waiting for approval.
+
+- **Library extensions are matched in any notation.** Entries in `library.supported_extensions` such as `.mp3`, `MP3`
+  or ` mp3 ` are normalized to `mp3`. Before, an entry with a leading dot or spaces matched no file, so the scan found
+  nothing for it. Local `.mp3` files are now served as `audio/mpeg`.
+
+- **Local library files stream when the scan directory is a symlink.** The stream check compared the resolved file path
+  with the unresolved scan directory path, so every file below a symlinked scan directory returned `403 Forbidden`.
+
+- **The override dialog shows the right channel for M3U items in Xtream targets.** M3U items whose stream URL has no
+  numeric id (for example HDHomeRun `.../auto/v5.2`) are stored in Xtream targets with provider id `0`. All of them
+  shared one override key, so the dialog showed the processed values of another channel. The key now comes from the
+  original input stream id. The explorer list now also uses this key, so saved overrides of these channels show and
+  apply. Override keys also stay correct when a target mapper rewrites the URL or id.
+
+- **The input playlist explorer gives every M3U channel its own row.** Stored M3U input channels have no virtual id,
+  so all rows shared one identity: selection marked every row, the open edit panel did not reload when another
+  channel was selected, and a save replaced every row. The explorer response now assigns each such channel a unique
+  explorer-local id.
+
+- **Shared HLS sessions continue on a healthy mirror after the active origin fails.** When the active origin
+  failed during playback, the content check against the alternative mirror tried to pin the reference segment
+  file a second time. A completed startup segment already holds that pin, so the check failed with
+  `switch-resource-unavailable` and the session never switched, even though the mirror served matching media.
+  The check now reuses the existing pin of the completed segment. Content comparison is unchanged.
+
+- **Stalker aliases now play with their own MAC and session.** An alias with its own MAC received the main
+  account's resolved URL, so playback ran on the main account's MAC instead of the allocated alias. Playback now
+  uses the alias's own `create_link` result, and a 4xx refresh re-resolves with the allocated account. The link
+  cache and resolve serialization are keyed per account. HLS playlist refreshes resolve a fresh link for the
+  pinned account instead of rewriting the stored URL. When the portal rejects a cached link on a playlist refresh
+  (4xx or a body that is no playlist), tuliprox requests one fresh `create_link` for the same account, retries once
+  and binds the session to the new link. The retry sends the session cookie of the new link's host, not the old one.
+  Timeouts, 5xx, 408, 429 and 407 do not trigger an extra portal call. A replayed alias URL stays bound to its alias
+  when the account pin is cleared; another account resolves its own link.
+
+- **CDN playback failover and recovery preserve provider bindings across all streams.** For inputs configuring
+  `playback_provider`, standard HLS, catchup, and archive streams retain their provider profiles and query parameters,
+  and alias accounts resolve their own upstream tokens instead of falling back to the root account. Established live
+  sessions now switch to the next CDN mirror after an outage (404/5xx/timeout), while 401/403 never switch.
+
+- **Removing a plugin no longer keeps the server down.** A `source.yml` that still named the plugin refused to start
+  (``Can't start server: config source error: invalid plugin references: input x: no loaded plugin y provides
+  fetch-input``), so uninstalling a plugin left an instance that could not boot. The start and a running server's hot
+  reload now report every unsatisfied plugin reference once and continue; only the entries that name the missing
+  plugin are inactive and keep their last playlist. A target whose processing filter calls `plugin.<id>.<fn>(…)` for a
+  missing plugin now fails as a target (``target 'x' is inactive: its filter calls plugin 'y' …``) instead of silently
+  dropping every item and reporting success. Saving `source.yml` through the API still rejects such a reference.
+
+- **Web UI posters and logos no longer fail with providers that only serve players.** The image proxy behind the
+  Web UI forwarded the browser's User-Agent to the provider; providers that block browsers answered 403, so most VOD
+  and series posters stayed empty in the Playlist Explorer. The proxy now drops the browser's User-Agent and sends the
+  headers of the input that hosts the image, or the configured `default_user_agent`.
+
+- **API user records retain every optional field position.** Runtime writes preserve empty network, plan and filter fields
+  in the complete V7 layout, so subsequent starts do not repeatedly migrate records with omitted trailing fields.
+
+- **User database repair archives are excluded from startup migration.** Directories whose names start with
+  `api_user_repair_backup_` and their contents remain untouched by the automatic database scanner, including when supplied
+  as scan roots or marker locations. Legacy V1/V2 backups can remain beside the repaired database without blocking startup;
+  archived V3 databases do not acquire new lock files.
 
 - **Playlist Update: "All" selects, status badges use status dots.** Clicking "All" under "Affected targets" now
   always selects every target instead of toggling all of them off on a second click; single targets still switch on
@@ -1956,6 +2171,24 @@
 - **source.yml (target `options`)**:
   - Added `failover_groups` (default off): `enabled` plus the optional overrides `match_by`, `match_as_ascii`,
     `epg_conflict`, `name_strip_quality`, `policy`, `allow_provider_grace` and `failover`.
+- **`library.scan_directories[].follow_symlinks`: follow symlinks in a scan directory.** Default `true`. With `false`,
+  the scanner skips symlinks and streaming only serves files whose resolved path lies inside the resolved scan
+  directory. The Web UI library settings show it as the **Follow symlinks** column.
+
+- **`plugins.directories` and `TULIPROX_PLUGINS_DIRS`: search plugins in several directories.** Directories are
+  searched in order; a plugin id found again in a later directory overrides the earlier one, and installs and uploads
+  go to the last directory. Relative entries resolve against the config dir. Unset, the list is `plugins.directory`
+  alone, preceded by `/app/plugins` when it exists: container images bundle the official plugins there, so Docker
+  searches `[/app/plugins, /app/config/plugins]` and Web UI installs persist on the config volume.
+  `TULIPROX_PLUGINS_DIRS` (separated by `,` or the platform path separator) replaces the configured list.
+
+- **`container_extension` is no longer served empty; input option `default_container_extension`.** Movies and series
+  episodes whose provider reports none and whose stream URL carries none now publish `mp4`. Stalker portals reveal the
+  container only on playback, so their Xtream output carried `"container_extension": ""` and clients such as
+  BouquetMakerXtream dropped those items. The input option replaces that default per input (any short alphanumeric
+  token such as `mkv`). The value is applied when the playlist is served, so a config change takes effect on the next
+  response without a playlist refresh, and it never overrides a provider value or a URL extension. Applies to every
+  input type; available in the Web UI input options and validated at config load.
 
 - **api-proxy.yml (`credential_generation`)**: `username`, `password` and `token` each take `length` (default `6`),
   `chars` (default `A-Z0-9`, token `A-Za-z0-9`) and `exclude` (default empty), or an ordered `segments` list of the

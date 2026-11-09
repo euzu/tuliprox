@@ -188,7 +188,7 @@ pub async fn epg_write_for_target(
                 }
             },
             TargetOutput::M3u(_) => m3u_get_epg_file_path_for_target(target_path),
-            TargetOutput::Strm(_) | TargetOutput::HdHomeRun(_) => return Ok(()),
+            TargetOutput::Strm(_) | TargetOutput::HdHomeRun(_) | TargetOutput::Plugin(_) => return Ok(()),
         };
         debug_if_enabled!("writing {} epg to {}", output.target_type(), epg_path.display());
         // The group index is small and built from the borrowed playlist here, so the playlist is
@@ -275,6 +275,7 @@ mod tests {
     fn target_with_m3u_and_xtream() -> ConfigTarget {
         ConfigTarget {
             curation: None,
+            managed_channels: Vec::new(),
             id: 1,
             enabled: true,
             name: "ics-target".to_string(),

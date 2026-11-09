@@ -8,7 +8,7 @@ use shared::{
     foundation::{get_filter, MapperScript},
     model::{
         ClusterFlags, ConfigRenameDto, ConfigTargetDto, EventMessage, FieldSetAccessor, InputType, ItemField,
-        M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+        M3uPlaylistItem, NoPlugins, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
         PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState, XtreamCluster, XtreamPlaylistItem,
     },
     utils::Internable,
@@ -185,8 +185,8 @@ fn mapper_cannot_resurrect_missing_legacy_input_stream_id_from_target_id() {
     assert_eq!(materialized_xtream.get_input_stream_id(), None);
 }
 
-#[test]
-fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
+#[tokio::test]
+async fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
     let input = ConfigInput::default();
     let item = PlaylistItem { header: PlaylistItemHeader { id: "origin-alpha".intern(), ..Default::default() } };
     let source = MemoryPlaylistSource::new(vec![PlaylistGroup {
@@ -200,8 +200,10 @@ fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
     let mut duplicates = HashSet::new();
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, None)
-        .expect("target processing should succeed");
+    let (mut processed, _outcome) =
+        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, None, &NoPlugins, None)
+            .await
+            .expect("target processing should succeed");
     let mut groups = processed.source.take_groups();
 
     assert_eq!(groups[0].channels[0].header.input_stream_id.as_ref(), "origin-alpha");
@@ -222,7 +224,7 @@ fn legacy_messagepack_playlist_items_default_missing_input_stream_id() {
         },
     };
 
-    let header_bytes = serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xc0, 0xa0]);
+    let header_bytes = serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xa0, 0xc0, 0xa0]);
     let decoded_header: PlaylistItemHeader =
         rmp_serde::from_slice(&header_bytes).expect("legacy header should deserialize");
     assert!(decoded_header.input_stream_id.is_empty());
@@ -235,7 +237,7 @@ fn legacy_messagepack_playlist_items_default_missing_input_stream_id() {
     source.header.freeze_input_stream_id();
     let mut m3u_item = M3uPlaylistItem::from(&source);
     m3u_item.input_stream_id = "".intern();
-    let m3u_bytes = serialize_without_trailing_fields(&m3u_item, &[0xc0, 0xa0]);
+    let m3u_bytes = serialize_without_trailing_fields(&m3u_item, &[0xa0, 0xc0, 0xa0]);
     let decoded_m3u: M3uPlaylistItem = rmp_serde::from_slice(&m3u_bytes).expect("legacy M3U item should deserialize");
     assert!(decoded_m3u.input_stream_id.is_empty());
     assert_eq!(decoded_m3u.get_input_stream_id().as_deref(), Some("origin-alpha"));
@@ -243,7 +245,7 @@ fn legacy_messagepack_playlist_items_default_missing_input_stream_id() {
 
     let mut xtream_item = XtreamPlaylistItem::from(&source);
     xtream_item.input_stream_id = "".intern();
-    let xtream_bytes = serialize_without_trailing_fields(&xtream_item, &[0xc0, 0xa0]);
+    let xtream_bytes = serialize_without_trailing_fields(&xtream_item, &[0xa0, 0xc0, 0xa0]);
     let decoded_xtream: XtreamPlaylistItem =
         rmp_serde::from_slice(&xtream_bytes).expect("legacy Xtream item should deserialize");
     assert!(decoded_xtream.input_stream_id.is_empty());
@@ -262,13 +264,13 @@ fn previous_messagepack_playlist_items_default_missing_upstream_user_agent() {
     };
 
     let header: PlaylistItemHeader =
-        rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xc0]))
+        rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xa0, 0xc0]))
             .expect("previous header should deserialize");
     let m3u: M3uPlaylistItem =
-        rmp_serde::from_slice(&serialize_without_trailing_fields(&M3uPlaylistItem::from(&source), &[0xc0]))
+        rmp_serde::from_slice(&serialize_without_trailing_fields(&M3uPlaylistItem::from(&source), &[0xa0, 0xc0]))
             .expect("previous M3U item should deserialize");
     let xtream: XtreamPlaylistItem =
-        rmp_serde::from_slice(&serialize_without_trailing_fields(&XtreamPlaylistItem::from(&source), &[0xc0]))
+        rmp_serde::from_slice(&serialize_without_trailing_fields(&XtreamPlaylistItem::from(&source), &[0xa0, 0xc0]))
             .expect("previous Xtream item should deserialize");
 
     assert_eq!(header.input_stream_id.as_ref(), "origin-alpha");
@@ -277,6 +279,38 @@ fn previous_messagepack_playlist_items_default_missing_upstream_user_agent() {
     assert_eq!(header.upstream_user_agent, None);
     assert_eq!(m3u.upstream_user_agent, None);
     assert_eq!(xtream.upstream_user_agent, None);
+}
+
+#[test]
+fn previous_messagepack_playlist_items_default_missing_input_url() {
+    let source = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "80510".intern(),
+            input_stream_id: "origin-alpha".intern(),
+            upstream_user_agent: Some("agent-x".intern()),
+            ..Default::default()
+        },
+    };
+
+    let header: PlaylistItemHeader =
+        rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xa0]))
+            .expect("previous header should deserialize");
+    let m3u: M3uPlaylistItem =
+        rmp_serde::from_slice(&serialize_without_trailing_fields(&M3uPlaylistItem::from(&source), &[0xa0]))
+            .expect("previous M3U item should deserialize");
+    let xtream: XtreamPlaylistItem =
+        rmp_serde::from_slice(&serialize_without_trailing_fields(&XtreamPlaylistItem::from(&source), &[0xa0]))
+            .expect("previous Xtream item should deserialize");
+
+    assert_eq!(header.input_stream_id.as_ref(), "origin-alpha");
+    assert_eq!(m3u.input_stream_id.as_ref(), "origin-alpha");
+    assert_eq!(xtream.input_stream_id.as_ref(), "origin-alpha");
+    assert_eq!(header.upstream_user_agent.as_deref(), Some("agent-x"));
+    assert_eq!(m3u.upstream_user_agent.as_deref(), Some("agent-x"));
+    assert_eq!(xtream.upstream_user_agent.as_deref(), Some("agent-x"));
+    assert!(header.input_url.is_empty());
+    assert!(m3u.input_url.is_empty());
+    assert!(xtream.input_url.is_empty());
 }
 
 #[test]
@@ -334,4 +368,114 @@ fn staged_xtream_overlay_recomputes_uuid_on_group_load() {
     assert_ne!(groups[0].channels[0].header.get_uuid(), &old_uuid);
     assert_eq!(groups[0].channels[0].header.get_uuid(), &expected_uuid);
     assert_eq!(groups[0].channels[0].header.get_input_stream_id().as_deref(), Some("11203"));
+}
+
+#[tokio::test]
+async fn execute_pipe_with_mapper_rewriting_url_preserves_input_url() {
+    let input = ConfigInput { input_type: InputType::M3u, ..ConfigInput::default() };
+    let item = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "origin-alpha".intern(),
+            url: "http://provider.example/live/stream.m3u8".intern(),
+            ..Default::default()
+        },
+    };
+    let source = MemoryPlaylistSource::new(vec![PlaylistGroup {
+        id: 1,
+        title: "Group".intern(),
+        channels: vec![item],
+        xtream_cluster: XtreamCluster::Live,
+    }])
+    .into_source();
+    let mut fetched = FetchedPlaylist { input: &input, source, epg: None };
+    let mut duplicates = HashSet::new();
+
+    let mapping = CompiledMapping {
+        rules: vec![CompiledMappingRule {
+            name: None,
+            filter: get_filter(r#"name ~ ".*""#, None).expect("filter should parse"),
+            program: MappingProgram::Dsl(
+                MapperScript::parse(r#"@url = "http://mapped.example/live/rewritten.m3u8""#, None)
+                    .expect("mapper should parse"),
+            ),
+        }],
+        ..Default::default()
+    };
+    let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+    target.mapping = std::sync::Arc::new(arc_swap::ArcSwapOption::from(Some(std::sync::Arc::new(
+        tuliprox_core::model::CompiledTargetMappings::new(vec![std::sync::Arc::new(mapping)]),
+    ))));
+
+    let pipe = vec![tuliprox_core::model::TransformStage::Map];
+    let (mut processed, _outcome) =
+        execute_pipe(&target, &pipe, &mut fetched, &mut duplicates, false, None, &NoPlugins, None)
+            .await
+            .expect("target processing should succeed");
+    let groups = processed.source.take_groups();
+    let channel = &groups[0].channels[0];
+
+    assert_eq!(channel.header.url.as_ref(), "http://mapped.example/live/rewritten.m3u8");
+    assert_eq!(channel.header.input_url.as_ref(), "http://provider.example/live/stream.m3u8");
+
+    let xtream = XtreamPlaylistItem::from(channel);
+    let m3u = M3uPlaylistItem::from(channel);
+    assert_eq!(xtream.input_url.as_ref(), "http://provider.example/live/stream.m3u8");
+    assert_eq!(m3u.input_url.as_ref(), "http://provider.example/live/stream.m3u8");
+    assert_eq!(xtream.override_source_url().as_ref(), "http://provider.example/live/stream.m3u8");
+    assert_eq!(m3u.override_source_url().as_ref(), "http://provider.example/live/stream.m3u8");
+}
+
+#[tokio::test]
+async fn execute_pipe_with_mapper_rewriting_url_for_xtream_leaves_input_url_empty() {
+    let input = ConfigInput { input_type: InputType::Xtream, ..ConfigInput::default() };
+    let item = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "origin-alpha".intern(),
+            url: "http://provider.example/live/stream.m3u8".intern(),
+            ..Default::default()
+        },
+    };
+    let source = MemoryPlaylistSource::new(vec![PlaylistGroup {
+        id: 1,
+        title: "Group".intern(),
+        channels: vec![item],
+        xtream_cluster: XtreamCluster::Live,
+    }])
+    .into_source();
+    let mut fetched = FetchedPlaylist { input: &input, source, epg: None };
+    let mut duplicates = HashSet::new();
+
+    let mapping = CompiledMapping {
+        rules: vec![CompiledMappingRule {
+            name: None,
+            filter: get_filter(r#"name ~ ".*""#, None).expect("filter should parse"),
+            program: MappingProgram::Dsl(
+                MapperScript::parse(r#"@url = "http://mapped.example/live/rewritten.m3u8""#, None)
+                    .expect("mapper should parse"),
+            ),
+        }],
+        ..Default::default()
+    };
+    let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+    target.mapping = std::sync::Arc::new(arc_swap::ArcSwapOption::from(Some(std::sync::Arc::new(
+        tuliprox_core::model::CompiledTargetMappings::new(vec![std::sync::Arc::new(mapping)]),
+    ))));
+
+    let pipe = vec![tuliprox_core::model::TransformStage::Map];
+    let (mut processed, _outcome) =
+        execute_pipe(&target, &pipe, &mut fetched, &mut duplicates, false, None, &NoPlugins, None)
+            .await
+            .expect("target processing should succeed");
+    let groups = processed.source.take_groups();
+    let channel = &groups[0].channels[0];
+
+    assert_eq!(channel.header.url.as_ref(), "http://mapped.example/live/rewritten.m3u8");
+    assert!(channel.header.input_url.is_empty());
+
+    let xtream = XtreamPlaylistItem::from(channel);
+    let m3u = M3uPlaylistItem::from(channel);
+    assert!(xtream.input_url.is_empty());
+    assert!(m3u.input_url.is_empty());
+    assert_eq!(xtream.override_source_url().as_ref(), "http://mapped.example/live/rewritten.m3u8");
+    assert_eq!(m3u.override_source_url().as_ref(), "http://mapped.example/live/rewritten.m3u8");
 }

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tv generator-info-name="sports-enricher demo">
+  <!-- Every broadcaster id has a <channel>: the host calls enrich-programmes only for channels of the guide. -->
+  <!-- sky.sports.premierleague.uk, laliga.tv.es, espn.nba.us and nba.tv.us have NO programmes at all. -->
+  <channel id="sky.sports.premierleague.uk"><display-name>Sky Sports Premier League</display-name></channel>
+  <channel id="tnt.sports.1.uk"><display-name>TNT Sports 1</display-name></channel>
+  <channel id="laliga.tv.es"><display-name>LaLiga TV HD</display-name></channel>
+  <channel id="espn.nba.us"><display-name>ESPN NBA</display-name></channel>
+  <channel id="nba.tv.us"><display-name>NBA TV</display-name></channel>
+  <channel id="bbc.one.uk"><display-name>BBC One</display-name></channel>
+  <!-- tnt.sports.1.uk has one programme: it does not name a fixture, so the plugin adds its matches next to it. -->
+  <programme start="20261101100000 +0000" stop="20261101110000 +0000" channel="tnt.sports.1.uk">
+    <title lang="en">Sports Talk Live</title>
+    <desc lang="en">Studio discussion.</desc>
+  </programme>
+  <programme start="20261101210000 +0000" stop="20261101213000 +0000" channel="bbc.one.uk">
+    <title lang="en">News at Nine</title>
+  </programme>
+</tv>

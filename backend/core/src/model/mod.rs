@@ -19,6 +19,7 @@ pub mod batch_result_collector;
 pub mod custom_stream_flags;
 pub mod fingerprint;
 pub mod maintenance;
+pub mod overrides;
 pub mod playback;
 pub mod playlist_filter;
 pub mod playlist_key;
@@ -35,8 +36,9 @@ pub mod xtream_response;
 
 pub use self::{
     auth_rejection::*, batch_result_collector::*, config::*, custom_stream_flags::*, fingerprint::*, healthcheck::*,
-    http_clients::*, input_source::*, maintenance::*, mapping::*, messaging::*, notification::*, playback::*,
-    playlist_filter::*, playlist_key::*, provider::*, proxy_redirect::*, stalker_record::*, stream_error::*,
-    stream_history::*, target_bouquet::*, update_guard::*, update_quality::*, update_task::*, xmltv::*, xtream::*,
+    http_clients::*, input_source::*, maintenance::*, mapping::*, messaging::*, notification::*, overrides::*,
+    playback::*, playlist_filter::*, playlist_key::*, provider::*, proxy_redirect::*, stalker_record::*,
+    stream_error::*, stream_history::*, target_bouquet::*, update_guard::*, update_quality::*, update_task::*,
+    xmltv::*, xtream::*,
 };
 pub use shared::model::xtream_const::*;

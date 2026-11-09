@@ -1,0 +1,14 @@
+inputs:
+  - name: demo-in
+    type: m3u
+    url: file://__RUN__/input.m3u
+    options:
+      probe_live: true   # only acts with metadata_update.ffprobe.enabled and ffprobe installed
+sources:
+  - inputs: [demo-in]
+    targets:
+      - name: demo
+        output:
+          - type: m3u
+            filename: demo.m3u
+          - type: xtream   # live probing (probe_live -> stream.probe.failed) runs only for targets with an xtream output

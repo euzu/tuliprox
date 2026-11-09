@@ -289,6 +289,20 @@ impl ActiveUserManager {
         streams
     }
 
+    /// Finds a single stream by UID for status / control endpoints without cloning all active streams.
+    pub async fn find_panel_stream_by_uid(&self, uid: u32) -> Option<StreamInfo> {
+        self.gc();
+        let user_connections = self.connections.read().await;
+        for connection_data in user_connections.by_key.values() {
+            for stream in &connection_data.streams {
+                if stream.uid == uid && (!stream.preserved || Self::should_preserve_session_stream(stream)) {
+                    return Some(stream.clone());
+                }
+            }
+        }
+        None
+    }
+
     pub(super) fn log_connection_added(
         username: &str,
         addr: &SocketAddr,

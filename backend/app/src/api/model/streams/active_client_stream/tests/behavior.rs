@@ -130,6 +130,7 @@ async fn deferred_provider_open_forces_identity_when_original_mode_preserves_ori
         &fingerprint,
         &stream_channel,
         &HeaderMap::new(),
+        None,
     )
     .expect("deferred provider open context");
 
@@ -186,6 +187,7 @@ async fn test_active_client_stream_deferred_provider_open_applies_sleep_timer_ti
         provider_http_status: None,
         provider_reconnect_count: AtomicU8::new(0),
         group_switcher: None,
+        _group_switch_guard: None,
         group_lease_owner: None,
         lease_owner: None,
         media_started: None,

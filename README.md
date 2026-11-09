@@ -242,6 +242,8 @@ Tuliprox can be configured and monitored directly from the browser.
 - **Playlist Stats** with per-target content counts, input-to-output ratios, largest groups, catch-up channels,
   EPG source health, and unmapped live channel CSV export
 - **Playlist Explorer** with tree/gallery views, EPG timeline, text/regex search, and field-scoped search
+- **Manual item overrides**: correct single channels, movies or series in the Playlist Explorer — for the whole input or
+  for one target — without writing mapper rules, with validation, conflict checks and orphan cleanup
 - **Download & Recording Manager** with retries, queue controls, fairness, and RBAC-protected actions
 - **User Management** including plans, connection limits, priorities, category access, output clusters, and network policies
 - **RBAC Administration** for users, groups, and permission grants
@@ -327,6 +329,7 @@ Supported notification channels include:
 - Gotify
 - Slack
 - Local command execution with structured event JSON on stdin
+- Plugins can add more channels. See `plugins/examples/` for source examples
 
 Notification capabilities include:
 
@@ -339,7 +342,7 @@ Notification capabilities include:
 - Dead-letter tracking for notifications that permanently fail
 - Provider `Retry-After` support where applicable
 - HMAC-SHA256 signing for REST webhooks
-- Per-channel Handlebars templates
+- Per-channel Handlebars templates with `json_escape`, `bytes` and `round` helpers
 - Preview/test endpoint so templates can be rendered without sending them
 - Events for provider failures, exhausted pools, priority fallback, user connection denial, auth activity, config reload  
   failures, metadata failures, scheduled-task failures, recording lifecycle, disk alerts, and more

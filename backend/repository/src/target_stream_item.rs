@@ -13,6 +13,16 @@ pub enum ResolvedStreamTarget {
     Member { group: Arc<FailoverGroupRecord>, index: usize },
 }
 
+impl ResolvedStreamTarget {
+    #[must_use]
+    pub fn group(&self) -> Option<&Arc<FailoverGroupRecord>> {
+        match self {
+            Self::Group(group) | Self::Member { group, .. } => Some(group),
+            Self::Item => None,
+        }
+    }
+}
+
 /// Whether `target` resolves failover groups at all. Targets without them skip every group lookup.
 #[must_use]
 pub fn failover_groups_enabled(target: &ConfigTarget) -> bool {
@@ -46,8 +56,7 @@ pub async fn classify_virtual_id(
 }
 
 #[must_use]
-pub fn member_to_xtream_item(group: &FailoverGroupRecord, index: usize, target: &ConfigTarget) -> XtreamPlaylistItem {
-    let _ = target;
+pub fn member_to_xtream_item(group: &FailoverGroupRecord, index: usize) -> XtreamPlaylistItem {
     let member = &group.members[index];
     XtreamPlaylistItem {
         virtual_id: member.member_vid,
@@ -69,14 +78,15 @@ pub fn member_to_xtream_item(group: &FailoverGroupRecord, index: usize, target: 
         channel_no: 0,
         source_ordinal: 0,
         input_stream_id: Arc::clone(&member.input_stream_id),
-        upstream_user_agent: None,
+        upstream_user_agent: member.upstream_user_agent.as_ref().map(Arc::clone),
+        input_url: Arc::clone(&member.input_url),
     }
 }
 
 #[must_use]
-pub fn member_to_m3u_item(group: &FailoverGroupRecord, index: usize, target: &ConfigTarget) -> M3uPlaylistItem {
-    let _ = target;
+pub fn member_to_m3u_item(group: &FailoverGroupRecord, index: usize) -> M3uPlaylistItem {
     let member = &group.members[index];
+    let time_shift = member.archive.as_ref().map_or_else(|| "".intern(), |a| a.duration_days.to_string().intern());
     M3uPlaylistItem {
         virtual_id: member.member_vid,
         provider_id: member.provider_id.to_string().intern(),
@@ -88,7 +98,7 @@ pub fn member_to_m3u_item(group: &FailoverGroupRecord, index: usize, target: &Co
         title: Arc::clone(&member.title),
         parent_code: "".intern(),
         audio_track: "".intern(),
-        time_shift: "".intern(),
+        time_shift,
         rec: "".intern(),
         url: Arc::clone(&member.url),
         epg_channel_id: member.epg_channel_id.as_ref().map(Arc::clone),
@@ -99,9 +109,10 @@ pub fn member_to_m3u_item(group: &FailoverGroupRecord, index: usize, target: &Co
         t_catchup_source: None,
         t_catchup_mode: None,
         source_ordinal: 0,
-        additional_properties: None,
+        additional_properties: member.additional_properties.clone(),
         input_stream_id: Arc::clone(&member.input_stream_id),
-        upstream_user_agent: None,
+        upstream_user_agent: member.upstream_user_agent.as_ref().map(Arc::clone),
+        input_url: Arc::clone(&member.input_url),
     }
 }
 
@@ -157,6 +168,7 @@ mod tests {
             })),
             sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
             hdhomerun: Arc::new(arc_swap::ArcSwapOption::default()),
+            plugins: Arc::default(),
             api_proxy: Arc::new(arc_swap::ArcSwapOption::default()),
             file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -228,6 +240,7 @@ mod tests {
                 title: "BBC One HD".intern(),
                 group: "Entertainment".intern(),
                 url: "http://xandar/live/201".intern(),
+                input_url: "http://xandar/original/201".intern(),
                 input_name: "xandar".intern(),
                 item_type: PlaylistItemType::Live,
                 xtream_cluster: XtreamCluster::Live,
@@ -243,6 +256,8 @@ mod tests {
                 title: "BBC One FHD".intern(),
                 group: "Entertainment".intern(),
                 url: "http://korath/live/101".intern(),
+                input_url: "http://korath/original/101".intern(),
+                upstream_user_agent: Some("Provider-UA".intern()),
                 input_name: "korath".intern(),
                 item_type: PlaylistItemType::Live,
                 xtream_cluster: XtreamCluster::Live,
@@ -423,10 +438,32 @@ mod tests {
         else {
             panic!()
         };
-        let item = member_to_xtream_item(&group, 1, &env.target);
+        let item = member_to_xtream_item(&group, 1);
         assert_eq!(item.virtual_id, env.member_vids[1]);
         assert_eq!(item.input_name.as_ref(), "korath");
         assert!(item.url.contains("korath"));
+        assert_eq!(item.input_url.as_ref(), "http://korath/original/101");
+    }
+
+    #[tokio::test]
+    async fn member_input_url_survives_persist_and_both_conversions() {
+        let env = persisted_group_env().await;
+        let path = target_path(&env.app_config, &env.target);
+        let record = FailoverGroupStore::read_group(&path, env.group_vid).expect("read").expect("group");
+        assert_eq!(record.members[1].input_url.as_ref(), "http://korath/original/101");
+        assert_eq!(record.members[1].upstream_user_agent.as_deref(), Some("Provider-UA"));
+
+        let ResolvedStreamTarget::Group(group) =
+            classify_virtual_id(&env.app_config, &env.playlists, &env.target, env.group_vid).await
+        else {
+            panic!()
+        };
+        let xtream = member_to_xtream_item(&group, 1);
+        let m3u = member_to_m3u_item(&group, 1);
+        assert_eq!(xtream.input_url.as_ref(), "http://korath/original/101");
+        assert_eq!(m3u.input_url.as_ref(), "http://korath/original/101");
+        assert_eq!(xtream.upstream_user_agent.as_deref(), Some("Provider-UA"));
+        assert_eq!(m3u.upstream_user_agent.as_deref(), Some("Provider-UA"));
     }
 
     #[tokio::test]
@@ -438,5 +475,20 @@ mod tests {
             classify_virtual_id(&env.app_config, &env.playlists, &env.target, env.group_vid).await,
             ResolvedStreamTarget::Item
         ));
+    }
+
+    #[tokio::test]
+    async fn resolved_stream_target_group_accessor() {
+        let env = persisted_group_env().await;
+        let group_resolved = classify_virtual_id(&env.app_config, &env.playlists, &env.target, env.group_vid).await;
+        assert!(group_resolved.group().is_some());
+        assert_eq!(group_resolved.group().unwrap().group_vid, env.group_vid);
+
+        let member_resolved =
+            classify_virtual_id(&env.app_config, &env.playlists, &env.target, env.member_vids[0]).await;
+        assert!(member_resolved.group().is_some());
+        assert_eq!(member_resolved.group().unwrap().group_vid, env.group_vid);
+
+        assert_eq!(ResolvedStreamTarget::Item.group(), None);
     }
 }

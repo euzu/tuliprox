@@ -390,16 +390,13 @@ fn search_catalog(
     (offset, limit): (usize, usize),
 ) -> CandidatePageDto {
     let excluded: HashSet<&ChannelMemberRefDto> = excluded.iter().collect();
-    let group_of: HashMap<(&str, &str), &str> = stored
-        .groups
-        .values()
-        .flat_map(|group| {
-            group
-                .members
-                .iter()
-                .map(|member| ((member.input_name.as_ref(), member.input_stream_id.as_ref()), group.key.as_ref()))
-        })
-        .collect();
+    let member_count: usize = stored.groups.values().map(|g| g.members.len()).sum();
+    let mut group_of: HashMap<(&str, &str), &str> = HashMap::with_capacity(member_count);
+    for group in stored.groups.values() {
+        for member in &group.members {
+            group_of.insert((member.input_name.as_ref(), member.input_stream_id.as_ref()), group.key.as_ref());
+        }
+    }
 
     let mut total = 0;
     let mut items = Vec::with_capacity(limit.min(catalog.len()));

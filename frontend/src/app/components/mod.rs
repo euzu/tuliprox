@@ -2,11 +2,13 @@ mod accordion;
 mod accordion_panel;
 mod api_user;
 mod authentication;
+mod autocomplete_input;
 pub mod bouquet_editor;
 mod breadcrumbs;
 mod button_utils;
 mod card;
 mod cell_value;
+mod checkbox;
 mod chip;
 mod collapse_panel;
 mod config;
@@ -37,6 +39,7 @@ mod no_submit_form;
 mod number_input;
 mod panel;
 mod playlist;
+mod plugins;
 mod popup_menu;
 mod radio_button_group;
 mod range_slider;
@@ -47,6 +50,7 @@ mod search;
 mod select;
 mod select_helpers;
 mod sidebar;
+mod split_button;
 mod split_pane;
 mod svg_icon;
 mod table;
@@ -91,4 +95,6 @@ pub(crate) use self::{
     text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*, userlist::*,
     websocket_status::*,
 };
-pub use self::{confirm_dialog::*, content_dialog::*, table::*};
+pub use self::{
+    autocomplete_input::*, checkbox::*, confirm_dialog::*, content_dialog::*, plugins::*, split_button::*, table::*,
+};

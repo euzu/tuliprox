@@ -1,6 +1,10 @@
 @use "../../../size" as size;
 
 .tp__playlist-update-view {
+  --update-card-spacing: 20px;
+  --update-action-width: 220px;
+  --update-control-gap: 12px;
+  container: update-view / inline-size;
   display: flex;
   flex-flow: column;
   width: 100%;
@@ -34,12 +38,8 @@
   }
 
   &__cards {
-    display: flex;
+    container: update-list / inline-size;
     flex: 1 1 auto;
-    flex-flow: row wrap;
-    align-items: flex-start;
-    align-content: flex-start;
-    gap: max(var(--gap-large), 1rem);
     box-sizing: border-box;
     width: 100%;
     min-height: 0;
@@ -49,11 +49,16 @@
     -webkit-overflow-scrolling: touch;
   }
 
-  // Content and actions panel need about 38rem side by side. A fixed basis keeps the intrinsic
-  // width of the wrapping body from forcing every card onto its own row.
+  &__cards-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: var(--update-card-spacing);
+  }
+
   &__input-card {
     box-sizing: border-box;
-    flex: 1 1 40rem;
+    padding: var(--update-card-spacing);
     max-width: 100%;
     min-width: 0;
   }
@@ -61,14 +66,14 @@
   &__input-card article {
     display: flex;
     flex-flow: column;
-    gap: max(var(--gap-large), 1rem);
     min-width: 0;
   }
 
   &__input-card-header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: var(--gap-default);
     min-width: 0;
   }
@@ -91,21 +96,27 @@
     text-transform: capitalize;
   }
 
-  // The actions panel drops below the content once the card is too narrow for both.
   &__input-card-body {
-    display: flex;
-    flex-flow: row wrap;
-    align-items: flex-start;
-    gap: max(var(--gap-large), 1rem);
+    container: update-card / inline-size;
     min-width: 0;
   }
 
   &__input-content {
     display: flex;
-    flex: 999 1 18rem;
     flex-flow: column;
-    gap: max(var(--gap-large), 1rem);
     min-width: 0;
+  }
+
+  &__input-facts,
+  &__input-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--update-action-width);
+    gap: var(--update-control-gap);
+    min-width: 0;
+  }
+
+  &__input-facts {
+    margin-block: 20px;
   }
 
   &__pipeline-summary {
@@ -125,6 +136,8 @@
     flex-flow: row wrap;
     gap: max(var(--gap-default), 0.5rem);
     min-width: 0;
+    min-height: 32px;
+    align-items: center;
   }
 
   // Round status indicator like the health badge; each status modifier sets `--status-color`.
@@ -154,7 +167,8 @@
     // A fixed line box keeps the warning/checkmark glyphs from changing badge height.
     line-height: 1.5;
     font-weight: normal;
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
 
     &--accepted,
     &--persisted-ok {
@@ -223,6 +237,7 @@
   &__target-toggles {
     display: flex;
     flex-flow: row wrap;
+    justify-content: flex-start;
     gap: max(var(--gap-default), 0.5rem);
     min-width: 0;
   }
@@ -252,65 +267,67 @@
     max-width: 100%;
     max-height: none;
     min-width: 0;
+    white-space: normal;
 
     span:last-child {
       min-width: 0;
       overflow-wrap: anywhere;
     }
 
-    &:focus-visible {
+    &.tp__text-button:focus-visible {
       outline: 2px solid var(--input-focus-border-color);
       outline-offset: 2px;
     }
   }
 
-  &__empty-targets {
-    margin: 0;
-    color: var(--modest-text-color);
-  }
-
-  &__input-actions {
-    display: flex;
-    flex: 1 1 20rem;
-    flex-flow: column;
-    gap: max(var(--gap-large), 1rem);
-    box-sizing: border-box;
-    min-width: 0;
-    padding: var(--padding-default);
-    border: 1px solid var(--border-color);
-    border-radius: var(--border-radius);
-  }
-
+  &__action-area,
   &__policy-control {
-    display: flex;
-    flex-flow: column;
-    gap: max(var(--gap-default), 0.5rem);
     min-width: 0;
-  }
-
-  &__action-label {
-    font-weight: bold;
   }
 
   &__policy-select,
   &__input-actions .tp__text-button {
     width: 100%;
-  }
-
-  &__policy-notes {
-    padding-block-start: max(var(--padding-mini), 0.5rem);
     min-width: 0;
   }
 
-  &__policy-description {
-    margin: 0;
-    color: var(--modest-text-color);
-    font-size: var(--font-size-sm);
-    line-height: 1.35;
+  &__policy-select .tp__select-wrapper,
+  &__input-actions .tp__text-button {
+    min-height: 44px;
+    max-height: none;
+  }
+
+  &__input-actions .tp__text-button {
+    padding-block: var(--padding-mini);
     overflow-wrap: anywhere;
   }
 
+  &__policy-select .tp__select__selected {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  &__policy-select:focus-within,
+  &__input-actions .tp__text-button:focus-visible {
+    outline: 2px solid var(--input-focus-border-color);
+    outline-offset: 2px;
+  }
+
+  &__policy-description {
+    margin: 10px 0 0;
+    min-height: 2lh;
+    color: var(--modest-text-color);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+
+    &--warning {
+      color: var(--warn-color);
+    }
+  }
+
   &__update-details {
+    margin-block-start: 16px;
     min-width: 0;
     border-block-start: 1px solid var(--border-color);
 
@@ -330,154 +347,150 @@
 
   &__update-details-body {
     display: flex;
-    flex-flow: row wrap;
-    align-items: flex-start;
-    gap: max(var(--gap-large), 1rem);
-    padding-block-end: var(--padding-default);
+    flex-direction: column;
     min-width: 0;
+    font-size: 15px;
+    line-height: 1.4;
 
-    // Full-width sections; the per-cluster details below flow side by side.
-    > * {
-      flex: 1 1 100%;
-      min-width: 0;
-    }
-
-    > .tp__playlist-update-view__cluster-detail {
-      flex: 1 1 auto;
-      max-width: 100%;
-    }
+    > * { width: 100%; min-width: 0; box-sizing: border-box; }
+    dl { margin: 0; }
+    dt { color: var(--modest-text-color); min-width: 0; overflow-wrap: anywhere; }
+    dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
   }
 
-  &__run-context,
-  &__cluster-detail dl,
-  &__target-detail dl {
+  &__cluster-detail,
+  &__target-details,
+  &__progress-details {
     display: flex;
-    flex-flow: column;
-    gap: max(var(--gap-default), 0.5rem);
-    margin: 0;
-  }
+    flex-direction: column;
+    gap: 10px;
+    padding-block: 12px;
+    min-width: 0;
+    border-block-end: 1px solid var(--border-color);
 
-  &__cluster-detail {
-    display: flex;
-    flex-flow: column;
-    gap: max(var(--gap-default), 0.5rem);
-    padding-inline-start: var(--gap-default);
-    border-inline-start: 2px solid var(--border-color);
-
-    header {
+    > header {
       display: flex;
-      align-items: center;
+      flex-wrap: wrap;
       justify-content: space-between;
-      flex-flow: row wrap;
-      gap: var(--gap-default);
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+
+      > .tp__playlist-update-view__pipeline-status { margin-inline-start: auto; }
     }
 
-    h4 {
-      margin: 0;
-    }
+    h4 { margin: 0; min-width: 0; font-size: 15px; overflow-wrap: anywhere; }
   }
 
-  &__target-details {
+  &__target-details { border-block-end: 0; }
+  &__cluster-detail > dl:not([class]) { display: flex; flex-direction: column; gap: 8px; }
+
+  &__run-context {
     display: flex;
-    flex-flow: column;
-    gap: max(var(--gap-default), 0.5rem);
-    padding-block-start: var(--gap-default);
-    border-block-start: 1px solid var(--border-color);
-
-    > h4 {
-      margin: 0;
-    }
-  }
-
-  &__target-details-list {
-    display: flex;
-    flex-flow: row wrap;
-    align-items: flex-start;
-    gap: max(var(--gap-large), 1rem);
-    min-width: 0;
-  }
-
-  &__target-detail {
-    display: flex;
-    flex: 0 1 auto;
-    flex-flow: column;
-    gap: max(var(--gap-default), 0.5rem);
-    min-width: 0;
-    max-width: 100%;
-    padding-inline-start: var(--gap-default);
-    border-inline-start: 2px solid var(--border-color);
-
-    header h5 {
-      margin: 0;
-      overflow-wrap: anywhere;
-    }
-  }
-
-  &__target-processing-order {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-flow: row wrap;
-    gap: var(--gap-default);
-
-    > span {
-      color: var(--modest-text-color);
-    }
-
-    .tp__playlist-processing {
-      justify-content: flex-start;
-    }
-  }
-
-  &__target-pipeline-unavailable {
-    margin: 0;
-    color: var(--modest-text-color);
+    flex-direction: column;
+    gap: 8px;
+    padding-block: 12px;
+    border-block-end: 1px solid var(--border-color);
   }
 
   &__detail-row {
     display: grid;
-    grid-template-columns: minmax(8rem, 0.4fr) minmax(0, 1fr);
-    gap: var(--gap-default);
-
-    dt {
-      color: var(--modest-text-color);
-    }
-
-    dd {
-      min-width: 0;
-      margin: 0;
-      overflow-wrap: anywhere;
-    }
+    grid-template-columns: 11.25rem minmax(0, 1fr);
+    gap: 16px;
+    min-width: 0;
   }
 
-  &__progress-details {
+  &__population {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 12px;
+
+    > div { min-width: 0; }
+    dt { font-size: 12px; line-height: 18px; margin-block-end: 2px; overflow-wrap: anywhere; }
+    dd { font-size: 20px; line-height: 28px; font-variant-numeric: tabular-nums; }
+  }
+
+  &__population-difference {
+    margin-inline-start: 8px;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--modest-text-color);
+    overflow-wrap: anywhere;
+  }
+
+  &__cluster-detail--quality-rejected &__population-difference { color: var(--warn-color); }
+
+  &__quality-visual {
+    --quality-color: var(--modest-text-color);
+    min-width: 0;
+
+    &--accepted { --quality-color: var(--theme-brand-positive); }
+    &--rejected { --quality-color: var(--theme-brand-warning); }
+    > .tp__playlist-update-view__secondary-facts dd { font-size: 13px; }
+  }
+
+  &__quality-pair {
     display: flex;
-    flex-flow: column;
-    gap: max(var(--gap-default), 0.5rem);
-    padding-inline-start: var(--gap-default);
-    border-inline-start: 2px solid var(--border-color);
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px 20px;
 
-    h4 {
-      margin: 0;
-    }
-
-    ul {
-      display: flex;
-      flex-flow: column;
-      gap: var(--padding-micro);
-      margin: 0;
-      padding-inline-start: var(--gap-default);
-    }
-
-    li {
-      overflow-wrap: anywhere;
-    }
+    > .tp__playlist-update-view__detail-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+    dt { font-size: 13px; }
+    dd { font-variant-numeric: tabular-nums; }
   }
+
+  &__quality-chart { display: block; width: 100%; height: 11px; margin-block: 4px; }
+  &__quality-chart:dir(rtl) { transform: scaleX(-1); }
+  &__quality-track { fill: var(--border-color); }
+  &__quality-fill { fill: var(--quality-color); }
+  &__quality-threshold { stroke: var(--text-color); stroke-width: 2px; }
+
+  &__secondary-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 24px;
+    align-items: baseline;
+
+    &:empty { display: none; }
+    > .tp__playlist-update-view__detail-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: baseline;
+      max-width: 100%;
+    }
+    dt { font-size: 13px; overflow-wrap: anywhere; }
+  }
+
+  &__target-subtitle { max-width: 100%; min-width: 0; overflow-wrap: anywhere; margin-inline-start: auto; color: var(--modest-text-color); font-size: 12px; }
+  &__target-table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+    position: relative;
+
+    col:first-child { width: 32%; }
+    col:nth-child(2) { width: 25%; }
+    th { text-align: start; font-weight: normal; }
+    thead th { font-size: 12px; color: var(--modest-text-color); padding-block-end: 6px; }
+    tbody th, td { padding: 8px 0; border-block-start: 1px solid var(--border-color); vertical-align: top; overflow-wrap: anywhere; }
+    .tp__playlist-processing { justify-content: flex-start; min-width: 0; max-width: 100%; }
+    .tp__tag_list { flex-wrap: wrap; max-width: 100%; min-width: 0; }
+  }
+  &__rule-value { font-variant-numeric: tabular-nums; }
+  &__mobile-label { display: none; }
+  &__target-pipeline-unavailable { color: var(--modest-text-color); }
+
+  &__progress-details ul { margin: 0; padding-inline-start: 20px; }
+  &__progress-details li { overflow-wrap: anywhere; }
 
   &__input-card-footer {
     display: flex;
     flex-flow: row wrap;
-    gap: max(var(--gap-default), 0.5rem);
+    gap: 4px;
+    margin-block-start: 6px;
     color: var(--modest-text-color);
     font-size: var(--font-size-sm);
   }
@@ -487,15 +500,75 @@
   }
 }
 
-@media (max-width: size.$mobile-breakpoint) {
+@container update-list (min-width: 1100px) {
+  .tp__playlist-update-view__cards-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container update-card (width < 560px) {
   .tp__playlist-update-view {
-    &__input-card {
-      padding: max(var(--padding-default), 0.75rem);
+    &__population { gap: 8px; }
+    &__population dt { min-height: 36px; }
+    &__population dd { font-size: 18px; }
+    &__population-difference { display: block; margin-inline-start: 0; }
+    &__secondary-facts { gap: 6px 14px; }
+    &__target-table, &__target-table tbody { display: block; }
+    &__target-table thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    &__target-table tbody tr {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      padding-block: 10px;
+      border-block-start: 1px solid var(--border-color);
+      min-width: 0;
+    }
+    &__target-table tbody th, &__target-table td { display: block; border: 0; padding: 0; min-width: 0; }
+    &__target-table tbody th { grid-column: 1 / 3; }
+    &__target-table td:nth-child(2) { grid-column: 3; }
+    &__target-table tbody &__target-detail--unavailable > th,
+    &__target-table tbody &__target-detail--unavailable > td { grid-column: 1 / -1; }
+    &__mobile-label { display: block; color: var(--modest-text-color); font-size: 12px; margin-block-end: 2px; }
+  }
+}
+
+@container update-card (width < 480px) {
+  .tp__playlist-update-view {
+    &__input-facts,
+    &__input-actions {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    &__input-actions {
+      gap: var(--update-control-gap);
+    }
+
+    &__policy-description {
+      min-height: 0;
     }
 
     &__detail-row {
       grid-template-columns: minmax(0, 1fr);
-      gap: var(--padding-micro);
+      gap: 3px;
+    }
+  }
+}
+
+@media (max-width: size.$mobile-breakpoint) {
+  .tp__playlist-update-view {
+    --update-card-spacing: 16px;
+
+    &__header .tp__text-button {
+      min-height: 44px;
+      max-height: none;
+      overflow-wrap: anywhere;
     }
   }
 }

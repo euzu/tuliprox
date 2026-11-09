@@ -57,6 +57,8 @@ fn group_member(input: &str, stream_id: &str, provider_id: u32, member_vid: u32)
         archive: None,
         epg_channel_id: None,
         additional_properties: None,
+        input_url: Arc::from(""),
+        upstream_user_agent: None,
     }
 }
 
@@ -235,7 +237,7 @@ async fn representative_skips_member_without_configured_input() {
     env.group.members.insert(0, group_member("orun", "9", 9, 99));
     let (input, url) = group_representative(&env.app_state, &env.group).expect("representative");
     assert_eq!(input.name.as_ref(), "korath");
-    assert_eq!(url.as_ref(), env.group.members[1].url.as_ref());
+    assert_eq!(url, env.group.members[1].url.as_ref());
 }
 
 #[tokio::test]

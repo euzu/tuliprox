@@ -143,10 +143,10 @@ impl fmt::Debug for ClusterFlags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "ClusterFlags({self})") }
 }
 
-impl TryFrom<&str> for ClusterFlags {
-    type Error = String;
+impl std::str::FromStr for ClusterFlags {
+    type Err = String;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         let input = value.trim().trim_matches(|c| ['[', ']', '(', ')'].contains(&c));
         if input.is_empty() {
             return Ok(Self::empty());
@@ -154,6 +154,13 @@ impl TryFrom<&str> for ClusterFlags {
         let items = input.split(',').map(str::trim);
         ClusterFlags::from_items(items)
     }
+}
+
+#[allow(unknown_lints, clippy::try_from_instead_of_from_str)]
+impl TryFrom<&str> for ClusterFlags {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> { value.parse() }
 }
 
 impl TryFrom<Vec<String>> for ClusterFlags {

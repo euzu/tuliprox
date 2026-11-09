@@ -7,8 +7,8 @@ use crate::fetched_playlist::FetchedPlaylist;
 use shared::{
     foundation::{get_filter, ValueProvider},
     model::{
-        ClusterFlags, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, InputType, ItemField, PlaylistGroup,
-        PlaylistItem, PlaylistItemHeader, PlaylistItemType, PlaylistUpdateState, XtreamCluster,
+        ClusterFlags, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, InputType, ItemField, NoPlugins,
+        PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, PlaylistUpdateState, XtreamCluster,
     },
     utils::Internable,
 };
@@ -19,8 +19,8 @@ use tuliprox_core::model::{
 use tuliprox_curation::{CurationMediaKind, CurationRunOutcome};
 use tuliprox_repository::{MemoryPlaylistSource, PlaylistPublicationPlan};
 
-#[test]
-fn execute_pipe_applies_target_bouquet_prefilter() {
+#[tokio::test]
+async fn execute_pipe_applies_target_bouquet_prefilter() {
     let input = ConfigInput::default();
     let item1 = PlaylistItem {
         header: PlaylistItemHeader {
@@ -53,8 +53,10 @@ fn execute_pipe_applies_target_bouquet_prefilter() {
         tuliprox_core::model::TargetBouquetFilter::from_dto(shared::model::TargetBouquetDto::whitelist(bouquet_dto))
             .unwrap();
 
-    let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter))
-        .expect("target processing should succeed");
+    let (mut processed, _outcome) =
+        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter), &NoPlugins, None)
+            .await
+            .expect("target processing should succeed");
     let groups = processed.source.take_groups();
 
     assert_eq!(groups.len(), 1);
@@ -63,8 +65,8 @@ fn execute_pipe_applies_target_bouquet_prefilter() {
     assert_eq!(groups[0].channels[0].header.id.as_ref(), "ch-1");
 }
 
-#[test]
-fn execute_pipe_prefilter_does_not_suppress_allowed_duplicate() {
+#[tokio::test]
+async fn execute_pipe_prefilter_does_not_suppress_allowed_duplicate() {
     let input = ConfigInput::default();
     // Two items with the same URL (same UUID): one in disallowed group, one in allowed group.
     let item_disallowed = PlaylistItem {
@@ -113,8 +115,10 @@ fn execute_pipe_prefilter_does_not_suppress_allowed_duplicate() {
         tuliprox_core::model::TargetBouquetFilter::from_dto(shared::model::TargetBouquetDto::whitelist(bouquet_dto))
             .unwrap();
 
-    let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter))
-        .expect("target processing should succeed");
+    let (mut processed, _outcome) =
+        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter), &NoPlugins, None)
+            .await
+            .expect("target processing should succeed");
     let groups = processed.source.take_groups();
 
     // The allowed item must be retained because the rejected item did not consume the duplicate UUID slot.
@@ -174,6 +178,7 @@ fn quality_rejection_keeps_a_usable_input_ready() {
         }],
         accepted_empty_clusters: ClusterFlags::empty(),
         input_telemetry: None,
+        plugins: shared::model::PluginRunReport::default(),
     };
 
     assert_eq!(result.job_state(), InputJobState::Ready);
@@ -260,7 +265,7 @@ fn filter_stage_can_remove_every_item() {
     let mut target = ConfigTarget::from(&ConfigTargetDto::default());
     target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse").into();
 
-    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter], None);
 
     assert!(groups.is_empty());
     assert_eq!(outcome.filter, Some(FilterOutcome { inspected: 1, retained: 0, removed: 1 }));
@@ -276,7 +281,7 @@ fn missing_processing_filter_skips_filter_stage() {
     }];
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter], None);
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].channels.len(), 1);
@@ -295,7 +300,7 @@ fn missing_processing_filter_preserves_filter_stage_group_normalization() {
     ];
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter], None);
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].channels.len(), 2);
@@ -323,7 +328,7 @@ fn pipeline_reports_filter_and_rename_outcomes() {
     })]);
 
     let (groups, outcome) =
-        execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter, TransformStage::Rename]);
+        execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter, TransformStage::Rename], None);
 
     assert_eq!(groups[0].channels[0].header.name.as_ref(), "Renamed");
     assert_eq!(outcome.filter, Some(FilterOutcome { inspected: 2, retained: 1, removed: 1 }));

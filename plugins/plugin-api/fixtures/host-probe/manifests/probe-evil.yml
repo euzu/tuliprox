@@ -1,0 +1,14 @@
+id: probe-evil
+name: Host probe (attack target, 1 s deadline, storage and network)
+version: 0.1.0
+api_version: 1
+capabilities:
+  network: true
+  storage: true
+hooks:
+  - playlist.after-filter
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 1000
+  max_instances: 4
+  fail_mode: continue

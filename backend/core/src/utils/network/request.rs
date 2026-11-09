@@ -72,6 +72,8 @@ const RESOURCE_DESTINATION_CACHE_CAPACITY: usize = 4096;
 const RESOURCE_DESTINATION_LOOKUP_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Options applied at the final boundary of every physical request attempt.
+// Independent per-request switches set through builder methods, not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RequestFetchOptions {
     stop_on_proxy_authentication_required: bool,
@@ -80,6 +82,14 @@ pub struct RequestFetchOptions {
     content_coding: OutboundContentCodingPolicy,
     resource_retry: ResourceRetryExecution,
     return_http_errors: bool,
+    /// Refuse a manual redirect from an `https` URL to an `http` URL. Off by default.
+    reject_https_downgrade: bool,
+    /// Largest request body, in bytes, a request may carry. `None` means unbounded.
+    max_request_body_bytes: Option<u64>,
+    /// Most header values a request may carry. `None` means unbounded.
+    max_request_headers: Option<usize>,
+    /// Most bytes the header names and values of a request may add up to. `None` means unbounded.
+    max_request_header_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -135,12 +145,16 @@ mod tests;
 
 mod attempt;
 mod body;
+mod bulkhead;
 mod client;
 mod destination;
 mod download;
+mod executor;
 mod headers;
+mod jitter;
 mod options;
 mod protocol;
+mod rate_limit;
 mod redirect;
 mod retry;
 
@@ -164,7 +178,9 @@ use self::{
     },
     headers::{format_request_target_for_logging, log_proxy_diagnostics, prepare_input_request_headers},
     options::{apply_request_fetch_options, ResourceRetryExecution, TextContentRetryOwner},
-    redirect::{is_failover_redirect, same_origin, strip_sensitive_headers_for_cross_origin_redirect},
+    redirect::{
+        is_failover_redirect, reject_https_downgrade, same_origin, strip_sensitive_headers_for_cross_origin_redirect,
+    },
     retry::{
         is_retryable_text_response_status, perform_backoff, provider_start_index, should_retry_text_body_error,
         sleep_before_text_body_retry, text_body_retry_values,
@@ -172,6 +188,10 @@ use self::{
 };
 pub use self::{
     body::{get_remote_content_as_stream, text_response_error_log_label},
+    bulkhead::{
+        BulkheadPermit, BulkheadRegisterError, BulkheadRejection, BulkheadSnapshot, KeyedBulkhead,
+        DEFAULT_MAX_BULKHEAD_KEYS,
+    },
     client::{create_client, create_client_with_redirect, create_tmdb_client, get_client_request},
     destination::{classify_ip, is_public_ip, resolve_public_socket_addrs, resolve_resource_socket_addrs},
     download::{
@@ -181,18 +201,32 @@ pub use self::{
         get_input_json_content_as_stream, get_input_text_content_as_stream, get_local_file_content,
         get_local_file_content_as_stream, get_remote_content_as_file, get_remote_content_as_file_with_options,
     },
+    executor::{
+        ExecutorRegisterError, ExecutorSnapshot, OutboundError, OutboundExecutor, OutboundPolicy,
+        DEFAULT_MAX_EXECUTOR_KEYS,
+    },
     headers::{
         append_user_agent_stream_index, get_request_headers, overlay_upstream_user_agent,
         preview_request_diagnostics_for_logging, preview_request_target_for_logging,
     },
-    protocol::{classify_content_type, content_type_from_ext, format_http_status, is_file_url, is_uri, parse_range},
+    jitter::{equal_jitter, full_jitter, FastrandJitter, JitterSource, JitterStrategy},
+    options::enforce_request_transport_limits,
+    protocol::{
+        classify_content_type, content_type_from_ext, format_http_status, is_file_url, is_uri, parse_range,
+        request_failed_message, request_failed_status,
+    },
+    rate_limit::{
+        KeyedRateLimiter, RateLimitConfig, RateLimitRegisterError, RateLimitRejection, RateLimitSnapshot,
+        DEFAULT_MAX_QUEUED, DEFAULT_MAX_RATE_LIMIT_KEYS,
+    },
     redirect::{
         download_text_content_with_manual_redirects, download_text_content_with_manual_redirects_and_headers,
         download_text_content_with_manual_redirects_and_headers_and_options,
         download_text_content_with_manual_redirects_and_options, is_safe_cross_origin_redirect_header,
     },
     retry::{
-        calculate_retry_backoff, send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
+        calculate_retry_backoff, calculate_retry_backoff_with_jitter,
+        send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
         send_input_with_retry_and_provider_policy_with_options_result, send_with_retry_and_provider,
         send_with_retry_and_provider_policy, send_with_retry_and_provider_policy_with_options, should_trigger_failover,
     },

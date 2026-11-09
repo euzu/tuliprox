@@ -1,0 +1,22 @@
+[package]
+name = "plugin-fixture-edge-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "W6a fixture plugin: injects upstream headers at the session edge (X-Edge-Probe, X-Edge-User; delay_ms spins past the 50 ms clamp) and reports dashboard metrics (answer, calls)"
+
+# Not a member of the tuliprox workspace: it targets wasm32-wasip2 and is built
+# by bin/build_plugin_fixture.sh, never committed as a binary.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.63.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

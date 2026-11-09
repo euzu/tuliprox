@@ -10,6 +10,9 @@ pub enum TargetType {
     Xtream,
     Strm,
     HdHomeRun,
+    /// A custom output format rendered by a plugin (`type: plugin` + `plugin: <id>`, plan §18 Q6).
+    /// Unit variant: the plugin id lives in `PluginTargetOutputDto::plugin`.
+    Plugin,
 }
 
 impl TargetType {
@@ -21,6 +24,7 @@ impl TargetType {
             Self::Xtream => "xtream",
             Self::Strm => "strm",
             Self::HdHomeRun => "hdhomerun",
+            Self::Plugin => "plugin",
         }
     }
 
@@ -43,6 +47,12 @@ impl TargetType {
             }
             Self::HdHomeRun => {
                 TargetCapabilities { supports_filter: false, supports_epg: false, supports_memory_cache: false }
+            }
+            // The host applies the output filter before it hands the items to `render-batch`, so the
+            // filter is honored. The output-generator interface carries channels only, with no EPG, and
+            // the rendered file is not a playlist db the memory cache could serve.
+            Self::Plugin => {
+                TargetCapabilities { supports_filter: true, supports_epg: false, supports_memory_cache: false }
             }
         }
     }
@@ -82,5 +92,22 @@ mod tests {
         for target_type in TargetType::iter() {
             assert_eq!(serde_json::to_value(target_type).unwrap(), serde_json::json!(target_type.as_str()));
         }
+    }
+
+    #[test]
+    fn plugin_row_is_explicit_on_all_three_flags() {
+        let capabilities = TargetType::Plugin.capabilities();
+        assert!(capabilities.supports_filter);
+        assert!(!capabilities.supports_epg);
+        assert!(!capabilities.supports_memory_cache);
+        assert_eq!(TargetType::Plugin.as_str(), "plugin");
+    }
+
+    #[test]
+    fn plugin_spells_plugin_in_serde_and_strum() {
+        assert_eq!(serde_json::to_value(TargetType::Plugin).unwrap(), serde_json::json!("plugin"));
+        assert_eq!(serde_json::from_value::<TargetType>(serde_json::json!("plugin")).unwrap(), TargetType::Plugin);
+        assert_eq!(TargetType::Plugin.to_string(), "Plugin");
+        assert_eq!("plugin".parse::<TargetType>().unwrap(), TargetType::Plugin);
     }
 }

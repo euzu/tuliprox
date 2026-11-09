@@ -651,7 +651,7 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
                                 on_op={on_op.clone()}
                                 on_back={on_back}/>
                         } else if *filter != GroupFilter::Problems {
-                            <p class="tp__failover-groups__notice">{ translate.t("MESSAGES.FAILOVER_GROUPS_SELECT_GROUP") }</p>
+                            <NoContent text={translate.t("MESSAGES.FAILOVER_GROUPS_SELECT_GROUP")} />
                         }
                     </div>
                 }}/>

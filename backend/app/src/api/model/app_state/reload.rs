@@ -74,6 +74,9 @@ pub async fn update_app_state_sources(
     sources: SourcesConfig,
     prevalidated_targets: Option<Arc<ProcessTargets>>,
 ) -> Result<(), TuliproxError> {
+    // Before any state changes, so a rejected reload leaves everything as it was. Only references this
+    // reload introduces are rejected; one a deleted or disabled plugin already broke is carried over.
+    crate::api::model::validate_new_plugin_refs(&app_state.plugins, &app_state.app_config.sources.load(), &sources)?;
     let targets = if let Some(prevalidated) = prevalidated_targets {
         prevalidated
     } else {
@@ -228,6 +231,18 @@ impl AppState {
         self.active_provider.update_config(&self.app_config);
         self.hls.proxy.update_config(&self.app_config).await;
         self.update_config().await?;
+        crate::api::model::reload_plugins(&self.plugins, &self.app_config).await;
+        // The plugin config is applied by now and has no rollback, so a target
+        // that lost its plugin is reported, and fails open at its hook sites.
+        if let Err(err) = crate::api::model::validate_plugin_refs(&self.plugins, &self.app_config.sources.load()) {
+            error!("{err}");
+        }
+        if let Err(err) = crate::api::model::validate_plugin_schedules(
+            &self.plugins,
+            self.app_config.config.load().schedules.as_deref().unwrap_or_default(),
+        ) {
+            error!("{err}");
+        }
 
         let geoip_reload_needed =
             changes.flags.contains(UpdateChangesFlags::Geoip) || (use_geoip && old_storage_dir != storage_dir);
@@ -297,6 +312,7 @@ impl AppState {
                 }
             }
         }
+        // Plugin references were checked by `update_app_state_sources` before anything was stored.
         self.app_config.set_sources(sources)?;
         self.active_provider.update_config(&self.app_config);
 

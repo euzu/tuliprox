@@ -45,6 +45,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(sources)),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -126,8 +127,11 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         metadata_manager,
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
+        overrides: crate::api::model::OverrideState::default(),
         maintenance: crate::api::model::create_test_maintenance(""),
         member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
+        failover_switch_registry: Arc::default(),
+        plugins: crate::api::model::AppPlugins::default(),
     })
 }
 
@@ -240,6 +244,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn custom_video_
         provider_http_status: None,
         provider_reconnect_count: AtomicU8::new(0),
         group_switcher: None,
+        _group_switch_guard: None,
         group_lease_owner: None,
         lease_owner: None,
         media_started: None,

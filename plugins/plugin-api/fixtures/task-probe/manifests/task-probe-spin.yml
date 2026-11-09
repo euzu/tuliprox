@@ -1,0 +1,26 @@
+# The task-probe component with four tasks that never return, each under a 1 s
+# deadline, so a test can run as many at once as the plugin has instances.
+id: task-probe-spin
+name: Task probe (attack target, spinning tasks)
+version: 0.1.0
+api_version: 1
+hooks:
+  - tasks.run
+tasks:
+  - id: spin-a
+    title: Spin A
+    max_exec_ms: 1000
+  - id: spin-b
+    title: Spin B
+    max_exec_ms: 1000
+  - id: spin-c
+    title: Spin C
+    max_exec_ms: 1000
+  - id: spin-d
+    title: Spin D
+    max_exec_ms: 1000
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

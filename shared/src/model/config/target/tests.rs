@@ -216,6 +216,24 @@ fn target_filter_persist_roundtrips_as_mapping() {
 }
 
 #[test]
+fn target_filter_allows_plugin_calls_only_in_processing_stage() {
+    let mut filter_processing = ConfigTargetFilterDto {
+        processing: Some(r#"plugin.my-plugin.is_match("val")"#.to_string()),
+        persist: None,
+        ..ConfigTargetFilterDto::default()
+    };
+    assert!(filter_processing.prepare(None).is_ok());
+
+    let mut filter_persist = ConfigTargetFilterDto {
+        processing: None,
+        persist: Some(r#"plugin.my-plugin.is_match("val")"#.to_string()),
+        ..ConfigTargetFilterDto::default()
+    };
+    let err = filter_persist.prepare(None).expect_err("plugin calls not allowed in persist");
+    assert!(err.to_string().contains("plugin.my-plugin.is_match() is only allowed in a target's processing filter"));
+}
+
+#[test]
 fn strm_with_username_is_allowed_with_m3u_output() {
     let mut target =
         target_with_outputs(vec![TargetOutputDto::M3u(M3uTargetOutputDto::default()), strm_with_username()]);

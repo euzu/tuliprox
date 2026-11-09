@@ -6,6 +6,8 @@ mod failover_service;
 mod flags_service;
 mod maintenance_service;
 mod playlist_service;
+mod plugin_service;
+mod plugin_ui_service;
 mod rbac_service;
 mod recording_service;
 mod requests;
@@ -20,9 +22,9 @@ mod websocket_service;
 
 pub use self::{
     auth_service::*, config_service::*, dialog_service::*, event_service::*, failover_service::*, flags_service::*,
-    maintenance_service::*, playlist_service::*, rbac_service::*, recording_service::*, requests::*, status_service::*,
-    stream_history_service::*, streams_service::*, target_bouquet_service::*, toastr_service::*, user_api_service::*,
-    user_service::*, websocket_service::*,
+    maintenance_service::*, playlist_service::*, plugin_service::*, plugin_ui_service::*, rbac_service::*,
+    recording_service::*, requests::*, status_service::*, stream_history_service::*, streams_service::*,
+    target_bouquet_service::*, toastr_service::*, user_api_service::*, user_service::*, websocket_service::*,
 };
 
 mod user_settings_service;

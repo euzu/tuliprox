@@ -50,6 +50,15 @@ pub struct ConfigTargetDto {
     pub watch: Option<Vec<ConfigWatchDto>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_memory_cache: bool,
+    /// `plugin:<id>`: the plugin that assigns channel numbers
+    /// (`assign-channel-numbers`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chno: Option<PluginRef>,
+    /// `plugin:<id>`: the plugin that merges groups (`merge-groups`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_merge: Option<PluginRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_channels: Vec<ManagedChannelBinding>,
 }
 
 impl Default for ConfigTargetDto {
@@ -69,6 +78,9 @@ impl Default for ConfigTargetDto {
             processing_order: ProcessingOrder::default(),
             watch: None,
             use_memory_cache: false,
+            chno: None,
+            group_merge: None,
+            managed_channels: Vec::new(),
         }
     }
 }
@@ -80,6 +92,8 @@ impl ConfigTargetDto {
         templates: Option<&[PatternTemplate]>,
         hdhr_config: Option<&HdHomeRunDeviceOverview>,
     ) -> Result<(), TuliproxError> {
+        validate_managed_channel_refs(self.managed_channels.iter().map(|binding| &binding.plugin))
+            .map_err(TuliproxError::ConfigTarget)?;
         self.id = id;
         if self.output.is_empty() {
             return Err(TuliproxError::ConfigTarget(format!("Missing output format for {}", self.name)));
@@ -102,6 +116,7 @@ impl ConfigTargetDto {
 
         //let mut strm_export_styles = vec![];
         let mut strm_directories: Vec<&str> = vec![];
+        let mut plugin_files: Vec<String> = vec![];
 
         for target_output in &mut self.output {
             target_output.prepare(templates)?;
@@ -149,6 +164,17 @@ impl ConfigTargetDto {
                         )));
                     }
                     strm_directories.push(strm_output.directory.as_str());
+                }
+                TargetOutputDto::Plugin(plugin_output) => {
+                    // Each plugin output owns one file in the target directory.
+                    let file_name = plugin_output.file_name();
+                    if plugin_files.contains(&file_name) {
+                        return Err(TuliproxError::ConfigTarget(format!(
+                            "plugin outputs with same filename '{file_name}' are not allowed: {}",
+                            self.name
+                        )));
+                    }
+                    plugin_files.push(file_name);
                 }
                 TargetOutputDto::HdHomeRun(hdhomerun_output) => {
                     hdhr_cnt += 1;
@@ -255,6 +281,7 @@ mod tests;
 
 mod failover_groups;
 mod filter;
+mod managed_channels;
 mod options;
 mod output;
 pub use failover_groups::{
@@ -262,11 +289,15 @@ pub use failover_groups::{
     FailoverGroupPolicy, FailoverGroupRuntimeConfig, FailoverGroupStartConfig, FailoverGroupsConfig,
     FailoverGroupsTargetConfig, RuntimeAudioLanguage, MIN_GROUP_MEMBERS,
 };
+mod plugin_ref;
 pub use filter::ConfigTargetFilterDto;
+pub use managed_channels::{validate_managed_channel_refs, ManagedChannelBinding, ManagedChannelStage};
 pub use options::{
     ConfigTargetOptions, ConfigTargetShareLiveStreams, DeduplicateConfig, DeduplicateKeep, DeduplicateMatchBy,
     EpgOutputOptions,
 };
 pub use output::{
-    HdHomeRunTargetOutputDto, M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+    HdHomeRunTargetOutputDto, M3uTargetOutputDto, PluginTargetOutputDto, StrmTargetOutputDto, TargetOutputDto,
+    XtreamTargetOutputDto,
 };
+pub use plugin_ref::PluginRef;

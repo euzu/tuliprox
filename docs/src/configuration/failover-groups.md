@@ -36,7 +36,8 @@ In the Web UI:
 
 ## How channels are grouped
 
-Grouping runs at the end of the target processing, after filters, renames and mappings.
+Grouping runs at the end of the target processing, after filters, renames and mappings. The target
+`filter.persist` filter restricts the published playlist but does not restrict the members of a failover group.
 
 1. Only live channels take part (`XtreamCluster::Live`, no local library items).
 2. Each channel gets a **match key** from the field chosen by `match_by` (`caption`, `name`, `title` or
@@ -51,6 +52,17 @@ Grouping runs at the end of the target processing, after filters, renames and ma
 
 The mapping DSL can steer grouping per channel with the header field `failover_group`: a value forces the channel
 into the group with that key, an empty string (`""`) keeps the channel out of any group.
+
+**Copies and favourites.** A channel the mapper copies into other playlist groups (`add_favourite(...)` in the DSL,
+`ctx.favourite(...)` in scripts) is grouped once: only its first row in playlist order takes part in grouping. When it
+becomes a member, every copy turns into a copy of the group channel in the copy's playlist group; a copy in the
+same playlist group as the group channel is dropped. Copies of channels that are not grouped stay unchanged. Target
+`favourites` run after grouping and copy group channels the same way. So you can group channels first and then
+place the group channel in as many playlist groups as you like.
+
+**Channel numbers and sorting.** A group channel is sorted like any other channel by the target `sort` rules. It
+does not keep the provider channel number of its first member; it gets its number from the target numbering, in the
+sorted order. A locked number or name of the first member (playlist explorer override) stays on the group channel.
 
 ### Manual groups and corrections
 
@@ -80,6 +92,18 @@ When a client starts a group, Tuliprox ranks the members and opens the best one 
 
 HLS entries use the same start selection; with the shared HLS cache enabled, viewers of the same member share one
 origin session.
+
+### Catch-up and timeshift
+
+A group channel advertises an archive when at least one member has one (`tv_archive`, M3U `catchup` attributes);
+the M3U catch-up attributes and the archive duration come from the archive members. A catch-up or timeshift request
+on a group channel (Xtream `/timeshift/...` and `timeshift.php`, `get_simple_data_table`, M3U catch-up, HLS with an
+archive start) ranks only the members whose archive covers the requested start time, whatever their position in the
+group, and plays the best one with its own input, account, stream id and catch-up template. If it cannot be opened,
+the next archive member is tried (`start.max_attempts`). A member that reports an archive without a duration counts
+as one day of archive. A member that can only answer with the "channel unavailable" or "connections exhausted"
+video counts as failed, and the next archive member is tried. Catch-up has no failover while watching; a broken
+playback is reopened by the player.
 
 ## Failover while watching (MPEG-TS)
 
@@ -122,6 +146,18 @@ Each switch emits the event `failover_group.member_switched` (with the reason); 
 `failover_group.member_selected`, exhausted groups `failover_group.exhausted`.
 
 HLS playback switches members only when a new entry is started; HLS runtime failover is not implemented.
+
+### Active Streams and manual switching
+
+The **Active Streams** view (Dashboard → Active Streams) shows the active member (member title, input name, and
+provider account) alongside the failover group name for every active group stream.
+
+For live MPEG-TS streams driven by the runtime failover switcher, administrators can manually change the active member
+by opening the stream's row action menu and choosing another member from the group list. The switcher transitions to
+the selected member using the standard splice path (emitting `failover_group.member_switched` with reason `manual`).
+If the chosen member cannot be opened, playback stays on (or reverts to) the previous member without disruption. For
+shared streams, the manual switch switches the shared upstream connection for all concurrent viewers. Manual switching
+is not available for HLS or catch-up streams (which display active member information only).
 
 ## Corrections and own groups (failover files)
 

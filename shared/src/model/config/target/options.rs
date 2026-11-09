@@ -1,6 +1,6 @@
 use crate::{
     defaults::{default_as_true, is_false, is_true},
-    model::ClusterFlags,
+    model::{ClusterFlags, PluginRef},
 };
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -81,17 +81,61 @@ pub enum DeduplicateMatchBy {
     Title,
 }
 
-#[derive(Debug, Copy, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+/// Which member of a duplicate group survives. Spelled `best_quality`,
+/// `first` or `plugin:<id>` in the config.
+///
+/// `Plugin` lets the plugin choose per group (`resolve-duplicates`); a group
+/// it leaves undecided falls back to [`DeduplicateKeep::BestQuality`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DeduplicateKeep {
     #[default]
     BestQuality,
     First,
+    Plugin(PluginRef),
+}
+
+impl DeduplicateKeep {
+    /// The plugin that decides, if the config names one.
+    #[must_use]
+    pub const fn plugin(&self) -> Option<&PluginRef> {
+        match self {
+            Self::Plugin(plugin) => Some(plugin),
+            Self::BestQuality | Self::First => None,
+        }
+    }
+}
+
+impl std::fmt::Display for DeduplicateKeep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BestQuality => f.write_str("best_quality"),
+            Self::First => f.write_str("first"),
+            Self::Plugin(plugin) => write!(f, "{plugin}"),
+        }
+    }
+}
+
+impl serde::Serialize for DeduplicateKeep {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { serializer.collect_str(self) }
+}
+
+impl<'de> serde::Deserialize<'de> for DeduplicateKeep {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        match value.trim() {
+            "best_quality" => Ok(Self::BestQuality),
+            "first" => Ok(Self::First),
+            other if other.starts_with("plugin:") => other.parse().map(Self::Plugin).map_err(serde::de::Error::custom),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown deduplicate keep `{other}`, expected best_quality, first or plugin:<id>"
+            ))),
+        }
+    }
 }
 
 /// Quality-aware duplicate removal: channels with the same normalized match
 /// value (quality tokens stripped) collapse to a single entry.
-#[derive(Debug, Copy, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DeduplicateConfig {
     #[serde(default)]

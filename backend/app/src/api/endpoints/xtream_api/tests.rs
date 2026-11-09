@@ -102,6 +102,7 @@ async fn response_body_text(response: axum::response::Response) -> Result<String
 
 fn short_epg_target() -> ConfigTarget {
     ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -147,6 +148,7 @@ fn short_epg_live_item() -> XtreamPlaylistItem {
         source_ordinal: 0,
         input_stream_id: "".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -259,6 +261,7 @@ fn m3u_catchup_item(name: &str, input_name: &str, url: &str, catchup_source: Opt
             ..shared::model::LiveStreamProperties::default()
         }))),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -456,6 +459,7 @@ fn create_test_vod_item(url: &str, container_extension: &str, item_type: Playlis
         xtream_cluster: XtreamCluster::Video,
         additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
             name: "Test".intern(),
+            plugin_fingerprint: None,
             category_id: 0,
             stream_id: 813_563,
             stream_icon: "".intern(),
@@ -478,6 +482,7 @@ fn create_test_vod_item(url: &str, container_extension: &str, item_type: Playlis
         source_ordinal: 0,
         input_stream_id: "813563".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -723,6 +728,7 @@ fn m3u_timeshift_item() -> XtreamPlaylistItem {
         source_ordinal: 0,
         input_stream_id: "100".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 

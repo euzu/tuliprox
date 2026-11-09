@@ -1,0 +1,24 @@
+[package]
+name = "youtube-input"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "tuliprox plugin: YouTube video and live stream input provider"
+
+# Not a member of the tuliprox workspace: it targets wasm32-wasip2 and is built
+# by `bin/package-plugin.sh plugins/inputs/youtube-input`.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tuliprox-plugin-sdk = { path = "../../plugin-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+quick-xml = "0.37"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

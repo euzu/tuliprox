@@ -11,9 +11,10 @@ mod terminal;
 
 pub(in crate::api::endpoints::hls_api::tests) use self::{
     app_state::{
-        cache_test_m3u_hls_item, configure_default_test_server, enable_hls_cache, hls_custom_video_test_user,
-        overlap_provider_input, path_has_extension, publish_test_transient_resource_membership,
-        single_hls_provider_input, single_variant_master_playlist, store_test_sources_with_target, test_app_state,
+        cache_test_m3u_hls_item, configure_default_test_server, configure_test_hls_strip, enable_hls_cache,
+        hls_custom_video_test_user, overlap_provider_input, path_has_extension,
+        publish_test_transient_resource_membership, single_hls_provider_input, single_variant_master_playlist,
+        store_test_sources_with_target, test_app_config_with_storage_dir, test_app_state,
         test_app_state_with_hls_proxy, test_app_state_with_hls_proxy_and_inputs, test_app_state_with_inputs,
         test_custom_video_buffer, test_hls_access_context, test_hls_access_context_with, test_hls_entry_stream_context,
         test_hls_input, test_hls_share_target, test_m3u_hls_item, test_m3u_hls_share_target, test_segment_entry,

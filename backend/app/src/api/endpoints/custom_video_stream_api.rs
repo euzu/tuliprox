@@ -617,6 +617,7 @@ mod tests {
             ..ConfigInput::default()
         });
         let target = Arc::new(ConfigTarget {
+            managed_channels: Vec::new(),
             curation: None,
             id: 1,
             enabled: true,
@@ -670,6 +671,7 @@ mod tests {
             })),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapOption::from_pointee(api_proxy)),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -754,8 +756,11 @@ mod tests {
             metadata_manager,
             auth: crate::api::model::AuthState::for_tests(),
             playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
+            overrides: crate::api::model::OverrideState::default(),
             maintenance: crate::api::model::create_test_maintenance(""),
             member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
+            failover_switch_registry: Arc::default(),
+            plugins: crate::api::model::AppPlugins::default(),
         })
     }
 

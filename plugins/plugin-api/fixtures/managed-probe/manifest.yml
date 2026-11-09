@@ -1,0 +1,14 @@
+id: managed-probe
+name: Managed channel overlay probe
+version: 0.1.0
+api_version: 1
+capabilities:
+  storage: true
+  playlist_write: true
+hooks: [playlist.managed-channels, rpc.call]
+resources:
+  max_exec_ms: 100
+ui:
+  rpc_exports:
+    - name: set
+      kind: write

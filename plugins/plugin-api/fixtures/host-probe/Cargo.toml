@@ -1,0 +1,22 @@
+[package]
+name = "plugin-fixture-host-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Phase 1 fixture plugin: probes each host function and trap from playlist-hooks; one wasm, several manifests"
+
+# Not a member of the tuliprox workspace: it targets wasm32-wasip2 and is built
+# by bin/build_plugin_fixture.sh, never committed as a binary.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.63.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

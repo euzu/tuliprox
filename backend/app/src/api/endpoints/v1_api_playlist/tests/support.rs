@@ -24,6 +24,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn playlist_update_target(
     name: &str,
 ) -> Arc<ConfigTarget> {
     Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id,
         enabled: true,
@@ -88,6 +89,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn test_app_config(
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(sources)),
         hdhomerun: Arc::new(ArcSwapOption::empty()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::empty()),
         file_locks: Arc::new(crate::utils::FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -177,7 +179,10 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn test_app_state_with_man
         metadata_manager,
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests_with_sender(manual_update_sender),
+        overrides: crate::api::model::OverrideState::default(),
         maintenance: crate::api::model::create_test_maintenance(""),
         member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
+        failover_switch_registry: Arc::default(),
+        plugins: crate::api::model::AppPlugins::default(),
     })
 }

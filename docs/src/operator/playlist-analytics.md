@@ -15,6 +15,9 @@ The **Stats** page is located in the sidebar under the **Playlist** section, dir
 - **EPG**: Timeline program guide and channel mapping status.
 - **Playlist settings**: Target-level playlist configuration and tuning.
 
+The viewer overlays manual item overrides on the stored playlist, so an item can be corrected in place — see
+[Playlist Item Overrides & Playlist Explorer](../configuration/playlist-overrides.md).
+
 ### Permissions
 
 - **`playlist.read`**: Required to open the Stats page, inspect target metrics, and download the unmapped channels CSV export.
@@ -53,7 +56,9 @@ The **Stats** page is located in the sidebar under the **Playlist** section, dir
 - **Guide window**: The guide horizon expressed in days and the maximum programme end date across all mapped channels.
 - **EPG sources breakdown**: Lists each EPG source contributing to the target:
   - **Input**: Source input name.
-  - **Label**: Sanitized file name or host of the EPG URL (credentials and sensitive query parameters are never displayed).
+  - **Label**: File name or host of the EPG URL.
+  - **URL**: Full configured EPG source URL below the label. It follows the `sanitize_sensitive_info` setting: when
+    enabled (the default), hosts, credentials and sensitive query values are masked like in log output.
   - **Type**: Format (`XMLTV` or `ICS`).
   - **Guide horizon**: Retained guide span in days.
   - **Last fetch**: Relative time of the last successful fetch, or the last failure timestamp with short error text.

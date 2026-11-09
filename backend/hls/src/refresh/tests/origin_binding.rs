@@ -16,12 +16,13 @@ use crate::{
     SegmentCacheStatus,
 };
 use axum::http::{header, HeaderMap};
+use sha2::Digest;
 use shared::model::{ConfigProviderDto, HlsManifestRecoveryBurstLevel, HlsStripMode, ProviderUrlSelectionPolicy};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use tokio::sync::RwLock;
+use tokio::{io::AsyncReadExt, sync::RwLock};
 use tuliprox_core::model::{Config, ConfigProvider, HlsManifestRecoveryBurstConfig, StripConfig};
 use url::Url;
 
@@ -387,7 +388,7 @@ async fn provider_failover_initial_success_commits_without_hls_host_retry_when_u
 }
 
 #[tokio::test]
-async fn fresh_pinned_revalidation_same_host_rebase_runs_complete_beast_plan() {
+async fn fresh_pinned_revalidation_rejects_reset_without_ready_media_evidence() {
     let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
     let origin = spawn_test_origin(Arc::new(|path| {
         if path_has_extension(&path, "m3u8") {
@@ -437,39 +438,20 @@ async fn fresh_pinned_revalidation_same_host_rebase_runs_complete_beast_plan() {
 
     let manifest_requests =
         origin.requests.lock().await.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
-    assert_eq!(manifest_requests, plan.total_candidates());
-    let next_fetch_allowed_at_ms = {
-        let session = session.read().await;
-        assert_eq!(session.origin_epoch, baseline_epoch.saturating_add(1));
-        assert_eq!(session.origin_seq_highwater, Some(11));
-        assert_eq!(session.last_effective_manifest_host.as_deref(), Some(effective_host.as_str()));
-        assert_eq!(session.fresh_manifest_commit_required, None);
-        let rebased_head = session
-            .segments
-            .values()
-            .find(|segment| segment.origin_key.origin_epoch == session.origin_epoch)
-            .expect("same-host rebased timeline head");
-        assert!(rebased_head.discontinuity_before);
-        session.origin_refresh.next_fetch_allowed_at_ms
-    };
-
-    let mut follow_up = switch_test_request(Arc::clone(&session), cache, &origin.base_url);
-    follow_up.manifest_recovery_burst = HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Beast };
-    follow_up.manifest_commit_requirement = session
-        .read()
-        .await
-        .fresh_manifest_commit_required
-        .map_or(HlsManifestCommitRequirement::CommittedManifestAllowed, |reason| {
-            HlsManifestCommitRequirement::FreshCommitRequired { reason }
-        });
-    follow_up.now_ms = next_fetch_allowed_at_ms;
-
-    assert!(trigger_origin_refresh_sync(follow_up).await);
-    let manifest_requests_after_follow_up =
-        origin.requests.lock().await.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
-    assert_eq!(manifest_requests_after_follow_up, plan.total_candidates().saturating_add(1));
+    assert_eq!(manifest_requests, plan.total_candidates() + no_delay_policy().attempt_count() - 1);
+    let session = session.read().await;
+    assert_eq!(session.origin_epoch, baseline_epoch);
+    assert_eq!(session.origin_seq_highwater, Some(1001));
+    assert_eq!(session.proxy_next_seq, Some(2));
+    assert_eq!(session.last_effective_manifest_host.as_deref(), Some(effective_host.as_str()));
+    assert_eq!(
+        session.fresh_manifest_commit_required,
+        Some(HlsFreshManifestRequiredReason::PreviousHardManifestFailure)
+    );
+    assert!(session.segments.values().all(|entry| entry.origin_key.origin_epoch == baseline_epoch));
 }
 
+/// Marks the baseline segment ready with `bytes` and records it as the content anchor.
 pub(in crate::refresh::tests) async fn prepare_ready_content_anchor(
     session: &Arc<RwLock<HlsSession>>,
     cache: &HlsSegmentCache,
@@ -477,12 +459,17 @@ pub(in crate::refresh::tests) async fn prepare_ready_content_anchor(
 ) {
     let key = {
         let mut session = session.write().await;
-        let segment = session.segments.values_mut().next().expect("baseline segment");
-        segment.status = SegmentCacheStatus::Ready {
-            content_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            ready_at_ms: 1,
+        let entry = {
+            let segment = session.segments.values_mut().next().expect("baseline segment");
+            segment.status = SegmentCacheStatus::Ready {
+                content_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                ready_at_ms: 1,
+            };
+            segment.clone()
         };
-        segment.cache_key.clone()
+        let generation = session.activity.origin_work_generation;
+        session.origin_content.record(&entry, generation, sha2::Sha256::digest(bytes).into());
+        entry.cache_key
     };
     cache.write_bytes_and_commit(&key, bytes).await.expect("committed anchor bytes");
 }
@@ -540,7 +527,7 @@ async fn pinned_origin_recovery_during_staging_rejects_alternative_commit() {
 }
 
 #[tokio::test]
-async fn recovery_required_orchestrator_requalifies_changed_pinned_landscape_with_full_plan() {
+async fn recovery_required_orchestrator_accepts_pinned_progress_without_another_full_plan() {
     let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
     let entry_hits = Arc::new(AtomicUsize::new(0));
     let entry_hits_for_handler = Arc::clone(&entry_hits);
@@ -615,12 +602,341 @@ async fn recovery_required_orchestrator_requalifies_changed_pinned_landscape_wit
     .expect("pinned follow-up commits");
 
     assert_eq!(committed.fetched.redirect_host.as_deref(), Some("127.0.0.1"));
-    assert_eq!(entry_hits.load(Ordering::SeqCst), plan.total_candidates().saturating_mul(2).saturating_add(1));
-    assert_eq!(pinned_hits.load(Ordering::SeqCst), plan.total_candidates().saturating_add(1));
+    assert_eq!(entry_hits.load(Ordering::SeqCst), plan.total_candidates().saturating_add(1));
+    assert_eq!(pinned_hits.load(Ordering::SeqCst), 1);
     let session = session.read().await;
     assert_eq!(session.origin_seq_highwater, Some(101));
     assert_eq!(session.last_effective_manifest_host.as_deref(), Some("127.0.0.1"));
     let episode = session.origin_control.acceptance_episode.as_ref().expect("completed acceptance episode");
     assert_eq!(episode.full_bursts_completed, 1);
     assert_eq!(episode.state, super::super::super::manifest_acceptance::HlsManifestAcceptanceState::Completed);
+}
+
+/// With mirror recovery on, a pinned 503 moves the fetch to the next profile URL.
+#[tokio::test]
+async fn pinned_recovery_moves_to_alternative_provider_url_on_qualifying_failure() {
+    let first = spawn_test_origin(Arc::new(|_path| (503, Vec::new(), "unavailable".to_string()))).await;
+    let second = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), three_segment_manifest_body(100)))).await;
+
+    let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+        name: "cdn".into(),
+        urls: vec![first.base_url.as_str().into(), second.base_url.as_str().into()],
+        provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+        dns: None,
+    }));
+
+    let session = test_session();
+    let entry = LiveHlsOriginEntry::parse_with_url_failover_provider(
+        "provider://cdn/live/user/pass/12345.m3u8?token=fixed",
+        Some(Arc::clone(&provider)),
+    )
+    .expect("provider entry url")
+    .with_profile_recovery_failover(true);
+
+    let binding = crate::manifest_origin_binding::HlsManifestOriginBinding::new(
+        Url::parse(&format!("{}/live/user/pass/12345.m3u8?token=fixed", first.base_url)).unwrap(),
+        Some(0),
+    )
+    .unwrap();
+
+    let attempt = Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+        crate::HlsManifestCommitRequirement::CommittedManifestAllowed,
+        true,
+        None,
+    ));
+    assert!(attempt.begin_logical_attempt());
+    assert_eq!(attempt.logical_attempts(), 1);
+
+    let mut context = manifest_fetch_context(&test_origin_refresh_request(Arc::clone(&session)), None);
+    context.origin_entry = entry;
+    context.attempt = Some(Arc::clone(&attempt));
+
+    // 1. PL returns 503: with profile_recovery_failover enabled, it must move to EU, and logical attempts stay 1.
+    let recovered = crate::manifest_fetch::fetch_hls_origin_manifest_recovery_once(&context, &binding)
+        .await
+        .expect("pinned session with PL 503 must recover on EU");
+    assert_eq!(recovered.provider_url_index, Some(1));
+    assert_eq!(attempt.logical_attempts(), 1);
+    assert_eq!(recovered.body, three_segment_manifest_body(100));
+
+    // 2. Disabled flag: does not move to EU, fails with 503.
+    context.origin_entry = context.origin_entry.clone().with_profile_recovery_failover(false);
+    let disabled_result = crate::manifest_fetch::fetch_hls_origin_manifest_recovery_once(&context, &binding).await;
+    assert!(disabled_result.is_err());
+    assert!(matches!(
+        disabled_result.err().unwrap(),
+        OriginManifestFetchError::RetryableStatus(axum::http::StatusCode::SERVICE_UNAVAILABLE, _)
+    ));
+
+    // 3. 403 Forbidden on PL: stays closed, does NOT move to EU.
+    let forbidden_origin = spawn_test_origin(Arc::new(|_path| (403, Vec::new(), "forbidden".to_string()))).await;
+    let forbidden_binding = crate::manifest_origin_binding::HlsManifestOriginBinding::new(
+        Url::parse(&format!("{}/live/user/pass/12345.m3u8?token=fixed", forbidden_origin.base_url)).unwrap(),
+        Some(0),
+    )
+    .unwrap();
+    context.origin_entry = context.origin_entry.clone().with_profile_recovery_failover(true);
+    let forbidden_result =
+        crate::manifest_fetch::fetch_hls_origin_manifest_recovery_once(&context, &forbidden_binding).await;
+    assert!(forbidden_result.is_err());
+    assert!(matches!(
+        forbidden_result.err().unwrap(),
+        OriginManifestFetchError::PermanentStatus(axum::http::StatusCode::FORBIDDEN)
+    ));
+}
+
+/// Runs the forward content anchor scenario with optional optimistic fast start.
+#[allow(clippy::too_many_lines)]
+async fn assert_forward_content_anchor_after_published_prefix(
+    anchor_bytes: &'static str,
+    should_commit: bool,
+    fast_start: bool,
+) {
+    let mode = fast_start.then_some(shared::model::HlsStartupMode::Optimistic);
+    assert_forward_content_anchor_with_mode(anchor_bytes, should_commit, mode).await;
+}
+
+/// Asserts that a refresh trimming the published prefix commits only when the
+/// overlap segment matches `anchor_bytes`, for the given startup mode.
+#[allow(clippy::too_many_lines)]
+async fn assert_forward_content_anchor_with_mode(
+    anchor_bytes: &'static str,
+    should_commit: bool,
+    startup_mode: Option<shared::model::HlsStartupMode>,
+) {
+    assert_forward_content_anchor_with_revision_pin(anchor_bytes, should_commit, startup_mode, false).await;
+}
+
+/// Like [`assert_forward_content_anchor_with_mode`]. When `keep_revision_pin`
+/// is set, the completed startup revisions keep their active-file pins, as
+/// production revisions do while a guard serves them.
+#[allow(clippy::too_many_lines)]
+async fn assert_forward_content_anchor_with_revision_pin(
+    anchor_bytes: &'static str,
+    should_commit: bool,
+    startup_mode: Option<shared::model::HlsStartupMode>,
+    keep_revision_pin: bool,
+) {
+    const COMMITTED: &[u8] = b"committed-anchor-bytes";
+    const NOVEL: &str = "different-new-segment-bytes";
+    super::short_manifest::init_qualification_logger();
+    let manifest = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:500\n#EXT-X-TARGETDURATION:4\n\
+        #EXTINF:4,\nold500.ts\n#EXTINF:4,\nold501.ts\n#EXTINF:4,\nold502.ts\n#EXTINF:4,\nnew503.ts\n";
+    let origin = spawn_test_origin(Arc::new(move |path| {
+        if path_has_extension(&path, "m3u8") {
+            (200, Vec::new(), manifest.to_string())
+        } else if path.ends_with("/old502.ts") {
+            (200, Vec::new(), anchor_bytes.to_string())
+        } else {
+            (200, Vec::new(), NOVEL.to_string())
+        }
+    }))
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Arc::new(HlsSegmentCache::with_cache_path(directory.path()));
+    let session = test_session();
+    prepare_cross_host_baseline(&session).await;
+    let baseline = manifest.replace("#EXTINF:4,\nnew503.ts\n", "");
+    let tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(baseline) =
+        tuliprox_parser::hls::origin_manifest::parse_origin_media_manifest(
+            &baseline,
+            "http://previous.example.com/live/user/pass/12345.m3u8",
+        )
+    else {
+        panic!("baseline parses");
+    };
+    session
+        .write()
+        .await
+        .apply_origin_manifest_for_host(&baseline, crate::timeline::effective_origin_host_id("previous.example.com"))
+        .unwrap();
+    publish_ready_test_manifest(&session, 1).await;
+    let (anchor_key, anchor_proxy_seq) = {
+        let mut session = session.write().await;
+        let entry = {
+            let segment = session.segments.values_mut().next_back().expect("baseline segment");
+            segment.status = SegmentCacheStatus::Ready {
+                content_length: u64::try_from(COMMITTED.len()).unwrap_or(u64::MAX),
+                ready_at_ms: 1,
+            };
+            segment.clone()
+        };
+        let generation = session.activity.origin_work_generation;
+        session.origin_content.record(&entry, generation, sha2::Sha256::digest(COMMITTED).into());
+        (entry.cache_key, entry.proxy_seq)
+    };
+    cache.write_bytes_and_commit(&anchor_key, COMMITTED).await.expect("committed anchor bytes");
+    if let Some(mode) = startup_mode {
+        let config = tuliprox_core::model::HlsStartupConfig { mode, ..Default::default() };
+        let store = Arc::new(crate::SegmentRevisionStore::default());
+        let mut revisions = std::collections::BTreeMap::new();
+        let keys = session
+            .read()
+            .await
+            .segments
+            .values()
+            .map(|entry| (entry.proxy_seq, entry.cache_key.clone()))
+            .collect::<Vec<_>>();
+        for (seq, key) in keys {
+            cache
+                .write_bytes_and_commit(&key, if seq == anchor_proxy_seq { COMMITTED } else { NOVEL.as_bytes() })
+                .await
+                .unwrap();
+            let revision =
+                store.create(key.proxy_session_id().clone(), seq, crate::SegmentRevisionKind::Processed).unwrap();
+            *revision.revision().file_pin.lock().unwrap() =
+                Some(cache.pin_revision_file(&cache.object_path(&revision.revision().key)).unwrap());
+            let metadata = cache
+                .publish_processed_revision(
+                    &revision.revision().key,
+                    &cache.object_path(&key),
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+            revision.revision().complete(metadata);
+            if !keep_revision_pin {
+                revision.revision().file_pin.lock().unwrap().take();
+            }
+            revision.revision().bind_origin(&*session.read().await);
+            revisions.insert(seq, revision);
+        }
+        let worker = Arc::new(crate::HlsSegmentWorkerPool::default());
+        session.write().await.startup = Some(crate::HlsSessionStartup {
+            config: config.clone(),
+            worker: Arc::downgrade(&worker),
+            access_leases: Arc::new(RwLock::new(crate::HlsAccessLeaseStore::default())),
+            revisions,
+            policy_fixed: true,
+            store,
+            budget: crate::ProgressiveBudgetManager::new(config),
+        });
+    }
+    let baseline_revision_bytes = cache.scan_revision_disk_bytes().await.unwrap();
+    let baseline_epoch = session.read().await.origin_epoch;
+    let mut request = switch_test_request(Arc::clone(&session), Arc::clone(&cache), &origin.base_url);
+    request.manifest_recovery_burst = HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Friendly };
+    let result = retry_test_manifest_recovery_chain(
+        &request,
+        Url::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url)).unwrap(),
+        HlsManifestRejectLogReason::PinnedHostRecoveryRejected,
+    )
+    .await;
+    assert_eq!(result.is_ok(), should_commit, "recovery error: {:?}", result.as_ref().err());
+    let state = session.read().await;
+    if should_commit {
+        assert!(state.origin_epoch > baseline_epoch);
+        assert_eq!(state.origin_seq_highwater, Some(503));
+        let key = state.segments.values().next_back().unwrap().cache_key.clone();
+        if let Some(mode) = startup_mode {
+            let revision = state
+                .startup
+                .as_ref()
+                .unwrap()
+                .revisions
+                .get(&key.proxy_seq())
+                .expect("ready handoff segment has an immutable startup revision");
+            assert!(revision.revision().is_complete());
+            assert!(
+                revision.revision().origin_binding_is_current(&state),
+                "handoff revision must be bound after commit"
+            );
+            let expected_kind = if mode.streams_raw_revisions() {
+                crate::SegmentRevisionKind::Raw
+            } else {
+                crate::SegmentRevisionKind::Processed
+            };
+            assert_eq!(
+                revision.revision().key.kind,
+                expected_kind,
+                "startup revision kind must follow mode.streams_raw_revisions()"
+            );
+        }
+        drop(state);
+        let mut file = cache.open_range(&key, 0).await.unwrap();
+        let mut body = String::new();
+        file.read_to_string(&mut body).await.unwrap();
+        assert_eq!(body, NOVEL, "anchor bytes must never replace the first new segment");
+    } else {
+        assert_eq!(state.origin_epoch, baseline_epoch);
+        drop(state);
+        assert_eq!(
+            cache.scan_revision_disk_bytes().await.unwrap(),
+            baseline_revision_bytes,
+            "rejected handoff must remove its unpublished revision files"
+        );
+    }
+}
+
+/// Unchanged overlap bytes after the trimmed prefix verify the anchor.
+#[tokio::test]
+async fn forward_content_anchor_verifies_overlap_after_trimming_published_prefix() {
+    assert_forward_content_anchor_after_published_prefix("committed-anchor-bytes", true, false).await;
+}
+
+/// Changed overlap bytes after the trimmed prefix reject the anchor.
+#[tokio::test]
+async fn forward_content_anchor_rejects_changed_overlap_after_trimming_published_prefix() {
+    assert_forward_content_anchor_after_published_prefix("changed-anchor-bytes", false, false).await;
+}
+
+/// An accepted optimistic handoff registers its revision as ready.
+#[tokio::test]
+async fn forward_content_anchor_registers_ready_optimistic_handoff_revision() {
+    assert_forward_content_anchor_after_published_prefix("committed-anchor-bytes", true, true).await;
+}
+
+/// An accepted conservative handoff registers its revision as ready.
+#[tokio::test]
+async fn forward_content_anchor_registers_ready_conservative_handoff_revision() {
+    assert_forward_content_anchor_with_mode(
+        "committed-anchor-bytes",
+        true,
+        Some(shared::model::HlsStartupMode::Conservative),
+    )
+    .await;
+}
+
+/// A rejected optimistic handoff removes its unpublished revision.
+#[tokio::test]
+async fn forward_content_anchor_cleans_rejected_optimistic_handoff_revision() {
+    assert_forward_content_anchor_after_published_prefix("changed-anchor-bytes", false, true).await;
+}
+
+/// A completed optimistic startup revision keeps its own active-file pin while
+/// a guard serves it. The content anchor probe must not pin that path again.
+#[tokio::test]
+async fn forward_content_anchor_accepts_already_pinned_optimistic_reference() {
+    assert_forward_content_anchor_with_revision_pin(
+        "committed-anchor-bytes",
+        true,
+        Some(shared::model::HlsStartupMode::Optimistic),
+        true,
+    )
+    .await;
+}
+
+/// A completed conservative startup revision keeps its own active-file pin
+/// while a guard serves it. The content anchor probe must not pin it again.
+#[tokio::test]
+async fn forward_content_anchor_accepts_already_pinned_conservative_reference() {
+    assert_forward_content_anchor_with_revision_pin(
+        "committed-anchor-bytes",
+        true,
+        Some(shared::model::HlsStartupMode::Conservative),
+        true,
+    )
+    .await;
+}
+
+/// A pinned reference with different origin bytes is still rejected.
+#[tokio::test]
+async fn forward_content_anchor_rejects_already_pinned_changed_reference() {
+    assert_forward_content_anchor_with_revision_pin(
+        "changed-anchor-bytes",
+        false,
+        Some(shared::model::HlsStartupMode::Optimistic),
+        true,
+    )
+    .await;
 }

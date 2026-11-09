@@ -15,15 +15,16 @@ fn upstream_error_class_follows_http_status() {
 
 mod switcher {
     use super::super::{
-        GroupEnd, GroupFailoverContext, GroupFailoverDriver, GroupPoll, GroupSwitcher, MemberHost, RuntimeMember,
+        GroupEnd, GroupFailoverContext, GroupFailoverDriver, GroupPoll, GroupSwitcher, ManualSwitchCommand, MemberHost,
+        RuntimeMember,
     };
     use crate::api::{
-        api_utils::tests::group_playback_support::{member_ts, GroupPlaybackEnv},
+        api_utils::tests::group_playback_support::{member_ts, FakeOriginMode, GroupPlaybackEnv},
         model::{BoxedProviderStream, StreamError},
     };
     use bytes::Bytes;
     use futures::StreamExt;
-    use shared::model::FailoverGroupRuntimeConfig;
+    use shared::model::{FailoverGroupRuntimeConfig, SwitchReason};
     use std::{
         sync::Arc,
         task::{Context, Poll},
@@ -203,5 +204,222 @@ mod switcher {
         let mut host = FakeHost::new(garbage, false);
         let ended = tokio::time::timeout(Duration::from_secs(4), poll(&mut switcher, &mut host)).await;
         assert!(matches!(ended, Ok(GroupPoll::Ended(GroupEnd::Stalled))), "no media within the stall timeout");
+    }
+
+    #[tokio::test]
+    async fn manual_switch_switches_to_target_member() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+            .origin_mode("korath", FakeOriginMode::TsThenStall(member_ts(0x100, 20)))
+            .build()
+            .await;
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover: FailoverGroupRuntimeConfig::default(),
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "switcher-session".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let mut switcher = GroupSwitcher::new(GroupFailoverDriver::new(Arc::new(ctx), 0));
+        let mut host = FakeHost::new(futures::stream::pending().boxed(), false);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let target_vid = env.member_vid("korath");
+        let sender = switcher.switch_sender();
+        sender.send(ManualSwitchCommand { target_member_vid: target_vid, respondent: tx }).expect("send");
+
+        let switch_result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match poll(&mut switcher, &mut host).await {
+                    GroupPoll::Data(_) | GroupPoll::Keepalive(_) => {
+                        if host.installed > 0 {
+                            break;
+                        }
+                    }
+                    GroupPoll::Ended(end) => panic!("ended unexpectedly: {end:?}"),
+                    GroupPoll::Pending => {}
+                }
+            }
+        })
+        .await;
+        assert!(switch_result.is_ok(), "switched to target member within timeout");
+        assert_eq!(switcher.driver.current, 1);
+        let res = rx.await.expect("response");
+        assert!(res.is_ok(), "manual switch succeeded: {res:?}");
+    }
+
+    #[tokio::test]
+    async fn manual_switch_failure_keeps_current_member() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+            .origin_mode("korath", FakeOriginMode::Status(500))
+            .build()
+            .await;
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover: FailoverGroupRuntimeConfig::default(),
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "switcher-session".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let mut switcher = GroupSwitcher::new(GroupFailoverDriver::new(Arc::new(ctx), 0));
+        let mut host = FakeHost::new(futures::stream::pending().boxed(), false);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let target_vid = env.member_vid("korath");
+        let sender = switcher.switch_sender();
+        sender.send(ManualSwitchCommand { target_member_vid: target_vid, respondent: tx }).expect("send");
+
+        let returned = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match poll(&mut switcher, &mut host).await {
+                    GroupPoll::Data(_) | GroupPoll::Keepalive(_) => {
+                        if host.installed > 0 {
+                            break;
+                        }
+                    }
+                    GroupPoll::Ended(end) => panic!("stream ended on manual switch failure: {end:?}"),
+                    GroupPoll::Pending => {}
+                }
+            }
+        })
+        .await;
+        assert!(returned.is_ok(), "re-installed current member within timeout");
+        assert_eq!(switcher.driver.current, 0, "stayed on current member (solis)");
+        let res = rx.await.expect("response");
+        assert!(res.is_err(), "manual switch reported failure: {res:?}");
+    }
+
+    #[tokio::test]
+    async fn manual_switch_failure_does_not_adopt_third_member() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath", "maris"])
+            .origin_mode("solis", FakeOriginMode::Status(500))
+            .origin_mode("korath", FakeOriginMode::Status(500))
+            .origin_mode("maris", FakeOriginMode::TsThenStall(member_ts(0x100, 20)))
+            .build()
+            .await;
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover: FailoverGroupRuntimeConfig::default(),
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "switcher-session".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let mut switcher = GroupSwitcher::new(GroupFailoverDriver::new(Arc::new(ctx), 0));
+        let mut host = FakeHost::new(futures::stream::pending().boxed(), false);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let target_vid = env.member_vid("korath");
+        let sender = switcher.switch_sender();
+        sender.send(ManualSwitchCommand { target_member_vid: target_vid, respondent: tx }).expect("send");
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match poll(&mut switcher, &mut host).await {
+                    GroupPoll::Data(_) | GroupPoll::Keepalive(_) => {
+                        assert_eq!(host.installed, 0, "unexpectedly installed a member");
+                    }
+                    GroupPoll::Ended(end) => return end,
+                    GroupPoll::Pending => {}
+                }
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "switch ended within timeout");
+        assert!(matches!(ended.unwrap(), GroupEnd::SwitchFailed { reason: SwitchReason::Manual }));
+        assert_eq!(switcher.driver.current, 0, "did not adopt third member (maris)");
+        let res = rx.await.expect("response");
+        assert_eq!(res.unwrap_err(), "Failed to open target member and failed to restore current member");
+    }
+
+    #[tokio::test]
+    async fn shared_stream_guard_cleanup_on_stream_drop() {
+        use super::super::GroupFailoverStream;
+        use futures::StreamExt;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target_name: env.target.name.as_str().into(),
+            target: Arc::clone(&env.target),
+            group: Arc::clone(&env.group_record),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            user: (*user).clone(),
+            playback: shared::model::FailoverGroupPlayback {
+                failover: FailoverGroupRuntimeConfig::default(),
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "tok".into(),
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            share_stream: true,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: Some("group:1:100".into()),
+        };
+        let target_id = ctx.target.id;
+        let group_vid = ctx.group.group_vid.get();
+        let driver = GroupFailoverDriver::new(Arc::new(ctx), 0);
+        let stream = GroupFailoverStream::new(driver, futures::stream::empty().boxed(), None);
+
+        // While stream exists, registry has the shared switch entry:
+        assert!(env.app_state.failover_switch_registry.contains_shared(target_id, group_vid));
+
+        // When stream ends / errors and drops:
+        drop(stream);
+
+        // Registry entry must be cleaned up:
+        assert!(!env.app_state.failover_switch_registry.contains_shared(target_id, group_vid));
     }
 }

@@ -25,6 +25,7 @@ pub(super) fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
         })),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -77,8 +78,10 @@ pub(super) fn processing_context(
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         maintenance: None,
+        plugins: shared::model::NoPlugins,
         input_refresh: None,
         library_update_mode: LibraryUpdateMode::ExistingCatalog,
+        override_status: None,
     }
 }
 
@@ -243,9 +246,10 @@ async fn assert_curation_preserves_empty_mixed_output_guard(canonical: Option<sh
         accepted_empty_clusters: ClusterFlags::Vod,
         library_empty: tuliprox_repository::LibraryEmptyPublication::None,
         analytics_input: TargetAnalyticsInput::default(),
+        overrides: Arc::new(TargetOverrideSet::empty(None)),
     };
 
-    let (result, errors) = finalize_prepared_target(Arc::new(context), prepared).await;
+    let (result, errors, _) = finalize_prepared_target(Arc::new(context), prepared).await;
 
     assert!(result.is_err_and(|errors| errors.iter().any(|error| {
         error.message().contains("non-Xtream outputs that cannot safely publish a fully empty forced result")
@@ -335,8 +339,9 @@ async fn complete_empty_curation_publishes_empty_watch_group_state() {
         accepted_empty_clusters: ClusterFlags::empty(),
         library_empty: tuliprox_repository::LibraryEmptyPublication::None,
         analytics_input: TargetAnalyticsInput::default(),
+        overrides: Arc::new(TargetOverrideSet::empty(None)),
     };
-    let (result, errors) = finalize_prepared_target(Arc::new(context), prepared).await;
+    let (result, errors, _) = finalize_prepared_target(Arc::new(context), prepared).await;
     server.await.expect("Trakt server should finish");
 
     assert!(result.is_ok(), "complete empty finalization failed: {result:?}");

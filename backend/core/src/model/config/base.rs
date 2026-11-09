@@ -1,7 +1,7 @@
 use crate::{
     model::{
         macros, ConfigApi, HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LibraryConfig, LogConfig, McpConfig,
-        MessagingConfig, MetadataUpdateConfig, ProxyConfig, RecordingConfig, ReverseProxyConfig,
+        MessagingConfig, MetadataUpdateConfig, PluginsConfig, ProxyConfig, RecordingConfig, ReverseProxyConfig,
         ReverseProxyDisabledHeaderConfig, ScheduleConfig, VideoConfig, WebUiConfig,
     },
     utils,
@@ -118,6 +118,7 @@ pub struct Config {
     pub library: Option<LibraryConfig>,
     pub failover_groups: FailoverGroupsConfig,
     pub mcp: Option<McpConfig>,
+    pub plugins: Option<PluginsConfig>,
 }
 
 /// Resolve a configured recording directory the way `Config::prepare` does:
@@ -204,6 +205,10 @@ impl Config {
 
         if let Some(messaging) = self.messaging.as_mut() {
             messaging.prepare(config_path);
+        }
+
+        if let Some(plugins) = self.plugins.as_mut() {
+            plugins.prepare(config_path)?;
         }
 
         if let Some(recording) = self.video.as_mut().and_then(|video| video.recording.as_mut()) {
@@ -373,6 +378,7 @@ impl From<&ConfigDto> for Config {
             library: dto.library.as_ref().map(Into::into),
             failover_groups: dto.failover_groups.clone().unwrap_or_default(),
             mcp: dto.mcp.as_ref().map(Into::into),
+            plugins: dto.plugins.as_ref().map(Into::into),
         }
     }
 }

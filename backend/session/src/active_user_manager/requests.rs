@@ -2,7 +2,10 @@ use super::{
     decide_connection_kind, remember_session_addr, stream_history_session_id, ActiveUserConnectionParams,
     ActiveUserManager, PlaybackSessionRegistration, SocketRegistration, StreamRequestDetach, UserConnectionData,
 };
-use shared::{model::StreamInfo, utils::current_time_secs};
+use shared::{
+    model::{StreamInfo, StreamMemberInfo},
+    utils::current_time_secs,
+};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::Mutex;
 use tuliprox_core::utils::utc_day_from_secs;
@@ -229,6 +232,30 @@ impl ActiveUserManager {
                 if let Some(token) = session_token {
                     if let Some(session) = connection_data.sessions.iter().find(|s| s.token == token) {
                         stream_info.started_at = session.started_at;
+                        if let Some(binding) = &session.member_binding {
+                            stream_info.member_info = Some(StreamMemberInfo {
+                                title: Arc::clone(&binding.member_title),
+                                input_name: Arc::clone(&binding.input_name),
+                                provider: Arc::clone(&binding.provider),
+                                member_vid: Some(binding.member_vid),
+                            });
+                        }
+                    }
+                }
+
+                if stream_info.member_info.is_none() && stream_info.channel.shared {
+                    if let Some(group_vid) = stream_info.channel.group_virtual_id {
+                        let existing_member_info = connection_data.streams.iter().find_map(|s| {
+                            if s.channel.shared
+                                && s.channel.target_id == stream_info.channel.target_id
+                                && s.channel.client_virtual_id() == group_vid
+                            {
+                                s.member_info.clone()
+                            } else {
+                                None
+                            }
+                        });
+                        stream_info.member_info = existing_member_info;
                     }
                 }
 

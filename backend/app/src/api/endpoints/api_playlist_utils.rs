@@ -4,7 +4,10 @@ use crate::{
             empty_json_list_response, json_or_bin_response, stream_json_or_bin_response_stream,
             stream_json_or_bin_response_try_stream,
         },
-        endpoints::v1_api_playlist::items::visible_in_target_listing,
+        endpoints::v1_api_playlist::{
+            epg_status::{apply_overlay_input, apply_overlay_target},
+            items::visible_in_target_listing,
+        },
         model::AppState,
     },
     iptv::{m3u, xtream},
@@ -44,11 +47,52 @@ fn stalker_refresh_pending_response(accept: Option<&str>) -> axum::response::Res
     response
 }
 
+/// Collects the mapped explorer rows of `stream`; unreadable records are skipped and logged.
+async fn collect_explorer_items<S, T, E, F>(mut stream: S, map_fn: F, source_name: &str) -> Vec<UiPlaylistItem>
+where
+    S: tokio_stream::Stream<Item = Result<T, E>> + Unpin,
+    E: std::fmt::Display,
+    F: Fn(T) -> Option<UiPlaylistItem>,
+{
+    let mut items = Vec::new();
+    let mut skipped = 0usize;
+    while let Some(res) = stream.next().await {
+        match res {
+            Ok(item) => {
+                if let Some(ui_item) = map_fn(item) {
+                    items.push(ui_item);
+                }
+            }
+            Err(err) => {
+                skipped += 1;
+                log::warn!("Skipping unreadable playlist record for '{source_name}': {err}");
+            }
+        }
+    }
+    if skipped > 0 {
+        log::warn!("Skipped {skipped} unreadable records for '{source_name}' in explorer mode");
+    }
+    items
+}
+
+/// Gives every explorer row with `virtual_id == 0` (raw input records) a unique explorer-local id above the
+/// largest existing one. The ids are unique only within one response, which covers one cluster.
+fn assign_explorer_virtual_ids(items: &mut [UiPlaylistItem]) {
+    let mut next_id = items.iter().map(|item| item.virtual_id).max().unwrap_or(0).saturating_add(1);
+    for item in items.iter_mut() {
+        if item.virtual_id == 0 {
+            item.virtual_id = next_id;
+            next_id = next_id.saturating_add(1);
+        }
+    }
+}
+
 pub(in crate::api::endpoints) async fn get_playlist_for_target(
     cfg_target: Option<&ConfigTarget>,
     app_state: &Arc<AppState>,
     cluster: XtreamCluster,
     accept: Option<&str>,
+    explorer: bool,
 ) -> impl IntoResponse + Send {
     let config = app_state.app_config.config.load();
     let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
@@ -60,6 +104,26 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             else {
                 return empty_json_list_response();
             };
+            if explorer {
+                let mut items = collect_explorer_items(
+                    channel_iterator,
+                    |item| {
+                        if visible_in_target_listing(cluster, &item) {
+                            Some(rewrite_resource_url(
+                                &encrypt_secret,
+                                &resource_url,
+                                UiPlaylistItem::from_xtream(item, true),
+                            ))
+                        } else {
+                            None
+                        }
+                    },
+                    &target.name,
+                )
+                .await;
+                apply_overlay_target(&mut items, target, app_state).await;
+                return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+            }
             let converted_stream = channel_iterator.filter_map(move |entry| match entry {
                 Ok(item) if visible_in_target_listing(cluster, &item) => {
                     Some(Ok(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item))))
@@ -74,6 +138,26 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             else {
                 return empty_json_list_response();
             };
+            if explorer {
+                let mut items = collect_explorer_items(
+                    channel_iterator,
+                    |pli| {
+                        if visible_in_target_listing(cluster, &pli) {
+                            Some(rewrite_resource_url(
+                                &encrypt_secret,
+                                &resource_url,
+                                UiPlaylistItem::from_m3u(pli, true),
+                            ))
+                        } else {
+                            None
+                        }
+                    },
+                    &target.name,
+                )
+                .await;
+                apply_overlay_target(&mut items, target, app_state).await;
+                return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+            }
             let converted_stream = channel_iterator.filter_map(move |res| match res {
                 Ok(pli) if visible_in_target_listing(cluster, &pli) => {
                     Some(Ok(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(pli))))
@@ -130,6 +214,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
     app_state: &Arc<AppState>,
     cluster: XtreamCluster,
     accept: Option<&str>,
+    explorer: bool,
 ) -> impl IntoResponse + Send {
     if let Some(input) = cfg_input {
         // Icon URLs are wrapped into a proxy link, so the browser never receives a destination that
@@ -143,6 +228,23 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
             else {
                 return empty_json_list_response();
             };
+            if explorer {
+                let mut items = collect_explorer_items(
+                    channel_iterator,
+                    |item| {
+                        Some(rewrite_resource_url(
+                            &encrypt_secret,
+                            &resource_url,
+                            UiPlaylistItem::from_xtream(item, true),
+                        ))
+                    },
+                    &input.name,
+                )
+                .await;
+                assign_explorer_virtual_ids(&mut items);
+                apply_overlay_input(&mut items, input, app_state).await;
+                return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+            }
             let converted_stream = channel_iterator.map(move |entry| {
                 entry.map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item)))
             });
@@ -151,6 +253,19 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
             let Some(channels) = iter_raw_m3u_input_playlist(&app_state.app_config, input, Some(cluster)).await else {
                 return empty_json_list_response();
             };
+            if explorer {
+                let mut items = collect_explorer_items(
+                    channels,
+                    |item| {
+                        Some(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from_m3u(item, true)))
+                    },
+                    &input.name,
+                )
+                .await;
+                assign_explorer_virtual_ids(&mut items);
+                apply_overlay_input(&mut items, input, app_state).await;
+                return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+            }
             let converted_stream = channels.map(move |entry| {
                 entry.map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item)))
             });
@@ -180,13 +295,16 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error_strings.join(", ")})))
                     .into_response();
             }
-            let channels: Vec<UiPlaylistItem> = fetch
+            let mut channels: Vec<UiPlaylistItem> = fetch
                 .groups
                 .iter()
                 .flat_map(|group| group.channels.iter())
                 .map(|item| preview_item(&encrypt_secret, &resource_url, input.id, UiPlaylistItem::from(item)))
                 .collect();
             interner_gc();
+            if explorer {
+                apply_overlay_input(&mut channels, input, app_state).await;
+            }
             return json_or_bin_response(accept, &channels).into_response();
         }
     }
@@ -306,6 +424,7 @@ mod tests {
             input_name: "test".intern(),
             input_stream_id: "".intern(),
             epg_channel_id: None,
+            explorer_meta: None,
         }
     }
 
@@ -376,5 +495,58 @@ mod tests {
 
         assert!(rewritten.logo.starts_with("/api/v1/playlist/resource/"), "{}", rewritten.logo);
         assert!(!rewritten.logo.contains("192.168.1.20"), "{}", rewritten.logo);
+    }
+
+    #[tokio::test]
+    async fn test_b4_collect_explorer_items_skips_unreadable_records() {
+        use crate::repository::LockedReceiverStream;
+        use shared::error::TuliproxError;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let _ = tx.send(Ok(sample_item("http://example.com/logo1.png"))).await;
+        let _ = tx.send(Err(TuliproxError::RepositoryStorage("Corrupt record".to_string()))).await;
+        let _ = tx.send(Ok(sample_item("http://example.com/logo2.png"))).await;
+        drop(tx);
+
+        let stream = LockedReceiverStream::new_empty(rx);
+        let collected = super::collect_explorer_items(stream, Some, "test_source").await;
+        assert_eq!(collected.len(), 2, "corrupt record must be skipped");
+        assert_eq!(collected[0].logo.as_ref(), "http://example.com/logo1.png");
+        assert_eq!(collected[1].logo.as_ref(), "http://example.com/logo2.png");
+    }
+
+    #[test]
+    fn test_assign_explorer_virtual_ids_allocates_unique_nonzero_ids() {
+        let mut item1 = sample_item("http://example.com/logo1.png");
+        item1.virtual_id = 0;
+        let mut item2 = sample_item("http://example.com/logo2.png");
+        item2.virtual_id = 0;
+
+        let mut items = vec![item1, item2];
+        super::assign_explorer_virtual_ids(&mut items);
+
+        assert_ne!(items[0].virtual_id, 0);
+        assert_ne!(items[1].virtual_id, 0);
+        assert_ne!(items[0].virtual_id, items[1].virtual_id);
+    }
+
+    #[test]
+    fn test_assign_explorer_virtual_ids_preserves_existing_and_starts_above_max() {
+        let mut item1 = sample_item("http://example.com/logo1.png");
+        item1.virtual_id = 10;
+        let mut item2 = sample_item("http://example.com/logo2.png");
+        item2.virtual_id = 0;
+        let mut item3 = sample_item("http://example.com/logo3.png");
+        item3.virtual_id = 25;
+        let mut item4 = sample_item("http://example.com/logo4.png");
+        item4.virtual_id = 0;
+
+        let mut items = vec![item1, item2, item3, item4];
+        super::assign_explorer_virtual_ids(&mut items);
+
+        assert_eq!(items[0].virtual_id, 10);
+        assert_eq!(items[1].virtual_id, 26);
+        assert_eq!(items[2].virtual_id, 25);
+        assert_eq!(items[3].virtual_id, 27);
     }
 }

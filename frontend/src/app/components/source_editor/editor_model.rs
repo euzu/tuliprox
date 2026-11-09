@@ -19,11 +19,17 @@ pub enum BlockType {
     InputPlex,
     InputStalker,
     InputStaged,
+    /// A `type: plugin` input: the id of the providing plugin lives in
+    /// `ConfigInputDto::plugin` and is picked in the source editor.
+    InputPlugin,
     Target,
     OutputM3u,
     OutputXtream,
     OutputHdHomeRun,
     OutputStrm,
+    /// A `type: plugin` output: `TargetOutputDto::Plugin`, bound to an installed
+    /// plugin that renders it.
+    OutputPlugin,
 }
 
 // Define string constants
@@ -36,11 +42,13 @@ impl BlockType {
     pub const INPUT_PLEX: &'static str = "InputPlex";
     pub const INPUT_STALKER: &'static str = "InputStalker";
     pub const INPUT_STAGED: &'static str = "InputStaged";
+    pub const INPUT_PLUGIN: &'static str = "InputPlugin";
     pub const TARGET: &'static str = "Target";
     pub const OUTPUT_M3U: &'static str = "OutputM3u";
     pub const OUTPUT_XTREAM: &'static str = "OutputXtream";
     pub const OUTPUT_HDHOMERUN: &'static str = "OutputHdHomeRun";
     pub const OUTPUT_STRM: &'static str = "OutputStrm";
+    pub const OUTPUT_PLUGIN: &'static str = "OutputPlugin";
 
     pub fn is_input(&self) -> bool {
         matches!(
@@ -53,16 +61,23 @@ impl BlockType {
                 | Self::InputPlex
                 | Self::InputStalker
                 | Self::InputStaged
+                | Self::InputPlugin
         )
     }
 
     pub fn is_target(&self) -> bool { matches!(self, Self::Target) }
 
     pub fn is_output(&self) -> bool {
-        matches!(self, Self::OutputXtream | Self::OutputM3u | Self::OutputHdHomeRun | Self::OutputStrm)
+        matches!(
+            self,
+            Self::OutputXtream | Self::OutputM3u | Self::OutputHdHomeRun | Self::OutputStrm | Self::OutputPlugin
+        )
     }
 
     pub fn is_chainable_input(&self) -> bool { matches!(self, Self::InputM3u | Self::InputXtream) }
+
+    /// A `type: plugin` input or output: the block names the plugin it runs on.
+    pub fn is_plugin(&self) -> bool { matches!(self, Self::InputPlugin | Self::OutputPlugin) }
 
     /// Left port — block can receive a connection.
     pub fn has_input_port(&self) -> bool { self.is_target() || self.is_output() || self.is_chainable_input() }
@@ -83,11 +98,13 @@ impl From<&str> for BlockType {
             BlockType::INPUT_PLEX => BlockType::InputPlex,
             BlockType::INPUT_STALKER => BlockType::InputStalker,
             BlockType::INPUT_STAGED => BlockType::InputStaged,
+            BlockType::INPUT_PLUGIN => BlockType::InputPlugin,
             BlockType::TARGET => BlockType::Target,
             BlockType::OUTPUT_M3U => BlockType::OutputM3u,
             BlockType::OUTPUT_XTREAM => BlockType::OutputXtream,
             BlockType::OUTPUT_HDHOMERUN => BlockType::OutputHdHomeRun,
             BlockType::OUTPUT_STRM => BlockType::OutputStrm,
+            BlockType::OUTPUT_PLUGIN => BlockType::OutputPlugin,
             _ => BlockType::Target, // fallback
         }
     }
@@ -108,6 +125,7 @@ impl From<InputType> for BlockType {
             InputType::Plex => BlockType::InputPlex,
             InputType::Stalker | InputType::StalkerBatch => BlockType::InputStalker,
             InputType::Staged => BlockType::InputStaged,
+            InputType::Plugin => BlockType::InputPlugin,
         }
     }
 }
@@ -124,40 +142,57 @@ impl fmt::Display for BlockType {
             BlockType::InputPlex => Self::INPUT_PLEX,
             BlockType::InputStalker => Self::INPUT_STALKER,
             BlockType::InputStaged => Self::INPUT_STAGED,
+            BlockType::InputPlugin => Self::INPUT_PLUGIN,
             BlockType::Target => Self::TARGET,
             BlockType::OutputM3u => Self::OUTPUT_M3U,
             BlockType::OutputXtream => Self::OUTPUT_XTREAM,
             BlockType::OutputHdHomeRun => Self::OUTPUT_HDHOMERUN,
             BlockType::OutputStrm => Self::OUTPUT_STRM,
+            BlockType::OutputPlugin => Self::OUTPUT_PLUGIN,
         };
         write!(f, "{s}")
     }
 }
 pub(crate) type BlockId = u16;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// What a sidebar tile adds: a block type and, for a plugin tile, the plugin
+/// the new input or output runs on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockSpec {
+    pub block_type: BlockType,
+    /// Only for [`BlockType::is_plugin`] types; `None` adds a plugin block with
+    /// no plugin chosen yet.
+    pub plugin: Option<String>,
+}
 
-    #[test]
-    fn media_server_input_types_keep_distinct_source_editor_blocks() {
-        assert_eq!(BlockType::from(InputType::Emby), BlockType::InputEmby);
-        assert_eq!(BlockType::from(InputType::Jellyfin), BlockType::InputJellyfin);
-        assert_eq!(BlockType::from(InputType::Plex), BlockType::InputPlex);
+impl BlockSpec {
+    pub const fn of(block_type: BlockType) -> Self { Self { block_type, plugin: None } }
+
+    pub fn with_plugin(block_type: BlockType, plugin_id: &str) -> Self {
+        Self { block_type, plugin: block_type.is_plugin().then(|| plugin_id.to_string()) }
     }
 
-    #[test]
-    fn media_server_source_editor_blocks_are_inputs() {
-        assert!(BlockType::InputEmby.is_input());
-        assert!(BlockType::InputJellyfin.is_input());
-        assert!(BlockType::InputPlex.is_input());
+    /// The `text/plain` payload of a sidebar drag: `InputXtream`, or
+    /// `InputPlugin:youtube-input` for a plugin tile. A plugin id never holds a
+    /// `:`, so the first one splits.
+    pub fn to_drag_data(&self) -> String {
+        match &self.plugin {
+            Some(plugin_id) => format!("{}:{plugin_id}", self.block_type),
+            None => self.block_type.to_string(),
+        }
     }
 
-    #[test]
-    fn stalker_input_types_share_source_editor_block() {
-        assert_eq!(BlockType::from(InputType::Stalker), BlockType::InputStalker);
-        assert_eq!(BlockType::from(InputType::StalkerBatch), BlockType::InputStalker);
-        assert!(BlockType::InputStalker.is_input());
+    /// The inverse of [`Self::to_drag_data`]. A plugin id on a block type that
+    /// takes none, or a blank one, is dropped.
+    pub fn from_drag_data(data: &str) -> Self {
+        let (block_type, plugin_id) = data.split_once(':').unwrap_or((data, ""));
+        let block_type = BlockType::from(block_type.trim());
+        let plugin_id = plugin_id.trim();
+        if plugin_id.is_empty() {
+            Self::of(block_type)
+        } else {
+            Self::with_plugin(block_type, plugin_id)
+        }
     }
 }
 
@@ -242,4 +277,54 @@ pub struct SourceEditorContext {
 
 impl PartialEq for SourceEditorContext {
     fn eq(&self, _other: &Self) -> bool { false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_specs_round_trip_through_the_drag_payload() {
+        let plain = BlockSpec::of(BlockType::InputXtream);
+        assert_eq!(plain.to_drag_data(), "InputXtream");
+        assert_eq!(BlockSpec::from_drag_data("InputXtream"), plain);
+
+        let input = BlockSpec::with_plugin(BlockType::InputPlugin, "youtube-input");
+        assert_eq!(input.to_drag_data(), "InputPlugin:youtube-input");
+        assert_eq!(BlockSpec::from_drag_data("InputPlugin:youtube-input"), input);
+
+        let output = BlockSpec::with_plugin(BlockType::OutputPlugin, "csv-out");
+        assert_eq!(BlockSpec::from_drag_data(&output.to_drag_data()), output);
+    }
+
+    #[test]
+    fn a_plugin_id_only_sticks_to_plugin_blocks() {
+        assert_eq!(BlockSpec::with_plugin(BlockType::InputM3u, "x").plugin, None);
+        assert_eq!(BlockSpec::from_drag_data("InputM3u:x"), BlockSpec::of(BlockType::InputM3u));
+        assert_eq!(BlockSpec::from_drag_data("InputPlugin:  "), BlockSpec::of(BlockType::InputPlugin));
+        assert_eq!(BlockSpec::from_drag_data("InputPlugin"), BlockSpec::of(BlockType::InputPlugin));
+        assert!(BlockType::InputPlugin.is_plugin() && BlockType::OutputPlugin.is_plugin());
+        assert!(!BlockType::InputXtream.is_plugin() && !BlockType::Target.is_plugin());
+    }
+
+    #[test]
+    fn media_server_input_types_keep_distinct_source_editor_blocks() {
+        assert_eq!(BlockType::from(InputType::Emby), BlockType::InputEmby);
+        assert_eq!(BlockType::from(InputType::Jellyfin), BlockType::InputJellyfin);
+        assert_eq!(BlockType::from(InputType::Plex), BlockType::InputPlex);
+    }
+
+    #[test]
+    fn media_server_source_editor_blocks_are_inputs() {
+        assert!(BlockType::InputEmby.is_input());
+        assert!(BlockType::InputJellyfin.is_input());
+        assert!(BlockType::InputPlex.is_input());
+    }
+
+    #[test]
+    fn stalker_input_types_share_source_editor_block() {
+        assert_eq!(BlockType::from(InputType::Stalker), BlockType::InputStalker);
+        assert_eq!(BlockType::from(InputType::StalkerBatch), BlockType::InputStalker);
+        assert!(BlockType::InputStalker.is_input());
+    }
 }

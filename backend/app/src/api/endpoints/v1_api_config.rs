@@ -366,6 +366,22 @@ async fn recording_reload_for(app_state: &Arc<AppState>, incoming: &ConfigDto) -
     recording_reload_outcome(current_recording, &incoming_recording, existing)
 }
 
+/// Put the `plugins.repositories` and `plugins.plugins` of the stored file over
+/// `incoming`. Neither is edited on the config page, which holds a copy read with
+/// `${env:VAR}` resolved: saving that copy would write a resolved url or secret
+/// into `config.yml`, and a stale copy would undo a marketplace or plugin change.
+fn restore_written_plugin_lists(incoming: &mut ConfigDto, written: &ConfigDto) {
+    let Some(written) = written.plugins.as_ref() else {
+        return;
+    };
+    if written.repositories.is_empty() && written.plugins.is_empty() && incoming.plugins.is_none() {
+        return;
+    }
+    let plugins = incoming.plugins.get_or_insert_with(Default::default);
+    plugins.repositories.clone_from(&written.repositories);
+    plugins.plugins.clone_from(&written.plugins);
+}
+
 async fn save_config_main(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     headers: HeaderMap,
@@ -398,6 +414,25 @@ async fn save_config_main(
         let stored = app_state.app_config.config.load();
         if let Some(current) = stored.messaging.as_ref() {
             incoming.restore_redacted_secrets(&shared::model::MessagingConfigDto::from(current));
+        }
+    }
+
+    // The page was filled from the env-resolved config and edits neither list:
+    // the marketplace sources and the plugin entries keep their written form.
+    {
+        let read_path = file_path.clone();
+        match tokio::task::spawn_blocking(move || crate::config_loader::read_config_file(&read_path, false, false))
+            .await
+        {
+            Ok(Ok(written)) => restore_written_plugin_lists(&mut cfg, &written),
+            Ok(Err(err)) => {
+                error!("Failed to read config.yml '{file_path}': {err}");
+                return internal_server_error!();
+            }
+            Err(err) => {
+                error!("Failed to read config.yml '{file_path}': {err}");
+                return internal_server_error!();
+            }
         }
     }
 
@@ -731,8 +766,27 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
         let paths = app_state.app_config.paths.load();
         crate::config_loader::read_app_config_dto(&paths, true, false).await
     };
+    // The plugin lists go out as written: the copy above is env-resolved, and a
+    // `${env:VAR}` in a plugin setting or a marketplace source url must not
+    // reach the page resolved. `save_config_main` restores both from the file.
+    let written = {
+        let read_path = config_file_path.clone();
+        tokio::task::spawn_blocking(move || crate::config_loader::read_config_file(&read_path, false, false)).await
+    };
+    let written = match written {
+        Ok(Ok(written)) => written,
+        Ok(Err(err)) => {
+            error!("Failed to read config.yml '{config_file_path}': {err}");
+            return internal_server_error!();
+        }
+        Err(err) => {
+            error!("Failed to read config.yml '{config_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
     match read_result {
         Ok(mut app_config) => {
+            restore_written_plugin_lists(&mut app_config.config, &written);
             if let Err(err) = prepare_sources_batch(&mut app_config.sources, false).await {
                 error!("Failed to prepare sources batch: {err}");
                 internal_server_error!()
@@ -1123,6 +1177,47 @@ mod tests {
         utils::{HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH},
     };
     use std::sync::Arc;
+
+    #[test]
+    fn config_page_save_keeps_the_written_plugin_lists() {
+        use shared::model::{PluginEntryDto, PluginRepositoryDto, PluginsConfigDto};
+        let repository = |url: &str| PluginRepositoryDto {
+            id: "community".to_string(),
+            name: "Community".to_string(),
+            url: url.to_string(),
+            enabled: true,
+        };
+        let written = ConfigDto {
+            plugins: Some(PluginsConfigDto {
+                repositories: vec![repository("${env:TP_MARKET_URL}")],
+                plugins: vec![PluginEntryDto::new("demo-plugin")],
+                ..PluginsConfigDto::default()
+            }),
+            ..ConfigDto::default()
+        };
+        // The page copy: resolved url, no entries, and a core field the page did edit.
+        let mut incoming = ConfigDto {
+            plugins: Some(PluginsConfigDto {
+                enabled: true,
+                repositories: vec![repository("https://resolved.test/m.json")],
+                ..PluginsConfigDto::default()
+            }),
+            ..ConfigDto::default()
+        };
+        super::restore_written_plugin_lists(&mut incoming, &written);
+        let plugins = incoming.plugins.unwrap();
+        assert!(plugins.enabled);
+        assert_eq!(plugins.repositories, vec![repository("${env:TP_MARKET_URL}")]);
+        assert_eq!(plugins.plugins.len(), 1);
+
+        let mut without_block = ConfigDto::default();
+        super::restore_written_plugin_lists(&mut without_block, &written);
+        assert_eq!(without_block.plugins.unwrap().repositories.len(), 1);
+
+        let mut untouched = ConfigDto::default();
+        super::restore_written_plugin_lists(&mut untouched, &ConfigDto::default());
+        assert!(untouched.plugins.is_none());
+    }
 
     #[tokio::test]
     async fn origin_target_duration_config_saves_reloads_and_rejects_invalid_values() {

@@ -32,7 +32,14 @@ num_op = { ">=" | "<=" | "!=" | ">" | "<" | "=" }
 numeric_comparison = { numeric_field ~ num_op ~ number }
 set_values = { regexp ~ ("," ~ regexp)* }
 set_comparison = { field ~ ^"in" ~ "[" ~ set_values ~ "]" }
-comparison = { field_comparison | type_comparison | numeric_comparison | set_comparison | presence_comparison | string_comparison }
+plugin_ident = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+plugin_name = ${ ^"plugin" ~ "." ~ plugin_ident ~ "." ~ plugin_ident }
+plugin_bool = @{ (^"true" | ^"false") ~ !(ASCII_ALPHANUMERIC | "_" | "-") }
+plugin_number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+plugin_arg = { regexp | plugin_bool | plugin_number }
+plugin_args = { plugin_arg ~ ("," ~ plugin_arg)* }
+plugin_call = { plugin_name ~ "(" ~ plugin_args? ~ ")" }
+comparison = { field_comparison | type_comparison | numeric_comparison | set_comparison | presence_comparison | string_comparison | plugin_call }
 bool_op = { and | or }
 expr_group = { "(" ~ expr ~ ")" }
 basic_expr = _{ comparison | expr_group }
@@ -198,6 +205,42 @@ fn get_parser_set_comparison(expr: Pair<Rule>, templates: Option<&[PatternTempla
     Ok(Leaf::SetComparison(field, values))
 }
 
+/// `plugin.<id>.<fn>(literal, ...)`. Arguments are literals only, so the term is a leaf and
+/// never nests. Strings keep their text, numbers and booleans are carried as written (booleans
+/// lowercased), because the plugin receives every argument as a string. The `call` index is
+/// assigned by [`FilterBuilder::leaf`].
+fn get_parser_plugin_call(
+    expr: Pair<Rule>,
+    templates: Option<&[PatternTemplate]>,
+    allow_plugins: bool,
+) -> Result<Leaf, TuliproxError> {
+    let mut expr_inner = expr.into_inner();
+    let name = next_rule(&mut expr_inner, "plugin call")?;
+    let mut idents = name.into_inner();
+    let plugin = next_rule(&mut idents, "plugin call")?.as_str().to_string();
+    let func = next_rule(&mut idents, "plugin call")?.as_str().to_string();
+    if !allow_plugins {
+        return Err(TuliproxError::FilterParse(format!(
+            "plugin.{plugin}.{func}() is only allowed in a target's processing filter"
+        )));
+    }
+    let mut args = Vec::new();
+    if let Some(list) = expr_inner.next() {
+        for arg in list.into_inner() {
+            let literal = next_rule(&mut arg.into_inner(), "plugin call argument")?;
+            args.push(match literal.as_rule() {
+                Rule::regexp => get_parser_string_value(&literal, templates)?,
+                Rule::plugin_bool => literal.as_str().to_ascii_lowercase(),
+                Rule::plugin_number => literal.as_str().to_string(),
+                _ => {
+                    return Err(TuliproxError::FilterParse(format!("unexpected plugin argument: {}", literal.as_str())))
+                }
+            });
+        }
+    }
+    Ok(Leaf::PluginCall { call: 0, plugin, func, args })
+}
+
 fn get_filter_item_type(text_item_type: &str) -> Option<PlaylistItemType> {
     if text_item_type.eq_ignore_ascii_case("live") {
         Some(PlaylistItemType::Live)
@@ -277,6 +320,7 @@ fn get_parser_expression(
     errors: &mut Vec<String>,
     depth: usize,
     builder: &mut FilterBuilder,
+    allow_plugins: bool,
 ) -> Result<NodeId, String> {
     // `get_filter_detailed` rejects deep nesting from the input text before pest parses, so
     // this is a second, cheap guard in case a caller reaches the expression builder another way.
@@ -292,7 +336,7 @@ fn get_parser_expression(
         let parsed = match pair.as_rule() {
             // A comparison is one leaf. Its error is recorded and the operand count check below
             // rejects the expression, so the remaining operands still report their errors.
-            Rule::comparison => match parse_leaf(pair, templates) {
+            Rule::comparison => match parse_leaf(pair, templates, allow_plugins) {
                 Ok(leaf) => Some(builder.leaf(leaf)),
                 Err(err) => {
                     errors.push(err.message().to_string());
@@ -301,7 +345,7 @@ fn get_parser_expression(
             },
             Rule::expr_group => {
                 let inner = pair.into_inner().next().ok_or_else(|| "empty expression group".to_string())?;
-                let node = get_parser_expression(inner, templates, errors, depth + 1, builder)?;
+                let node = get_parser_expression(inner, templates, errors, depth + 1, builder, allow_plugins)?;
                 Some(builder.group(node))
             }
             Rule::not => {
@@ -358,7 +402,11 @@ fn get_parser_expression(
 }
 
 /// Parses a `comparison` rule into its leaf.
-fn parse_leaf(comparison: Pair<Rule>, templates: Option<&[PatternTemplate]>) -> Result<Leaf, TuliproxError> {
+fn parse_leaf(
+    comparison: Pair<Rule>,
+    templates: Option<&[PatternTemplate]>,
+    allow_plugins: bool,
+) -> Result<Leaf, TuliproxError> {
     let pair = next_rule(&mut comparison.into_inner(), "comparison")?;
     match pair.as_rule() {
         Rule::field_comparison => get_parser_field_comparison(pair, templates),
@@ -367,6 +415,7 @@ fn parse_leaf(comparison: Pair<Rule>, templates: Option<&[PatternTemplate]>) -> 
         Rule::presence_comparison => get_parser_presence_comparison(pair),
         Rule::numeric_comparison => get_parser_numeric_comparison(pair),
         Rule::set_comparison => get_parser_set_comparison(pair, templates),
+        Rule::plugin_call => get_parser_plugin_call(pair, templates, allow_plugins),
         _ => Err(TuliproxError::FilterParse(format!("did not expect rule: {pair:?}"))),
     }
 }
@@ -393,6 +442,9 @@ fn unresolved_template_placeholders(input: &str) -> Vec<String> {
 }
 
 /// Deepest parenthesis nesting in `filter_text`, ignoring parentheses inside a quoted regex.
+///
+/// The parentheses of a `plugin.<id>.<fn>(...)` call count as one level: they cannot nest
+/// (arguments are literals), so the scan overstates the parse tree's depth by at most one.
 ///
 /// pest itself recurses per `expr_group` while building the parse tree, before any of this
 /// crate's code runs, and pest 2.9.5 does not probe the stack on musl. The nesting has to be
@@ -455,9 +507,10 @@ pub struct FilterParsePosition {
 
 /// Like [`get_filter`], but reports the syntax-error position when available
 /// (semantic errors such as invalid regex values have no position).
-pub fn get_filter_detailed(
+fn get_filter_detailed_impl(
     filter_text: &str,
     templates: Option<&[PatternTemplate]>,
+    allow_plugins: bool,
 ) -> Result<Filter, (TuliproxError, Option<FilterParsePosition>)> {
     let source = match apply_templates_to_pattern_single(filter_text, templates) {
         Ok(source) => source,
@@ -505,7 +558,14 @@ pub fn get_filter_detailed(
                     Rule::stmt => {
                         for expr in pair.into_inner() {
                             if expr.as_rule() == Rule::expr {
-                                match get_parser_expression(expr, templates, &mut errors, 0, &mut builder) {
+                                match get_parser_expression(
+                                    expr,
+                                    templates,
+                                    &mut errors,
+                                    0,
+                                    &mut builder,
+                                    allow_plugins,
+                                ) {
                                     Ok(node) => result = Some(node),
                                     Err(err) => errors.push(err),
                                 }
@@ -553,8 +613,33 @@ pub fn get_filter_detailed(
     }
 }
 
+/// Like [`get_filter`], but reports the syntax-error position when available
+/// (semantic errors such as invalid regex values have no position).
+pub fn get_filter_detailed(
+    filter_text: &str,
+    templates: Option<&[PatternTemplate]>,
+) -> Result<Filter, (TuliproxError, Option<FilterParsePosition>)> {
+    get_filter_detailed_impl(filter_text, templates, false)
+}
+
 pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> Result<Filter, TuliproxError> {
     get_filter_detailed(filter_text, templates).map_err(|(err, _)| err)
+}
+
+/// Parse a target processing filter expression, allowing `plugin.<id>.<fn>(...)` calls.
+pub fn get_target_processing_filter_detailed(
+    filter_text: &str,
+    templates: Option<&[PatternTemplate]>,
+) -> Result<Filter, (TuliproxError, Option<FilterParsePosition>)> {
+    get_filter_detailed_impl(filter_text, templates, true)
+}
+
+/// Parse a target processing filter expression, allowing `plugin.<id>.<fn>(...)` calls.
+pub fn get_target_processing_filter(
+    filter_text: &str,
+    templates: Option<&[PatternTemplate]>,
+) -> Result<Filter, TuliproxError> {
+    get_target_processing_filter_detailed(filter_text, templates).map_err(|(err, _)| err)
 }
 
 #[cfg(test)]

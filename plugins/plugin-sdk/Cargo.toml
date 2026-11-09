@@ -1,0 +1,19 @@
+[package]
+name = "tuliprox-plugin-sdk"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Author SDK for tuliprox wasm plugins: guest bindings, host wrappers, typed payloads and a mock host"
+
+[lints]
+workspace = true
+
+[dependencies]
+tuliprox-plugin-api = { workspace = true }
+tuliprox-plugin-sdk-macros = { version = "1", path = "../plugin-sdk-macros" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wit-bindgen = { version = "0.63.0", default-features = false, features = ["macros", "realloc"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wstd = { version = "0.6.8", default-features = false }

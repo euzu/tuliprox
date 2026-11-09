@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{input::Input, RadioButtonGroup, TextButton},
+    app::components::{input::Input, NoContent, RadioButtonGroup, TextButton},
     hooks::{use_clipboard_copy, use_log_stream, UseLogStreamOptions},
     i18n::use_translation,
 };
@@ -218,9 +218,7 @@ pub fn LogConsole(props: &LogConsoleProps) -> Html {
                 {
                     if filtered_logs.is_empty() {
                         html! {
-                            <div class="tp__log-console__empty">
-                                { translate.t("LABEL.NO_LOGS") }
-                            </div>
+                            <NoContent text={translate.t("LABEL.NO_LOGS")} />
                         }
                     } else {
                         html! {

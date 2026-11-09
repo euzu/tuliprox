@@ -206,6 +206,7 @@ fn test_app_config() -> Arc<AppConfig> {
         config: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::Config::default())),
         sources: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::SourcesConfig::default())),
         hdhomerun: Arc::new(arc_swap::ArcSwapOption::empty()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(arc_swap::ArcSwapOption::empty()),
         file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
         paths: Arc::new(arc_swap::ArcSwap::from_pointee(shared::model::ConfigPaths {
@@ -280,6 +281,7 @@ fn service_with_disk(
     let input = Arc::new(tuliprox_core::model::ConfigInput { id: 7, name: "input-a".into(), ..Default::default() });
     let target = Arc::new(tuliprox_core::model::ConfigTarget {
         id: 11,
+        managed_channels: Vec::new(),
         enabled: true,
         name: "1".to_string(),
         options: None,

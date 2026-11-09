@@ -7,9 +7,12 @@ use shared::{
         PlaylistItem, PlaylistItemType, PlaylistItemTypeSet, XtreamMappingFlags, XtreamMappingFlagsSet,
         XtreamMappingOptions,
     },
-    utils::{arc_str_serde, concat_path_leading_slash, deserialize_number_from_string_or_zero},
+    utils::{
+        arc_str_serde, concat_path_leading_slash, deserialize_number_from_string_or_zero,
+        normalize_container_extension, Internable,
+    },
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use strum::IntoEnumIterator;
 
 #[derive(Deserialize, Default)]
@@ -91,7 +94,32 @@ pub fn xtream_mapping_option_from_target_options(
         web_ui_request: user.t_is_api_user,
         encrypt_secret,
         resource_host_policies: Arc::default(),
+        default_container_extensions: default_container_extensions(app_config),
     })
+}
+
+/// Snapshots every input's configured `options.default_container_extension`.
+///
+/// The value is applied when a document is built, so reading it per request keeps a config change
+/// effective for the next response without touching the stored playlist.
+///
+/// Aliases are keyed both under their own name and under the parent input's name: an input item
+/// carries the name of the account that fetched it, and an alias inherits the parent's options
+/// (`ConfigInput::as_input`), so either key must resolve to the same configured value.
+fn default_container_extensions(app_config: &AppConfig) -> Arc<HashMap<Arc<str>, Arc<str>>> {
+    let sources = app_config.sources.load();
+    let mut configured: HashMap<Arc<str>, Arc<str>> = HashMap::new();
+    for input in &sources.inputs {
+        let Some(extension) = input.default_container_extension().and_then(normalize_container_extension) else {
+            continue;
+        };
+        let extension: Arc<str> = extension.as_ref().intern();
+        configured.insert(Arc::clone(&input.name), Arc::clone(&extension));
+        for alias in input.aliases.iter().flatten() {
+            configured.insert(Arc::clone(&alias.name), Arc::clone(&extension));
+        }
+    }
+    Arc::new(configured)
 }
 
 pub fn normalize_release_date(document: &mut serde_json::Map<String, Value>) {
@@ -160,6 +188,7 @@ mod tests {
             config: Arc::new(ArcSwap::from_pointee(Config::default())),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapOption::default()),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -203,6 +232,7 @@ mod tests {
             execution_plan: crate::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
+            managed_channels: Vec::new(),
         };
         (target, xtream_output)
     }
@@ -244,5 +274,99 @@ mod tests {
 
         assert!(!options.reverse_item_types.is_set(PlaylistItemType::Live));
         assert!(options.resource_proxy_item_types.is_set(PlaylistItemType::Live));
+    }
+
+    fn user_for_api() -> ProxyUserCredentials {
+        let mut user = ProxyUserCredentials::default();
+        user.username = "viewer".to_string();
+        user.password = "secret".to_string();
+        user.t_is_api_user = true;
+        user
+    }
+
+    fn app_config_with_container_extension(input_name: &str, extension: Option<&str>) -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: input_name.intern(),
+            input_type: InputType::Stalker,
+            url: "http://portal.example/stalker_portal/c/".to_string(),
+            enabled: true,
+            options: extension.map(|extension| crate::model::ConfigInputOptions {
+                default_container_extension: Some(extension.to_string()),
+                ..crate::model::ConfigInputOptions::defaults().clone()
+            }),
+            ..ConfigInput::default()
+        });
+        let mut app_config = create_test_app_config();
+        app_config.sources =
+            Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![input], ..SourcesConfig::default() }));
+        app_config
+    }
+
+    #[test]
+    fn mapping_options_carry_the_configured_container_extension_per_input() {
+        let app_config = app_config_with_container_extension("portal", Some("mp4"));
+        let (target, xtream_output) = create_test_target();
+
+        let options =
+            xtream_mapping_option_from_target_options(&target, &xtream_output, &app_config, &user_for_api(), [0; 16])
+                .expect("mapping options");
+
+        assert_eq!(options.default_container_extension(&"portal".intern()).map(AsRef::as_ref), Some("mp4"));
+        assert!(options.default_container_extension(&"other".intern()).is_none());
+    }
+
+    #[test]
+    fn mapping_options_key_an_alias_by_its_own_name() {
+        let alias = crate::model::ConfigInputAlias {
+            id: 2,
+            name: "portal-alias".intern(),
+            url: "http://portal-alias.example/stalker_portal/c/".to_string(),
+            username: None,
+            password: None,
+            priority: 0,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        };
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "portal".intern(),
+            input_type: InputType::Stalker,
+            url: "http://portal.example/stalker_portal/c/".to_string(),
+            enabled: true,
+            options: Some(crate::model::ConfigInputOptions {
+                default_container_extension: Some("mp4".to_string()),
+                ..crate::model::ConfigInputOptions::defaults().clone()
+            }),
+            aliases: Some(vec![alias]),
+            ..ConfigInput::default()
+        });
+        let mut app_config = create_test_app_config();
+        app_config.sources =
+            Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![input], ..SourcesConfig::default() }));
+        let (target, xtream_output) = create_test_target();
+
+        let options =
+            xtream_mapping_option_from_target_options(&target, &xtream_output, &app_config, &user_for_api(), [0; 16])
+                .expect("mapping options");
+
+        // An item fetched through the alias carries the alias name; the parent's configured value
+        // must still resolve for it.
+        assert_eq!(options.default_container_extension(&"portal-alias".intern()).map(AsRef::as_ref), Some("mp4"));
+        assert_eq!(options.default_container_extension(&"portal".intern()).map(AsRef::as_ref), Some("mp4"));
+    }
+
+    #[test]
+    fn mapping_options_omit_inputs_without_a_configured_container_extension() {
+        let app_config = app_config_with_container_extension("portal", None);
+        let (target, xtream_output) = create_test_target();
+
+        let options =
+            xtream_mapping_option_from_target_options(&target, &xtream_output, &app_config, &user_for_api(), [0; 16])
+                .expect("mapping options");
+
+        assert!(options.default_container_extensions.is_empty());
     }
 }

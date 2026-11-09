@@ -1,0 +1,473 @@
+// Tuliprox plugin contract, ABI 1.0.0. This file is the single source of truth
+// for the plugin ABI.
+// The contract is frozen: breaking edits are not allowed. A 1.x addition is a NEW
+// interface (e.g. `sort-hooks-v1-1`) plus a new world; existing interfaces,
+// records and worlds never change.
+//
+// The `wasi:*@0.2.12` packages under `deps/` are copied verbatim from
+// wasmtime-wasi-http 50.0.1, which is the host runtime the contract is pinned to.
+//
+// Conventions:
+// - Every hook returns `result<_, string>`. `err` is treated exactly like a
+//   trap: fail-open (or abort under `fail_mode: abort-target`), logged, counted.
+// - `handle` is a host-issued per-call index, meaningless across calls. Results
+//   naming an unknown handle are logged and ignored; for a repeated handle the
+//   first entry wins.
+// - Within one interface every function is mandatory, so interfaces stay
+//   single-purpose and a plugin exports only what it implements.
+package tuliprox:plugin@1.0.0;
+
+// Only the types the base and playlist-plugin worlds need. This interface does not grow.
+interface types {
+  enum item-type {                 // == shared::model::PlaylistItemType (11)
+    live, video, series, series-info, catchup,
+    live-unknown, live-hls, live-dash,
+    local-video, local-series, local-series-info,
+  }
+  enum cluster { live, video, series }   // == XtreamCluster
+  enum log-level { trace, debug, info, warn, error }
+
+  record channel {
+    handle: u32,                   // host-issued, unique within one call; read-only
+    name: string,
+    title: string,
+    group: string,
+    url: string,
+    epg-id: option<string>,        // PlaylistItemHeader.epg_channel_id
+    logo: string,
+    chno: option<u32>,             // PlaylistItemHeader.chno; 0 <-> none
+    item-type: item-type,          // read-only
+    cluster: cluster,              // read-only
+    input-name: string,            // read-only
+    input-stream-id: string,       // read-only (frozen origin id)
+    extra: list<tuple<string, string>>,  // host->guest only in 1.0; ignored on return
+  }
+
+  // Sparse result: ids not mentioned are kept unchanged.
+  variant channel-change {
+    drop(u32),                     // handle
+    modified(channel),             // identified by channel.handle
+  }
+}
+
+// Shared by the dashboard metric and notification records.
+interface status {
+  enum severity { info, warn, error }
+}
+
+// EPG records, shared by the epg-* hooks and input-provider.
+interface epg-types {
+  record epg-channel {
+    id: string,                    // compared case-insensitively
+    names: list<string>,           // XMLTV display-names
+    icon: option<string>,
+  }
+
+  record epg-category { value: string, lang: option<string> }
+
+  // == shared::model::EpgProgramme. The channel id is transient host-side
+  // (#[serde(skip)]); the host re-attaches it on return.
+  record epg-programme {
+    channel: string,               // epg channel id; compared case-insensitively
+    start: s64,                    // unix seconds
+    stop: s64,
+    title: option<string>,
+    description: option<string>,   // EpgProgramme.desc
+    categories: list<epg-category>,
+    catchup-id: option<string>,
+    icon: option<string>,
+    is-live: bool,
+    is-new: bool,
+    previously-shown: bool,
+    extra: list<tuple<string, string>>,  // host->guest only in 1.0; ignored on return
+  }
+}
+
+// ——— functions the HOST provides to every plugin ———
+interface host {
+  use types.{log-level};
+
+  variant kv-error { quota-exceeded, key-too-large, value-too-large, unavailable(string) }
+
+  // What a finished program left behind. `status` is none when a signal ended it.
+  // stdout and stderr are each cut to their first 64 KiB.
+  record process-output {
+    status: option<s32>,
+    stdout: list<u8>,
+    stderr: list<u8>,
+  }
+
+  log: func(level: log-level, msg: string);   // rate-limited; excess dropped + counted
+  kv-get: func(key: string) -> result<option<list<u8>>, kv-error>;
+  kv-set: func(key: string, value: list<u8>) -> result<_, kv-error>;
+  kv-delete: func(key: string) -> result<_, kv-error>;
+  get-config: func() -> string;    // settings JSON, secrets resolved, own instance only
+  now-unix: func() -> s64;         // tuliprox_core::utils::clock::Clock
+  cache-image: func(url: string) -> result<string, string>;  // -> locally served URL
+  // Runs a local program (never through a shell) as the tuliprox user and waits for it. Needs the
+  // `process` capability. The program gets an empty environment except PATH and `env`; `stdin` is
+  // written and closed. err: refused, not startable, or still running after `timeout-secs`.
+  run-process: func(program: string, args: list<string>, env: list<tuple<string, string>>,
+                    stdin: list<u8>, timeout-secs: u32) -> result<process-output, string>;
+}
+
+// ——— lifecycle: every plugin exports this ———
+interface lifecycle {
+  // once per instantiation with the settings JSON; err disables the instance
+  init: func(settings: string) -> result<_, string>;
+}
+
+// ——— playlist pipeline ———
+// manifest: playlist.{before,after}-{filter,rename,map}
+interface playlist-hooks {
+  use types.{channel, channel-change};
+
+  // Closed by TransformStage {Filter, Rename, Map}. A new stage is a new interface.
+  enum stage { before-filter, after-filter, before-rename, after-rename, before-map, after-map }
+
+  // Called only for stages the manifest `hooks:` lists (`after-filter`, ...).
+  // The host may batch: several calls per stage per target, disjoint subsets.
+  on-stage: func(stage: stage, target: string, channels: list<channel>)
+      -> result<list<channel-change>, string>;
+}
+
+// manifest: playlist.loaded — after an input downloaded, before target processing
+interface source-hooks {
+  use types.{channel, channel-change};
+  on-playlist-loaded: func(input-name: string, channels: list<channel>)
+      -> result<list<channel-change>, string>;
+}
+
+// manifest: playlist.after-sort — once per finalized view (base, and Xtream when curated)
+interface sort-hooks {
+  use types.{channel};
+  // Handles in the new order. Handles not listed keep their relative order
+  // after the listed ones; the returned order is authoritative for the batch.
+  after-sort: func(target: string, channels: list<channel>) -> result<list<u32>, string>;
+}
+
+// manifest: playlist.enrich-metadata — inside update_vod_metadata /
+// update_series_metadata, before persistence; non-fatal like TMDB failures
+interface metadata-hooks {
+  use types.{channel};
+  // `metadata-json` is the resolved TMDB-style info; return amended JSON or none
+  enrich-metadata: func(item: channel, metadata-json: string)
+      -> result<option<string>, string>;
+}
+
+// ——— per-target strategies, opt-in via target config (prepare -> apply) ———
+// manifest: playlist.sort-key
+interface sort-key-hooks {
+  use types.{channel};
+  // index-aligned with `channels`; the host stable-sorts by the returned keys
+  sort-key: func(target: string, channels: list<channel>) -> result<list<string>, string>;
+}
+
+// manifest: playlist.assign-chno
+interface chno-hooks {
+  use types.{channel};
+  // (handle, chno) pairs; unlisted channels keep host numbering; chno 0 is ignored
+  assign-channel-numbers: func(target: string, channels: list<channel>)
+      -> result<list<tuple<u32, u32>>, string>;
+}
+
+// manifest: playlist.resolve-duplicates — overrides the post-merge content
+// dedup pass only (DeduplicateConfig), before curation
+interface dedupe-hooks {
+  use types.{channel};
+  record duplicate-group {
+    key: string,                   // normalized dedupe key (name/url based)
+    channels: list<channel>,
+  }
+  // handles to KEEP in preference order; the rest of the group is dropped.
+  // An empty list means "host default" for that group.
+  resolve-duplicates: func(target: string, group: duplicate-group)
+      -> result<list<u32>, string>;
+}
+
+// manifest: playlist.merge-groups
+interface group-merge-hooks {
+  // canonical group name -> member group names merged under it
+  merge-groups: func(target: string, groups: list<string>)
+      -> result<list<tuple<string, list<string>>>, string>;
+}
+
+// manifest: filter.eval-fn — decisions are materialized before the sync
+// built-in Filter evaluator runs (Leaf::PluginCall)
+interface filter-hooks {
+  use types.{channel};
+  // result positions correspond to input positions
+  eval-filter-batch: func(name: string, channels: list<channel>, args: list<string>)
+      -> result<list<bool>, string>;
+}
+
+// ——— EPG: one interface per hook, so a matcher need not stub a transformer ———
+// manifest: epg.loaded — per source, on the parsed channel list, before
+// register_guide_names / match_epg_channel_candidates
+interface epg-load-hooks {
+  use epg-types.{epg-channel};
+  // sparse: channels not returned are kept; a returned id replaces names/icon
+  on-epg-loaded: func(source: string, channels: list<epg-channel>)
+      -> result<list<epg-channel>, string>;
+}
+
+// manifest: epg.transform-programmes — per bounded batch while the streaming
+// parser builds a source, never the whole source in guest memory
+interface epg-transform-hooks {
+  use epg-types.{epg-programme};
+  // returns the batch to keep, in order (may drop, rewrite or add)
+  transform-programmes: func(source: string, programmes: list<epg-programme>)
+      -> result<list<epg-programme>, string>;
+}
+
+// manifest: epg.enrich-programmes — inject/modify one channel's programmes
+interface epg-enrich-hooks {
+  use epg-types.{epg-programme};
+  enrich-programmes: func(channel-id: string, programmes: list<epg-programme>)
+      -> result<list<epg-programme>, string>;
+}
+
+// manifest: epg.match-channel — second pass over the channels the built-in
+// matcher left unresolved; results go through the same ambiguity and
+// case-adoption rules (prepare -> apply)
+interface epg-match-hooks {
+  use types.{channel};
+  use epg-types.{epg-channel};
+  record match-request {
+    chan: channel,
+    candidates: list<epg-channel>, // top-K shortlist from the built-in index
+  }
+  // index-aligned with `requests`: the winning epg-channel id, or none
+  match-channels: func(requests: list<match-request>)
+      -> result<list<option<string>>, string>;
+}
+
+// manifest: epg.resolve-conflict — v1.x (needs the blocking-thread bridge)
+interface epg-conflict-hooks {
+  use epg-types.{epg-programme};
+  // The host only collapses EXACT start/stop collisions today (priority
+  // backfill); partial overlaps are all kept. `overlap` is new with this hook.
+  enum conflict-kind { exact-time, overlap }
+  record epg-conflict {
+    channel-id: string,
+    kind: conflict-kind,
+    candidates: list<epg-programme>,
+  }
+  // candidate index to keep, or none for the host default
+  resolve-conflict: func(conflict: epg-conflict) -> result<option<u32>, string>;
+}
+
+// ——— session edge: strictly bounded (50 ms clamp, TTL-cached, fail-open) ———
+// manifest: stream.inject-headers (capability stream_headers)
+interface stream-hooks {
+  record upstream-request {
+    // At the session edge virtual ids DO exist: this is the persisted
+    // VirtualId from the stream URL, unlike the pipeline `handle`.
+    virtual-id: u32,
+    url: string,
+    headers: list<tuple<string, string>>,
+    user: string,                  // requesting api-user name
+  }
+  // extra headers; connection-control headers are dropped by the host
+  inject-upstream-headers: func(req: upstream-request)
+      -> result<list<tuple<string, string>>, string>;
+}
+
+// ——— async lifecycle events (fire-and-forget, queued, never block emitters) ———
+// manifest: events.on-event + `events:` wire names
+interface event-hooks {
+  record event {
+    kind: string,                  // EventKind::as_wire_name(), e.g. "playlist.update"
+    payload: string,               // EventMessage::payload() — JSON
+    timestamp: s64,                // unix seconds
+  }
+  on-event: func(ev: event) -> result<_, string>;
+}
+
+// ——— dashboard metrics: polled (throttled) by the host ———
+// manifest: metrics.collect
+interface metrics-hooks {
+  use status.{severity};
+  record metric {
+    key: string,                   // namespaced by the host as <plugin-id>.<key>
+    label: string,                 // display label or ui/locales i18n key
+    value: string,                 // preformatted
+    unit: option<string>,
+    severity: option<severity>,    // drives the card accent
+  }
+  collect-metrics: func() -> result<list<metric>, string>;
+}
+
+// ——— notification channel (Channel::Plugin) ———
+// manifest: notifications.send (capability notifications)
+interface notification-hooks {
+  use status.{severity};
+  record notification {
+    title: string,
+    body: string,
+    severity: severity,
+    payload: string,               // raw event JSON for rich formatting
+  }
+  // maps onto messaging's Delivery; the outbox owns all retrying
+  variant delivery-error {
+    transient(string),             // Delivery::Retry, outbox backoff
+    retry-after(u32),              // Delivery::Retry with an explicit delay (seconds)
+    permanent(string),             // Delivery::Permanent
+  }
+  send-notification: func(msg: notification) -> result<_, delivery-error>;
+}
+
+// ——— custom input type: `type: plugin` + `plugin: <id>` in source.yml ———
+// manifest: input.fetch (provides.input_type)
+interface input-provider {
+  use types.{channel};
+  use epg-types.{epg-channel, epg-programme};
+  record input-request {
+    input-name: string,
+    url: string,
+    username: option<string>,
+    password: option<string>,
+    options: list<tuple<string, string>>,
+  }
+  // returned handles are ignored; the host issues its own
+  fetch-playlist: func(req: input-request) -> result<list<channel>, string>;
+  // ok([]) when the provider has no EPG
+  fetch-epg: func(req: input-request)
+      -> result<list<tuple<epg-channel, list<epg-programme>>>, string>;
+}
+
+// ——— custom output format: `type: plugin` + `plugin: <id>` in a target output ———
+// manifest: output.render (provides.output_format). One instance per output
+// file, so begin/render/finish may keep state.
+interface output-generator {
+  use types.{channel};
+  record output-request {
+    target: string,
+    format: string,                // provides.output_format
+    options: list<tuple<string, string>>,
+  }
+  begin-output: func(req: output-request) -> result<list<u8>, string>;  // header bytes
+  render-batch: func(channels: list<channel>) -> result<list<u8>, string>;
+  finish-output: func() -> result<list<u8>, string>;                    // trailer bytes
+}
+
+// ——— rpc: functions named in manifest ui.rpc_exports (UI frames + MCP tools) ———
+// manifest: rpc.call
+interface rpc {
+  // method = rpc_exports[].name; payload/result are JSON, the payload already
+  // validated by the host against the declared input_schema
+  call: func(method: string, payload: string) -> result<string, string>;
+}
+
+// ——— scheduled tasks: run by the host scheduler, outside any pipeline run ———
+// manifest: tasks.run + `tasks:`
+interface tasks {
+  record task-context {
+    task-id: string,               // manifest tasks[].id
+    scheduled-at: s64,             // the cron fire time (unix seconds); now for a manual run
+    last-success-at: option<s64>,  // host-tracked, for incremental work
+  }
+  // ok(summary) is shown in the UI and stats; err publishes scheduled_task.failed
+  run: func(ctx: task-context) -> result<string, string>;
+}
+
+// ——— settings migration (1.x addition; optional) ———
+// manifest: settings.migrate
+// Called by the host when the stored settings carry an older settings-schema
+// `version` than the installed package's schema. `from-version` is the stored
+// version and `settings` the stored JSON (secrets resolved). `ok` is the JSON
+// for the current schema version; the host validates it before persisting.
+// `err` keeps the stored settings and marks the plugin "needs settings review".
+interface settings-migration {
+  migrate: func(from-version: u32, settings: string) -> result<string, string>;
+}
+
+// ——— worlds: ONE PER CAPABILITY ———
+// `base` carries the imports + lifecycle; each capability world adds exactly
+// one export. A plugin needing several capabilities declares a small composite
+// world itself (or uses `enricher-plugin`). The host never assumes a world: it
+// binds per interface and discovers exports at load time.
+world base {
+  import host;
+  import wasi:http/outgoing-handler@0.2.12;  // = wasmtime-wasi-http 50.0.1
+  export lifecycle;
+}
+world playlist-plugin      { include base; export playlist-hooks; }
+world source-plugin        { include base; export source-hooks; }
+world sort-plugin          { include base; export sort-hooks; }
+world metadata-plugin      { include base; export metadata-hooks; }
+world sort-key-plugin      { include base; export sort-key-hooks; }
+world chno-plugin          { include base; export chno-hooks; }
+world dedupe-plugin        { include base; export dedupe-hooks; }
+world group-merge-plugin   { include base; export group-merge-hooks; }
+world filter-plugin        { include base; export filter-hooks; }
+world epg-load-plugin      { include base; export epg-load-hooks; }
+world epg-transform-plugin { include base; export epg-transform-hooks; }
+world epg-enrich-plugin    { include base; export epg-enrich-hooks; }
+world epg-match-plugin     { include base; export epg-match-hooks; }
+world epg-conflict-plugin  { include base; export epg-conflict-hooks; }
+world stream-plugin        { include base; export stream-hooks; }
+world event-plugin         { include base; export event-hooks; }
+world metrics-plugin       { include base; export metrics-hooks; }
+world notifier-plugin      { include base; export notification-hooks; }
+world input-plugin         { include base; export input-provider; }
+world output-plugin        { include base; export output-generator; }
+world rpc-plugin           { include base; export rpc; }
+world task-plugin          { include base; export tasks; }
+world settings-migration-plugin { include base; export settings-migration; }
+
+// convenience composite shipped with the SDK (authors may define their own)
+world enricher-plugin {
+  include playlist-plugin;
+  include metadata-plugin;
+  include epg-enrich-plugin;
+  include event-plugin;
+  include task-plugin;
+  include rpc-plugin;
+}
+
+// Additive ABI 1.x interface. Existing records and worlds remain frozen.
+// manifest: http.handle, capability http_routes, non-empty routes.
+interface http-routes {
+  record request {
+    route: string,                 // manifest route id, selected by host
+    method: string,
+    path: string,                  // plugin-relative, encoded URI path
+    query: string,                 // raw query, without ?
+    params: list<tuple<string, string>>, // encoded path parameters
+    headers: list<tuple<string, string>>,
+    body: list<u8>,
+    principal: option<string>,     // host sets after authentication; never client supplied
+  }
+  record response {
+    status: u16,
+    headers: list<tuple<string, string>>,
+    body: list<u8>,
+  }
+  // Called only for auth: plugin. none rejects with 401; err fails closed.
+  // For a login endpoint the plugin may explicitly accept an anonymous principal.
+  authenticate: func(req: request) -> result<option<string>, string>;
+  handle: func(req: request) -> result<response, string>;
+}
+world http-plugin { include base; export http-routes; }
+
+// Managed-channel interface is unreleased; input and target bindings share this contract.
+interface managed-channel-hooks {
+  use types.{channel};
+  enum destination-kind { input, target }
+  enum insertion-point { input, before-filter, after-filter }
+  record request {
+    kind: destination-kind,
+    name: string,
+    point: insertion-point,
+    inputs: list<string>,
+  }
+  record managed-channel {
+    id: string,
+    source-input: string, // must name one of request.inputs
+    value: channel,
+  }
+  // Successful complete list replaces this plugin's contribution to this binding.
+  reconcile: func(req: request) -> result<list<managed-channel>, string>;
+}
+world managed-channel-plugin { include base; export managed-channel-hooks; }

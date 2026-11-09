@@ -31,6 +31,7 @@ extern crate pest;
 pub mod api;
 mod env_loader;
 mod mcp_stdio;
+mod seed;
 
 // The media-server anti-corruption layer is its own package; aliased under its
 // historical module name so `crate::media_server::X` paths keep resolving.
@@ -45,7 +46,7 @@ use crate::{
 };
 use arc_swap::{access::Access, ArcSwap};
 use chrono::{DateTime, Utc};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use log::{error, info, warn};
 use shared::{
     defaults::{CONFIG_FILE, CONFIG_PATH, DEFAULT_STORAGE_DIR, SOURCE_FILE},
@@ -75,6 +76,8 @@ use tuliprox_repository as repository;
 #[command(author = "euzu <euzu@proton.me>")]
 #[command(version)]
 #[command(about = "Extended playlist proxy", long_about = None)]
+#[command(group(ArgGroup::new("user_db_operation").args(["user_db_get", "user_db_check", "user_db_set"])))]
+#[command(group(ArgGroup::new("user_db_input_operation").args(["user_db_check", "user_db_set"])))]
 struct Args {
     /// Path to .env file for environment variable overrides
     #[arg(short = 'e', long = "env-file")]
@@ -182,11 +185,65 @@ struct Args {
     db_type: Option<String>,
 
     /// Skip creating a backup file before migration
-    #[arg(long = "no-backup", default_value_t = false)]
+    #[arg(long = "no-backup", default_value_t = false, requires = "migrate_db", conflicts_with = "user_db_operation")]
     no_backup: bool,
+
+    /// Read user repair fields as JSON without changing the database
+    #[arg(long = "user-db-get", value_name = "PATH", conflicts_with_all = ["inspect_db", "migrate_db"])]
+    user_db_get: Option<PathBuf>,
+
+    /// Validate the complete user database and optional edited export without writing
+    #[arg(long = "user-db-check", value_name = "PATH", conflicts_with_all = ["inspect_db", "migrate_db"])]
+    user_db_check: Option<PathBuf>,
+
+    /// Import a checked user repair export, or repair from verified history without one
+    #[arg(long = "user-db-set", value_name = "PATH", conflicts_with_all = ["inspect_db", "migrate_db"])]
+    user_db_set: Option<PathBuf>,
+
+    /// Edited JSON export to validate or import
+    #[arg(long = "user-db-input", value_name = "PATH", requires = "user_db_input_operation", conflicts_with_all = ["user_db_get", "inspect_db", "migrate_db"])]
+    user_db_input: Option<PathBuf>,
+
+    /// Write a new JSON export file instead of printing JSON to stdout
+    #[arg(long = "user-db-output", value_name = "PATH", requires = "user_db_get", conflicts_with_all = ["user_db_check", "user_db_set", "inspect_db", "migrate_db"])]
+    user_db_output: Option<PathBuf>,
+
+    /// Read only this user key; partial exports cannot be imported
+    #[arg(long = "user-db-key", value_name = "KEY", requires = "user_db_get", conflicts_with_all = ["user_db_check", "user_db_set", "inspect_db", "migrate_db"])]
+    user_db_user: Option<String>,
 }
 
 impl Args {
+    /// Maps the parsed offline database flags to one command; `None` starts the normal application.
+    fn database_command(&self) -> Option<repository::DatabaseCommand<'_>> {
+        use repository::DatabaseCommand;
+
+        if let Some(path) = self.inspect_db.as_deref() {
+            return Some(DatabaseCommand::Inspect { path, db_type: self.db_type.as_deref() });
+        }
+        if let Some(path) = self.migrate_db.as_deref() {
+            return Some(DatabaseCommand::Migrate {
+                path,
+                db_type: self.db_type.as_deref(),
+                no_backup: self.no_backup,
+            });
+        }
+        if let Some(path) = self.user_db_get.as_deref() {
+            return Some(DatabaseCommand::UserGet {
+                path,
+                output: self.user_db_output.as_deref(),
+                user: self.user_db_user.as_deref(),
+            });
+        }
+        if let Some(path) = self.user_db_check.as_deref() {
+            return Some(DatabaseCommand::UserCheck { path, input: self.user_db_input.as_deref() });
+        }
+        if let Some(path) = self.user_db_set.as_deref() {
+            return Some(DatabaseCommand::UserSet { path, input: self.user_db_input.as_deref() });
+        }
+        None
+    }
+
     fn db_viewer_args(&self) -> repository::DbViewerArgs<'_> {
         repository::DbViewerArgs::new(
             self.db_xtream_file_name.as_deref(),
@@ -209,87 +266,6 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 // #[allow(non_upper_case_globals)]
 // #[export_name = "malloc_conf"]
 // pub static malloc_conf: &[u8] = b"lg_prof_interval:25,prof:true,prof_leak:true,prof_active:true,prof_prefix:/tmp/jeprof\0";
-
-fn format_hex_id(id: &[u8; 16]) -> String {
-    use std::fmt::Write;
-    let mut hex = String::with_capacity(32);
-    for b in id {
-        let _ = write!(hex, "{b:02x}");
-    }
-    hex
-}
-
-fn handle_inspect_db(db_path: &Path, db_type: Option<&str>) {
-    match repository::inspect_single_database(db_path, db_type) {
-        Ok(report) => {
-            println!("=== B+Tree Database Inspection ===");
-            println!("Path:              {}", report.path.display());
-            println!("File Size:         {} bytes", report.file_size);
-            if let Some(v) = report.version {
-                println!("Storage Version:   V{v}");
-            } else {
-                println!("Storage Version:   Not a B+Tree file");
-            }
-            println!("Database Type:     {}", report.kind);
-            println!("Healthy Entries:   {}", report.live_entries);
-            if report.corrupted_entries > 0 {
-                println!(
-                    "Corrupted Entries: {} (corrupted LZ4 blocks or deserialization errors)",
-                    report.corrupted_entries
-                );
-            } else {
-                println!("Corrupted Entries: 0");
-            }
-            if let Some(id) = report.database_id {
-                println!("Database ID:       {}", format_hex_id(&id));
-            }
-            if let Some(gen) = report.generation {
-                println!("Generation:        {gen}");
-            }
-            std::process::exit(0);
-        }
-        Err(err) => {
-            eprintln!("Error inspecting database: {err}");
-            std::process::exit(1);
-        }
-    }
-}
-
-fn handle_migrate_db(db_path: &Path, db_type: Option<&str>, no_backup: bool) {
-    let make_backup = !no_backup;
-    match repository::migrate_single_database(db_path, db_type, make_backup) {
-        Ok(report) => {
-            if report.already_current {
-                println!(
-                    "Database is already at storage version 3 (current). No migration needed: {}",
-                    report.path.display()
-                );
-                std::process::exit(0);
-            }
-            println!("=== B+Tree Database Migration Complete ===");
-            println!("Path:              {}", report.path.display());
-            println!("Version:           V{} -> V{}", report.original_version, report.target_version);
-            println!("Database Type:     {}", report.kind);
-            if let Some(ref bp) = report.backup_path {
-                println!("Backup Created:    {}", bp.display());
-            }
-            println!("Recovered Entries: {}", report.live_entries);
-            if report.corrupted_entries > 0 {
-                println!("Corrupted Skipped: {} (unreadable records safely bypassed)", report.corrupted_entries);
-            } else {
-                println!("Corrupted Skipped: 0");
-            }
-            println!("Database ID:       {}", format_hex_id(&report.database_id));
-            println!("Generation:        {}", report.generation);
-            println!("Status:            SUCCESS (valid V3 database)");
-            std::process::exit(0);
-        }
-        Err(err) => {
-            eprintln!("Error migrating database: {err}");
-            std::process::exit(1);
-        }
-    }
-}
 
 async fn run_mcp_stdio(mcp_url: Option<&str>) -> i32 {
     let default_url = format!("http://127.0.0.1:{}", shared::defaults::DEFAULT_PORT);
@@ -334,12 +310,8 @@ async fn main() {
         std::process::exit(run_mcp_stdio(args.mcp_url.as_deref()).await);
     }
 
-    if let Some(ref db_path) = args.inspect_db {
-        handle_inspect_db(db_path, args.db_type.as_deref());
-    }
-
-    if let Some(ref db_path) = args.migrate_db {
-        handle_migrate_db(db_path, args.db_type.as_deref(), args.no_backup);
+    if let Some(command) = args.database_command() {
+        repository::run_database_command(command);
     }
 
     db_viewer(&args.db_viewer_args());
@@ -404,6 +376,12 @@ async fn main() {
             flush_syslog();
             return;
         }
+    }
+
+    // The Plugin Manager needs the `plugins:` section; the server adds a minimal one when it is missing.
+    #[cfg(feature = "plugins")]
+    if args.server {
+        seed::plugins::ensure_section(&config_paths.config_file_path).await;
     }
 
     let app_config = crate::config_loader::read_initial_app_config(&mut config_paths, true, true, args.server)
@@ -597,11 +575,21 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
     // In CLI mode, we don't start background managers for events or providers. Maintenance
     // still applies: an input taken out of service is not fetched by a one-shot run either.
     // Read-only: a one-shot run may share the storage directory with a running server.
-    let storage_dir = arc_swap::ArcSwapAny::load(cfg.config.as_ref()).storage_dir.clone();
-    let maintenance_path = std::path::PathBuf::from(storage_dir).join(tuliprox_core::model::MAINTENANCE_FILE);
+    let storage_dir = cfg.resolve_storage_dir();
+    let maintenance_path = storage_dir.join(tuliprox_core::model::MAINTENANCE_FILE);
     let maintenance = Arc::new(tuliprox_core::model::MaintenanceRegistry::load_read_only(maintenance_path).await);
-    exec_processing(ProcessingRun::new(client, cfg, targets, shared::model::NoopSink).with_maintenance(maintenance))
-        .await;
+    let plugins = crate::api::model::load_validated_plugins(&cfg, None).await;
+    crate::api::model::migrate_settings_for_run(&plugins, &cfg).await;
+    // The status store holds no cache and writes under a cross-process lock, so recording the
+    // applied override revisions here never overwrites what a running server recorded.
+    let override_status = Arc::new(tuliprox_repository::OverrideStatusStore::new(storage_dir));
+    exec_processing(
+        ProcessingRun::new(client, cfg, targets, shared::model::NoopSink)
+            .with_maintenance(maintenance)
+            .with_plugins(plugins)
+            .with_override_status(override_status),
+    )
+    .await;
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
@@ -696,5 +684,30 @@ async fn healthcheck(config_file: &str) -> bool {
             error!("Failed to open config file for healthcheck {err:?}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_db_cli_flags_are_renamed() {
+        assert!(Args::try_parse_from([
+            "tuliprox",
+            "--user-db-get",
+            "db",
+            "--user-db-output",
+            "f",
+            "--user-db-key",
+            "k",
+        ])
+        .is_ok());
+
+        assert!(Args::try_parse_from(["tuliprox", "--user-db-check", "db", "--user-db-input", "f"]).is_ok());
+
+        assert!(Args::try_parse_from(["tuliprox", "--user-db-check", "db", "--input", "f"]).is_err());
+
+        assert!(Args::try_parse_from(["tuliprox", "--user-db-output", "f"]).is_err());
     }
 }

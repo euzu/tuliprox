@@ -17,22 +17,22 @@ tuliprox-repository = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
 fastrand.workspace = true
-chrono-tz = "0.10.4"
+chrono-tz.workspace = true
 futures.workspace = true
-libc = "0.2"
+libc.workspace = true
 log.workspace = true
-reqwest = { version = "0.13.5", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+reqwest = { workspace = true, features = ["default", "json", "stream", "rustls", "socks", "form", "query"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros", "sync", "process"] }
-tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
+tokio-util = { workspace = true, features = ["io", "io-util"] }
 url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 blake3.workspace = true
-tempfile = "3.27.0"
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

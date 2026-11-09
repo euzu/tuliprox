@@ -1,0 +1,21 @@
+[package]
+name = "plugin-fixture-filter-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "W5 fixture plugin: eval-filter-batch `name-contains(needle)`"
+
+# Not a member of the tuliprox workspace: it targets wasm32-wasip2 and is built
+# by bin/build_plugin_fixture.sh, never committed as a binary.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

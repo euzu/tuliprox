@@ -4,7 +4,7 @@ use super::{live_media_fixture, HlsMediaActivityCommitOutcome};
 async fn contiguous_live_completion_wakes_capacity_protection_waiters() {
     let (manager, session, proxy_session_id, lease_id, live_identity) = live_media_fixture("capacity-release").await;
     let revision = manager.segment_cache.capacity_revision();
-    let mut capacity_wait = Box::pin(manager.segment_cache.wait_for_capacity_change(&revision));
+    let mut capacity_wait = std::pin::pin!(manager.segment_cache.wait_for_capacity_change(&revision));
     assert!(matches!(futures::poll!(capacity_wait.as_mut()), std::task::Poll::Pending));
     let token = manager
         .record_access_lease_segment_request_started_if_identity_matches(

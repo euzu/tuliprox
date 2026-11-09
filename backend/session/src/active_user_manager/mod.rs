@@ -117,6 +117,8 @@ pub struct MemberBinding {
     pub member_vid: u32,
     pub member_index: usize,
     pub input_name: Arc<str>,
+    pub member_title: Arc<str>,
+    pub provider: Arc<str>,
 }
 
 #[derive(Clone, Debug)]

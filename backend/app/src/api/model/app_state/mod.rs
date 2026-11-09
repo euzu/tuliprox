@@ -22,7 +22,9 @@ mod change_detection;
 mod hls_state;
 mod http_clients;
 mod network_access;
+mod override_state;
 mod playlist_update_control;
+mod plugin_state;
 mod recording_state;
 mod reload;
 mod resource_cache;
@@ -32,13 +34,16 @@ mod test_support;
 mod tests;
 mod view;
 
+#[cfg(all(test, feature = "plugins"))]
+pub use self::test_support::create_test_plugin_system;
 #[cfg(test)]
 pub use self::test_support::{
-    create_test_app_state, create_test_app_state_with_manual_update_sender, create_test_maintenance,
+    counting_runtime, create_test_app_state, create_test_app_state_with_manual_update_sender,
+    create_test_app_state_with_plugins, create_test_maintenance,
 };
 pub use self::{
-    auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, playlist_update_control::*, recording_state::*,
-    reload::*, resource_cache::*, view::*,
+    auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, override_state::*, playlist_update_control::*,
+    plugin_state::*, recording_state::*, reload::*, resource_cache::*, view::*,
 };
 
 /// Root server state. It always lives behind one `Arc<AppState>` and is never
@@ -64,9 +69,14 @@ pub struct AppState {
     pub metadata_manager: Arc<MetadataUpdateManager>,
     pub auth: AuthState,
     pub playlist_updates: PlaylistUpdateControl,
+    /// Manual override files and the applied-revision store, shared by every request.
+    pub overrides: OverrideState,
     /// Inputs taken out of service; read on every new stream request.
     pub maintenance: Arc<MaintenanceRegistry>,
     pub member_health: Arc<tuliprox_session::MemberHealthIndex>,
+    pub failover_switch_registry: Arc<crate::api::api_utils::failover_group_runtime::FailoverSwitchRegistry>,
+    /// Plugin hooks handed to every playlist update this server runs.
+    pub plugins: AppPlugins,
 }
 
 impl AppState {

@@ -1,11 +1,8 @@
-use super::{
-    input_type_label_key,
-    processing::{processing_stages, PlaylistProcessingStage},
-};
+use super::{input_type_label_key, processing::PlaylistProcessingStage};
 use crate::{
     app::components::{
         popup_menu::{PopupMenuPlacement, PopupMenuWidth},
-        Card, DropDownOption, DropDownSelection, PlaylistProcessing, Select, TextButton, TitledCard,
+        Card, DropDownOption, DropDownSelection, NoContent, PlaylistProcessing, Select, TextButton,
     },
     error::Error,
     hooks::use_service_context,
@@ -29,6 +26,9 @@ use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 use yew::{platform::spawn_local, prelude::*};
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod browser_fixture;
 
 const POLICY_NORMAL: &str = "normal";
 const POLICY_REFRESH: &str = "refresh";
@@ -100,8 +100,8 @@ impl InputUpdateCardInteractionState {
 }
 
 enum InputUpdateCardAction {
-    /// A target button is a selection, not a toggle: it selects only this target.
-    SelectTarget(u16),
+    /// Toggle only this stable target ID.
+    ToggleTarget(u16),
     /// "All" is a selection, not a toggle: it always selects every target.
     SelectAll(Vec<u16>),
     SelectPolicy(InputRefreshPolicy),
@@ -132,8 +132,12 @@ fn reduce_input_update_card_state(
     action: InputUpdateCardAction,
 ) -> InputUpdateCardInteractionState {
     match action {
-        InputUpdateCardAction::SelectTarget(target_id) if !state.is_submitting() => {
-            state.controls.selected_target_ids = vec![target_id];
+        InputUpdateCardAction::ToggleTarget(target_id) if !state.is_submitting() => {
+            if state.controls.selected_target_ids.contains(&target_id) {
+                state.controls.selected_target_ids.retain(|id| *id != target_id);
+            } else {
+                state.controls.selected_target_ids.push(target_id);
+            }
         }
         InputUpdateCardAction::SelectAll(target_ids) if !state.is_submitting() => {
             state.controls.selected_target_ids = target_ids;
@@ -157,7 +161,7 @@ fn reduce_input_update_card_state(
                 state.controls.policy = InputRefreshPolicy::NORMAL;
             }
         }
-        InputUpdateCardAction::SelectTarget(_)
+        InputUpdateCardAction::ToggleTarget(_)
         | InputUpdateCardAction::SelectAll(_)
         | InputUpdateCardAction::SelectPolicy(_)
         | InputUpdateCardAction::BeginSubmission(_)
@@ -354,18 +358,22 @@ fn cluster_summary_status(cluster: &InputClusterRunView) -> ClusterSummaryStatus
         (Some(InputClusterOutcomeView::TechnicalError), _) => ClusterSummaryStatus::TechnicalError,
         (Some(InputClusterOutcomeView::Rejected), _) => ClusterSummaryStatus::Rejected,
         (_, Some(InputDataSourceView::Cache)) => ClusterSummaryStatus::Cached,
-        (Some(InputClusterOutcomeView::Accepted), _) => ClusterSummaryStatus::Accepted,
-        (None, Some(InputDataSourceView::Provider))
-            if cluster.technical_state == Some(PersistedPlaylistUpdateTechnicalState::Succeeded) =>
+        (Some(InputClusterOutcomeView::Accepted), _)
+            if cluster.technical_state.is_none() && cluster.persisted_status.is_none() =>
         {
+            ClusterSummaryStatus::Unavailable
+        }
+        (Some(InputClusterOutcomeView::Accepted), _) => ClusterSummaryStatus::Accepted,
+        (None, _) if cluster.technical_state == Some(PersistedPlaylistUpdateTechnicalState::Succeeded) => {
             ClusterSummaryStatus::Accepted
         }
-        (None, Some(InputDataSourceView::Provider)) => ClusterSummaryStatus::Unavailable,
-        (None, None) => match cluster.persisted_status.map(|persisted| persisted.status) {
-            Some(PersistedPlaylistUpdateClusterState::Ok) => ClusterSummaryStatus::PersistedOk,
-            Some(PersistedPlaylistUpdateClusterState::Failed) => ClusterSummaryStatus::PersistedFailed,
-            None => ClusterSummaryStatus::Unavailable,
-        },
+        (None, Some(InputDataSourceView::Provider) | None) => {
+            match cluster.persisted_status.map(|persisted| persisted.status) {
+                Some(PersistedPlaylistUpdateClusterState::Ok) => ClusterSummaryStatus::PersistedOk,
+                Some(PersistedPlaylistUpdateClusterState::Failed) => ClusterSummaryStatus::PersistedFailed,
+                None => ClusterSummaryStatus::Unavailable,
+            }
+        }
     }
 }
 
@@ -495,13 +503,95 @@ fn detail_row(label: String, value: String) -> Html {
     }
 }
 
+fn population_difference(previous: Option<usize>, candidate: Option<usize>) -> Option<String> {
+    let (previous, candidate) = previous.zip(candidate)?;
+    match candidate.cmp(&previous) {
+        std::cmp::Ordering::Less => Some(format!("−{}", previous - candidate)),
+        std::cmp::Ordering::Greater => Some(format!("+{}", candidate - previous)),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+fn population_details(cluster: &InputClusterRunView, translate: &impl Fn(&str) -> String) -> Html {
+    let counts = [
+        ("MESSAGES.PLAYLIST_UPDATE.BASELINE", cluster.baseline_count),
+        ("MESSAGES.PLAYLIST_UPDATE.CANDIDATE", cluster.candidate_count),
+        ("MESSAGES.PLAYLIST_UPDATE.ACTIVE_POPULATION", cluster.active_count),
+    ];
+    if counts.iter().all(|(_, value)| value.is_none()) {
+        return Html::default();
+    }
+    let difference = population_difference(cluster.baseline_count, cluster.candidate_count);
+    html! {
+        <dl class="tp__playlist-update-view__population">
+            {for counts.into_iter().filter_map(|(label, value)| value.map(|value| html! {
+                <div>
+                    <dt>{translate(label)}</dt>
+                    <dd>
+                        <bdi dir="ltr">{value}</bdi>
+                        if label == "MESSAGES.PLAYLIST_UPDATE.CANDIDATE" {
+                            if let Some(difference) = &difference {
+                                <span class="tp__playlist-update-view__population-difference" role="img"
+                                    aria-label={translate("MESSAGES.PLAYLIST_UPDATE.POPULATION_DIFFERENCE")
+                                        .replace("{difference}", difference)}>
+                                    <bdi dir="ltr">{difference}</bdi>
+                                </span>
+                            }
+                        }
+                    </dd>
+                </div>
+            }))}
+        </dl>
+    }
+}
+
+fn has_quality_graph(cluster: &InputClusterRunView, policy: Option<InputRefreshPolicy>) -> bool {
+    matches!(quality_presentation(cluster, policy), Some(QualityPresentation::Evaluated { threshold: 1.., .. }))
+        && !policy.is_some_and(InputRefreshPolicy::bypasses_quality)
+}
+
 fn quality_details(
     cluster: &InputClusterRunView,
     policy: Option<InputRefreshPolicy>,
     translate: &impl Fn(&str) -> String,
 ) -> Html {
-    match quality_presentation(cluster, policy) {
-        None => Html::default(),
+    let presentation = quality_presentation(cluster, policy);
+    if let Some(QualityPresentation::Evaluated { threshold, quality, identical_population_required }) = presentation {
+        if has_quality_graph(cluster, policy) {
+            let modifier = match cluster.outcome {
+                Some(InputClusterOutcomeView::Accepted) => "tp__playlist-update-view__quality-visual--accepted",
+                Some(InputClusterOutcomeView::Rejected) => "tp__playlist-update-view__quality-visual--rejected",
+                _ => "tp__playlist-update-view__quality-visual--neutral",
+            };
+            let marker = f64::from(threshold.min(100)).clamp(0.2, 99.8).to_string();
+            return html! {
+                <div class={classes!("tp__playlist-update-view__quality-visual", modifier)}>
+                    <dl class="tp__playlist-update-view__quality-pair">
+                        {detail_row(translate("MESSAGES.PLAYLIST_UPDATE.QUALITY_ACHIEVED"), format!("{quality}%"))}
+                        {detail_row(translate("MESSAGES.PLAYLIST_UPDATE.QUALITY_THRESHOLD"), format!("{threshold}%"))}
+                    </dl>
+                    <svg class="tp__playlist-update-view__quality-chart" viewBox="0 0 100 11"
+                        preserveAspectRatio="none" role="img"
+                        aria-label={translate("MESSAGES.PLAYLIST_UPDATE.QUALITY_GRAPH_LABEL")
+                            .replace("{quality}", &quality.to_string()).replace("{threshold}", &threshold.to_string())}>
+                        <rect class="tp__playlist-update-view__quality-track" x="0" y="3" width="100" height="5" rx="0.5" />
+                        <rect class="tp__playlist-update-view__quality-fill" x="0" y="3"
+                            width={quality.min(100).to_string()} height="5" rx="0.5" />
+                        <line class="tp__playlist-update-view__quality-threshold" x1={marker.clone()} x2={marker}
+                            y1="0" y2="11" vector-effect="non-scaling-stroke" />
+                    </svg>
+                    if identical_population_required {
+                        <dl class="tp__playlist-update-view__secondary-facts">
+                            {detail_row(translate("MESSAGES.PLAYLIST_UPDATE.REQUIRED"),
+                                translate("MESSAGES.PLAYLIST_UPDATE.IDENTICAL_POPULATION"))}
+                        </dl>
+                    }
+                </div>
+            };
+        }
+    }
+    let facts = match presentation {
+        None => return Html::default(),
         Some(QualityPresentation::Bypassed) => detail_row(
             translate("MESSAGES.PLAYLIST_UPDATE.QUALITY_GUARD"),
             translate("MESSAGES.PLAYLIST_UPDATE.QUALITY_BYPASSED"),
@@ -518,14 +608,16 @@ fn quality_details(
         }
         Some(QualityPresentation::Evaluated { threshold, quality, identical_population_required }) => html! {
             <>
+                if policy.is_some_and(InputRefreshPolicy::bypasses_quality) {
+                    {detail_row(translate("MESSAGES.PLAYLIST_UPDATE.QUALITY_GUARD"),
+                        translate("MESSAGES.PLAYLIST_UPDATE.QUALITY_BYPASSED"))}
+                }
                 {quality_threshold_details(threshold, identical_population_required, translate)}
-                {detail_row(
-                    translate("MESSAGES.PLAYLIST_UPDATE.QUALITY_ACHIEVED"),
-                    format!("{quality}%"),
-                )}
+                {detail_row(translate("MESSAGES.PLAYLIST_UPDATE.QUALITY_ACHIEVED"), format!("{quality}%"))}
             </>
         },
-    }
+    };
+    facts
 }
 
 fn quality_threshold_details(
@@ -581,7 +673,9 @@ fn cluster_details(
     });
 
     html! {
-        <section class="tp__playlist-update-view__cluster-detail" aria-labelledby={heading_id.clone()}>
+        <section class={classes!("tp__playlist-update-view__cluster-detail",
+            (cluster.outcome == Some(InputClusterOutcomeView::Rejected)).then_some("tp__playlist-update-view__cluster-detail--quality-rejected"))}
+            aria-labelledby={heading_id.clone()}>
             <header>
                 <h4 id={heading_id}>{translate(cluster_label_key(cluster.cluster))}</h4>
                 <span class={classes!("tp__playlist-update-view__pipeline-status", status.modifier())}>
@@ -589,26 +683,20 @@ fn cluster_details(
                     {translate(status.label_key())}
                 </span>
             </header>
-            <dl>
+            {population_details(cluster, translate)}
+            if has_quality_graph(cluster, policy) {
+                {quality_details(cluster, policy, translate)}
+            }
+            <dl class="tp__playlist-update-view__secondary-facts">
+                if !has_quality_graph(cluster, policy) {
+                    {quality_details(cluster, policy, translate)}
+                }
                 if cluster.persisted_status.is_some_and(|persisted| persisted.last_update.is_some()) {
                     if let Some(policy) = policy {
-                        {detail_row(
-                            translate("MESSAGES.PLAYLIST_UPDATE.MODE"),
-                            translate(policy_label_key(policy)),
-                        )}
+                        {detail_row(translate("MESSAGES.PLAYLIST_UPDATE.MODE"), translate(policy_label_key(policy)))}
                     }
                 }
-                if let Some(count) = cluster.baseline_count {
-                    {detail_row(translate("MESSAGES.PLAYLIST_UPDATE.BASELINE"), count.to_string())}
-                }
-                if let Some(count) = cluster.candidate_count {
-                    {detail_row(translate("MESSAGES.PLAYLIST_UPDATE.CANDIDATE"), count.to_string())}
-                }
-                if let Some(count) = cluster.active_count {
-                    {detail_row(translate("MESSAGES.PLAYLIST_UPDATE.ACTIVE_POPULATION"), count.to_string())}
-                }
-                {quality_details(cluster, policy, translate)}
-                if let Some(outcome) = outcome {
+                if let Some(outcome) = outcome.filter(|outcome| *outcome != status) {
                     {detail_row(
                         translate(if outcome == ClusterSummaryStatus::TechnicalError {
                             "LABEL.STATUS"
@@ -616,13 +704,6 @@ fn cluster_details(
                             "MESSAGES.PLAYLIST_UPDATE.DECISION"
                         }),
                         translate(outcome.label_key()),
-                    )}
-                }
-                if cluster.technical_state == Some(PersistedPlaylistUpdateTechnicalState::Failed)
-                    && outcome != Some(ClusterSummaryStatus::TechnicalError) {
-                    {detail_row(
-                        translate("LABEL.STATUS"),
-                        translate(ClusterSummaryStatus::TechnicalError.label_key()),
                     )}
                 }
                 {cache_details(cluster.source, policy, translate)}
@@ -647,41 +728,76 @@ const fn target_stage_summary(stage: PlaylistProcessingStage, pipeline: TargetPi
     }
 }
 
+fn target_column_id(input_id: u16, column: &str) -> String { format!("input-update-card-{input_id}-pipeline-{column}") }
+
 fn target_pipeline_details(input_id: u16, target: &TargetRunView, translate: &impl Fn(&str) -> String) -> Html {
     let heading_id = format!("input-update-card-{input_id}-target-{}-pipeline", target.target_id);
-
     html! {
-        <article
-            key={target.target_id}
-            class="tp__playlist-update-view__target-detail"
-            aria-labelledby={heading_id.clone()}
-        >
-            <header>
-                <h5 id={heading_id}>{target.target_name.as_str()}</h5>
-            </header>
+        <tr key={target.target_id} role="row" data-target-id={target.target_id.to_string()}
+            class={classes!("tp__playlist-update-view__target-detail",
+                target.pipeline.is_none().then_some("tp__playlist-update-view__target-detail--unavailable"))}>
+            <th id={heading_id.clone()} scope="row" role="rowheader"
+                headers={target_column_id(input_id, "target")}>
+                {target.target_name.as_str()}
+            </th>
             if let Some(pipeline) = target.pipeline {
-                <div class="tp__playlist-update-view__target-processing-order">
-                    <span>{translate("LABEL.PROCESSING_ORDER")}</span>
+                <td role="cell" headers={format!("{} {}", heading_id, target_column_id(input_id, "order"))}>
+                    <span class="tp__playlist-update-view__mobile-label" aria-hidden="true">
+                        {translate("MESSAGES.PLAYLIST_UPDATE.TARGET_ORDER")}
+                    </span>
                     <PlaylistProcessing order={pipeline.processing_order} />
-                </div>
-                <dl>
-                    {for processing_stages(pipeline.processing_order).into_iter().map(|stage| {
-                        let summary = target_stage_summary(stage, pipeline);
-                        detail_row(
-                            translate(target_stage_label_key(stage)),
-                            count_message(
-                                translate("MESSAGES.PLAYLIST_UPDATE.CONFIGURED_COUNT"),
-                                summary.configured_count,
-                            ),
-                        )
+                </td>
+                {for [PlaylistProcessingStage::Filter, PlaylistProcessingStage::Rename, PlaylistProcessingStage::Mapping]
+                    .into_iter().map(|stage| {
+                        let key = match stage {
+                            PlaylistProcessingStage::Filter => "filter",
+                            PlaylistProcessingStage::Rename => "rename",
+                            PlaylistProcessingStage::Mapping => "mapping",
+                        };
+                        html! {
+                            <td class="tp__playlist-update-view__rule-value" role="cell"
+                                headers={format!("{} {}", heading_id, target_column_id(input_id, key))}>
+                                <span class="tp__playlist-update-view__mobile-label" aria-hidden="true">
+                                    {translate(target_stage_label_key(stage))}
+                                </span>
+                                <bdi dir="ltr">{target_stage_summary(stage, pipeline).configured_count}</bdi>
+                            </td>
+                        }
                     })}
-                </dl>
             } else {
-                <p class="tp__playlist-update-view__target-pipeline-unavailable">
+                <td colspan="4" role="cell" class="tp__playlist-update-view__target-pipeline-unavailable">
                     {translate("MESSAGES.PLAYLIST_UPDATE.DATA_UNAVAILABLE")}
-                </p>
+                </td>
             }
-        </article>
+        </tr>
+    }
+}
+
+fn target_details(view: &InputUpdateRunView, heading_id: String, translate: &impl Fn(&str) -> String) -> Html {
+    let rules_id = format!("{heading_id}-rules");
+    html! {
+        <section class="tp__playlist-update-view__target-details" aria-labelledby={heading_id.clone()}>
+            <header>
+                <h4 id={heading_id.clone()}>{translate("LABEL.TARGETS")}</h4>
+                <span id={rules_id.clone()} class="tp__playlist-update-view__target-subtitle">
+                    {translate("MESSAGES.PLAYLIST_UPDATE.CONFIGURED_RULES")}
+                </span>
+            </header>
+            <table class="tp__playlist-update-view__target-table" role="table"
+                aria-labelledby={heading_id} aria-describedby={rules_id}>
+                <colgroup><col /><col /><col /><col /><col /></colgroup>
+                <thead role="rowgroup"><tr role="row">
+                    {for [("target", "LABEL.TARGET"), ("order", "MESSAGES.PLAYLIST_UPDATE.TARGET_ORDER"),
+                        ("filter", "LABEL.FILTER"), ("rename", "LABEL.RENAME"), ("mapping", "LABEL.MAPPING")]
+                        .into_iter().map(|(column, label)| html! {
+                            <th id={target_column_id(view.input_id, column)} scope="col" role="columnheader">{translate(label)}</th>
+                        })}
+                </tr></thead>
+                <tbody role="rowgroup">
+                    {for view.target_results.iter().map(|target| target_pipeline_details(view.input_id, target, translate))}
+                </tbody>
+            </table>
+        </section>
     }
 }
 
@@ -730,6 +846,7 @@ fn input_content(
     capabilities: InputUpdateCapabilities,
     last_update: Html,
     targets: Html,
+    actions: Html,
     translate: impl Fn(&str) -> String,
 ) -> Html {
     let pipeline_summary_heading_id = format!("input-update-card-{}-pipeline-summary", view.input_id);
@@ -741,6 +858,7 @@ fn input_content(
     html! {
         <div class="tp__playlist-update-view__input-content">
             {last_update}
+            <div class="tp__playlist-update-view__input-facts">
             <section
                 class="tp__playlist-update-view__pipeline-summary"
                 aria-labelledby={pipeline_summary_heading_id.clone()}
@@ -788,6 +906,8 @@ fn input_content(
                 </div>
             </section>
             {targets}
+            </div>
+            {actions}
             <details class="tp__playlist-update-view__update-details">
                 <summary>{translate("MESSAGES.PLAYLIST_UPDATE.UPDATE_DETAILS")}</summary>
                 <div class="tp__playlist-update-view__update-details-body">
@@ -835,17 +955,7 @@ fn input_content(
                         </section>
                     }
                     if !view.target_results.is_empty() {
-                        <section
-                            class="tp__playlist-update-view__target-details"
-                            aria-labelledby={target_pipeline_heading_id.clone()}
-                        >
-                            <h4 id={target_pipeline_heading_id.clone()}>{translate("LABEL.TARGETS")}</h4>
-                            <div class="tp__playlist-update-view__target-details-list">
-                                {for view.target_results.iter().map(|target| {
-                                    target_pipeline_details(view.input_id, target, &translate)
-                                })}
-                            </div>
-                        </section>
+                        {target_details(view, target_pipeline_heading_id.clone(), &translate)}
                     }
                 </div>
             </details>
@@ -1065,9 +1175,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                         <section class="tp__playlist-update-view__input-targets">
                             <h3 id={target_group_heading_id.clone()}>{translate.t("LABEL.AFFECTED_TARGETS")}</h3>
                             if view.target_results.is_empty() {
-                                <p class="tp__playlist-update-view__empty-targets">
-                                    {translate.t("MESSAGES.PLAYLIST_UPDATE.NO_TARGETS_ASSIGNED")}
-                                </p>
+                                <NoContent text={translate.t("MESSAGES.PLAYLIST_UPDATE.NO_TARGETS_ASSIGNED")} />
                             } else {
                                 <div
                                     class="tp__playlist-update-view__target-toggles"
@@ -1103,7 +1211,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                                 aria_label={Some(target.target_name.clone())}
                                                 aria_pressed={Some(selection.aria_pressed().to_string())}
                                                 disabled={state.is_submitting() || !model.capabilities.rebuilds_targets()}
-                                                onclick={move |_| state.dispatch(InputUpdateCardAction::SelectTarget(target_id))}
+                                                onclick={move |_| state.dispatch(InputUpdateCardAction::ToggleTarget(target_id))}
                                             />
                                         }
                                     })}
@@ -1111,11 +1219,10 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                             }
                         </section>
                         },
-                        |key| translate.t(key),
-                    )}
-                    <section class="tp__playlist-update-view__input-actions">
+                        html! {
+                    <div class="tp__playlist-update-view__action-area">
+                        <div class="tp__playlist-update-view__input-actions">
                         <div class="tp__playlist-update-view__policy-control">
-                            <span class="tp__playlist-update-view__action-label">{action_label}</span>
                             if model.capabilities.rebuilds_targets() {
                                 <Select
                                     name={select_label}
@@ -1137,13 +1244,6 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                 />
                             }
                         </div>
-                        <div class="tp__playlist-update-view__policy-notes">
-                            <TitledCard title={translate.t("LABEL.NOTES")}>
-                                <p id={policy_description_id} class="tp__playlist-update-view__policy-description" aria-live="polite">
-                                    {policy_description}
-                                </p>
-                            </TitledCard>
-                        </div>
                         if model.capabilities.rebuilds_targets() {
                             <TextButton
                                 name={format!("input_update_{}", model.input_id)}
@@ -1155,7 +1255,18 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                 onclick={on_start}
                             />
                         }
-                    </section>
+                        </div>
+                        <p id={policy_description_id} class={classes!(
+                            "tp__playlist-update-view__policy-description",
+                            effective_policy.bypasses_quality().then_some("tp__playlist-update-view__policy-description--warning"),
+                        )} aria-live="polite">
+                            {policy_description}
+                        </p>
+                    </div>
+                        },
+                        |key| translate.t(key),
+                    )}
+
                 </div>
             </article>
         </Card>
@@ -1240,6 +1351,10 @@ mod tests {
         assert_eq!(cluster_summary_status(&cluster), ClusterSummaryStatus::Unavailable);
 
         cluster.outcome = Some(InputClusterOutcomeView::Accepted);
+        assert_eq!(cluster_summary_status(&cluster), ClusterSummaryStatus::Unavailable);
+        cluster.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Succeeded);
+        assert_eq!(cluster_summary_status(&cluster), ClusterSummaryStatus::Accepted);
+        cluster.outcome = None;
         assert_eq!(cluster_summary_status(&cluster), ClusterSummaryStatus::Accepted);
         cluster.source = Some(InputDataSourceView::Cache);
         assert_eq!(cluster_summary_status(&cluster), ClusterSummaryStatus::Cached);
@@ -1314,7 +1429,10 @@ mod tests {
             last_update: Some(snapshot),
         });
 
-        assert_eq!(cluster_summary_status(&cluster), ClusterSummaryStatus::TechnicalError);
+        for general in [PersistedPlaylistUpdateClusterState::Ok, PersistedPlaylistUpdateClusterState::Failed] {
+            cluster.persisted_status.as_mut().unwrap().status = general;
+            assert_eq!(cluster_summary_status(&cluster), ClusterSummaryStatus::TechnicalError);
+        }
         assert_eq!(cluster.outcome, Some(InputClusterOutcomeView::Accepted));
         assert_eq!(cluster.active_count, None);
         assert_eq!(
@@ -1403,6 +1521,7 @@ mod tests {
     fn pipeline_transparency_model_runtime_request_state_controls_cluster_presentation() {
         let mut cluster = cluster_view(XtreamCluster::Live);
         cluster.outcome = Some(InputClusterOutcomeView::Accepted);
+        cluster.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Succeeded);
         cluster.requested = Some(false);
 
         assert_eq!(cluster_summary_status(&cluster), ClusterSummaryStatus::NotRequested);
@@ -1454,6 +1573,7 @@ mod tests {
 
     #[test]
     fn playlist_update_view_pipeline_transparency_target_uses_real_order_and_configured_counts() {
+        use super::super::processing::processing_stages;
         use PlaylistProcessingStage::{Filter, Mapping, Rename};
 
         let pipeline = TargetPipelineView {
@@ -1467,30 +1587,18 @@ mod tests {
 
         assert_eq!(ordered, [(Mapping, 3), (Filter, 2), (Rename, 0)]);
 
-        let source = include_str!("input_update_card.rs").split("#[cfg(test)]").next().expect("card component");
-        let disclosure = source.split_once("<details class=\"tp__playlist-update-view__update-details\">").unwrap().1;
-        let target_details = disclosure.split_once("if !view.target_results.is_empty()").unwrap().1;
-        let target_renderer =
-            source.split_once("fn target_pipeline_details").unwrap().1.split_once("fn policy_options").unwrap().0;
-        assert!(target_details.contains("target_pipeline_details(view.input_id, target, &translate)"));
-        assert!(target_renderer.contains("key={target.target_id}"));
-        assert!(target_renderer.contains("target-{}-pipeline\", target.target_id"));
-        assert!(target_renderer.contains("<PlaylistProcessing order={pipeline.processing_order} />"));
-        assert!(target_renderer.contains("processing_stages(pipeline.processing_order)"));
-        assert!(target_renderer.contains("MESSAGES.PLAYLIST_UPDATE.CONFIGURED_COUNT"));
-        assert!(target_renderer.contains("summary.configured_count"));
-        assert!(target_renderer.contains("if let Some(pipeline) = target.pipeline"));
-        assert!(target_renderer.contains("MESSAGES.PLAYLIST_UPDATE.DATA_UNAVAILABLE"));
-        for unsupported_runtime_claim in [
-            "matched_count",
-            "changed_count",
-            "removed_count",
-            "output_count",
-            "overall_state",
-            "cluster_summary_status",
-        ] {
-            assert!(!target_renderer.contains(unsupported_runtime_claim));
-        }
+        let target = TargetRunView {
+            target_id: 11,
+            target_name: "same-name".into(),
+            input_ids: vec![17],
+            pipeline: Some(pipeline),
+        };
+        let rendered = format!("{:?}", target_pipeline_details(17, &target, &str::to_string));
+        assert!(rendered.contains("input-update-card-17-target-11-pipeline"));
+        assert!(rendered.contains("same-name") && !rendered.contains("DATA_UNAVAILABLE"));
+        let unknown = TargetRunView { pipeline: None, ..target };
+        let unavailable = format!("{:?}", target_pipeline_details(17, &unknown, &str::to_string));
+        assert!(unavailable.contains("DATA_UNAVAILABLE") && !unavailable.contains("rule-value"));
     }
 
     #[test]
@@ -1774,25 +1882,27 @@ mod tests {
     }
 
     #[test]
-    fn playlist_update_view_target_buttons_select_one_target_and_all_selects_every_target() {
+    fn playlist_update_view_target_buttons_toggle_independently_and_all_is_idempotent() {
+        let model = card(7, &[1, 2, 3]);
         let targets = vec![1, 2, 3];
-        let initial = InputUpdateCardInteractionState::from_model(&card(7, &targets));
-        assert_eq!(target_selection_state(&initial.controls.selected_target_ids, &targets), TargetSelectionState::All);
-
-        // A target button selects only that target, also when it was already selected.
-        let single = reduce(initial, InputUpdateCardAction::SelectTarget(2));
-        assert_eq!(single.controls.selected_target_ids, vec![2]);
-        let still_single = reduce(single.clone(), InputUpdateCardAction::SelectTarget(2));
-        assert_eq!(still_single.controls.selected_target_ids, vec![2]);
-        let other = reduce(still_single, InputUpdateCardAction::SelectTarget(3));
-        assert_eq!(other.controls.selected_target_ids, vec![3]);
-        assert_eq!(target_selection_state(&other.controls.selected_target_ids, &targets), TargetSelectionState::Mixed);
-
-        // "All" always selects every target; clicking it again keeps them selected.
-        let all = reduce(other, InputUpdateCardAction::SelectAll(targets.clone()));
-        assert_eq!(all.controls.selected_target_ids, targets);
-        let still_all = reduce(all, InputUpdateCardAction::SelectAll(targets.clone()));
-        assert_eq!(still_all.controls.selected_target_ids, targets);
+        let mut state = InputUpdateCardInteractionState::from_model(&model);
+        for (id, expected) in [(2, vec![1, 3]), (1, vec![3]), (3, vec![]), (1, vec![1]), (3, vec![1, 3])] {
+            state = reduce(state, InputUpdateCardAction::ToggleTarget(id));
+            assert_eq!(selected_current_target_ids(&model, &state.controls.selected_target_ids), expected);
+            assert_eq!(can_start_update(&state, &model, true), !expected.is_empty());
+            assert_eq!(
+                target_selection_state(&state.controls.selected_target_ids, &targets),
+                if expected.is_empty() { TargetSelectionState::Empty } else { TargetSelectionState::Mixed }
+            );
+        }
+        for _ in 0..2 {
+            state = reduce(state, InputUpdateCardAction::SelectAll(targets.clone()));
+            assert_eq!(state.controls.selected_target_ids, targets);
+            assert_eq!(
+                target_selection_state(&state.controls.selected_target_ids, &targets),
+                TargetSelectionState::All
+            );
+        }
     }
 
     #[test]
@@ -1821,9 +1931,9 @@ mod tests {
         let first = InputUpdateCardInteractionState::from_model(&card(7, &[1, 2]));
         let second = InputUpdateCardInteractionState::from_model(&card(8, &[3, 4]));
 
-        let first = reduce(first, InputUpdateCardAction::SelectTarget(2));
+        let first = reduce(first, InputUpdateCardAction::ToggleTarget(2));
 
-        assert_eq!(first.controls.selected_target_ids, vec![2]);
+        assert_eq!(first.controls.selected_target_ids, vec![1]);
         assert_eq!(second.controls.selected_target_ids, vec![3, 4]);
     }
 
@@ -1982,6 +2092,7 @@ mod tests {
     {
         for source in [
             include_str!("../../../../public/assets/i18n/en.json"),
+            include_str!("../../../../public/assets/i18n/es.json"),
             include_str!("../../../../public/assets/i18n/ru.json"),
             include_str!("../../../../public/assets/i18n/ar.json"),
         ] {

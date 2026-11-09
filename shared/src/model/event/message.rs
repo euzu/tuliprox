@@ -6,10 +6,10 @@ use crate::model::{
     ActiveUserConnectionChange, CapacityTier, CircuitState, ConfigReloadFailure, ConfigType, ConnectionDenied,
     DiskAlert, LibraryScanProgressEvent, LibraryScanSummaryStatus, MaintenanceEntries, MetadataUpdateFailure, MsgKind,
     NotificationDeadLetter, Permission, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
-    PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted,
-    ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent,
-    ServerLifecycleState, StreamProbeFailure, SwitchReason, SystemInfo, UserLifecycleEvent, UserLifecycleState,
-    WatchChanges, WatchDisabled, WatchUnmatched,
+    PlaylistUpdateState, PluginUpdateEvent, PluginUpdateOutcome, ProviderAccountEvent, ProviderAccountState,
+    ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage,
+    ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SwitchReason, SystemInfo,
+    UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -88,6 +88,10 @@ pub enum EventMessage {
 
     /// A scheduled task could not complete.
     ScheduledTaskFailed(ScheduledTaskFailure),
+
+    /// A marketplace update of an installed plugin was staged for review,
+    /// applied, or failed. One variant, three kinds - see [`EventMessage::kind`].
+    PluginUpdate(PluginUpdateEvent),
 
     /// A notification ran out of delivery attempts and was dropped.
     ///
@@ -193,6 +197,11 @@ impl EventMessage {
             Self::StreamProbeFailed(_) => EventKind::StreamProbeFailed,
             Self::NotificationDeadLettered(_) => EventKind::NotificationDeadLettered,
             Self::ScheduledTaskFailed(_) => EventKind::ScheduledTaskFailed,
+            Self::PluginUpdate(event) => match event.outcome {
+                PluginUpdateOutcome::Available => EventKind::PluginUpdateAvailable,
+                PluginUpdateOutcome::Applied => EventKind::PluginUpdateApplied,
+                PluginUpdateOutcome::Failed => EventKind::PluginUpdateFailed,
+            },
             Self::AuthAudit(event) => match event.outcome {
                 AuthAuditOutcome::SignInSucceeded => EventKind::AuthSignInSucceeded,
                 AuthAuditOutcome::SignInFailed => EventKind::AuthSignInFailed,
@@ -290,6 +299,11 @@ impl EventMessage {
             Self::StreamProbeFailed(_) => registry::STREAM_PROBE_FAILED,
             Self::NotificationDeadLettered(_) => registry::NOTIFICATION_DEAD_LETTERED,
             Self::ScheduledTaskFailed(_) => registry::SCHEDULED_TASK_FAILED,
+            Self::PluginUpdate(event) => match event.outcome {
+                PluginUpdateOutcome::Available => registry::PLUGIN_UPDATE_AVAILABLE,
+                PluginUpdateOutcome::Applied => registry::PLUGIN_UPDATE_APPLIED,
+                PluginUpdateOutcome::Failed => registry::PLUGIN_UPDATE_FAILED,
+            },
             Self::AuthAudit(event) => match event.outcome {
                 AuthAuditOutcome::SignInSucceeded => registry::AUTH_SIGN_IN_SUCCEEDED,
                 AuthAuditOutcome::SignInFailed => registry::AUTH_SIGN_IN_FAILED,
@@ -363,6 +377,7 @@ impl EventMessage {
             Self::StreamProbeFailed(failure) => encode(failure),
             Self::NotificationDeadLettered(dead_letter) => encode(dead_letter),
             Self::ScheduledTaskFailed(failure) => encode(failure),
+            Self::PluginUpdate(event) => encode(event),
             Self::AuthAudit(event) => encode(event),
             Self::FailoverGroupMemberSelected { target_id, group_vid, member_vid, tier } => {
                 serde_json::json!({

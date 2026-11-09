@@ -1,0 +1,13 @@
+server:
+  - name: default
+    protocol: http
+    host: 127.0.0.1
+    port: 18980
+    timezone: UTC
+    message: matrix-notifier demo
+user:
+  - target: demo
+    credentials:
+      - username: u
+        password: p
+        proxy: reverse

@@ -2,7 +2,9 @@
 
 use super::draft::GroupRef;
 use crate::{
-    app::components::{select::Select, selection_first, AppIcon, Chip, DropDownOption, DropDownSelection, Search},
+    app::components::{
+        select::Select, selection_first, AppIcon, Chip, DropDownOption, DropDownSelection, NoContent, Search,
+    },
     i18n::use_translation,
 };
 use shared::model::{
@@ -246,7 +248,7 @@ pub fn GroupList(props: &GroupListProps) -> Html {
                     }
                 }) }
                 if visible.is_empty() {
-                    <li class="tp__failover-groups__list-empty">{ translate.t("LABEL.NO_CONTENT") }</li>
+                    <li class="tp__failover-groups__list-empty"><NoContent text={translate.t("LABEL.NO_CONTENT")} /></li>
                 }
             </ul>
         </div>

@@ -24,6 +24,7 @@ async fn stable_recording_route_rejects_target_and_input_from_different_sources(
         ConfigSource {
             inputs: vec!["input-a".intern()],
             targets: vec![Arc::new(ConfigTarget {
+                managed_channels: Vec::new(),
                 curation: None,
                 id: 11,
                 enabled: true,
@@ -75,6 +76,7 @@ fn recording_target_resolution_uses_stable_name_and_input_across_runtime_ids() {
     let input_b = Arc::new(ConfigInput { id: 8, name: "input-b".intern(), ..Default::default() });
     let target = |id, name: &str| {
         Arc::new(ConfigTarget {
+            managed_channels: Vec::new(),
             curation: None,
             id,
             enabled: true,

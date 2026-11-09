@@ -5,6 +5,8 @@ use super::{
     *,
 };
 
+/// Prepares the origin account runtime for HLS origin work. A healthy known binding is reused without the
+/// prepare lock; otherwise the locked path rebinds or acquires an account.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn prepare_hls_origin_runtime(
     app_state: &Arc<AppState>,
@@ -50,7 +52,7 @@ pub(super) async fn prepare_hls_origin_runtime(
                 session_entry_url,
                 &binding,
             )
-            .await;
+            .await?;
             let mut current = session.write().await;
             if !current.is_gc_marked_for_removal() && observed.matches_session(&current) {
                 if current.origin_account_runtime.is_none() {
@@ -204,6 +206,7 @@ async fn advance_hls_origin_account_lifecycle(app_state: &Arc<AppState>, session
     reclaim_hls_account_overlap_if_needed(app_state, session, now_ms).await;
 }
 
+/// Under the prepare lock: reuses a known binding, rebinds a stale one, or acquires a new account.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn prepare_hls_origin_runtime_locked(
     app_state: &Arc<AppState>,
@@ -261,14 +264,14 @@ async fn prepare_hls_origin_runtime_locked(
                     .await;
                 }
                 HlsOriginAccountStatus::Known => {
-                    return Ok(prepared_hls_origin_runtime_for_known_binding(
+                    return prepared_hls_origin_runtime_for_known_binding(
                         app_state,
                         input,
                         raw_request_url,
                         session_entry_url,
                         &binding,
                     )
-                    .await);
+                    .await;
                 }
             }
         }

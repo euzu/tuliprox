@@ -94,6 +94,7 @@ impl HlsCtx {
             config: Arc::new(ArcSwap::from_pointee(config)),
             sources: Arc::new(ArcSwap::from_pointee(tuliprox_core::model::SourcesConfig::default())),
             hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapOption::default()),
             file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(shared::model::ConfigPaths {

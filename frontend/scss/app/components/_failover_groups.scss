@@ -77,12 +77,9 @@
     }
   }
 
-  // The split pane sizes to its content; shrinking it would cut the divider short of the cards.
+  // Mobile stacks list and detail; the page scrolls.
   &__body {
     flex-shrink: 0;
-  }
-
-  &__body {
     align-items: flex-start;
   }
 
@@ -497,6 +494,44 @@
     }
 
     &__list-items {
+      max-height: none;
+    }
+  }
+
+  // Desktop: the page stays put; the group list and the detail pane scroll on their own and reach the page end.
+  @media (min-width: calc(size.$mobile-breakpoint + 1px)) {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+
+    &__editor,
+    &__tabset,
+    &__tabset > .tp__tab-set__body,
+    &__tabset > .tp__tab-set__body > .tp__tab-set__panel {
+      flex: 1 1 0;
+      min-height: 0;
+      display: flex;
+      flex-flow: column;
+    }
+
+    &__tabset > .tp__tab-set__body > .tp__tab-set__panel {
+      overflow: hidden;
+    }
+
+    &__body {
+      flex: 1 1 0;
+      min-height: 0;
+      align-items: stretch;
+    }
+
+    &__list {
+      flex: 1 1 0;
+      min-height: 0;
+    }
+
+    &__list-items {
+      flex: 1 1 0;
+      min-height: 0;
       max-height: none;
     }
   }

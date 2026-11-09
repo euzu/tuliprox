@@ -192,6 +192,7 @@ async fn disk_force_keeps_active_files_after_a_technical_staging_failure() {
 
     assert_eq!(result.errors.len(), 1);
     assert_eq!(result.outcomes.len(), 0);
+    assert_eq!(result.completed_clusters, Vec::new());
     assert_eq!(result.force_updates.len(), 0);
     assert_eq!(active_cluster_snapshot(&storage_path, XtreamCluster::Live), before);
     assert_no_refresh_artifacts(&storage_path);
@@ -235,6 +236,7 @@ async fn pipeline_transparency_disk_quality_survives_post_evaluation_staging_fai
         }]
     );
     assert_eq!(result.outcomes.len(), 0);
+    assert_eq!(result.completed_clusters, Vec::new());
     assert_eq!(result.errors.len(), 1);
     assert_eq!(result.failed_cluster, Some(XtreamCluster::Live));
     assert_eq!(active_cluster_snapshot(&storage_path, XtreamCluster::Live), before);

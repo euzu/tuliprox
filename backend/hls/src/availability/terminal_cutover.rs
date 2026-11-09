@@ -54,6 +54,7 @@ use tuliprox_mpegts::transport_stream_buffer::HlsTsSpliceAnchor;
 struct HlsLeaseCutoverStateSnapshot {
     ready_timeline: HlsReadyTimelineSnapshot,
     capacity_recovery_blocks_ready_timeline: bool,
+    retained_playback_gap: bool,
     progress_phase: HlsOriginProgressPhase,
     path_condition: HlsOriginPathCondition,
     progress_generation: u64,
@@ -110,7 +111,8 @@ fn evaluate_lease_terminal_cutover(
     state: &HlsLeaseCutoverStateSnapshot,
     now_ms: u64,
 ) -> HlsLeaseTerminalCutoverEvaluation {
-    let origin_path_degraded = state.path_condition.is_degraded()
+    let origin_path_degraded = state.retained_playback_gap
+        || state.path_condition.is_degraded()
         || state.last_media_progress_at_ms.is_some_and(|last_progress_at_ms| {
             now_ms.saturating_sub(last_progress_at_ms) >= publication_late_after_ms(state.target_duration_ms)
         });
@@ -295,13 +297,7 @@ pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detai
             reason: HlsTerminalFailedClosedReason::LeaseStateUnavailable,
         });
     };
-    let state = snapshot_lease_cutover_state(
-        session,
-        lease.playback_cursor.ready_timeline_start_proxy_seq(manifest.first_proxy_seq),
-        manifest.target_duration_ms,
-        now_ms,
-    )
-    .await;
+    let state = snapshot_lease_cutover_state(session, lease, manifest, now_ms).await;
     if state.capacity_recovery_blocks_ready_timeline && matches!(purpose, HlsTerminalDecisionPurpose::OrdinaryCutover) {
         return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::LiveAllowed);
     }
@@ -346,16 +342,20 @@ pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detai
 
 async fn snapshot_lease_cutover_state(
     session: &HlsSessionHandle,
-    ready_timeline_start_proxy_seq: u64,
-    manifest_target_duration_ms: u64,
+    lease: &HlsAccessLease,
+    manifest: &HlsLeaseManifestSnapshot,
     now_ms: u64,
 ) -> HlsLeaseCutoverStateSnapshot {
     let session = session.read().await;
-    let ready_timeline = session.ready_timeline_snapshot(ready_timeline_start_proxy_seq, now_ms);
+    let ready_timeline = session.ready_timeline_snapshot(
+        lease.playback_cursor.ready_timeline_start_proxy_seq(manifest.first_proxy_seq),
+        now_ms,
+    );
     let capacity_recovery_blocks_ready_timeline = session.capacity_recovery_blocks_ready_timeline(&ready_timeline);
     HlsLeaseCutoverStateSnapshot {
         ready_timeline,
         capacity_recovery_blocks_ready_timeline,
+        retained_playback_gap: session.has_retained_playback_gap(lease),
         progress_phase: session.origin_control.progress_phase,
         path_condition: session.origin_control.path_condition,
         progress_generation: session.origin_control.progress_generation,
@@ -365,7 +365,7 @@ async fn snapshot_lease_cutover_state(
             .origin_control
             .target_duration_snapshot_ms
             .or_else(|| session.target_duration.map(|seconds| u64::from(seconds).saturating_mul(1_000)))
-            .unwrap_or(manifest_target_duration_ms),
+            .unwrap_or(manifest.target_duration_ms),
         session_target_duration: session.target_duration,
         observed_latency: session.origin_control.recovery_samples.latency_snapshot(),
     }

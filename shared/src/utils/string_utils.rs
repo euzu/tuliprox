@@ -435,8 +435,9 @@ pub fn token_quality(token: &str) -> Option<u8> {
     TIERS.iter().find_map(|(tokens, rank)| tokens.iter().any(|t| token.eq_ignore_ascii_case(t)).then_some(*rank))
 }
 
+/// Word tokens of `value`. `+` stays part of a token: "TV+" or "RTL+" name another channel than "TV" or "RTL".
 pub fn quality_tokens(value: &str) -> impl Iterator<Item = &str> {
-    value.split(|c: char| !c.is_alphanumeric()).filter(|token| !token.is_empty())
+    value.split(|c: char| !c.is_alphanumeric() && c != '+').filter(|token| !token.is_empty())
 }
 
 /// Best quality tier found in `value` (5=UHD/4K .. 1=SD); 0 when no known token is present.

@@ -62,9 +62,11 @@ use super::{
 mod acceptance;
 mod account_handoff;
 mod archive_master;
+mod content_anchor;
 mod critical_handoff;
 mod headers_redirects;
 mod origin_binding;
+mod origin_restart;
 mod origin_telemetry;
 mod ownership;
 mod reduced_retry;

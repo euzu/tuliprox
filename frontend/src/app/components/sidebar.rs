@@ -1,6 +1,9 @@
 use crate::{
-    app::components::{menu_item::MenuItem, svg_icon::AppIcon, CollapsePanel, IconButton},
-    hooks::use_service_context,
+    app::components::{
+        is_plugin_route, menu_item::MenuItem, svg_icon::AppIcon, use_plugin_ui, CollapsePanel, IconButton,
+        PluginMenuEntry,
+    },
+    hooks::{use_icon_context, use_service_context},
     i18n::use_translation,
     model::ViewType,
     services::AuthService,
@@ -35,6 +38,12 @@ pub struct SidebarProps {
     pub show_recording: bool,
     #[prop_or_default]
     pub active_page: ViewType,
+    /// Called with the `plugin/{id}/{element}` route of a plugin menu entry.
+    #[prop_or_default]
+    pub onplugin: Callback<String>,
+    /// The route of the plugin page that is open, if one is.
+    #[prop_or_default]
+    pub active_plugin: Option<String>,
 }
 
 fn sidebar_variant_class(collapsed: CollapseState) -> &'static str {
@@ -158,6 +167,7 @@ fn nav_sections(access: &NavAccess) -> Vec<NavSection> {
             &[
                 (access.admin, NavEntry::new(ViewType::Rbac, "Shield", "LABEL.RBAC")),
                 (access.config_read, NavEntry::new(ViewType::Config, "Config", "LABEL.CONFIG")),
+                (access.system_read, NavEntry::new(ViewType::Plugins, "Plugin", "LABEL.PLUGINS")),
                 (access.user_read || access.user_write, NavEntry::new(ViewType::Users, "UserOutline", "LABEL.USER")),
                 (access.config_read, NavEntry::new(ViewType::Plans, "Group", "LABEL.PLANS")),
                 (access.source_read, NavEntry::new(ViewType::SourceEditor, "SourceEditor", "LABEL.SOURCE_EDITOR")),
@@ -191,6 +201,41 @@ fn nav_sections(access: &NavAccess) -> Vec<NavSection> {
     sections.into_iter().filter(|section| section.title_key.is_none() || !section.entries.is_empty()).collect()
 }
 
+/// The expanded sidebar entry of a plugin menu contribution; greyed out when the plugin is not enabled.
+fn render_plugin_item(
+    entry: &PluginMenuEntry,
+    active_plugin: Option<&str>,
+    onclick: &Callback<(String, MouseEvent)>,
+) -> Html {
+    let class = classes!(
+        (active_plugin == Some(entry.route.as_str())).then_some("active"),
+        (!entry.available).then_some("tp__plugin--disabled")
+    )
+    .to_string();
+    html! {
+        <MenuItem key={entry.route.clone()} class={class} icon={entry.icon.clone()} name={entry.route.clone()}
+            label={entry.title.clone()} onclick={onclick}></MenuItem>
+    }
+}
+
+/// The collapsed sidebar entry of a plugin menu contribution.
+fn render_plugin_icon(
+    entry: &PluginMenuEntry,
+    active_plugin: Option<&str>,
+    onclick: &Callback<(String, MouseEvent)>,
+) -> Html {
+    let class = classes!(
+        "tp__app-sidebar-menu--plugin",
+        (active_plugin == Some(entry.route.as_str())).then_some("active"),
+        (!entry.available).then_some("tp__plugin--disabled")
+    )
+    .to_string();
+    html! {
+        <IconButton key={entry.route.clone()} class={class} icon={entry.icon.clone()} name={entry.route.clone()}
+            hint={entry.title.clone()} aria_label={entry.title.clone()} onclick={onclick}></IconButton>
+    }
+}
+
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
@@ -202,20 +247,30 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     });
     let is_mobile = use_state(|| false);
     let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
-    let active_menu = props.active_page;
     let access = NavAccess::new(&services.auth, props);
+    let plugin_ui = use_plugin_ui();
+    let icons = use_icon_context();
+    let plugin_entries = plugin_ui.map(|ui| ui.menu_entries(&icons)).unwrap_or_default();
+    let is_active = |view: ViewType| props.active_plugin.is_none() && props.active_page == view;
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
+        let pluginchange = props.onplugin.clone();
         let is_mobile = is_mobile.clone();
         let collapsed = collapsed.clone();
         Callback::from(move |(name, _): (String, _)| {
-            if let Ok(view_type) = ViewType::from_str(&name) {
+            let navigated = if is_plugin_route(&name) {
+                pluginchange.emit(name);
+                true
+            } else if let Ok(view_type) = ViewType::from_str(&name) {
                 viewchange.emit(view_type);
-                if *is_mobile {
-                    set_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY, "collapsed");
-                    collapsed.set(CollapseState::ManualCollapsed);
-                }
+                true
+            } else {
+                false
+            };
+            if navigated && *is_mobile {
+                set_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY, "collapsed");
+                collapsed.set(CollapseState::ManualCollapsed);
             }
         })
     };
@@ -322,7 +377,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             { for sections.iter().map(|section| {
                 let items = html! {
                     { for section.entries.iter().map(|entry| html! {
-                        <MenuItem class={if active_menu == entry.view { "active" } else { "" }} icon={entry.icon}
+                        <MenuItem class={if is_active(entry.view) { "active" } else { "" }} icon={entry.icon}
                             name={entry.view.to_string()} label={translate.t(entry.label_key)} onclick={&handle_menu_click}></MenuItem>
                     }) }
                 };
@@ -331,6 +386,11 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                     None => items,
                 }
             }) }
+            {html_if!(!plugin_entries.is_empty(), {
+                <CollapsePanel title={translate.t("LABEL.PLUGINS")}>
+                  { for plugin_entries.iter().map(|entry| render_plugin_item(entry, props.active_plugin.as_deref(), &handle_menu_click)) }
+                </CollapsePanel>
+            })}
           </div>
         }
     };
@@ -344,11 +404,17 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                     { for section.entries.iter().map(|entry| {
                         let label = translate.t(entry.label_key);
                         html! {
-                            <IconButton class={format!("tp__app-sidebar-menu--{}{}", entry.view, if active_menu == entry.view { " active" } else { "" })}
+                            <IconButton class={format!("tp__app-sidebar-menu--{}{}", entry.view, if is_active(entry.view) { " active" } else { "" })}
                                 icon={entry.icon} name={entry.view.to_string()} hint={label.clone()} aria_label={label}
                                 onclick={&handle_menu_click}></IconButton>
                         }
                     }) }
+                </>
+            }) }
+            {html_if!(!plugin_entries.is_empty(), {
+                <>
+                <span class="tp__app-sidebar__content-space"></span>
+                { for plugin_entries.iter().map(|entry| render_plugin_icon(entry, props.active_plugin.as_deref(), &handle_menu_click)) }
                 </>
             }) }
           </div>
@@ -504,6 +570,7 @@ mod tests {
                 ViewType::StreamHistory,
                 ViewType::Rbac,
                 ViewType::Config,
+                ViewType::Plugins,
                 ViewType::Users,
                 ViewType::Plans,
                 ViewType::SourceEditor,

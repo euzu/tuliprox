@@ -1,0 +1,75 @@
+id: discord-notifier
+name: Discord Notifier
+version: 1.0.0
+api_version: 1
+category: notifier
+author: tuliprox
+description: >
+  Delivers tuliprox notifications to a Discord webhook as an embed or plain
+  text. Routing, quiet hours, suppression and retries are the host's; this
+  plugin formats the message and speaks to Discord.
+capabilities:
+  notifications: true
+  network: true
+hooks:
+  - notifications.send
+ui:
+  locales: [en, ru, es, ar]   # ui/locales/<lang>.json; en is the fallback
+  # The channel config (and its routing) lives on the Web UI messaging page, stored
+  # under settings.ext.messaging. The plugin has no standalone settings form.
+  config_extensions:
+    - section: messaging
+      schema:
+        type: object
+        title: settings.title
+        required:
+        - url
+        properties:
+          url:
+            type: string
+            title: settings.url.title
+            description: settings.url.description
+            writeOnly: true
+          style:
+            type: string
+            title: settings.style.title
+            description: settings.style.description
+            enum:
+            - embed
+            - text
+            default: embed
+          routing:
+            type: object
+            title: settings.routing.title
+            description: settings.routing.description
+            additionalProperties: false
+            properties:
+              notify_on:
+                type: array
+                title: settings.routing.notify_on.title
+                description: settings.routing.notify_on.description
+                items:
+                  type: string
+              min_severity:
+                type: string
+                title: settings.routing.min_severity.title
+                description: settings.routing.min_severity.description
+                enum:
+                - info
+                - warn
+                - error
+                - critical
+              quiet_hours:
+                type: string
+                title: settings.routing.quiet_hours.title
+                description: settings.routing.quiet_hours.description
+              max_per_hour:
+                type: integer
+                title: settings.routing.max_per_hour.title
+                description: settings.routing.max_per_hour.description
+                minimum: 1
+              dedup_window_secs:
+                type: integer
+                title: settings.routing.dedup_window_secs.title
+                description: settings.routing.dedup_window_secs.description
+                minimum: 1

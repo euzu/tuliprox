@@ -84,6 +84,9 @@ pub(super) fn input_telemetry_for_fetch(
             };
 
             if let Some(fetch) = fetch {
+                if requested && fetch.completed_clusters.contains(&cluster) {
+                    telemetry.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Succeeded);
+                }
                 if requested && fetch.failed_clusters.contains(&cluster) {
                     telemetry.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Failed);
                 }
@@ -107,7 +110,7 @@ pub(super) fn input_telemetry_for_fetch(
                     telemetry.decision = Some(PlaylistUpdateClusterDecision::Accepted);
                 } else if source == Some(PlaylistUpdateDataSource::Provider) {
                     if configured_threshold == 0
-                        && (candidate_counts.contains_key(&cluster) || (fetch.errors.is_empty() && !fetch.partial))
+                        && (fetch.completed_clusters.contains(&cluster) || (!fetch.persisted && fetch.is_ok()))
                     {
                         telemetry.decision = Some(PlaylistUpdateClusterDecision::Accepted);
                     } else if (provider_clusters == [cluster] || input_type == InputType::M3u)
@@ -126,6 +129,7 @@ pub(super) fn input_telemetry_for_fetch(
     PlaylistUpdateInputTelemetry { refresh_policy, source: None, clusters }
 }
 
+#[cfg(test)]
 pub(super) fn confirm_published_cluster_counts(input_telemetry: &mut PlaylistUpdateInputTelemetry) {
     for cluster in &mut input_telemetry.clusters {
         if cluster.decision == Some(PlaylistUpdateClusterDecision::Accepted) {
@@ -138,16 +142,40 @@ pub(super) fn finalize_input_telemetry(
     playlist_download_result: &mut PlaylistDownloadResult,
     storage_error: Option<&TuliproxError>,
 ) {
-    let activation_is_uncertain = storage_error.is_some()
+    let technical_failure = storage_error.is_some()
         || playlist_download_result.partial
         || !playlist_download_result.download_err.is_empty();
-    if let Some(input_telemetry) = playlist_download_result.input_telemetry.as_mut() {
-        if activation_is_uncertain {
-            for cluster in &mut input_telemetry.clusters {
-                cluster.active_count = None;
+    if let Some(telemetry) = playlist_download_result.input_telemetry.as_mut() {
+        let provider_cluster_count = telemetry
+            .clusters
+            .iter()
+            .filter(|cluster| cluster.requested && cluster.source == Some(PlaylistUpdateDataSource::Provider))
+            .count();
+        for cluster in telemetry.clusters.iter_mut().filter(|cluster| cluster.requested) {
+            if storage_error.is_some()
+                && !playlist_download_result.persisted
+                && cluster.source == Some(PlaylistUpdateDataSource::Provider)
+            {
+                cluster.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Failed);
             }
-        } else {
-            confirm_published_cluster_counts(input_telemetry);
+            cluster.technical_state = persisted_technical_state(
+                cluster,
+                PersistedSnapshotContext {
+                    effective_policy: telemetry.refresh_policy,
+                    request_policy: None,
+                    technical_failure,
+                    storage_failure: storage_error.is_some(),
+                    provider_failure_evidence: playlist_download_result.provider_failure_evidence,
+                    provider_cluster_count,
+                },
+            );
+            if cluster.technical_state == Some(PersistedPlaylistUpdateTechnicalState::Failed)
+                || (technical_failure && cluster.technical_state.is_none())
+            {
+                cluster.active_count = None;
+            } else if cluster.decision == Some(PlaylistUpdateClusterDecision::Accepted) {
+                cluster.active_count = cluster.candidate_count;
+            }
         }
     }
 }
@@ -202,6 +230,9 @@ fn persisted_technical_state(
     if cluster.decision == Some(PlaylistUpdateClusterDecision::TechnicalError) {
         return Some(PersistedPlaylistUpdateTechnicalState::Failed);
     }
+    if cluster.technical_state == Some(PersistedPlaylistUpdateTechnicalState::Succeeded) {
+        return cluster.technical_state;
+    }
     if context.storage_failure && source == PlaylistUpdateDataSource::Provider {
         return Some(PersistedPlaylistUpdateTechnicalState::Failed);
     }
@@ -230,7 +261,7 @@ pub(super) fn persisted_cluster_snapshot(
     }
 }
 
-pub(super) fn persist_finalized_cluster_snapshots(
+pub(super) async fn persist_finalized_cluster_snapshots(
     playlist_download_result: &mut PlaylistDownloadResult,
     request_policy: Option<InputRefreshPolicy>,
     storage_error: Option<&TuliproxError>,
@@ -249,7 +280,7 @@ pub(super) fn persist_finalized_cluster_snapshots(
             .clusters
             .iter()
             .filter(|cluster| cluster.requested)
-            .map(|cluster| {
+            .filter_map(|cluster| {
                 let snapshot = persisted_cluster_snapshot(
                     cluster,
                     PersistedSnapshotContext {
@@ -261,7 +292,8 @@ pub(super) fn persist_finalized_cluster_snapshots(
                         provider_cluster_count,
                     },
                 );
-                (cluster.cluster, snapshot)
+                (snapshot.technical_state.is_some() || snapshot.quality.is_some())
+                    .then_some((cluster.cluster, snapshot))
             })
             .collect()
     });
@@ -269,9 +301,8 @@ pub(super) fn persist_finalized_cluster_snapshots(
     let Some(mut pending_status) = playlist_download_result.pending_status.take() else {
         return;
     };
-    let mut changed = pending_status.status_changed;
     for (cluster, snapshot) in snapshots {
-        changed |= match pending_status.cluster_status_source {
+        match pending_status.cluster_status_source {
             ClusterStatusSource::PerCluster => {
                 input_cache::replace_cluster_snapshot(&mut pending_status.status, cluster.as_ref(), snapshot)
             }
@@ -282,7 +313,27 @@ pub(super) fn persist_finalized_cluster_snapshots(
             ),
         };
     }
-    if changed {
-        input_cache::save_input_status(&pending_status.storage_path, &pending_status.status);
+    let previous = pending_status.previous_clusters;
+    let updated = pending_status.status.clusters;
+    if previous == updated {
+        return;
     }
+    input_cache::update_input_status(&pending_status.storage_path, move |current| {
+        // Only apply this acquisition's changes to entries that still match its starting snapshot.
+        let mut changed = false;
+        current.clusters.retain(|key, entry| {
+            let remove = !updated.contains_key(key) && previous.get(key) == Some(entry);
+            changed |= remove;
+            !remove
+        });
+        for (key, entry) in updated {
+            let baseline = previous.get(&key);
+            if baseline != Some(&entry) && current.clusters.get(&key) == baseline {
+                current.clusters.insert(key, entry);
+                changed = true;
+            }
+        }
+        changed
+    })
+    .await;
 }

@@ -13,6 +13,20 @@ impl fmt::Debug for HlsAccessLeaseId {
 }
 
 impl HlsMediaLeaseIdentity {
+    pub const fn same_playback_authorization(self, other: Self) -> bool {
+        self.issued_at_ms == other.issued_at_ms
+            && match (self.playback, other.playback) {
+                (
+                    HlsMediaLeasePlaybackIdentity::Live { admission_generation: left },
+                    HlsMediaLeasePlaybackIdentity::Live { admission_generation: right },
+                ) => left == right,
+                (
+                    HlsMediaLeasePlaybackIdentity::TerminalTail { generation: left },
+                    HlsMediaLeasePlaybackIdentity::TerminalTail { generation: right },
+                ) => left.0 == right.0,
+                _ => false,
+            }
+    }
     pub const fn is_live(self) -> bool { matches!(self.playback, HlsMediaLeasePlaybackIdentity::Live { .. }) }
 
     pub const fn lease_issued_at_ms(self) -> u64 { self.issued_at_ms }
@@ -25,10 +39,61 @@ pub(super) enum HlsMediaLeasePlaybackIdentity {
 }
 
 impl HlsLeaseManifestPublicationGuard {
-    pub(crate) const fn lease_issued_at_ms(self) -> u64 { self.issued_at_ms }
+    pub const fn same_lease_authorization(self, other: Self) -> bool {
+        self.issued_at_ms == other.issued_at_ms && self.admission_generation == other.admission_generation
+    }
+    pub(crate) const fn has_source_binding(self) -> bool { self.source.is_some() }
+    pub fn is_for_session(self, session: &crate::HlsSessionHandle) -> bool {
+        self.source.is_none_or(|source| source.session_address == std::sync::Arc::as_ptr(session) as usize)
+    }
+
+    pub(crate) fn bind_source(&mut self, session_address: usize, session: &crate::HlsSession) {
+        self.source = Some(super::HlsLeasePublicationSource {
+            session_address,
+            origin_epoch: session.origin_epoch,
+            origin_work_generation: session.activity.origin_work_generation,
+            origin_commits: session.origin_manifest_commits(),
+            media_readiness_generation: session.activity.media_readiness_generation,
+        });
+    }
+
+    pub(crate) fn source_is_current(self, session_address: usize, session: &crate::HlsSession) -> bool {
+        self.source.is_none_or(|source| {
+            source
+                == super::HlsLeasePublicationSource {
+                    session_address,
+                    origin_epoch: session.origin_epoch,
+                    origin_work_generation: session.activity.origin_work_generation,
+                    origin_commits: session.origin_manifest_commits(),
+                    media_readiness_generation: session.activity.media_readiness_generation,
+                }
+        })
+    }
+    pub const fn entry_generation(self) -> u64 { self.entry_generation }
+
+    pub const fn lease_state(self) -> super::HlsAccessLeaseState { self.state }
+
+    pub fn entry_strip_policy(self) -> Option<tuliprox_core::model::StripConfig> {
+        self.strip_policy.map(|(mode, value)| tuliprox_core::model::StripConfig { mode, value })
+    }
+
+    pub(crate) fn bind_strip_policy(&mut self, strip: &tuliprox_core::model::StripConfig) {
+        self.strip_policy = Some((strip.mode, strip.value));
+    }
+
+    pub(crate) fn strip_policy_matches(self, strip: &tuliprox_core::model::StripConfig) -> bool {
+        self.strip_policy.is_none_or(|policy| policy == (strip.mode, strip.value))
+    }
+
+    pub(crate) fn without_live_entry_admission(mut self) -> Self {
+        self.admits_live_entry = false;
+        self
+    }
+    pub const fn lease_issued_at_ms(self) -> u64 { self.issued_at_ms }
     pub(crate) const fn media_identity(self) -> HlsMediaLeaseIdentity {
         HlsMediaLeaseIdentity {
             issued_at_ms: self.issued_at_ms,
+            entry_generation: Some(self.entry_generation),
             playback: HlsMediaLeasePlaybackIdentity::Live { admission_generation: self.admission_generation },
         }
     }
@@ -47,7 +112,11 @@ impl HlsAccessLease {
             | HlsLeasePlaybackMode::TerminalUnavailable { .. }
             | HlsLeasePlaybackMode::Ended => return None,
         };
-        Some(HlsMediaLeaseIdentity { issued_at_ms: self.issued_at_ms, playback })
+        Some(HlsMediaLeaseIdentity {
+            issued_at_ms: self.issued_at_ms,
+            entry_generation: self.admitted_entry_generation.or(self.entry_generation),
+            playback,
+        })
     }
 }
 
@@ -69,7 +138,7 @@ impl HlsAccessLeaseStore {
         self.by_lease_id.get(lease_id).is_some_and(|lease| {
             lease_state_allows_use(lease.state)
                 && lease.issued_at_ms == expected.issued_at_ms
-                && lease.media_identity() == Some(expected)
+                && lease.media_identity().is_some_and(|current| current.same_playback_authorization(expected))
         })
     }
 }

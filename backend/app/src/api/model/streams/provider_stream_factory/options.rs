@@ -8,7 +8,7 @@ use crate::{
     model::{ConfigProvider, ReverseProxyDisabledHeaderConfig},
     utils::request::{get_request_headers, preview_request_target_for_logging},
 };
-use reqwest::header::{HeaderMap, HeaderValue, RANGE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use shared::{
     model::{FailureStage, PlaylistItemType, StreamChannel, StreamInfo},
     utils::is_sanitize_sensitive_info_enabled,
@@ -40,8 +40,13 @@ pub(crate) struct ProviderStreamFactoryParams<'a> {
     pub stream_channel: Option<&'a StreamChannel>,
     pub connect_failure_stage: Option<FailureStage>,
     pub content_representation: ProviderContentRepresentationMode,
+    /// Extra upstream headers of `inject-upstream-headers`, already
+    /// denylist-filtered (plan §7 *Session-edge header injection*). `Some` only
+    /// at a stream-session setup; every other constructor passes `None`.
+    pub plugin_headers: Option<&'a [(String, String)]>,
 }
 
+/// The behaviour flags a stream session opens with.
 fn compute_flags(
     stream_options: &StreamOptions,
     item_type: PlaylistItemType,
@@ -95,6 +100,7 @@ impl ProviderStreamFactoryOptions {
             stream_channel,
             connect_failure_stage,
             content_representation,
+            plugin_headers,
         } = request;
         let buffer_size = if stream_options.buffer_enabled { stream_options.buffer_size } else { 0 };
         let buffer_max_bytes = stream_options.buffer_max_bytes;
@@ -124,6 +130,9 @@ impl ProviderStreamFactoryOptions {
             stream_channel.as_ref().and_then(|channel| channel.upstream_user_agent.as_deref()),
             *disabled_headers,
         );
+        if let Some(plugin_headers) = plugin_headers {
+            apply_plugin_headers(&mut headers, plugin_headers);
+        }
 
         let default_user_agent = default_user_agent
             .and_then(|ua| {
@@ -236,6 +245,7 @@ impl ProviderStreamFactoryOptions {
     #[inline]
     pub fn should_retry_provider_request(&self) -> bool {
         self.flags.contains(ProviderStreamFactoryFlags::RetryEnabled)
+            && !self.flags.contains(ProviderStreamFactoryFlags::GroupMember)
     }
 
     pub(super) fn requires_public_destination(&self) -> bool {
@@ -305,6 +315,17 @@ impl ProviderStreamFactoryOptions {
     #[cfg(test)]
     pub(crate) fn hls_content_coding_object_kind(&self) -> Option<HlsOriginContentCodingObjectKind> {
         self.hls_content_coding_object_kind
+    }
+}
+
+/// Set the plugin headers on the request headers, replacing a header of the
+/// same name. The host already screened them, so an unparsable one (which can
+/// only be a bug) is skipped rather than failing the stream.
+fn apply_plugin_headers(headers: &mut HeaderMap, plugin_headers: &[(String, String)]) {
+    for (name, value) in plugin_headers {
+        if let (Ok(name), Ok(value)) = (HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(value)) {
+            headers.insert(name, value);
+        }
     }
 }
 

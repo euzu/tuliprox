@@ -346,6 +346,12 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                     }
                                 }
                             </div>
+                            if let Some(member) = stream.member_info.as_ref() {
+                                <div class="tp__stream-display__member-line">
+                                    <span class="tp__stream-display__member-label">{translate.t("LABEL.ACTIVE_MEMBER")}{": "}</span>
+                                    <span class="tp__stream-display__member-value">{format!("{} ({}) • {}", member.title, member.input_name, member.provider)}</span>
+                                </div>
+                            }
                             if !hide_properties.contains(StreamInfoFields::HideEpg) {
                             if let Some((current, next_opt)) = current_next.as_ref() {
                                 if !current.title.is_empty() {

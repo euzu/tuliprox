@@ -1,3 +1,4 @@
+mod activation;
 mod publication_handoff;
 mod retained;
 mod startup_recovery;
@@ -12,7 +13,7 @@ use tuliprox_core::{
     utils::current_time_millis,
 };
 
-fn origin(
+pub(super) fn origin(
     first: u64,
     count: usize,
     durations: &[u64],
@@ -25,7 +26,7 @@ fn origin(
     normal_manifest(&body)
 }
 
-fn prepare_revisions(session: &mut tuliprox_hls::api::HlsSession, sequences: &[u64]) {
+pub(super) fn prepare_revisions(session: &mut tuliprox_hls::api::HlsSession, sequences: &[u64]) {
     let mode = session.startup_mode();
     let startup = session.startup.as_mut().unwrap();
     for seq in sequences {
@@ -508,7 +509,7 @@ async fn live_window_config_changes_reentry_and_generation_races_preserve_lease_
         };
         let first = request().await.unwrap();
         assert_eq!(first.status(), StatusCode::OK);
-        let first_body = response_body(first).await;
+        let _first_body = response_body(first).await;
         let proxy = session.read().await.proxy_session_id.clone();
         let original = manager.access_lease_response_snapshot(&id, &proxy, current_time_millis()).await.unwrap();
         let mut leases = manager.access_leases().write().await;
@@ -516,7 +517,7 @@ async fn live_window_config_changes_reentry_and_generation_races_preserve_lease_
             assert!(leases.try_claim_progressive_startup(&id, 2, current_time_millis()));
         }
         drop(leases);
-        // A larger strip must retain the published body, never rewind to 0,1,2.
+        // A new policy cannot reuse the older entry body or rewind to 0,1,2.
         dto.strip.value = 3;
         let mut config = app.app_config.config.load().as_ref().clone();
         config.reverse_proxy =
@@ -526,9 +527,16 @@ async fn live_window_config_changes_reentry_and_generation_races_preserve_lease_
             }));
         app.app_config.config.store(Arc::new(config));
         manager.update_config(&app.app_config).await;
-        let retained = request().await.unwrap();
-        assert_eq!(retained.status(), StatusCode::OK);
-        assert_eq!(response_body(retained).await, first_body);
+        let blocked = request().await;
+        assert!(blocked.is_none_or(|response| response.status() == StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(
+            manager
+                .access_lease_response_snapshot(&id, &proxy, current_time_millis())
+                .await
+                .unwrap()
+                .last_manifest_snapshot,
+            original.last_manifest_snapshot
+        );
         dto.strip.value = 0;
         let mut config = app.app_config.config.load().as_ref().clone();
         config.reverse_proxy.as_mut().unwrap().hls_cache = Some(HlsCacheConfig::from(&dto));
@@ -554,8 +562,10 @@ async fn live_window_config_changes_reentry_and_generation_races_preserve_lease_
                 current_time_millis()
             ));
         }
-        let guard =
-            manager.prepare_access_lease_manifest_publication(&id, &proxy, current_time_millis()).await.unwrap();
+        let guard = manager
+            .prepare_access_lease_manifest_publication_for_test(&id, &proxy, current_time_millis())
+            .await
+            .unwrap();
         let stale = {
             let state = session.read().await;
             let plan = state.plan_live_window(HlsLiveWindowView::Entry).unwrap();

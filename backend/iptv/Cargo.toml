@@ -8,6 +8,9 @@ description = "Provider clients for Xtream, M3U and Stalker portals"
 [lints]
 workspace = true
 
+[features]
+test-support = ["tuliprox-repository/test-support"]
+
 [dependencies]
 shared = { workspace = true }
 tuliprox-core = { workspace = true }
@@ -18,16 +21,17 @@ bytes.workspace = true
 chrono.workspace = true
 futures.workspace = true
 log.workspace = true
-parking_lot = "0.12.5"
-reqwest = { version = "0.13.5", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+parking_lot.workspace = true
+reqwest = { workspace = true, features = ["default", "json", "stream", "rustls", "socks", "form", "query"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros"] }
-tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
+tokio-util = { workspace = true, features = ["io", "io-util"] }
 url.workspace = true
 
 [dev-dependencies]
-http = "1.4.0"
-tempfile = "3.27.0"
+tuliprox-repository = { workspace = true, features = ["test-support"] }
+http.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }

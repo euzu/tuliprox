@@ -272,6 +272,7 @@ body[data-theme="graperoot-dark"] {
   --theme-palette-graph-port: #8f7aa8;
   --theme-palette-graph-port-border: #f1ebfb;
   --theme-palette-graph-port-hover: #fde68a;
+  --theme-palette-graph-plugin: #ff4fd8;
 
   --theme-palette-login-logo: color-mix(in srgb, #0b0a12 78%, #d8b4fe 10%);
   --theme-palette-series-title: #f1ebfb;
@@ -291,4 +292,18 @@ body[data-theme="graperoot-dark"] {
   --theme-palette-failover-group-health-ok: var(--theme-palette-success-tone-520);
   --theme-palette-failover-group-health-degraded: var(--theme-palette-warning-tone-520);
   --theme-palette-failover-group-health-open: var(--theme-palette-danger-tone-520);
+  // Explorer UI tokens (poster grids, ratings, badges) — tuned per theme for WCAG AA text contrast.
+  --theme-palette-explorer-poster-placeholder-1: #15111e;
+  --theme-palette-explorer-poster-placeholder-2: #1f1830;
+  --theme-palette-explorer-rating-surface: rgba(0, 0, 0, 0.67);
+  --theme-palette-explorer-rating-text: #fde68a;
+  --theme-palette-explorer-new-surface: #311c49;
+  --theme-palette-explorer-new-text: #e9d5ff;
+  --theme-palette-explorer-edited: #bfdbfe;
+  --theme-palette-explorer-edited-surface: #1e2c45;
+  --theme-palette-explorer-epg-missing: #fde68a;
+  --theme-palette-explorer-epg-missing-surface: #3c2f10;
+  --theme-palette-explorer-row-hover: rgba(192, 132, 252, 0.14);
+  --theme-palette-explorer-selected: rgba(192, 132, 252, 0.22);
+  --theme-palette-explorer-text-secondary: var(--theme-palette-neutral-text-760);
 }

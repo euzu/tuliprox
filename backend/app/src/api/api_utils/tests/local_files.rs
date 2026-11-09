@@ -29,6 +29,7 @@ async fn local_stream_response_registers_active_local_stream() {
     let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
     let user = ProxyUserCredentials::default();
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -89,6 +90,7 @@ async fn local_stream_response_rechecks_limits_before_registering_socket_bound_s
     user.username = "local-limit-user".to_string();
     user.max_connections = 1;
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -174,6 +176,7 @@ async fn local_stream_response_disables_response_compression() {
     let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
     let user = ProxyUserCredentials::default();
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -223,6 +226,7 @@ async fn local_stream_response_reuses_stable_playback_session_token_across_reope
     let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
     let user = ProxyUserCredentials::default();
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -298,6 +302,7 @@ async fn local_stream_response_allows_exhausted_reopen_for_same_playback_session
     user.username = "user1".to_string();
     user.max_connections = 1;
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -376,6 +381,7 @@ async fn local_stream_response_preserves_soft_kind_across_reopens() {
     user.max_connections = 1;
     user.soft_connections = 1;
     let target = ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,
@@ -444,4 +450,81 @@ async fn local_stream_response_preserves_soft_kind_across_reopens() {
         )
         .await;
     assert_eq!(session_admission.kind(), Some(crate::api::model::ConnectionKind::Soft));
+}
+
+mod library_path_check {
+    use crate::api::api_utils::local_files::{is_library_path_allowed, AllowedLibraryRoot};
+    use std::path::{Path, PathBuf};
+
+    /// Builds an allowed root; `canonical` is `None` for follow roots that skip canonicalization.
+    fn root(lexical: &str, canonical: Option<&str>, follow_symlinks: bool) -> AllowedLibraryRoot {
+        AllowedLibraryRoot { lexical: PathBuf::from(lexical), canonical: canonical.map(PathBuf::from), follow_symlinks }
+    }
+
+    /// Runs the path check on string paths.
+    fn allowed(requested: &str, canonical: &str, roots: &[AllowedLibraryRoot]) -> bool {
+        is_library_path_allowed(Path::new(requested), Path::new(canonical), roots)
+    }
+
+    /// A follow root serves a link inside it even when the target lies elsewhere.
+    #[test]
+    fn follow_allows_lexical_inside_with_canonical_outside() {
+        let roots = [root("/media/library", Some("/media/library"), true)];
+        assert!(allowed("/media/library/linked_movie.mp4", "/mnt/external/storage/linked_movie.mp4", &roots));
+    }
+
+    /// A follow root rejects `..` below the root and relative request paths.
+    #[test]
+    fn follow_denies_dotdot_and_relative() {
+        let roots = [root("/media/library", Some("/media/library"), true)];
+        assert!(!allowed("/media/library/../etc/passwd", "/etc/passwd", &roots));
+        assert!(!allowed("media/library/movie.mp4", "/etc/passwd", &roots));
+    }
+
+    /// A no-follow root rejects a link whose target lies outside the root.
+    #[test]
+    fn no_follow_denies_canonical_outside() {
+        let roots = [root("/media/library", Some("/media/library"), false)];
+        assert!(!allowed("/media/library/linked_movie.mp4", "/mnt/external/storage/linked_movie.mp4", &roots));
+    }
+
+    /// A no-follow root that is itself a symlink serves files inside its target.
+    #[test]
+    fn no_follow_symlinked_root_allows_file_inside_target() {
+        let roots = [root("/media/symlink_root", Some("/mnt/disk/real_root"), false)];
+        assert!(allowed("/media/symlink_root/movie.mp4", "/mnt/disk/real_root/movie.mp4", &roots));
+    }
+
+    /// A path outside every configured root is rejected.
+    #[test]
+    fn path_outside_every_root_denied() {
+        let roots = [root("/media/library", Some("/media/library"), true)];
+        assert!(!allowed("/var/data/movie.mp4", "/var/data/movie.mp4", &roots));
+    }
+
+    /// A follow root configured with `..` matches lexically and still rejects escapes.
+    #[test]
+    fn follow_accepts_root_with_parent_components() {
+        // A configured root such as `/srv/app/../media` stays lexical; files below it are allowed.
+        let roots = [root("/srv/app/../media", None, true)];
+        assert!(allowed("/srv/app/../media/movie.mp4", "/mnt/cloud/movie.mp4", &roots));
+        assert!(!allowed("/srv/app/../media/../etc/passwd", "/mnt/cloud/movie.mp4", &roots));
+    }
+
+    /// An inner no-follow root keeps its strict rule inside an outer follow root.
+    #[test]
+    fn nested_no_follow_root_overrides_outer_follow_root() {
+        let roots = [root("/media", None, true), root("/media/private", Some("/media/private"), false)];
+        assert!(!allowed("/media/private/link.mp4", "/etc/secret.mp4", &roots));
+        assert!(allowed("/media/private/movie.mp4", "/media/private/movie.mp4", &roots));
+        assert!(allowed("/media/public/link.mp4", "/mnt/cloud/link.mp4", &roots));
+    }
+
+    /// An inner follow root keeps its lexical rule inside an outer no-follow root.
+    #[test]
+    fn nested_follow_root_overrides_outer_no_follow_root() {
+        let roots = [root("/media", Some("/media"), false), root("/media/cloud", None, true)];
+        assert!(allowed("/media/cloud/link.mp4", "/mnt/cloud/link.mp4", &roots));
+        assert!(!allowed("/media/other/link.mp4", "/mnt/cloud/link.mp4", &roots));
+    }
 }

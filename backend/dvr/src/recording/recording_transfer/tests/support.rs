@@ -123,6 +123,7 @@ pub(in crate::recording::recording_transfer::tests) fn bare_app_config() -> tuli
         config: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::Config::default())),
         sources: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::SourcesConfig::default())),
         hdhomerun: Arc::new(arc_swap::ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(arc_swap::ArcSwapOption::default()),
         file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
         paths: Arc::new(arc_swap::ArcSwap::from_pointee(shared::model::ConfigPaths {

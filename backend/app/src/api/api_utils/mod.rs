@@ -256,6 +256,8 @@ mod strategy;
 mod streaming;
 
 #[cfg(test)]
+use self::failover_group::member_needs_stalker_resolution;
+#[cfg(test)]
 use self::metering::resolve_stream_config_u64;
 #[cfg(test)]
 pub(crate) use self::provider_acquire::acquire_exact_provider_handle;
@@ -292,7 +294,7 @@ use self::{
     resources::hls_resource_failure_status,
     response::stream_admission_rejected_response,
     session_identity::session_reacquire_cleanup_addrs,
-    stalker::{re_resolve_stalker_url_singleflight, should_refresh_stalker_playback, stalker_stream_kind},
+    stalker::{accepts_requested_stream_url, re_resolve_stalker_url_singleflight, should_refresh_stalker_playback},
     strategy::{get_grace_period_millis, should_defer_provider_open_for_grace_hold},
     streaming::{
         create_stream_response_details, force_stream_response, is_hop_by_hop_response_header,
@@ -309,7 +311,9 @@ pub use self::{
     clock::{get_build_time, get_server_time, get_uptime_secs, init_uptime_clock},
     local_files::serve_file,
     provider_urls::get_stream_alternative_url,
-    resources::{resource_input_for_url, resource_proxy_response, resource_redirect_or_proxy, resource_response},
+    resources::{
+        is_same_origin, resource_input_for_url, resource_proxy_response, resource_redirect_or_proxy, resource_response,
+    },
     response::{
         bin_response, empty_json_list_response, empty_json_response_as_array, empty_json_response_as_object,
         json_or_bin_response, json_response, redirect, reentry_suppressed_response, separate_number_and_remainder,
@@ -328,11 +332,14 @@ pub use self::{
 pub(crate) use self::{
     auth::{input_for_user, with_recording_headers},
     catchup::get_catchup_session_ttl_secs,
-    failover_group::{group_playback_settings, resolve_hls_group_entry, GroupSelectionRequest, PlaybackSource},
+    failover_group::{
+        archive_member_order, group_playback_settings, member_playback_url, resolve_hls_group_entry,
+        GroupSelectionRequest, PlaybackSource,
+    },
     local_files::local_stream_response,
     maintenance::{blocks_new_playback, is_running_playback, maintenance_rejection_response},
-    provider_acquire::stream_response_with_provider_handle,
-    provider_urls::select_provider_stream_url,
+    provider_acquire::{stream_response_with_provider_handle, StreamPlaybackOutcome},
+    provider_urls::{lookup_account_m3u_stream_url, select_provider_stream_url},
     resources::force_hls_resource_response,
     response::admission_failure_response,
     serialization::coalesce_byte_stream,
@@ -340,11 +347,12 @@ pub(crate) use self::{
         create_playback_session_fingerprint, get_hls_session_ttl_secs, get_session_reservation_ttl_secs,
         is_session_based_playback, is_socket_bound_playback_session, should_pin_provider_for_session,
     },
-    stalker::resolve_initial_stalker_playback_url,
+    stalker::{resolve_initial_stalker_playback_url, resolve_stalker_stream_for_account, stalker_stream_kind},
     strategy::resolve_redirect_location,
     streaming::{
-        get_hls_playback_ttl_secs, record_connect_failed_attempt, resolve_request_url_for_logging,
-        resolve_stream_user_agent_index, should_allow_exhausted_shared_reconnect, stream_response,
+        get_hls_playback_ttl_secs, plugin_upstream_headers, record_connect_failed_attempt,
+        resolve_request_url_for_logging, resolve_stream_user_agent_index, should_allow_exhausted_shared_reconnect,
+        stream_response,
     },
 };
 #[cfg(test)]

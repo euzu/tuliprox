@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use shared::utils::{bin_deserialize, bin_serialize, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON};
 use std::{collections::HashMap, sync::OnceLock};
-use web_sys::window;
+use web_sys::{window, FormData};
 
 enum RequestMethod {
     Get,
@@ -161,6 +161,47 @@ fn unexpected_response_error(message: String) -> Error {
     }
 }
 
+/// Maps a non-success HTTP status onto the shared [`Error`] vocabulary.
+///
+/// `None` means the status carries no generic error, either because the caller decodes a
+/// typed body (`422`) or because the status is not part of the protocol.
+fn status_error(status: u16, message: &str) -> Option<Error> {
+    let text = || {
+        if message.trim().is_empty() {
+            status.to_string()
+        } else {
+            message.to_string()
+        }
+    };
+    match status {
+        400 => Some(Error::BadRequest(text())),
+        401 => Some(Error::Unauthorized),
+        403 => Some(Error::Forbidden(if message.trim().is_empty() {
+            "Forbidden".to_string()
+        } else {
+            message.to_string()
+        })),
+        404 => Some(Error::NotFound),
+        409 => Some(Error::Conflict(if message.trim().is_empty() {
+            "Configuration conflict (409)".to_string()
+        } else {
+            message.to_string()
+        })),
+        412 => Some(Error::PreconditionFailed(message.to_string())),
+        428 => Some(Error::PreconditionRequired(if message.trim().is_empty() {
+            "Missing precondition header (428)".to_string()
+        } else {
+            message.to_string()
+        })),
+        500 => Some(Error::InternalServerError(if message.trim().is_empty() {
+            "Internal Server Error".to_string()
+        } else {
+            message.to_string()
+        })),
+        _ => None,
+    }
+}
+
 const TOKEN_KEY: &str = "tuliprox.token";
 pub fn get_token() -> Option<String> { LocalStorage::get(TOKEN_KEY).ok() }
 
@@ -270,48 +311,6 @@ where
                     Ok(ResponseMeta { body: Some(decoded), headers: response_headers })
                 }
                 204 => Ok(ResponseMeta { body: None, headers: response_headers }),
-                400 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::BadRequest("400".to_string()))
-                    } else {
-                        Err(Error::BadRequest(message))
-                    }
-                }
-                403 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::Forbidden("Forbidden".to_string()))
-                    } else {
-                        Err(Error::Forbidden(message))
-                    }
-                }
-                404 => Err(Error::NotFound),
-                409 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::Conflict("Configuration conflict (409)".to_string()))
-                    } else {
-                        Err(Error::Conflict(message))
-                    }
-                }
-                412 => Err(Error::PreconditionFailed(extract_error_message(response).await)),
-                428 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::PreconditionRequired("Missing precondition header (428)".to_string()))
-                    } else {
-                        Err(Error::PreconditionRequired(message))
-                    }
-                }
-                500 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::InternalServerError("Internal Server Error".to_string()))
-                    } else {
-                        Err(Error::InternalServerError(message))
-                    }
-                }
                 422 => {
                     let ct = response.headers().get("content-type").unwrap_or_default();
                     let is_json = ct.contains(CONTENT_TYPE_JSON);
@@ -331,22 +330,23 @@ where
                         Err(Error::DeserializeError)
                     }
                 }
-                _ => Err(unexpected_response_error(extract_error_message(response).await)),
+                _ => {
+                    let message =
+                        if matches!(status, 401 | 404) { String::new() } else { extract_error_message(response).await };
+                    match status_error(status, &message) {
+                        Some(error) => Err(error),
+                        None => Err(unexpected_response_error(message)),
+                    }
+                }
             }
         }
         Err(e) => Err(e),
     }
 }
 
-/// Status and text body of a response, for callers that handle non-success statuses themselves.
-/// A 401 is not handed back: it is the same `Error::Unauthorized` every other request path reports.
-#[derive(Debug, Clone)]
-pub struct RawResponse {
-    pub status: u16,
-    pub body: String,
-}
-
-async fn request_raw<B>(method: RequestMethod, url: &str, body: B) -> Result<RawResponse, Error>
+/// Sends a JSON request and hands back status and text body for callers that handle non-success statuses
+/// themselves. A 401 is not handed back: it is the same `Error::Unauthorized` every other request path reports.
+async fn request_method_raw<B>(method: RequestMethod, url: &str, body: B) -> Result<RawResponse, Error>
 where
     B: Serialize + std::fmt::Debug,
 {
@@ -362,7 +362,7 @@ pub async fn request_put_raw<B>(url: &str, body: B) -> Result<RawResponse, Error
 where
     B: Serialize + std::fmt::Debug,
 {
-    request_raw(RequestMethod::Put, url, body).await
+    request_method_raw(RequestMethod::Put, url, body).await
 }
 
 /// Post request that hands back every status with its body instead of mapping errors.
@@ -370,12 +370,12 @@ pub async fn request_post_raw<B>(url: &str, body: B) -> Result<RawResponse, Erro
 where
     B: Serialize + std::fmt::Debug,
 {
-    request_raw(RequestMethod::Post, url, body).await
+    request_method_raw(RequestMethod::Post, url, body).await
 }
 
 /// Delete request that hands back every status with its body instead of mapping errors.
 pub async fn request_delete_raw(url: &str) -> Result<RawResponse, Error> {
-    request_raw(RequestMethod::Delete, url, ()).await
+    request_method_raw(RequestMethod::Delete, url, ()).await
 }
 
 /// Delete request
@@ -402,6 +402,63 @@ where
     request(RequestMethod::Get, url, (), content_type, response_type, None, None).await.map(|response| response.body)
 }
 
+/// A response the caller decodes itself: the status and the body text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+/// `POST` a `multipart/form-data` body and hand back the status and the body
+/// text, so the caller can read the error body of a `422`.
+///
+/// No `Content-Type` is set: the browser derives it from the `FormData`,
+/// including the boundary the body needs. A header set here would drop it.
+pub async fn request_post_form(url: &str, form: FormData) -> Result<RawResponse, Error> {
+    let mut request = Request::post(url).header("Accept", CONTENT_TYPE_JSON);
+    if let Some(token) = get_token() {
+        request = request.header("Authorization", format!("Bearer {token}").as_str());
+    }
+    let request = request.body(form).map_err(|err| {
+        error!("Failed to attach the form body: {err}");
+        Error::RequestError
+    })?;
+    let response = request.send().await.map_err(|err| {
+        error!("{err}");
+        Error::RequestError
+    })?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Ok(RawResponse { status, body })
+}
+
+/// Send `request` with the bearer token and an optional JSON body, and hand
+/// back the status and the body text, whatever the status. For callers that
+/// must read an error body the typed helpers fold away: a `422` with field
+/// problems, or the exact status a plugin frame is told.
+pub async fn request_raw(request: RequestBuilder, json_body: Option<String>) -> Result<RawResponse, Error> {
+    let mut request = request.header("Accept", CONTENT_TYPE_JSON);
+    if let Some(token) = get_token() {
+        request = request.header("Authorization", format!("Bearer {token}").as_str());
+    }
+    let response = match json_body {
+        Some(payload) => {
+            request
+                .header("Content-Type", CONTENT_TYPE_JSON)
+                .body(payload)
+                .map_err(|_| Error::RequestError)?
+                .send()
+                .await
+        }
+        None => request.send().await,
+    }
+    .map_err(|err| {
+        error!("{err}");
+        Error::RequestError
+    })?;
+    Ok(RawResponse { status: response.status(), body: response.text().await.unwrap_or_default() })
+}
+
 pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {
     let mut request = Request::get(url);
     if let Some(token) = get_token() {
@@ -414,54 +471,20 @@ pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {
     })?;
 
     reject_unauthorized(response.status())?;
-    match response.status() {
+    let status = response.status();
+    match status {
         200 | 205 | 206 => response.binary().await.map_err(|err| {
             error!("Failed to read binary response body: {err}");
             Error::RequestError
         }),
-        400 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::BadRequest("400".to_string()))
-            } else {
-                Err(Error::BadRequest(message))
+        _ => {
+            let message =
+                if matches!(status, 401 | 404) { String::new() } else { extract_error_message(response).await };
+            match status_error(status, &message) {
+                Some(error) => Err(error),
+                None => Err(unexpected_response_error(message)),
             }
         }
-        403 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::Forbidden("Forbidden".to_string()))
-            } else {
-                Err(Error::Forbidden(message))
-            }
-        }
-        404 => Err(Error::NotFound),
-        409 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::Conflict("Configuration conflict (409)".to_string()))
-            } else {
-                Err(Error::Conflict(message))
-            }
-        }
-        412 => Err(Error::PreconditionFailed(extract_error_message(response).await)),
-        428 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::PreconditionRequired("Missing precondition header (428)".to_string()))
-            } else {
-                Err(Error::PreconditionRequired(message))
-            }
-        }
-        500 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::InternalServerError("Internal Server Error".to_string()))
-            } else {
-                Err(Error::InternalServerError(message))
-            }
-        }
-        _ => Err(unexpected_response_error(extract_error_message(response).await)),
     }
 }
 
@@ -512,6 +535,73 @@ where
 {
     request(RequestMethod::Post, url, body, content_type, response_type, request_headers, Some(response_header_keys))
         .await
+}
+
+/// A failed write request whose failure body is decoded by the caller.
+///
+/// Endpoints that answer a failure with a typed body (409 conflict, 422 field errors) cannot
+/// use [`request`], which maps every non-success status onto [`Error`] and drops the body.
+/// This keeps the auth header, the dummy token and the status mapping in one place while
+/// leaving the body to the caller.
+#[derive(Debug)]
+pub struct WriteFailure<E> {
+    /// `0` when the request never reached the server.
+    pub status: u16,
+    /// Shared error mapping for the status, `None` for statuses decoded by the caller.
+    pub error: Option<Error>,
+    /// Decoded failure body, when the payload could be deserialized into `E`.
+    pub body: Option<E>,
+    /// Human readable failure text (the decoded `error` field when the body carried one).
+    pub message: String,
+}
+
+impl<E> WriteFailure<E> {
+    fn transport(error: Error) -> Self { Self { status: 0, error: Some(error), body: None, message: String::new() } }
+
+    /// Error text for callers that cannot use the typed body.
+    #[must_use]
+    pub fn into_message(self) -> String { self.error.map_or(self.message, |error| error.to_string()) }
+}
+
+/// JSON `POST` whose failure body is deserialized into `E` instead of being folded into a string.
+pub async fn request_post_with_error_body<B, T, E>(url: &str, body: B) -> Result<Option<T>, WriteFailure<E>>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+    B: Serialize + std::fmt::Debug,
+    E: DeserializeOwned,
+{
+    check_dummy_token();
+
+    let encoded = Encoding::Json.encode(&body).map_err(WriteFailure::transport)?;
+    let mut request = Request::post(url);
+    if let Some(token) = get_token() {
+        request = request.header("Authorization", format!("Bearer {token}").as_str());
+    }
+    request = request.header("Accept", Encoding::Json.as_content_type());
+    let request =
+        apply_encoded_body(request, encoded, Encoding::Json.as_content_type()).map_err(WriteFailure::transport)?;
+
+    let response = request.send().await.map_err(|err| {
+        error!("{err}");
+        WriteFailure::transport(Error::RequestError)
+    })?;
+
+    let status = response.status();
+    if (200..300).contains(&status) {
+        let content_type = response.headers().get("content-type").unwrap_or_default().to_ascii_lowercase();
+        if !should_decode_success_body::<T>(status, &content_type) {
+            let _ = response.binary().await;
+            return Ok(None);
+        }
+        let encoding = encoding_from_content_type(&content_type).unwrap_or(Encoding::Json);
+        return decode_response_body::<T>(response, encoding).await.map(Some).map_err(WriteFailure::transport);
+    }
+
+    let bytes = response.binary().await.unwrap_or_default();
+    let message = serde_json::from_slice::<ErrorInfo>(&bytes)
+        .map_or_else(|_| String::from_utf8_lossy(&bytes).trim().to_string(), |info| info.error);
+    let body = serde_json::from_slice::<E>(&bytes).ok();
+    Err(WriteFailure { status, error: status_error(status, &message), body, message })
 }
 
 /// Put request with a body

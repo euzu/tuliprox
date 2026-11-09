@@ -126,6 +126,8 @@ fn group_member(input: &str, stream_id: &str, title: &str, provider_id: u32, vid
         archive: None,
         epg_channel_id: None,
         additional_properties: None,
+        input_url: Arc::from(""),
+        upstream_user_agent: None,
     }
 }
 

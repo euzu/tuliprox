@@ -51,121 +51,189 @@
   }
 
   &__popover {
+    box-sizing: border-box;
     position: fixed;
     z-index: var(--z-index-popover);
-    min-width: 16rem;
-    padding: 0.75rem 0.85rem;
-    border-radius: 0.6rem;
+    top: var(--health-popover-top, 0);
+    left: var(--health-popover-left, 0);
+    width: var(--health-popover-width, 320px);
+    max-height: var(--health-popover-max-height, none);
+    padding: 14px;
+    border-radius: 10px;
     border: 1px solid var(--popup-border-color);
-    background: var(--popup-background-color);
+    background: var(--theme-brand-surface-code-solid);
+    background: rgb(from var(--popup-background-color) r g b / 1);
     color: var(--popup-color);
     box-shadow: var(--popup-shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    font-size: 13px;
     font-weight: 400;
-    opacity: 0;
+    line-height: 1.45;
+    text-align: start;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    scrollbar-width: thin;
+    scrollbar-color: var(--theme-brand-text-muted) rgb(from var(--popup-background-color) r g b / 1);
     visibility: hidden;
-    transform: translateY(-0.25rem);
-    transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s ease;
-  }
+    opacity: 0;
 
-  &:hover &__popover,
-  &:focus-within &__popover {
-    opacity: 1;
-    visibility: visible;
-    transform: translateY(0);
+    &[data-positioned="true"] {
+      visibility: visible;
+      opacity: 1;
+    }
+
+    // A pointer bridge covers the gap without intercepting the toolbar above it.
+    &::before {
+      content: "";
+      position: absolute;
+      inset-inline: 0;
+      top: -8px;
+      height: 8px;
+    }
+
+    &[data-side="above"]::before {
+      top: auto;
+      bottom: -8px;
+    }
+
+    &[data-compact="true"] {
+      display: block;
+      overflow: auto;
+      overscroll-behavior: contain;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--theme-brand-primary);
+      outline-offset: 2px;
+    }
   }
 
   &__popover-head {
     display: flex;
+    flex: none;
     align-items: baseline;
     justify-content: space-between;
-    gap: 0.75rem;
-    margin-bottom: 0.5rem;
+    gap: 12px;
+    margin-bottom: 10px;
   }
 
   &__popover-title {
     font-weight: 700;
-    font-size: 0.78rem;
+    font-size: 13px;
   }
 
   &__popover-since {
-    font-size: 0.7rem;
-    opacity: 0.6;
+    font-size: 12px;
+    color: var(--theme-brand-text-muted);
+    flex: none;
   }
 
   &__row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.18rem 0;
-    font-size: 0.74rem;
+    display: grid;
+    flex: none;
+    grid-template-columns: 8px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 8px;
+    padding: 5px 0;
+    font-size: 13px;
+
+    > .tp__health-banner__signal {
+      grid-column: 1;
+      margin-top: 5px;
+    }
   }
 
   &__row-label {
-    opacity: 0.75;
+    grid-column: 2;
+    min-width: 0;
+    color: var(--theme-brand-text-muted);
   }
 
   &__row-value {
-    margin-left: auto;
+    grid-column: 3;
+    min-width: 0;
+    max-width: 154px;
+    font-size: 12px;
+    text-align: end;
     font-weight: 600;
   }
 
   &__signal {
-    width: 0.5rem;
-    height: 0.5rem;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    flex: 0 0 auto;
+    flex: none;
     background: var(--theme-brand-border);
 
-    &--ok {
-      background: var(--theme-brand-positive);
-    }
+    &--ok { background: var(--theme-brand-positive); }
+    &--warn { background: var(--theme-brand-warning); }
+    &--bad { background: var(--theme-brand-danger); }
+  }
 
-    &--warn {
-      background: var(--theme-brand-warning);
-    }
+  &__providers {
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    margin-top: 10px;
+    border-top: 1px solid var(--popup-border-color);
+    padding-top: 10px;
+    padding-inline-end: 5px;
+    scrollbar-width: thin;
 
-    &--bad {
-      background: var(--theme-brand-danger);
+    &:focus-visible {
+      outline: 2px solid var(--theme-brand-primary);
+      outline-offset: -2px;
     }
   }
 
   &__provider {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.15rem 0 0.15rem 0.4rem;
-    font-size: 0.72rem;
+    display: grid;
+    grid-template-columns: 8px minmax(0, 1fr) 42px auto;
+    align-items: start;
+    gap: 8px;
+    padding: 7px 0;
+    font-size: 12px;
+    line-height: 1.45;
+
+    > .tp__health-banner__signal { margin-top: 5px; }
   }
 
   &__provider-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 6rem;
-    opacity: 0.85;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   &__provider-value {
-    margin-left: auto;
+    text-align: end;
+    white-space: nowrap;
     font-variant-numeric: tabular-nums;
-    opacity: 0.8;
+  }
+
+  &__popover:dir(rtl) &__provider-value {
+    text-align: left;
   }
 
   &__bar {
-    width: 3.5rem;
-    height: 0.3rem;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--theme-brand-border) 60%, transparent);
+    appearance: none;
+    display: block;
+    width: 42px;
+    height: 4px;
+    margin-top: 7px;
+    border: 0;
+    border-radius: 3px;
     overflow: hidden;
-    flex: 0 0 auto;
+    background: var(--border-color);
+    color: var(--theme-brand-positive);
+
+    &.tp__health-banner__signal--warn { color: var(--theme-brand-warning); }
+    &.tp__health-banner__signal--bad { color: var(--theme-brand-danger); }
+    &::-webkit-progress-bar { background: var(--border-color); }
+    &::-webkit-progress-value { background: currentColor; }
+    &::-moz-progress-bar { background: currentColor; }
   }
 
-  &__bar-fill {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: var(--health-color);
-  }
 }
 
 @media (prefers-reduced-motion: no-preference) {

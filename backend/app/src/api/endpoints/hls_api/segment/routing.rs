@@ -36,6 +36,9 @@ use shared::{
     utils::{generate_random_string, is_m3u_catchup_session_token, sanitize_sensitive_info, Internable},
 };
 use std::sync::Arc;
+use tuliprox_repository::target_stream_item::{
+    classify_virtual_id, member_to_m3u_item, member_to_xtream_item, ResolvedStreamTarget,
+};
 
 pub(in crate::api::endpoints::hls_api) fn hls_stream_context_or_unavailable(
     item: &impl PlaylistEntry,
@@ -64,15 +67,11 @@ pub(in crate::api) async fn resolve_hls_virtual_source_for_target(
             let stream_context = hls_stream_context_or_unavailable(&item, virtual_id)?;
             (Arc::clone(&item.input_name), stream_context)
         } else {
-            let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
-                &app_state.app_config,
-                &app_state.playlists,
-                target,
-                VirtualId::new(virtual_id),
-            )
-            .await;
-            if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } = classified {
-                let item = tuliprox_repository::target_stream_item::member_to_xtream_item(&group, index, target);
+            let classified =
+                classify_virtual_id(&app_state.app_config, &app_state.playlists, target, VirtualId::new(virtual_id))
+                    .await;
+            if let ResolvedStreamTarget::Member { group, index } = classified {
+                let item = member_to_xtream_item(&group, index);
                 let stream_context = hls_stream_context_or_unavailable(&item, virtual_id)?;
                 (Arc::clone(&item.input_name), stream_context)
             } else {
@@ -85,15 +84,10 @@ pub(in crate::api) async fn resolve_hls_virtual_source_for_target(
         let stream_context = hls_stream_context_or_unavailable(&item, virtual_id)?;
         (Arc::clone(&item.input_name), stream_context)
     } else {
-        let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
-            &app_state.app_config,
-            &app_state.playlists,
-            target,
-            VirtualId::new(virtual_id),
-        )
-        .await;
-        if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } = classified {
-            let item = tuliprox_repository::target_stream_item::member_to_m3u_item(&group, index, target);
+        let classified =
+            classify_virtual_id(&app_state.app_config, &app_state.playlists, target, VirtualId::new(virtual_id)).await;
+        if let ResolvedStreamTarget::Member { group, index } = classified {
+            let item = member_to_m3u_item(&group, index);
             let stream_context = hls_stream_context_or_unavailable(&item, virtual_id)?;
             (Arc::clone(&item.input_name), stream_context)
         } else {
@@ -117,22 +111,21 @@ pub(in crate::api::endpoints::hls_api) async fn resolve_hls_origin_playlist_url(
         {
             item
         } else {
-            let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
-                &app_state.app_config,
-                &app_state.playlists,
-                target,
-                VirtualId::new(virtual_id),
-            )
-            .await;
-            if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } = classified {
-                tuliprox_repository::target_stream_item::member_to_xtream_item(&group, index, target)
+            let classified =
+                classify_virtual_id(&app_state.app_config, &app_state.playlists, target, VirtualId::new(virtual_id))
+                    .await;
+            if let ResolvedStreamTarget::Member { group, index } = classified {
+                member_to_xtream_item(&group, index)
             } else {
                 return Err(StatusCode::NOT_FOUND);
             }
         };
         let hls_extension = format!(".{HLS_EXT}");
         let (query_path, _) = get_query_path("", Some(&hls_extension), &pli, app_state);
-        return get_xtream_player_api_stream_url(input, ApiStreamContext::Live, &query_path, &pli.url)
+        let is_archive =
+            resolve_m3u_archive_reference(fallback_url, None).is_some() || looks_like_archive_media_path(fallback_url);
+        let stream_context = if is_archive { ApiStreamContext::Timeshift } else { ApiStreamContext::Live };
+        return get_xtream_player_api_stream_url(input, stream_context, &query_path, &pli.url)
             .map(|url| url.to_string())
             .ok_or(StatusCode::SERVICE_UNAVAILABLE);
     }

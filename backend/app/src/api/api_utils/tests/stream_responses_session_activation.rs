@@ -545,6 +545,7 @@ async fn stream_response_rolls_back_provisional_user_activation_when_provider_op
     let input_name = "provider_1".intern();
     let input = app_state.app_config.get_input_by_name(&input_name).expect("provider input should exist");
     let target = Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,

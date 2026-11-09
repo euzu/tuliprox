@@ -14,8 +14,13 @@ async fn registered_shared_key_waiter_observes_controlled_ready_transition() {
     let (_, context, _) = encrypted_fetch_context(&server, &temp_dir, &policy).await;
     let now_ms = current_time_millis();
     let (fetch_token, notifier, resource_id, extension) = shared_key_fetch_and_wait(&context, now_ms).await;
-    let mut wait =
-        Box::pin(wait_for_segment_key_dependency(&context, notifier, resource_id, extension, Duration::from_secs(1)));
+    let mut wait = std::pin::pin!(wait_for_segment_key_dependency(
+        &context,
+        notifier,
+        resource_id,
+        extension,
+        Duration::from_secs(1)
+    ));
     assert!(matches!(poll!(wait.as_mut()), Poll::Pending));
 
     commit_test_key_ready(&context, &fetch_token, now_ms.saturating_add(1)).await;

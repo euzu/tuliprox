@@ -252,6 +252,7 @@ fn output_names_are_pinned() {
         (TargetType::M3u, "m3u"),
         (TargetType::Strm, "strm"),
         (TargetType::HdHomeRun, "hdhomerun"),
+        (TargetType::Plugin, "plugin"),
     ];
     assert_eq!(expected.len(), TargetType::iter().count(), "every output variant is pinned");
     for (output, name) in expected {
@@ -262,6 +263,7 @@ fn output_names_are_pinned() {
 
 fn target(name: &str, outputs: Vec<TargetOutput>, lowercase_ids: bool) -> ConfigTarget {
     ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 1,
         enabled: true,

@@ -38,6 +38,7 @@ pub(crate) fn app_config_from(config: Config, paths: ConfigPaths, api_proxy: Opt
         config: Arc::new(ArcSwap::from_pointee(config)),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::new(api_proxy.map(Arc::new))),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(paths)),
@@ -62,6 +63,7 @@ pub(crate) fn app_config_in(storage_dir: &Path) -> Arc<AppConfig> {
 pub(crate) fn target_with_output(name: &str, output: TargetOutput) -> ConfigTarget {
     ConfigTarget {
         curation: None,
+        managed_channels: Vec::new(),
         id: 1,
         enabled: true,
         name: name.to_string(),
@@ -103,6 +105,7 @@ pub(crate) fn xtream_playlist_item(id: u32) -> XtreamPlaylistItem {
         source_ordinal: 0,
         input_stream_id: id.to_string().intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 

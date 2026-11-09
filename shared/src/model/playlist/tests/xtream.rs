@@ -287,6 +287,7 @@ fn series_list_projection_skips_details_on_rmp_decode() {
         source_ordinal: 0,
         input_stream_id: "42".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     };
 
     let encoded = rmp_serde::to_vec(&item).expect("rmp encode succeeds");
@@ -407,6 +408,7 @@ fn rendered_get_series_json_contains_no_seasons_or_episodes() {
         source_ordinal: 0,
         input_stream_id: "42".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     };
 
     let options = XtreamMappingOptions {
@@ -420,6 +422,7 @@ fn rendered_get_series_json_contains_no_seasons_or_episodes() {
         web_ui_request: false,
         encrypt_secret: [0u8; 16],
         resource_host_policies: Arc::default(),
+        default_container_extensions: Arc::default(),
     };
 
     let doc = item.to_document(&options);
@@ -463,6 +466,7 @@ fn clear_series_details_removes_details() {
         source_ordinal: 0,
         input_stream_id: "1".intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     };
 
     assert!(item.has_details());
@@ -472,4 +476,53 @@ fn clear_series_details_removes_details() {
         Some(StreamProperties::Series(props)) => assert_eq!(props.details, None),
         _ => panic!("expected series properties"),
     }
+}
+
+#[test]
+fn xtream_record_override_source_id_uses_input_stream_id_or_falls_back_to_provider_id() {
+    let mut item = XtreamPlaylistItem {
+        virtual_id: VirtualId::new(42),
+        provider_id: 42,
+        name: "Test".intern(),
+        logo: "".intern(),
+        logo_small: "".intern(),
+        group: "Group".intern(),
+        title: "Test".intern(),
+        parent_code: "".intern(),
+        rec: "".intern(),
+        url: "http://example.test/stream".intern(),
+        epg_channel_id: None,
+        xtream_cluster: XtreamCluster::Live,
+        additional_properties: None,
+        item_type: PlaylistItemType::Live,
+        category_id: 1,
+        input_name: "test-input".intern(),
+        channel_no: 1,
+        source_ordinal: 0,
+        input_stream_id: "".intern(),
+        upstream_user_agent: None,
+        input_url: "".intern(),
+    };
+
+    assert_eq!(item.override_source_id().as_ref(), "42");
+
+    item.input_stream_id = "hash123".intern();
+    assert_eq!(item.override_source_id().as_ref(), "hash123");
+}
+
+/// Builds an Xtream playlist item with the given URL and input URL for override testing.
+fn test_xtream_item(url: &str, input_url: &str) -> XtreamPlaylistItem {
+    XtreamPlaylistItem::from(&PlaylistItem {
+        header: PlaylistItemHeader { url: url.intern(), input_url: input_url.intern(), ..Default::default() },
+    })
+}
+
+#[test]
+fn xtream_record_override_source_url_uses_input_url_or_falls_back_to_url() {
+    let mut item = test_xtream_item("http://example.test/mapped/stream.ts", "");
+
+    assert_eq!(item.override_source_url().as_ref(), "http://example.test/mapped/stream.ts");
+
+    item.input_url = "http://example.test/original/stream.ts".intern();
+    assert_eq!(item.override_source_url().as_ref(), "http://example.test/original/stream.ts");
 }

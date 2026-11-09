@@ -13,8 +13,9 @@ use shared::{
     foundation::{Filter, ValueProvider},
     model::{
         ConfigTargetDto, ConfigTargetOptions, DeduplicateConfig, FailoverGroupsTargetConfig, HdHomeRunTargetOutputDto,
-        M3uTargetOutputDto, MappingStage, PlaylistItemType, ProcessingOrder, StrmExportStyle, StrmTargetOutputDto,
-        TargetOutputDto, TargetType, TraktConfigDto, WatchContext, WatchContextSet, XtreamTargetOutputDto,
+        M3uTargetOutputDto, MappingStage, PlaylistItemType, PluginHook, PluginRef, PluginTargetOutputDto,
+        ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto,
+        WatchContext, WatchContextSet, XtreamTargetOutputDto,
     },
 };
 use std::{borrow::Cow, sync::Arc};
@@ -36,6 +37,37 @@ pub struct TargetExecutionPlan {
     pub post_merge_content_dedup: Option<DeduplicateConfig>,
     /// The target's failover group switch and overrides; resolved against `config.yml` when used.
     pub failover_groups: Option<FailoverGroupsTargetConfig>,
+    /// The plugin strategies the target opted into. Unlike the always-on stage
+    /// hooks these never run unless the config names a plugin (plan §6).
+    pub plugin_strategies: PluginStrategies,
+}
+
+/// The four per-target plugin strategies, each `None` unless the config spells
+/// `plugin:<id>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginStrategies {
+    /// `sort.strategy` (`sort-key`).
+    pub sort_key: Option<PluginRef>,
+    /// `options.deduplicate.keep` (`resolve-duplicates`).
+    pub resolve_duplicates: Option<PluginRef>,
+    /// `chno` (`assign-channel-numbers`).
+    pub assign_chno: Option<PluginRef>,
+    /// `group_merge` (`merge-groups`).
+    pub merge_groups: Option<PluginRef>,
+}
+
+impl PluginStrategies {
+    /// The strategies with the hook each one calls.
+    pub fn refs(&self) -> impl Iterator<Item = (PluginHook, &str)> {
+        [
+            (PluginHook::SortKey, self.sort_key.as_ref()),
+            (PluginHook::ResolveDuplicates, self.resolve_duplicates.as_ref()),
+            (PluginHook::AssignChno, self.assign_chno.as_ref()),
+            (PluginHook::MergeGroups, self.merge_groups.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(hook, plugin)| plugin.map(|plugin| (hook, plugin.id())))
+    }
 }
 
 impl Default for TargetExecutionPlan {
@@ -45,6 +77,7 @@ impl Default for TargetExecutionPlan {
             pre_transform_identity_dedup: false,
             post_merge_content_dedup: None,
             failover_groups: None,
+            plugin_strategies: PluginStrategies::default(),
         }
     }
 }
@@ -62,7 +95,17 @@ impl TargetExecutionPlan {
         Self {
             transform_stages,
             pre_transform_identity_dedup: dto.options.as_ref().is_some_and(|options| options.remove_duplicates),
-            post_merge_content_dedup: dto.options.as_ref().and_then(|options| options.deduplicate),
+            post_merge_content_dedup: dto.options.as_ref().and_then(|options| options.deduplicate.clone()),
+            plugin_strategies: PluginStrategies {
+                sort_key: dto.sort.as_ref().and_then(|sort| sort.strategy.clone()),
+                resolve_duplicates: dto
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.deduplicate.as_ref())
+                    .and_then(|dedupe| dedupe.keep.plugin().cloned()),
+                assign_chno: dto.chno.clone(),
+                merge_groups: dto.group_merge.clone(),
+            },
             failover_groups: dto.options.as_ref().and_then(|options| options.failover_groups).filter(|cfg| cfg.enabled),
         }
     }
@@ -265,12 +308,56 @@ impl From<&HdHomeRunTargetOutput> for HdHomeRunTargetOutputDto {
     }
 }
 
+/// A `type: plugin` output; see [`PluginTargetOutputDto`].
+#[derive(Debug, Clone)]
+pub struct PluginTargetOutput {
+    pub plugin: String,
+    pub format: Option<String>,
+    pub filename: Option<String>,
+    /// The plugin's settings for this output, as configured. Handed to the
+    /// plugin as `output-request.options` (see [`shared::model::plugin_options`]).
+    pub plugin_config: serde_json::Map<String, serde_json::Value>,
+    pub filter: Option<Filter>,
+}
+
+impl PluginTargetOutput {
+    /// The file name in the target directory: `filename`, else `<plugin>.out`.
+    #[must_use]
+    pub fn file_name(&self) -> String { self.filename.clone().unwrap_or_else(|| format!("{}.out", self.plugin)) }
+}
+
+macros::from_impl!(PluginTargetOutput);
+impl From<&PluginTargetOutputDto> for PluginTargetOutput {
+    fn from(dto: &PluginTargetOutputDto) -> Self {
+        Self {
+            plugin: dto.plugin.clone(),
+            format: dto.format.clone(),
+            filename: dto.filename.clone(),
+            plugin_config: dto.plugin_config.clone(),
+            filter: dto.t_filter.clone(),
+        }
+    }
+}
+impl From<&PluginTargetOutput> for PluginTargetOutputDto {
+    fn from(instance: &PluginTargetOutput) -> Self {
+        Self {
+            plugin: instance.plugin.clone(),
+            format: instance.format.clone(),
+            filename: instance.filename.clone(),
+            plugin_config: instance.plugin_config.clone(),
+            filter: instance.filter.as_ref().map(ToString::to_string),
+            t_filter: instance.filter.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum TargetOutput {
     Xtream(XtreamTargetOutput),
     M3u(M3uTargetOutput),
     Strm(StrmTargetOutput),
     HdHomeRun(HdHomeRunTargetOutput),
+    Plugin(PluginTargetOutput),
 }
 
 impl From<&TargetOutput> for TargetType {
@@ -280,6 +367,7 @@ impl From<&TargetOutput> for TargetType {
             TargetOutput::M3u(_) => TargetType::M3u,
             TargetOutput::Strm(_) => TargetType::Strm,
             TargetOutput::HdHomeRun(_) => TargetType::HdHomeRun,
+            TargetOutput::Plugin(_) => TargetType::Plugin,
         }
     }
 }
@@ -298,6 +386,7 @@ impl TargetOutput {
             TargetOutput::Xtream(out) => out.filter.as_ref(),
             TargetOutput::M3u(out) => out.filter.as_ref(),
             TargetOutput::Strm(out) => out.filter.as_ref(),
+            TargetOutput::Plugin(out) => out.filter.as_ref(),
             TargetOutput::HdHomeRun(_) => None,
         }
     }
@@ -311,6 +400,7 @@ impl From<&TargetOutputDto> for TargetOutput {
             TargetOutputDto::M3u(o) => TargetOutput::M3u(M3uTargetOutput::from(o)),
             TargetOutputDto::Strm(o) => TargetOutput::Strm(StrmTargetOutput::from(o)),
             TargetOutputDto::HdHomeRun(o) => TargetOutput::HdHomeRun(HdHomeRunTargetOutput::from(o)),
+            TargetOutputDto::Plugin(o) => TargetOutput::Plugin(PluginTargetOutput::from(o)),
         }
     }
 }
@@ -322,6 +412,7 @@ impl From<&TargetOutput> for TargetOutputDto {
             TargetOutput::M3u(o) => TargetOutputDto::M3u(M3uTargetOutputDto::from(o)),
             TargetOutput::Strm(o) => TargetOutputDto::Strm(StrmTargetOutputDto::from(o)),
             TargetOutput::HdHomeRun(o) => TargetOutputDto::HdHomeRun(HdHomeRunTargetOutputDto::from(o)),
+            TargetOutput::Plugin(o) => TargetOutputDto::Plugin(PluginTargetOutputDto::from(o)),
         }
     }
 }
@@ -366,6 +457,7 @@ pub struct ConfigTarget {
     pub execution_plan: TargetExecutionPlan,
     pub watch: Option<Vec<ConfigWatch>>,
     pub use_memory_cache: bool,
+    pub managed_channels: Vec<shared::model::ManagedChannelBinding>,
 }
 
 impl ConfigTarget {
@@ -403,7 +495,31 @@ impl ConfigTarget {
         })
     }
 
+    /// The `type: plugin` outputs, in config order.
+    pub fn plugin_outputs(&self) -> impl Iterator<Item = &PluginTargetOutput> {
+        self.output.iter().filter_map(|o| match o {
+            TargetOutput::Plugin(output) => Some(output),
+            _ => None,
+        })
+    }
+
     pub fn has_output(&self, tt: TargetType) -> bool { self.output.iter().any(|o| TargetType::from(o) == tt) }
+
+    /// The plugin strategies this target names, with the hook each one calls.
+    ///
+    /// Plugins load after the config, so the orchestrator checks these against
+    /// the registry (`PluginHost::provides`) right after plugin load; core does
+    /// not validate them. A `type: plugin` output names its plugin with
+    /// `RenderOutput`; its `format` is checked against `provides.output_format`
+    /// separately (see [`PluginTargetOutput::format`]).
+    pub fn plugin_refs(&self) -> impl Iterator<Item = (PluginHook, &str)> {
+        let outputs = self.plugin_outputs().map(|output| (PluginHook::RenderOutput, output.plugin.as_str()));
+        self.execution_plan
+            .plugin_strategies
+            .refs()
+            .chain(outputs)
+            .chain(self.managed_channels.iter().map(|binding| (PluginHook::ManagedChannels, binding.plugin.id())))
+    }
 
     pub fn epg_id_case(&self) -> EpgIdOutputCase {
         EpgIdOutputCase::from_lowercase(self.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids))
@@ -457,6 +573,7 @@ impl From<&ConfigTargetDto> for ConfigTarget {
                     .collect()
             }),
             use_memory_cache: dto.use_memory_cache,
+            managed_channels: dto.managed_channels.clone(),
         }
     }
 }
@@ -560,12 +677,55 @@ mod tests {
     }
 
     #[test]
+    fn plugin_output_round_trips_and_names_its_plugin_for_the_render_hook() {
+        let mut dto: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "t1", "output": [
+            {"type": "m3u"},
+            {"type": "plugin", "plugin": "my-plugin", "format": "my-format", "filename": "out.txt",
+             "plugin_config": {"b": "2", "a": 1, "on": true}, "filter": "Group ~ \"News\""},
+        ]}))
+        .unwrap();
+        dto.prepare(1, None, None).unwrap();
+        let target = ConfigTarget::from(&dto);
+
+        assert_eq!(target.output[1].target_type(), TargetType::Plugin);
+        assert!(target.has_output(TargetType::Plugin));
+        let output = target.plugin_outputs().next().unwrap();
+        // `plugin_options` is the one place the typed values become the plugin's strings.
+        let mut options = shared::model::plugin_options(&output.plugin_config);
+        options.sort();
+        assert_eq!(
+            options,
+            [("a".to_string(), "1".to_string()), ("b".to_string(), "2".to_string()), ("on".to_string(), "true".into())],
+            "typed values reach the plugin as their JSON text; the order is the document's"
+        );
+        assert_eq!(output.file_name(), "out.txt");
+        assert!(target.output[1].filter().is_some(), "the output filter is the plugin output's");
+        assert_eq!(TargetOutputDto::from(&target.output[1]), dto.output[1]);
+
+        let refs: Vec<_> = target.plugin_refs().collect();
+        assert_eq!(refs, [(PluginHook::RenderOutput, "my-plugin")]);
+    }
+
+    #[test]
+    fn plugin_refs_lists_strategies_and_outputs_together() {
+        let mut dto: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "t1",
+            "sort": {"strategy": "plugin:sorter"},
+            "output": [{"type": "plugin", "plugin": "my-plugin"}]}))
+        .unwrap();
+        dto.prepare(1, None, None).unwrap();
+        let target = ConfigTarget::from(&dto);
+        let refs: Vec<_> = target.plugin_refs().collect();
+        assert!(refs.contains(&(PluginHook::RenderOutput, "my-plugin")), "{refs:?}");
+        assert_eq!(refs.len(), 2, "{refs:?}");
+    }
+
+    #[test]
     fn execution_plan_preserves_both_deduplication_passes() {
         let deduplicate = DeduplicateConfig::default();
         let dto = ConfigTargetDto {
             options: Some(ConfigTargetOptions {
                 remove_duplicates: true,
-                deduplicate: Some(deduplicate),
+                deduplicate: Some(deduplicate.clone()),
                 ..Default::default()
             }),
             ..Default::default()

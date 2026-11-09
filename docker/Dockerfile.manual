@@ -54,6 +54,7 @@ WORKDIR /app
 COPY --from=binary-selector /app/tuliprox ./tuliprox
 COPY ./web ./web
 COPY ./resources ./resources
+COPY ./plugins ./plugins
 
 CMD ["/app/tuliprox", "-s", "-p", "/app/config"]
 
@@ -79,6 +80,7 @@ WORKDIR /app
 COPY --from=binary-selector /app/tuliprox ./tuliprox
 COPY ./web ./web
 COPY ./resources ./resources
+COPY ./plugins ./plugins
 # config should be mounted as volume
 # COPY ./config ./config
 

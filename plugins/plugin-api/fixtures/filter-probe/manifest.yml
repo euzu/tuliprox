@@ -1,0 +1,6 @@
+id: filter-probe
+name: Filter probe (W5 fixture)
+version: 0.1.0
+api_version: 1
+hooks:
+  - filter.eval-fn

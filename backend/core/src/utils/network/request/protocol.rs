@@ -1,6 +1,6 @@
 use super::MimeCategory;
 use reqwest::StatusCode;
-use shared::utils::CONTENT_TYPE_JSON;
+use shared::utils::{sanitize_sensitive_info, CONTENT_TYPE_JSON};
 use url::Url;
 
 pub fn classify_content_type(headers: &[(String, String)]) -> MimeCategory {
@@ -26,10 +26,23 @@ pub fn format_http_status(status: StatusCode) -> String {
     }
 }
 
+pub fn request_failed_message(status: StatusCode, url: &str) -> String {
+    format!("Request failed ({}): {}", format_http_status(status), sanitize_sensitive_info(url))
+}
+
+pub fn request_failed_status(message: &str) -> Option<StatusCode> {
+    let marker = "Request failed (";
+    let status_start = message.find(marker)?.checked_add(marker.len())?;
+    let status_text = message.get(status_start..)?.split(')').next()?;
+    let status_code = status_text.split_whitespace().next()?.parse::<u16>().ok()?;
+    StatusCode::from_u16(status_code).ok()
+}
+
 pub fn content_type_from_ext(ext: &str) -> &'static str {
     match ext.to_ascii_lowercase().as_str() {
         "mp4" | "fmp4" | "m4s" | "m4v" | "cmfv" => "video/mp4",
         "m4a" | "cmfa" => "audio/mp4",
+        "mp3" => "audio/mpeg",
         "mkv" => "video/x-matroska",
         "avi" => "video/x-msvideo",
         "mov" => "video/quicktime",

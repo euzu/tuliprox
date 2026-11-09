@@ -131,7 +131,7 @@ pub(in crate::api) fn get_epg_path_for_target_by_type(
             }
             None
         }
-        TargetType::Strm | TargetType::HdHomeRun => None,
+        TargetType::Strm | TargetType::HdHomeRun | TargetType::Plugin => None,
     }
 }
 
@@ -1068,6 +1068,7 @@ mod tests {
 
     fn test_target_with_xtream_and_m3u() -> ConfigTarget {
         ConfigTarget {
+            managed_channels: Vec::new(),
             curation: None,
             id: 1,
             enabled: true,
@@ -1101,6 +1102,7 @@ mod tests {
 
     fn test_target_with_xtream_only() -> ConfigTarget {
         ConfigTarget {
+            managed_channels: Vec::new(),
             curation: None,
             id: 1,
             enabled: true,

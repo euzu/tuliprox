@@ -41,6 +41,7 @@ struct Fixture {
 
 fn target(id: u16, name: &str, output: TargetOutput) -> Arc<ConfigTarget> {
     Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id,
         enabled: true,
@@ -89,16 +90,22 @@ async fn setup_fixture() -> Fixture {
             schedule: "0 0 12 * * * *".to_string(),
             task_type: ScheduleTaskType::PlaylistUpdate,
             targets: Some(vec!["target-alpha".to_string()]),
+            plugin: None,
+            task: None,
         },
         ScheduleConfig {
             schedule: "0 0 18 * * * *".to_string(),
             task_type: ScheduleTaskType::PlaylistUpdate,
             targets: None,
+            plugin: None,
+            task: None,
         },
         ScheduleConfig {
             schedule: "0 0 6 * * * *".to_string(),
             task_type: ScheduleTaskType::LibraryScan,
             targets: None,
+            plugin: None,
+            task: None,
         },
     ];
     let config = Config {
@@ -274,16 +281,22 @@ fn test_schedule_filtering_and_next_run_helper() {
             schedule: "0 0 12 * * * *".to_string(), // next: 12:00 (timestamp: 1761912000)
             task_type: ScheduleTaskType::PlaylistUpdate,
             targets: Some(vec!["target-alpha".to_string()]),
+            plugin: None,
+            task: None,
         },
         ScheduleConfig {
             schedule: "0 0 14 * * * *".to_string(), // next: 14:00 (timestamp: 1761919200)
             task_type: ScheduleTaskType::PlaylistUpdate,
             targets: None, // applies to all
+            plugin: None,
+            task: None,
         },
         ScheduleConfig {
             schedule: "0 0 11 * * * *".to_string(),   // next: 11:00
             task_type: ScheduleTaskType::LibraryScan, // must be ignored
             targets: None,
+            plugin: None,
+            task: None,
         },
     ];
 

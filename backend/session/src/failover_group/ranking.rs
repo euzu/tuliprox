@@ -1,6 +1,6 @@
 use crate::failover_group::{
-    circuit::{CircuitView, MemberKey},
-    health::{member_key, MemberHealthIndex},
+    circuit::CircuitView,
+    health::{MemberHealth, MemberHealthIndex},
 };
 use shared::{
     model::{AudioChannels, AudioCodec, FailoverGroupPolicy, RuntimeAudioLanguage, VideoCodec, VideoResolution},
@@ -46,35 +46,28 @@ pub use shared::model::ScoreBreakdown;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RankedCandidate {
     pub index: usize,
-    pub key: MemberKey,
     pub score: ScoreBreakdown,
 }
 
-fn filter_candidates<'a>(
-    target_name: &Arc<str>,
-    members: &'a [GroupMember],
-    health: &MemberHealthIndex,
-    mode: &SelectionMode,
-    now: Instant,
-) -> Vec<(usize, &'a GroupMember)> {
+fn filter_candidates(members: &[GroupMember], healths: &[MemberHealth], mode: &SelectionMode) -> Vec<usize> {
     let mut candidates = Vec::with_capacity(members.len());
     for (i, member) in members.iter().enumerate() {
         match mode {
             SelectionMode::Live => {
-                candidates.push((i, member));
+                candidates.push(i);
             }
             SelectionMode::Archive { start_ts, now_ts } => {
                 if let Some(archive) = member.archive {
                     let earliest_ts = now_ts.saturating_sub(i64::from(archive.duration_days) * 86_400);
                     if *start_ts >= earliest_ts {
-                        candidates.push((i, member));
+                        candidates.push(i);
                     }
                 }
             }
             SelectionMode::Runtime { current_audio, audio_language, .. } => {
                 if *audio_language == RuntimeAudioLanguage::Require {
                     if let Some(target_lang) = current_audio.as_ref().and_then(|a| a.language.as_deref()) {
-                        let m_health = health.health(target_name, member, now);
+                        let m_health = &healths[i];
                         if let Some(cand_lang) = m_health.probe.as_ref().and_then(|p| p.audio_language.as_deref()) {
                             if !cand_lang.eq_ignore_ascii_case(target_lang) {
                                 continue;
@@ -82,7 +75,7 @@ fn filter_candidates<'a>(
                         }
                     }
                 }
-                candidates.push((i, member));
+                candidates.push(i);
             }
         }
     }
@@ -165,7 +158,7 @@ fn compute_runtime_bonuses(probe: Option<&crate::failover_group::health::ProbePa
 }
 
 pub fn rank_members(
-    target_name: &Arc<str>,
+    target_name: &str,
     members: &[GroupMember],
     policy: FailoverGroupPolicy,
     health: &MemberHealthIndex,
@@ -176,17 +169,17 @@ pub fn rank_members(
         return Vec::new();
     }
 
-    let candidates = filter_candidates(target_name, members, health, mode, now);
+    let member_healths: Vec<_> = members.iter().map(|m| health.health(target_name, m, now)).collect();
+
+    let candidates = filter_candidates(members, &member_healths, mode);
     if candidates.is_empty() {
         return Vec::new();
     }
 
-    let member_healths: Vec<_> = candidates.iter().map(|(_, m)| health.health(target_name, m, now)).collect();
-
     let mut max_bitrate = 0u32;
     let mut min_bitrate = u32::MAX;
-    for h in &member_healths {
-        let b = h.probe.as_ref().map_or(0, |p| p.bitrate_kbps);
+    for &idx in &candidates {
+        let b = member_healths[idx].probe.as_ref().map_or(0, |p| p.bitrate_kbps);
         max_bitrate = max_bitrate.max(b);
         min_bitrate = min_bitrate.min(b);
     }
@@ -195,8 +188,9 @@ pub fn rank_members(
     }
 
     let mut ranked = Vec::with_capacity(candidates.len());
-    for ((index, member), m_health) in candidates.into_iter().zip(member_healths) {
-        let key = member_key(member);
+    for &index in &candidates {
+        let member = &members[index];
+        let m_health = &member_healths[index];
 
         let member_circuit_open = matches!(m_health.circuit, CircuitView::Open { .. });
         let input_circuit_open = matches!(health.input_circuit_view(&member.input_name, now), CircuitView::Open { .. });
@@ -217,7 +211,7 @@ pub fn rank_members(
         let penalty = if member_circuit_open || input_circuit_open { OPEN_CIRCUIT_PENALTY } else { 0 };
         let total = u8::try_from((base_total + bonuses - penalty).clamp(0, 100)).unwrap_or(0);
 
-        ranked.push(RankedCandidate { index, key, score: ScoreBreakdown { qos, quality, order, total, demoted } });
+        ranked.push(RankedCandidate { index, score: ScoreBreakdown { qos, quality, order, total, demoted } });
     }
 
     match policy {
@@ -291,7 +285,7 @@ mod tests {
         index: &MemberHealthIndex,
         mode: &SelectionMode,
     ) -> Vec<RankedCandidate> {
-        rank_members(&Arc::from(TARGET), members, policy, index, mode, Instant::now())
+        rank_members(TARGET, members, policy, index, mode, Instant::now())
     }
 
     #[test]

@@ -56,6 +56,9 @@ pub struct PlaylistItemHeader {
     pub input_stream_id: Arc<str>,
     #[serde(default, rename = "source_user_agent", alias = "upstream_user_agent", with = "arc_str_option_serde")]
     pub upstream_user_agent: Option<Arc<str>>,
+    /// URL captured before any target transformation; empty when it equals `url`.
+    #[serde(default, with = "arc_str_serde")]
+    pub input_url: Arc<str>,
     /// Mapping override for failover grouping: `Some("")` opts out, `Some(key)` forces a key.
     #[serde(default, with = "arc_str_option_serde")]
     pub failover_group: Option<Arc<str>>,
@@ -90,6 +93,7 @@ impl Default for PlaylistItemHeader {
             source_ordinal: 0,
             input_stream_id: "".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
             failover_group: None,
             failover_group_uuid: None,
         }
@@ -97,6 +101,24 @@ impl Default for PlaylistItemHeader {
 }
 
 impl PlaylistItemHeader {
+    /// Captures the input playlist item URL before any target transformation.
+    pub fn freeze_input_url(&mut self) {
+        if self.input_url.is_empty() {
+            self.input_url = Arc::clone(&self.url);
+        }
+    }
+
+    /// Returns the input playlist item URL to persist: `input_url` when non-empty and different
+    /// from `url`, else an empty interned string.
+    #[must_use]
+    pub fn persisted_input_url(&self) -> Arc<str> {
+        if !self.input_url.is_empty() && self.input_url != self.url {
+            Arc::clone(&self.input_url)
+        } else {
+            "".intern()
+        }
+    }
+
     /// Captures the input playlist item ID at the input-processing boundary.
     ///
     /// This must run before target transformations and must not be used to recover an identity
@@ -232,5 +254,15 @@ impl crate::model::FieldSetAccessor for crate::model::PlaylistItemHeader {
     fn set_field(&mut self, field: &str, value: &str) -> bool {
         use crate::model::FieldSet;
         HeaderField::parse(field).is_some_and(|field| self.set(field, value))
+    }
+}
+
+/// Returns `input_url` when non-empty, otherwise falls back to `url`.
+#[inline]
+pub(crate) fn override_source_url<'a>(input_url: &'a Arc<str>, url: &'a Arc<str>) -> &'a Arc<str> {
+    if input_url.is_empty() {
+        url
+    } else {
+        input_url
     }
 }

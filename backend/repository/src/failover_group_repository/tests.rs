@@ -16,7 +16,88 @@ fn member(vid: u32, stream_id: &str) -> GroupMember {
         archive: None,
         epg_channel_id: None,
         additional_properties: None,
+        input_url: Arc::from(""),
+        upstream_user_agent: None,
     }
+}
+
+#[test]
+fn old_group_member_records_without_input_url_still_decode() {
+    // Records written before `input_url` existed used positional MessagePack: the field was
+    // simply absent. `serde(default)` must keep them readable.
+    #[derive(serde::Serialize)]
+    struct LegacyGroupMember {
+        member_vid: VirtualId,
+        input_name: Arc<str>,
+        provider_id: u32,
+        input_stream_id: Arc<str>,
+        url: Arc<str>,
+        item_type: PlaylistItemType,
+        cluster: XtreamCluster,
+        title: Arc<str>,
+        archive: Option<MemberArchive>,
+        epg_channel_id: Option<Arc<str>>,
+        additional_properties: Option<StreamProperties>,
+    }
+
+    let legacy = LegacyGroupMember {
+        member_vid: VirtualId(2),
+        input_name: Arc::from("a"),
+        provider_id: 0,
+        input_stream_id: Arc::from("2"),
+        url: Arc::from("http://provider.test/live"),
+        item_type: PlaylistItemType::Live,
+        cluster: XtreamCluster::Live,
+        title: Arc::from("ZDF"),
+        archive: None,
+        epg_channel_id: None,
+        additional_properties: None,
+    };
+    let encoded = rmp_serde::to_vec(&legacy).expect("legacy record encoded");
+    let decoded: GroupMember = rmp_serde::from_slice(&encoded).expect("legacy record decodes");
+
+    assert_eq!(decoded.member_vid, VirtualId(2));
+    assert_eq!(decoded.input_url.as_ref(), "");
+    assert_eq!(decoded.upstream_user_agent, None);
+}
+
+#[test]
+fn old_group_member_records_without_upstream_user_agent_still_decode() {
+    #[derive(serde::Serialize)]
+    struct LegacyGroupMemberWithInputUrl {
+        member_vid: VirtualId,
+        input_name: Arc<str>,
+        provider_id: u32,
+        input_stream_id: Arc<str>,
+        url: Arc<str>,
+        item_type: PlaylistItemType,
+        cluster: XtreamCluster,
+        title: Arc<str>,
+        archive: Option<MemberArchive>,
+        epg_channel_id: Option<Arc<str>>,
+        additional_properties: Option<StreamProperties>,
+        input_url: Arc<str>,
+    }
+
+    let legacy = LegacyGroupMemberWithInputUrl {
+        member_vid: VirtualId(2),
+        input_name: Arc::from("a"),
+        provider_id: 0,
+        input_stream_id: Arc::from("2"),
+        url: Arc::from("http://provider.test/live"),
+        item_type: PlaylistItemType::Live,
+        cluster: XtreamCluster::Live,
+        title: Arc::from("ZDF"),
+        archive: None,
+        epg_channel_id: None,
+        additional_properties: None,
+        input_url: Arc::from("http://provider.test/original"),
+    };
+    let encoded = rmp_serde::to_vec(&legacy).expect("legacy record encoded");
+    let decoded: GroupMember = rmp_serde::from_slice(&encoded).expect("legacy record decodes");
+
+    assert_eq!(decoded.input_url.as_ref(), "http://provider.test/original");
+    assert_eq!(decoded.upstream_user_agent, None);
 }
 
 fn record() -> FailoverGroupRecord {

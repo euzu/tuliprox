@@ -44,6 +44,11 @@ impl fmt::Debug for HlsRevisionFilePin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("HlsRevisionFilePin") }
 }
 
+impl HlsRevisionFilePin {
+    /// Returns true when this pin keeps `path` registered as an active cache file.
+    pub(crate) fn covers(&self, path: &Path) -> bool { self.registration.path == path }
+}
+
 impl HlsSegmentCache {
     pub async fn reserve_revision_peak<K: HlsCacheObjectKey>(
         &self,
@@ -109,7 +114,7 @@ impl HlsSegmentCache {
         if !self.contains_current_cache_path(path) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "revision outside current cache root"));
         }
-        Ok(HlsRevisionFilePin { _registration: self.register_active_temp_path(path)? })
+        Ok(HlsRevisionFilePin { registration: self.register_active_temp_path(path)? })
     }
 
     pub async fn create_revision_spool<K: HlsCacheObjectKey>(&self, key: &K) -> io::Result<(File, HlsRevisionFilePin)> {

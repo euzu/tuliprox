@@ -103,6 +103,10 @@ macro_rules! check_input_credentials {
                 // Staged credentials belong to the staged playlist source itself.
                 // validation happens in ConfigInputDto/ConfigInput prepare methods.
             }
+            InputType::Plugin => {
+                // url, username and password are passed to the plugin as they are and may all be
+                // absent; `ConfigInputDto::prepare` validates the `plugin` id.
+            }
         }
     };
 }
@@ -160,7 +164,7 @@ macro_rules! check_input_connections {
                 }
             }
             InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex => {}
-            InputType::Staged => {}
+            InputType::Staged | InputType::Plugin => {}
         }
     };
 }

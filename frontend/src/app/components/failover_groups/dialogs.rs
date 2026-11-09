@@ -1,7 +1,7 @@
 //! Small dialogs of the failover groups page: a name prompt and a list picker.
 
 use crate::{
-    app::components::{CustomDialog, TextButton},
+    app::components::{CustomDialog, NoContent, TextButton},
     edit_field_text, generate_form_reducer,
     i18n::use_translation,
     use_default_form_reducer,
@@ -121,7 +121,7 @@ pub fn PickerDialog(props: &PickerDialogProps) -> Html {
                     }
                 }) }
                 if props.items.is_empty() {
-                    <li class="tp__failover-groups__list-empty">{ translate.t("LABEL.NO_CONTENT") }</li>
+                    <li class="tp__failover-groups__list-empty"><NoContent text={translate.t("LABEL.NO_CONTENT")} /></li>
                 }
             </ul>
             <div class="tp__dialog__toolbar">

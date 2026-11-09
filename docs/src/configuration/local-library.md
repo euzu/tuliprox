@@ -41,6 +41,7 @@ library:
       path: "/media/shows"
       content_type: auto   # Uses PTT to guess S01E01 structures
       recursive: true
+      follow_symlinks: true # Default; follows links to other drives or cloud mounts
   supported_extensions:
     - "mp4"
     - "mkv"
@@ -65,6 +66,35 @@ library:
     width: 320
     height: 180
 ```
+
+### Symlinks and cloud mounts
+
+Media can live on another drive or a cloud mount (rclone, NFS, SMB) and be linked into a scan directory:
+
+```text
+/media/library/
+  Movies/                            <- regular directory
+  Shows -> /mnt/gdrive/Shows         <- symlinked directory
+  Film.mkv -> /mnt/usb/Film.mkv      <- symlinked file
+```
+
+With `follow_symlinks: true` (default):
+
+* The scanner follows symlinked files and directories. With `recursive: false`, symlinked directories are not entered.
+* The catalog stores the link path, not the target path. The file extension of the link name decides whether a file
+  is scanned.
+* Directory loops (`Shows/loop -> ..`) are detected; every directory is scanned once.
+* A dangling link, for example while a cloud mount is offline, is logged and skipped. A scan before a target rebuild
+  stops with an error instead, so an offline mount never removes entries from the catalog.
+* Streaming serves a file when its link path lies inside the scan directory, wherever the target lies.
+
+With `follow_symlinks: false`, the scanner skips symlinks. Streaming serves only files whose resolved path lies inside
+the resolved scan directory. The scan directory itself may be a symlink in both modes.
+When scan directories are nested, the innermost directory that contains a file decides which rule applies.
+
+> **Security:** with `follow_symlinks: true`, anyone who can create files in a scan directory can make Tuliprox serve
+> any file it can read that has a supported extension. Keep scan directories writable only by trusted users, or set
+> `follow_symlinks: false`.
 
 ### Thumbnail Extraction
 
@@ -97,7 +127,8 @@ That remains a future feature.
 | ↳ `path`                   | String |                  | The absolute or relative path to your media directory.                        |
 | ↳ `content_type`           | Enum   | `auto`           | Classification mode. Options: `auto` (guess via PTT), `movie`, `series`.      |
 | ↳ `recursive`              | Bool   | `true`           | If true, Tuliprox crawls all subdirectories within the specified path.        |
-| `supported_extensions`     | List   | `[...]`          | Video extensions considered playable (e.g., `mp4`, `mkv`, `mov`, `webm`).     |
+| ↳ `follow_symlinks`        | Bool   | `true`           | Follows symlinked files and directories. See "Symlinks and cloud mounts".     |
+| `supported_extensions`     | List   | `[...]`          | File extensions to scan (e.g., `mp4`, `mkv`, `mp3`). Case and dot are ignored.|
 | **`metadata`**             | Object |                  | Configuration for metadata resolution and fallback logic.                     |
 | ↳ `fallback_to_filename`   | Bool   | `true`           | Uses the parsed filename if NFO or TMDB metadata is unavailable.              |
 | ↳ `read_existing.kodi`     | Bool   | `true`           | Reads Kodi-compatible `.nfo` files located alongside the media.               |

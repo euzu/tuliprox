@@ -82,6 +82,7 @@ fn existing_video_item() -> XtreamPlaylistItem {
         source_ordinal: 0,
         input_stream_id: "1001".into(),
         upstream_user_agent: None,
+        input_url: "".into(),
     }
 }
 
@@ -339,4 +340,28 @@ fn resource_field_names_exclude_stream_urls() {
     for not_a_resource in ["url", "name", "chno", "caption", "epg_channel_id", "stream_url", "nfo_s_2_title"] {
         assert!(!is_resource_field_name(not_a_resource), "{not_a_resource}");
     }
+}
+
+#[test]
+fn archive_info_uses_one_rule_for_indicator_and_duration() {
+    let live = |archive: Option<i32>, duration: Option<i32>, catchup_days: Option<&str>| {
+        StreamProperties::Live(Box::new(LiveStreamProperties {
+            tv_archive: archive,
+            tv_archive_duration: duration,
+            catchup: catchup_days
+                .map(|days| CatchupProperties { days: Some(days.intern()), ..CatchupProperties::default() }),
+            ..LiveStreamProperties::default()
+        }))
+    };
+
+    assert_eq!(archive_info(None, ""), (false, None));
+    assert_eq!(archive_info(None, "  "), (false, None));
+    assert_eq!(archive_info(Some(&live(Some(0), None, None)), ""), (false, None));
+    assert_eq!(archive_info(Some(&live(Some(-1), None, None)), ""), (false, None));
+    assert_eq!(archive_info(Some(&live(Some(1), Some(7), None)), ""), (true, Some(7)));
+    assert_eq!(archive_info(Some(&live(Some(1), Some(0), Some("5"))), ""), (true, Some(5)));
+    assert_eq!(archive_info(Some(&live(Some(1), Some(-3), Some("5"))), ""), (true, Some(5)));
+    assert_eq!(archive_info(Some(&live(Some(1), None, None)), ""), (true, None));
+    assert_eq!(archive_info(None, "12"), (true, Some(12)));
+    assert_eq!(archive_info(None, "0"), (true, None));
 }

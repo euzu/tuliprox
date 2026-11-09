@@ -2,6 +2,7 @@
 //! is replaced by another member when it fails, stalls or delivers slower than real time.
 
 mod budget;
+mod registry;
 #[cfg(test)]
 mod tests;
 
@@ -23,7 +24,13 @@ use axum::http::HeaderMap;
 pub(crate) use budget::{BudgetDecision, FailoverBudget};
 use bytes::Bytes;
 use futures::Future;
-use shared::model::{EventMessage, FailoverGroupPlayback, StreamChannel, SwitchReason, UserConnectionPermission};
+pub use registry::FailoverSwitchRegistry;
+#[cfg(test)]
+pub(crate) use registry::ManualSwitchCommand;
+pub(crate) use registry::{DirectSwitchGuard, SharedSwitchGuard, SwitchReceiver, SwitchSender};
+use shared::model::{
+    EventMessage, FailoverGroupPlayback, StreamChannel, StreamMemberInfo, SwitchReason, UserConnectionPermission,
+};
 use std::{
     pin::Pin,
     sync::Arc,
@@ -41,6 +48,7 @@ use tuliprox_repository::failover_group_repository::FailoverGroupRecord;
 use tuliprox_session::{
     active_provider_manager::{ConnectionKind, ManagedProviderHandle},
     failover_group::{AudioSignature, FailureClass, SelectionMode},
+    stream_options::StreamOptions,
     MemberBinding,
 };
 
@@ -193,13 +201,15 @@ impl GroupFailoverDriver {
             return None;
         }
         let group = &self.ctx.group;
-        // The member failed whether or not another one may take over.
-        record_member_failure(
-            &self.ctx.app_state.member_health,
-            &group.members[self.current],
-            None,
-            failure_class_for(reason, status),
-        );
+        if reason != SwitchReason::Manual {
+            // The member failed whether or not another one may take over.
+            record_member_failure(
+                &self.ctx.app_state.member_health,
+                &group.members[self.current],
+                None,
+                failure_class_for(reason, status),
+            );
+        }
         let decision = self.budget.on_trigger(self.current, group.members.len(), now);
         let (exclude, prefer) = match decision {
             BudgetDecision::GiveUp => return None,
@@ -251,7 +261,9 @@ pub(crate) fn failure_class_for(reason: SwitchReason, status: Option<u16>) -> Fa
     match (reason, status.and_then(|status| axum::http::StatusCode::from_u16(status).ok())) {
         (SwitchReason::UpstreamError, Some(status)) => FailureClass::from_status(status),
         (SwitchReason::UpstreamError, None) => FailureClass::Transport,
-        (SwitchReason::UpstreamEof | SwitchReason::Stall | SwitchReason::Underrun, _) => FailureClass::Stream,
+        (SwitchReason::UpstreamEof | SwitchReason::Stall | SwitchReason::Underrun | SwitchReason::Manual, _) => {
+            FailureClass::Stream
+        }
     }
 }
 
@@ -318,6 +330,12 @@ async fn adopt_member(
         }
     }
     let member_vid = opened.member.member_vid.get();
+    let member_info = StreamMemberInfo {
+        title: Arc::clone(&opened.member.title),
+        input_name: Arc::clone(&opened.member.input_name),
+        provider: Arc::clone(&provider),
+        member_vid: Some(member_vid),
+    };
     app_state
         .active_users
         .bind_member(
@@ -328,6 +346,8 @@ async fn adopt_member(
                 member_vid,
                 member_index: opened.index,
                 input_name: Arc::clone(&opened.member.input_name),
+                member_title: Arc::clone(&opened.member.title),
+                provider: Arc::clone(&provider),
             },
         )
         .await;
@@ -335,7 +355,12 @@ async fn adopt_member(
         // Every viewer of the shared stream plays the new member, not only the one that started it.
         app_state
             .active_users
-            .update_shared_group_provider(ctx.target.id, ctx.group.group_vid.get(), Arc::clone(&provider))
+            .update_shared_group_provider(
+                ctx.target.id,
+                ctx.group.group_vid.get(),
+                Arc::clone(&provider),
+                Some(member_info),
+            )
             .await;
     }
     app_state
@@ -350,6 +375,58 @@ async fn adopt_member(
         reason,
     });
     Some(RuntimeMember { index: opened.index, stream, handle, cancel, allocation_id })
+}
+
+fn make_selection_request<'a>(
+    ctx: &'a GroupFailoverContext,
+    mode: SelectionMode,
+    priority: i8,
+    exclude: &'a [usize],
+    demoted_inputs: &'a [Arc<str>],
+    prefer: Option<usize>,
+) -> GroupSelectionRequest<'a> {
+    GroupSelectionRequest {
+        mode,
+        allow_provider_grace: false,
+        exclude,
+        demoted_inputs,
+        prefer,
+        bypass_maintenance: ctx.user.is_recording_proxy_user(),
+        allow_preempt: false,
+        ..GroupSelectionRequest::new(
+            &ctx.target_name,
+            &ctx.group,
+            ctx.playback.start,
+            &ctx.fingerprint.addr,
+            &ctx.user.username,
+            priority,
+            ctx.connection_kind,
+        )
+    }
+}
+
+fn make_open_request<'a>(
+    ctx: &'a GroupFailoverContext,
+    stream_options: &'a StreamOptions,
+    priority: i8,
+    deadline: tokio::time::Instant,
+) -> GroupOpenRequest<'a> {
+    GroupOpenRequest {
+        app_state: &ctx.app_state,
+        user: &ctx.user,
+        fingerprint: &ctx.fingerprint,
+        req_headers: &ctx.req_headers,
+        group: &ctx.group,
+        base_channel: &ctx.base_channel,
+        stream_options,
+        share_stream: ctx.share_stream,
+        connection_permission: ctx.connection_permission,
+        connection_kind: ctx.connection_kind,
+        priority,
+        session_token: &ctx.session_token,
+        is_reopen: true,
+        deadline,
+    }
 }
 
 async fn switch_member(ctx: Arc<GroupFailoverContext>, request: SwitchRequest) -> Option<RuntimeMember> {
@@ -376,27 +453,10 @@ async fn switch_member(ctx: Arc<GroupFailoverContext>, request: SwitchRequest) -
     }
     loop {
         if tokio::time::Instant::now() >= deadline {
-            return None;
+            break;
         }
         let wanted = prefer.take();
-        let req = GroupSelectionRequest {
-            mode: mode.clone(),
-            allow_provider_grace: false,
-            exclude: &exclude,
-            demoted_inputs: &demoted_inputs,
-            prefer: wanted,
-            bypass_maintenance: ctx.user.is_recording_proxy_user(),
-            allow_preempt: false,
-            ..GroupSelectionRequest::new(
-                &ctx.target_name,
-                &ctx.group,
-                ctx.playback.start,
-                &ctx.fingerprint.addr,
-                &ctx.user.username,
-                priority,
-                ctx.connection_kind,
-            )
-        };
+        let req = make_selection_request(&ctx, mode.clone(), priority, &exclude, &demoted_inputs, wanted);
         let acquired = match tokio::time::timeout_at(deadline, acquire_group_member(app_state, req)).await {
             Ok(Ok(acquired)) => acquired,
             Ok(Err(GroupSelectionFailure::Exhausted)) => {
@@ -407,6 +467,9 @@ async fn switch_member(ctx: Arc<GroupFailoverContext>, request: SwitchRequest) -
                 continue;
             }
             Ok(Err(GroupSelectionFailure::NoCandidate)) => {
+                if reason == SwitchReason::Manual {
+                    break;
+                }
                 // Every other member failed in this switch: start a new round over them after a
                 // pause, still bounded by the budget. The replaced member stays out.
                 exclude.retain(|index| *index == previous || hard_exclude.contains(index));
@@ -414,30 +477,19 @@ async fn switch_member(ctx: Arc<GroupFailoverContext>, request: SwitchRequest) -
                 round_pause = (round_pause * 2).min(NO_CANDIDATE_RETRY_MAX_INTERVAL);
                 continue;
             }
-            Ok(Err(_)) | Err(_) => return None,
+            Ok(Err(_)) | Err(_) => break,
         };
-        let open_req = GroupOpenRequest {
-            app_state,
-            user: &ctx.user,
-            fingerprint: &ctx.fingerprint,
-            req_headers: &ctx.req_headers,
-            group: &ctx.group,
-            base_channel: &ctx.base_channel,
-            stream_options: &stream_options,
-            share_stream: ctx.share_stream,
-            connection_permission: ctx.connection_permission,
-            connection_kind: ctx.connection_kind,
-            priority,
-            session_token: &ctx.session_token,
-            is_reopen: true,
-            deadline: deadline.min(tokio::time::Instant::now() + RUNTIME_OPEN_TIMEOUT),
-        };
+        let open_deadline = deadline.min(tokio::time::Instant::now() + RUNTIME_OPEN_TIMEOUT);
+        let open_req = make_open_request(&ctx, &stream_options, priority, open_deadline);
         match open_group_member(&open_req, acquired).await {
             Ok(mut opened) => {
                 let stream = opened.details.stream.take();
                 let (Some(stream), ProbedPayload::Ts) = (stream, opened.payload) else {
                     // Only MPEG-TS can be spliced into the running response.
                     app_state.connection_manager.release_managed_provider_handle(opened.details.provider_handle);
+                    if reason == SwitchReason::Manual {
+                        break;
+                    }
                     exclude.push(opened.index);
                     hard_exclude.push(opened.index);
                     continue;
@@ -445,6 +497,9 @@ async fn switch_member(ctx: Arc<GroupFailoverContext>, request: SwitchRequest) -
                 return adopt_member(&ctx, shared_allocation, previous, reason, opened, stream).await;
             }
             Err(failure) => {
+                if reason == SwitchReason::Manual {
+                    break;
+                }
                 if matches!(failure.class, FailureClass::Auth | FailureClass::Capacity) {
                     if !demoted_inputs.contains(&failure.input_name) {
                         demoted_inputs.push(failure.input_name);
@@ -455,9 +510,29 @@ async fn switch_member(ctx: Arc<GroupFailoverContext>, request: SwitchRequest) -
             }
         }
     }
+    if reason == SwitchReason::Manual {
+        let all_others: Vec<usize> = (0..ctx.group.members.len()).filter(|&i| i != previous).collect();
+        let restore_req = make_selection_request(&ctx, mode, priority, &all_others, &[], Some(previous));
+        if let Ok(mut acquired) = acquire_group_member(app_state, restore_req).await {
+            if acquired.index == previous {
+                let open_deadline = tokio::time::Instant::now() + RUNTIME_OPEN_TIMEOUT;
+                let open_req = make_open_request(&ctx, &stream_options, priority, open_deadline);
+                if let Ok(mut opened) = open_group_member(&open_req, acquired).await {
+                    if let (Some(stream), ProbedPayload::Ts) = (opened.details.stream.take(), opened.payload) {
+                        return adopt_member(&ctx, shared_allocation, previous, SwitchReason::Manual, opened, stream)
+                            .await;
+                    }
+                }
+            } else {
+                app_state.connection_manager.release_provider_handle(acquired.handle.disarm());
+            }
+        }
+    }
+    None
 }
 
 /// How a group playback's member body ended for good: no member could take over.
+#[derive(Debug)]
 pub(crate) enum GroupEnd {
     Eof,
     Error(StreamError),
@@ -468,6 +543,7 @@ pub(crate) enum GroupEnd {
     },
 }
 
+#[derive(Debug)]
 pub(crate) enum GroupPoll {
     Data(Bytes),
     /// A null packet sent while a switch runs: keeps the connection alive, carries no media.
@@ -493,16 +569,51 @@ pub(crate) struct GroupSwitcher {
     driver: GroupFailoverDriver,
     /// The switch in flight and the failure that started it.
     switch: Option<(SwitchFuture, SwitchReason)>,
+    manual_switch_rx: SwitchReceiver,
+    manual_switch_tx: SwitchSender,
+    manual_respondent: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    manual_target_index: Option<usize>,
 }
 
 impl GroupSwitcher {
-    pub(crate) fn new(driver: GroupFailoverDriver) -> Self { Self { driver, switch: None } }
+    pub(crate) fn new(driver: GroupFailoverDriver) -> Self {
+        let (manual_switch_tx, manual_switch_rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            driver,
+            switch: None,
+            manual_switch_rx,
+            manual_switch_tx,
+            manual_respondent: None,
+            manual_target_index: None,
+        }
+    }
+
+    pub(crate) fn switch_sender(&self) -> SwitchSender { self.manual_switch_tx.clone() }
 
     /// True while another member is being opened.
     pub(crate) fn is_switching(&self) -> bool { self.switch.is_some() }
 
     /// Polls the member body of `host`, switching members underneath it when it fails.
     pub(crate) fn poll_member(&mut self, host: &mut impl MemberHost, cx: &mut Context<'_>) -> GroupPoll {
+        while let Poll::Ready(Some(cmd)) = self.manual_switch_rx.poll_recv(cx) {
+            if self.is_switching() {
+                let _ = cmd.respondent.send(Err("Switch already in progress".to_string()));
+                continue;
+            }
+            let target_member_vid = cmd.target_member_vid;
+            let target_index =
+                self.driver.ctx.group.members.iter().position(|m| m.member_vid.get() == target_member_vid);
+            let Some(target_index) = target_index else {
+                let _ = cmd.respondent.send(Err("Target member not found in group".to_string()));
+                continue;
+            };
+            if target_index == self.driver.current {
+                let _ = cmd.respondent.send(Ok(()));
+                continue;
+            }
+            let _ = self.start_manual_switch(host, target_index, cmd.respondent);
+        }
+
         loop {
             if let Some(packets) = self.driver.take_pending_output() {
                 return GroupPoll::Data(packets);
@@ -512,13 +623,36 @@ impl GroupSwitcher {
                 match switch.as_mut().poll(cx) {
                     Poll::Ready(Some(member)) => {
                         self.switch = None;
+                        let is_manual = reason == SwitchReason::Manual;
+                        let target_index = self.manual_target_index.take();
+                        let respondent = self.manual_respondent.take();
+
                         self.driver.on_switched(member.index);
                         self.driver.shared_allocation = member.allocation_id;
                         host.install_member(member);
+
+                        if is_manual {
+                            if let Some(resp) = respondent {
+                                if Some(self.driver.current) == target_index {
+                                    let _ = resp.send(Ok(()));
+                                } else {
+                                    let _ = resp.send(Err(
+                                        "Failed to open target member; returned to current member".to_string()
+                                    ));
+                                }
+                            }
+                        }
                         continue;
                     }
                     Poll::Ready(None) => {
                         self.switch = None;
+                        if reason == SwitchReason::Manual {
+                            if let Some(resp) = self.manual_respondent.take() {
+                                let _ = resp.send(Err(
+                                    "Failed to open target member and failed to restore current member".to_string(),
+                                ));
+                            }
+                        }
                         return GroupPoll::Ended(GroupEnd::SwitchFailed { reason });
                     }
                     Poll::Pending => {
@@ -577,6 +711,45 @@ impl GroupSwitcher {
         self.switch = Some((switch, reason));
         true
     }
+
+    fn start_manual_switch(
+        &mut self,
+        host: &mut impl MemberHost,
+        target_index: usize,
+        respondent: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) -> bool {
+        if host.member_preempted() {
+            let _ = respondent.send(Err("Stream member preempted".to_string()));
+            return false;
+        }
+        let now = Instant::now();
+        let deadline = now + RUNTIME_OPEN_TIMEOUT;
+        let previous = self.driver.current;
+        let exclude: Vec<usize> = (0..self.driver.ctx.group.members.len()).filter(|&i| i != target_index).collect();
+        self.driver.stall_armed = false;
+        self.driver.pending_since = None;
+        self.driver.keepalive.as_mut().reset(tokio::time::Instant::now() + KEEPALIVE_INTERVAL);
+
+        let shared_allocation = self.driver.shared_allocation;
+        host.release_member();
+
+        let ctx = Arc::clone(&self.driver.ctx);
+        let future = Box::pin(switch_member(
+            ctx,
+            SwitchRequest {
+                shared_allocation,
+                previous,
+                exclude,
+                prefer: Some(target_index),
+                deadline: tokio::time::Instant::from_std(deadline),
+                reason: SwitchReason::Manual,
+            },
+        ));
+        self.switch = Some((future, SwitchReason::Manual));
+        self.manual_target_index = Some(target_index);
+        self.manual_respondent = Some(respondent);
+        true
+    }
 }
 
 /// The producer of a shared group stream: forwards the member body to the shared stream and
@@ -584,6 +757,7 @@ impl GroupSwitcher {
 pub(crate) struct GroupFailoverStream {
     switcher: GroupSwitcher,
     host: SharedMemberHost,
+    _switch_guard: Option<SharedSwitchGuard>,
 }
 
 struct SharedMemberHost {
@@ -613,9 +787,18 @@ impl GroupFailoverStream {
         slot: Option<&ManagedProviderHandle>,
     ) -> Self {
         driver.shared_allocation = slot.and_then(ManagedProviderHandle::handle).map(|handle| handle.allocation_id);
+        let target_id = driver.ctx.target.id;
+        let group_vid = driver.ctx.group.group_vid.get();
+        let switcher = GroupSwitcher::new(driver);
+        let switch_guard = switcher.driver.ctx.app_state.failover_switch_registry.register_shared(
+            target_id,
+            group_vid,
+            switcher.switch_sender(),
+        );
         Self {
-            switcher: GroupSwitcher::new(driver),
+            switcher,
             host: SharedMemberHost { body: Some(inner), member_cancel: member_cancel_token(slot) },
+            _switch_guard: Some(switch_guard),
         }
     }
 }

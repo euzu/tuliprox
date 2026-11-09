@@ -58,6 +58,7 @@ pub(in crate::processor::playlist::tests) fn playlist_update_run_result(
         accepted_empty_clusters: ClusterFlags::empty(),
         had_quality_rejections,
         input_telemetry: None,
+        plugins: shared::model::PluginRunReport::default(),
     }
 }
 

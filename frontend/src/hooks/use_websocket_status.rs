@@ -11,6 +11,8 @@ pub fn use_websocket_status() -> UseStateHandle<bool> {
         let status = status.clone();
         use_effect_with((), move |()| {
             let services_ctx = services.clone();
+            // The handshake can finish between the first render and this effect.
+            status.set(services_ctx.websocket.is_connected());
             let status = status.clone();
             let subid = services_ctx.event.subscribe(move |msg| {
                 if let EventMessage::WebSocketStatus(active) = msg {

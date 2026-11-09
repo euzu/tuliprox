@@ -37,8 +37,16 @@ pub(super) fn apply_playlist_fetch_outcome<E: EventSink>(
         CacheStatusScope::RequestedClusters(requested_clusters) => {
             for cluster in requested_clusters {
                 let rejected = fetch.quality_rejections.iter().any(|rejection| rejection.cluster == *cluster);
-                let state = if technical_failure || rejected { ClusterState::Failed } else { ClusterState::Ok };
-                input_cache::update_cluster_status(status, cluster.as_ref(), state);
+                let failed =
+                    fetch.failed_clusters.contains(cluster) || (technical_failure && requested_clusters.len() == 1);
+                if failed || rejected {
+                    input_cache::update_cluster_status(status, cluster.as_ref(), ClusterState::Failed);
+                } else if fetch.completed_clusters.contains(cluster) || (!fetch.persisted && fetch.is_ok()) {
+                    input_cache::update_cluster_status(status, cluster.as_ref(), ClusterState::Ok);
+                } else {
+                    // No completed result: invalidate reuse without inventing a cluster failure.
+                    status.clusters.remove(cluster.as_ref());
+                }
             }
             !requested_clusters.is_empty()
         }
@@ -248,6 +256,7 @@ mod tests {
             ClusterStatus { status: ClusterState::Failed, timestamp: 17, last_update: None },
         );
         let fetch = PlaylistFetch::default()
+            .with_completed_clusters(vec![XtreamCluster::Video])
             .with_force_updates(vec![ClusterForceUpdate {
                 cluster: XtreamCluster::Video,
                 candidate_count: 12_450,

@@ -149,9 +149,9 @@ fn playlist_update_view_target_rules_do_not_become_input_or_action_capabilities(
     let m3u = &cards[0];
     let state = reduce_input_update_card_state(
         InputUpdateCardInteractionState::from_model(m3u),
-        InputUpdateCardAction::SelectTarget(3),
+        InputUpdateCardAction::ToggleTarget(3),
     );
-    assert_eq!(selected_current_target_ids(m3u, &state.controls.selected_target_ids), [3]);
+    assert_eq!(selected_current_target_ids(m3u, &state.controls.selected_target_ids), [20]);
     assert_eq!(sources, before);
     let first_target = sources.sources[0].targets[0].clone();
     let second_target = &mut sources.sources[0].targets[1];
@@ -184,9 +184,9 @@ fn playlist_update_view_same_names_keep_real_card_state_and_actions_independent_
         .collect::<HashMap<_, _>>();
     let untouched = states.get(&7).expect("Xtream state").clone();
     let m3u = states.remove(&41).expect("M3U state");
-    let m3u = reduce_input_update_card_state(m3u, InputUpdateCardAction::SelectTarget(3));
+    let m3u = reduce_input_update_card_state(m3u, InputUpdateCardAction::ToggleTarget(3));
     let m3u = reduce_input_update_card_state(m3u, InputUpdateCardAction::SelectPolicy(InputRefreshPolicy::REFRESH));
-    assert_eq!(m3u.controls.selected_target_ids, [3]);
+    assert_eq!(m3u.controls.selected_target_ids, [20]);
     assert_eq!(states.get(&7), Some(&untouched));
     assert_eq!(untouched.controls.selected_target_ids, [20, 3]);
     assert_eq!(untouched.controls.policy, InputRefreshPolicy::NORMAL);
@@ -272,6 +272,7 @@ fn playlist_update_view_rescan_and_unavailable_actions_keep_explicit_accessible_
     }
     for locale in [
         include_str!("../../../../public/assets/i18n/en.json"),
+        include_str!("../../../../public/assets/i18n/es.json"),
         include_str!("../../../../public/assets/i18n/ru.json"),
         include_str!("../../../../public/assets/i18n/ar.json"),
     ] {
@@ -289,5 +290,55 @@ fn playlist_update_view_rescan_and_unavailable_actions_keep_explicit_accessible_
         let accessible = action_message(template.to_owned(), &cards[7].input_name, label);
         assert!(accessible.contains(cards[7].input_name.as_ref()) && accessible.contains(label));
     }
+    Ok(())
+}
+
+// Optional typed fixture export for the browser audit; inactive during ordinary tests.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn update_view_export_browser_fixture() -> Result<(), Box<dyn std::error::Error>> {
+    let Ok(directory) = std::env::var("TULIPROX_UPDATE_VIEW_FIXTURE_DIR") else {
+        return Ok(());
+    };
+    use shared::model::{AppConfigDto, LibraryStatus, UserSettingsDto};
+    let mut config = AppConfigDto::default();
+    config.config.library = Some(serde_json::from_value(serde_json::json!({"enabled": true}))?);
+    let input_data = [
+        (1, "dev0", InputType::Xtream, 10, "dev00"),
+        (2, "dev1", InputType::M3u, 20, "dev10"),
+        (3, "dev2", InputType::Library, 30, "dev20"),
+        (4, "trex", InputType::Xtream, 40, "dev01"),
+    ];
+    for (id, name, input_type, target_id, target_name) in input_data {
+        config.sources.inputs.push(ConfigInputDto {
+            id,
+            name: name.intern(),
+            input_type,
+            enabled: true,
+            ..Default::default()
+        });
+        config.sources.sources.push(ConfigSourceDto {
+            inputs: vec![name.intern()],
+            targets: vec![ConfigTargetDto { id: target_id, name: target_name.into(), ..Default::default() }],
+        });
+    }
+    let now = 1_800_000_000_u64;
+    let inputs = input_data.iter().map(|(id, _, input_type, _, _)| {
+        let last_update = now - if *id == 1 { 59 * 60 } else { 3 * 3600 };
+        let clusters = if *input_type == InputType::Library { vec![] } else {
+            [XtreamCluster::Live, XtreamCluster::Series, XtreamCluster::Video].iter().map(|cluster| {
+                let rejected = *id <= 2 && *cluster == XtreamCluster::Live;
+                serde_json::json!({"cluster":cluster,"status":if rejected { "failed" } else { "ok" },"timestamp":last_update,
+                    "last_update":{"source":"provider","technical_state":"succeeded","policy":{"cache":"respect","quality":"enforce"},
+                    "quality":{"threshold":95,"baseline_count":100,"candidate_count":if rejected {80} else {100},"achieved_quality":if rejected {80} else {100},"decision":if rejected {"rejected"} else {"accepted"}}}})
+            }).collect()
+        };
+        serde_json::json!({"input_id":id,"last_update":last_update,"last_input_update":{"state":if *id <= 2 {"Partial"} else {"Success"},"timestamp":last_update},"clusters":clusters})
+    }).collect::<Vec<_>>();
+    let status: PlaylistUpdateStatusDto = serde_json::from_value(serde_json::json!({"inputs":inputs}))?;
+    let value = serde_json::json!({"config":config,"status":status,"now":now,
+        "library": LibraryStatus { enabled:true, ..Default::default() },"settings":UserSettingsDto::default()});
+    std::fs::create_dir_all(&directory)?;
+    std::fs::write(std::path::Path::new(&directory).join("fixture.json"), serde_json::to_vec_pretty(&value)?)?;
     Ok(())
 }

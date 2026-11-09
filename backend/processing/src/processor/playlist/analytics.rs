@@ -1,8 +1,11 @@
 use crate::{epg::epg_source_label, input_cache::InputStatus};
 use log::warn;
-use shared::model::{
-    ClusterAnalytics, EpgAnalytics, EpgSourceAnalytics, EpgSourceTypeDto, GroupCount, PlaylistGroup, PlaylistItem,
-    PlaylistItemType, StreamProperties, TargetAnalyticsDto, XtreamCluster, TARGET_ANALYTICS_VERSION,
+use shared::{
+    model::{
+        ClusterAnalytics, EpgAnalytics, EpgSourceAnalytics, EpgSourceTypeDto, GroupCount, PlaylistGroup, PlaylistItem,
+        PlaylistItemType, StreamProperties, TargetAnalyticsDto, XtreamCluster, TARGET_ANALYTICS_VERSION,
+    },
+    utils::sanitize_sensitive_info,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -323,6 +326,7 @@ fn build_epg_source_rows(
                 sources.push(EpgSourceAnalytics {
                     input: input_info.name.clone(),
                     label,
+                    url: sanitize_sensitive_info(&epg_source.url).into_owned(),
                     kind,
                     mapped_channels,
                     guide_days,
@@ -725,6 +729,10 @@ mod tests {
         // Source 1 won Channel A2 -> mapped_channels = 1
         assert_eq!(epg_res.sources[1].mapped_channels, 1);
         assert_eq!(epg_res.sources[1].guide_days, Some(5));
+        assert_eq!(epg_res.sources[0].label, "example.com");
+        // The URL follows the global log sanitization setting.
+        assert_eq!(epg_res.sources[0].url, sanitize_sensitive_info("http://example.com/source0.xml"));
+        assert_eq!(epg_res.sources[1].url, sanitize_sensitive_info("http://example.com/source1.xml"));
 
         // Missing EPG by group: top 4 groups + other
         assert_eq!(epg_res.missing_by_group.len(), 4);

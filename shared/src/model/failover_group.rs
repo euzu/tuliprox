@@ -23,6 +23,7 @@ pub enum SwitchReason {
     UpstreamEof,
     Stall,
     Underrun,
+    Manual,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,6 +390,18 @@ pub struct FailoverGroupMemberDto {
     pub input_name: String,
     pub provider_id: u32,
     pub has_archive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StreamFailoverMembersDto {
+    pub group_name: String,
+    pub current_member_vid: Option<u32>,
+    pub members: Vec<FailoverGroupMemberDto>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StreamFailoverSwitchRequest {
+    pub member_vid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

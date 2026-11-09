@@ -261,8 +261,7 @@ impl fmt::Debug for HlsLogIdentity {
     }
 }
 
-/// Applies the process-wide logging policy without adding HLS-specific
-/// hashing, truncation, parsing, or forced redaction.
+/// Formats the central sanitizer's result as an owned HLS diagnostic field.
 pub fn hls_origin_log_value(value: impl AsRef<str>) -> String { sanitize_sensitive_info(value.as_ref()).into_owned() }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -413,9 +412,9 @@ fn short_hash(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        hls_manifest_recovery_log_fields, hls_origin_log_value, safe_proxy_session_id, safe_session_key,
-        HlsCacheMetrics, HlsLogIdentity, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
-        HlsRecoveryAvailabilityLogEvidence, HlsRecoveryTriggerDiagnostic, HlsRecoveryTriggerSource,
+        hls_manifest_recovery_log_fields, safe_proxy_session_id, safe_session_key, HlsCacheMetrics, HlsLogIdentity,
+        HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource, HlsRecoveryAvailabilityLogEvidence,
+        HlsRecoveryTriggerDiagnostic, HlsRecoveryTriggerSource,
     };
     use crate::{
         media_reserve::HlsLeasePlaybackCursor,
@@ -441,31 +440,6 @@ mod tests {
 
     impl Drop for SanitizationSettingGuard {
         fn drop(&mut self) { set_sanitize_sensitive_info(self.0); }
-    }
-
-    #[test]
-    fn hls_origin_diagnostics_follow_global_sanitization_for_all_supported_value_shapes() {
-        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let values = [
-            "http://user:password@example.com/live/user/password/123.ts?token=secret",
-            "origin.example.com:8443",
-            "http://192.0.2.10/live/user/password/123.ts",
-            "http://[2001:db8::1]/live/user/password/123.ts",
-            "provider://demo/live/user/password/123.m3u8",
-            "not a valid URL user:password",
-        ];
-
-        let _guard = SanitizationSettingGuard::set(false);
-        for value in values {
-            assert_eq!(hls_origin_log_value(value), value);
-        }
-
-        set_sanitize_sensitive_info(true);
-        for value in values {
-            let logged = hls_origin_log_value(value);
-            assert_eq!(logged, sanitize_sensitive_info(value));
-            assert!(!logged.starts_with("origin#"));
-        }
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::{
     },
     utils::{
         arc_str_null_is_none_serde, arc_str_option_null_if_empty_serde, arc_str_option_serde, arc_str_serde,
-        arc_str_vec_serde, Internable,
+        arc_str_vec_serde, resolve_container_extension, Internable,
     },
 };
 use indexmap::IndexMap;
@@ -140,6 +140,7 @@ impl StreamProperties {
         item_type: PlaylistItemType,
         virtual_id: VirtualId,
         category_id: u32,
+        configured_extension: Option<&Arc<str>>,
     ) -> XtreamSeriesInfoDoc {
         XtreamSeriesInfoDoc {
             seasons: if let Some(seasons) = series.details.as_ref().and_then(|d| d.seasons.as_ref()) {
@@ -178,7 +179,7 @@ impl StreamProperties {
                 category_ids: vec![category_id],
             },
             episodes: if let Some(episodes) = series.details.as_ref().and_then(|d| d.episodes.as_ref()) {
-                self.series_episodes_to_info_document(options, item_type, virtual_id, episodes)
+                self.series_episodes_to_info_document(options, item_type, virtual_id, episodes, configured_extension)
             } else {
                 IndexMap::new()
             },
@@ -259,6 +260,7 @@ impl StreamProperties {
         item_type: PlaylistItemType,
         virtual_id: VirtualId,
         episodes: &[SeriesStreamDetailEpisodeProperties],
+        configured_extension: Option<&Arc<str>>,
     ) -> IndexMap<String, Vec<XtreamSeriesEpisodeInfoDoc>> {
         let empty_str = "".intern();
         let mut map: IndexMap<u32, Vec<XtreamSeriesEpisodeInfoDoc>> = IndexMap::new();
@@ -267,7 +269,15 @@ impl StreamProperties {
                 id: ep.id.intern(),
                 episode_num: ep.episode_num,
                 title: Arc::clone(&ep.title),
-                container_extension: Arc::clone(&ep.container_extension),
+                // An episode entry carries no URL of its own, so the provider value is normalized here
+                // and the input's configured default, then the built-in default, fill a blank.
+                container_extension: resolve_container_extension(
+                    &ep.container_extension,
+                    "",
+                    configured_extension.map(Arc::as_ref),
+                )
+                .as_ref()
+                .intern(),
                 info: XtreamSeriesEpisodeInfoData {
                     tmdb_id: ep.tmdb.unwrap_or_default(),
                     air_date: Arc::clone(&ep.release_date),

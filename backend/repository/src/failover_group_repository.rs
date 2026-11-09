@@ -6,9 +6,12 @@ use crate::{
     },
 };
 pub use shared::model::FailoverGroupOrigin;
-use shared::model::{
-    ChannelMemberRefDto, FailoverGroupPolicy, PlaylistItem, PlaylistItemType, StreamProperties,
-    TargetFailoverOverridesDto, UUIDType, VirtualId, XtreamCluster,
+use shared::{
+    model::{
+        ChannelMemberRefDto, FailoverGroupPolicy, PlaylistItem, PlaylistItemType, StreamProperties,
+        TargetFailoverOverridesDto, UUIDType, VirtualId, XtreamCluster,
+    },
+    utils::{arc_str_option_serde, arc_str_serde},
 };
 use std::{
     collections::HashMap,
@@ -46,9 +49,18 @@ pub struct GroupMember {
     pub item_type: PlaylistItemType,
     pub cluster: XtreamCluster,
     pub title: Arc<str>,
+    #[serde(default)]
     pub archive: Option<MemberArchive>,
     pub epg_channel_id: Option<Arc<str>>,
     pub additional_properties: Option<StreamProperties>,
+    /// URL captured before any target transformation; empty when it equals `url`.
+    /// Appended last so records written before this field keep their positional encoding.
+    #[serde(default, with = "arc_str_serde")]
+    pub input_url: Arc<str>,
+    /// Upstream provider user agent captured for this member, when the input exposes one.
+    /// Appended last so records written before this field keep their positional encoding.
+    #[serde(default, with = "arc_str_option_serde")]
+    pub upstream_user_agent: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -599,12 +611,18 @@ impl FailoverGroupCache {
 
         #[cfg(any(test, feature = "test-support"))]
         self.loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let loaded = Self::read_store(app_config, &target.name, move |target_path| {
+        let loaded = match Self::read_store(app_config, &target.name, move |target_path| {
             FailoverGroupStore::load_target_data(target_path, current_generation)
         })
         .await
-        .and_then(Result::ok)
-        .unwrap_or_else(empty);
+        {
+            Some(Ok(data)) => data,
+            Some(Err(err)) => {
+                log::warn!("Failed to read failover groups of target '{}': {err}", target.name);
+                return Arc::new(empty());
+            }
+            None => empty(),
+        };
 
         let arc_data = Arc::new(loaded);
         let mut guard = self.targets.write().await;

@@ -1,4 +1,5 @@
 use shared::model::{PlaylistItemType, VirtualId, XtreamCluster};
+use std::sync::Arc;
 use tuliprox_repository::GroupMember;
 
 pub fn test_member(input: &str, stream_id: &str, provider_id: u32, member_vid: u32) -> GroupMember {
@@ -14,5 +15,7 @@ pub fn test_member(input: &str, stream_id: &str, provider_id: u32, member_vid: u
         archive: None,
         epg_channel_id: None,
         additional_properties: None,
+        input_url: Arc::from(""),
+        upstream_user_agent: None,
     }
 }

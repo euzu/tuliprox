@@ -61,6 +61,7 @@ fn resolve_provider_url_for_target_request_rewrites_provider_scheme() {
         ..Default::default()
     });
     let target = Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         id: 11,
         enabled: true,
         name: "target".to_string(),
@@ -127,6 +128,7 @@ fn resolve_provider_url_passthrough_for_unresolved_provider_target_request() {
         ..Default::default()
     });
     let target = Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         id: 11,
         enabled: true,
         name: "target".to_string(),
@@ -179,6 +181,7 @@ fn resolve_provider_url_passthrough_for_ambiguous_target_request() {
         ..Default::default()
     });
     let target = Arc::new(ConfigTarget {
+        managed_channels: Vec::new(),
         curation: None,
         id: 11,
         enabled: true,
@@ -212,6 +215,7 @@ fn resolve_provider_url_passthrough_for_ambiguous_target_request() {
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(sources)),
         hdhomerun: Arc::new(ArcSwapOption::empty()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::empty()),
         file_locks: Arc::new(crate::utils::FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -275,6 +279,7 @@ async fn playlist_live_input_route_supports_stalker_inputs() {
             probe_filter: None,
             flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
             flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
+            default_container_extension: None,
         }),
         stalker: Some(crate::model::StalkerInputConfig {
             device: None,
@@ -422,6 +427,7 @@ async fn initial_stalker_playback_resolution_uses_the_requested_items_own_comman
             probe_filter: None,
             flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
             flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
+            default_container_extension: None,
         }),
         stalker: Some(crate::model::StalkerInputConfig {
             device: None,

@@ -2,8 +2,8 @@ use crate::{
     model::{
         ApiProxyConfig, ApiProxyServerInfo, CompiledMappings, CompiledTargetMappings, Config, ConfigInput,
         ConfigInputOptions, ConfigTarget, CustomStreamResponse, FailoverOverrides, GracePeriodOptions, HdHomeRunConfig,
-        HdHomeRunFlags, MediaToolCapabilities, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig,
-        TargetOutput, TargetOverridesEntry,
+        HdHomeRunFlags, MediaToolCapabilities, PluginsConfig, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig,
+        SourcesConfig, TargetOutput, TargetOverridesEntry,
     },
     utils,
 };
@@ -41,6 +41,9 @@ pub struct AppConfig {
     pub config: Arc<ArcSwap<Config>>,
     pub sources: Arc<ArcSwap<SourcesConfig>>,
     pub hdhomerun: Arc<ArcSwapOption<HdHomeRunConfig>>,
+    /// Mirror of `Config.plugins`, so plugin settings writes can swap the
+    /// section without rebuilding `Config`.
+    pub plugins: Arc<ArcSwapOption<PluginsConfig>>,
     pub api_proxy: Arc<ArcSwapOption<ApiProxyConfig>>,
     pub file_locks: Arc<utils::FileLockManager>,
     pub paths: Arc<ArcSwap<ConfigPaths>>,
@@ -57,10 +60,22 @@ impl AppConfig {
         self.failover.load().sections.get(target).map(Arc::clone)
     }
 
+    #[must_use]
+    pub fn resolve_storage_dir(&self) -> std::path::PathBuf {
+        let paths = self.paths.load();
+        let config = self.config.load();
+        crate::utils::resolve_storage_dir(&paths.storage_path, &config.storage_dir)
+    }
+
     pub fn set_config(&self, config: Config) -> Result<(), TuliproxError> {
+        self.mirror_plugins(&config);
         self.config.store(Arc::new(config));
         self.prepare_paths();
         Ok(())
+    }
+
+    fn mirror_plugins(&self, config: &Config) {
+        self.plugins.store(config.plugins.as_ref().map(|plugins| Arc::new(plugins.clone())));
     }
 
     pub fn set_sources(&self, sources: SourcesConfig) -> Result<(), TuliproxError> {
@@ -164,7 +179,7 @@ impl AppConfig {
             for target in &source.targets {
                 for output in &target.output {
                     match output {
-                        TargetOutput::Xtream(_) | TargetOutput::M3u(_) => {}
+                        TargetOutput::Xtream(_) | TargetOutput::M3u(_) | TargetOutput::Plugin(_) => {}
                         TargetOutput::Strm(strm_output) => {
                             self.check_username(strm_output.username.as_deref(), &target.name)?;
                         }
@@ -299,6 +314,16 @@ impl AppConfig {
         None
     }
 
+    /// Resolves a member name — an input name or one of its alias names — to the owning input.
+    ///
+    /// A playlist item carries the name of the account that fetched it, so an item fetched through an
+    /// alias names the alias. Only the owning input holds the configuration the item inherits.
+    pub fn get_input_by_member_name(&self, member_name: &Arc<str>) -> Option<Arc<ConfigInput>> {
+        let sources = self.sources.load();
+        let owner = sources.group_lookup.get(member_name).unwrap_or(member_name);
+        sources.inputs.iter().find(|input| &input.name == owner).map(Arc::clone)
+    }
+
     pub fn get_input_options_by_name(&self, input_name: &Arc<str>) -> Option<ConfigInputOptions> {
         let sources = self.sources.load();
         for input in &sources.inputs {
@@ -384,6 +409,8 @@ impl AppConfig {
      *  if `include_computed` set to true for `app_state`
      */
     pub fn prepare(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
+        // The initial `Config` is built before `AppConfig`, so `set_config` never sees it.
+        self.mirror_plugins(&self.config.load());
         if include_computed {
             self.access_token_secret = generate_secret();
             self.encrypt_secret = <&[u8] as TryInto<[u8; 16]>>::try_into(&generate_secret()[0..16])
@@ -591,6 +618,7 @@ mod tests {
     use shared::{
         foundation::{Filter, MapperScript},
         model::{ConfigPaths, ProcessingOrder},
+        utils::Internable,
     };
 
     fn empty_paths() -> ConfigPaths {
@@ -618,6 +646,7 @@ mod tests {
                 ..SourcesConfig::default()
             })),
             hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapOption::default()),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(empty_paths())),
@@ -627,6 +656,48 @@ mod tests {
             media_tools: Arc::new(MediaToolCapabilities::new()),
             failover: Arc::default(),
         }
+    }
+
+    #[test]
+    fn member_name_resolution_finds_the_owning_input_for_an_alias() {
+        let alias = crate::model::ConfigInputAlias {
+            id: 2,
+            name: "portal-alias".intern(),
+            url: "http://portal-alias.example/".to_string(),
+            username: None,
+            password: None,
+            priority: 0,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        };
+        let input = ConfigInput {
+            id: 1,
+            name: "portal".intern(),
+            url: "http://portal.example/".to_string(),
+            enabled: true,
+            aliases: Some(vec![alias]),
+            ..ConfigInput::default()
+        };
+        let group_lookup = shared::model::provider_saturation::build_group_lookup(std::slice::from_ref(&input));
+        let mut app_config = test_app_config_with_target(target_with_mapping_id("map1"));
+        app_config.sources = Arc::new(ArcSwap::from_pointee(SourcesConfig {
+            inputs: vec![Arc::new(input)],
+            group_lookup,
+            ..SourcesConfig::default()
+        }));
+
+        // An item fetched by an alias names the alias; only the owning input holds the configuration.
+        assert_eq!(
+            app_config.get_input_by_member_name(&"portal-alias".intern()).map(|input| input.name.to_string()),
+            Some("portal".to_string())
+        );
+        assert_eq!(
+            app_config.get_input_by_member_name(&"portal".intern()).map(|input| input.name.to_string()),
+            Some("portal".to_string())
+        );
+        assert!(app_config.get_input_by_member_name(&"unknown".intern()).is_none());
     }
 
     fn target_with_mapping_id(mapping_id: &str) -> Arc<ConfigTarget> {
@@ -647,6 +718,7 @@ mod tests {
             execution_plan: crate::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
+            managed_channels: Vec::new(),
         })
     }
 
@@ -663,6 +735,32 @@ mod tests {
     }
 
     fn empty_mappings() -> CompiledMappings { CompiledMappings::default() }
+
+    fn config_with_plugins(enabled: bool) -> Config {
+        let dto = shared::model::PluginsConfigDto { enabled, ..shared::model::PluginsConfigDto::default() };
+        Config { plugins: Some(crate::model::PluginsConfig::from(&dto)), ..Config::default() }
+    }
+
+    #[test]
+    fn set_config_mirrors_the_plugins_section_and_clears_it_again() {
+        let app_config = test_app_config_with_target(target_with_mapping_id("map1"));
+        assert!(app_config.plugins.load().is_none());
+
+        app_config.set_config(config_with_plugins(true)).unwrap();
+        assert!(app_config.plugins.load().as_ref().is_some_and(|plugins| plugins.enabled));
+        assert!(app_config.config.load().plugins.as_ref().is_some_and(|plugins| plugins.enabled));
+
+        app_config.set_config(Config::default()).unwrap();
+        assert!(app_config.plugins.load().is_none(), "removing the section must clear the mirror");
+    }
+
+    #[test]
+    fn prepare_mirrors_the_plugins_of_the_initial_config() {
+        let mut app_config = test_app_config_with_target(target_with_mapping_id("map1"));
+        app_config.config.store(Arc::new(config_with_plugins(true)));
+        app_config.prepare(false).unwrap();
+        assert!(app_config.plugins.load().as_ref().is_some_and(|plugins| plugins.enabled));
+    }
 
     #[test]
     fn set_mappings_clears_existing_target_mappings_when_reload_is_empty() {

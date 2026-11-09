@@ -12,7 +12,7 @@ use crate::{
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 create_bitset!(
     u8,
@@ -34,6 +34,12 @@ pub struct XtreamMappingOptions {
     pub web_ui_request: bool,
     pub encrypt_secret: [u8; 16],
     pub resource_host_policies: Arc<DashMap<String, ResourceOutputPolicy>>,
+    /// Per-input `options.default_container_extension`, keyed by input name.
+    ///
+    /// Fills the `container_extension` of movies and series episodes whose provider value is empty.
+    /// The map is built per request from the live configuration, so a config change takes effect on
+    /// the next response and nothing has to be persisted into a playlist item.
+    pub default_container_extensions: Arc<HashMap<Arc<str>, Arc<str>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,12 +50,17 @@ pub enum ResourceOutputPolicy {
 }
 
 impl XtreamMappingOptions {
+    /// Configured container extension for the input that owns an item, if any.
+    #[inline]
+    pub fn default_container_extension(&self, input_name: &Arc<str>) -> Option<&Arc<str>> {
+        self.default_container_extensions.get(input_name)
+    }
+
     #[inline]
     pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool { self.reverse_item_types.is_set(item_type) }
 
     pub(super) fn is_trusted_web_ui_resource_path(resource_url: &str) -> bool {
-        const TRUSTED_WEB_UI_RESOURCE_PREFIXES: [&str; 1] = ["/api/v1/library/thumbnail/"];
-        TRUSTED_WEB_UI_RESOURCE_PREFIXES.iter().any(|prefix| resource_url.starts_with(prefix))
+        crate::model::is_internal_resource_path(resource_url)
     }
 
     pub(super) fn build_reverse_proxy_base_url(
@@ -215,9 +226,28 @@ pub struct XtreamPlaylistItem {
     pub input_stream_id: Arc<str>,
     #[serde(default, rename = "source_user_agent", alias = "upstream_user_agent", with = "arc_str_option_serde")]
     pub upstream_user_agent: Option<Arc<str>>,
+    /// URL captured before any target transformation; empty when it equals `url`.
+    #[serde(default, with = "arc_str_serde")]
+    pub input_url: Arc<str>,
 }
 
 impl XtreamPlaylistItem {
+    /// URL the override key is built from: the unchanged input URL when target transformations rewrote `url`.
+    /// Falls back to `url` when unchanged or for old records.
+    #[must_use]
+    pub fn override_source_url(&self) -> &Arc<str> { super::header::override_source_url(&self.input_url, &self.url) }
+
+    /// Id the override key is built from: the unchanged input stream id, because M3U-origin items without a
+    /// numeric stream id are stored with `provider_id = 0`. Falls back to `provider_id` for old records.
+    #[must_use]
+    pub fn override_source_id(&self) -> Arc<str> {
+        if self.input_stream_id.is_empty() {
+            Arc::from(self.provider_id.to_string())
+        } else {
+            Arc::clone(&self.input_stream_id)
+        }
+    }
+
     pub fn to_common(&self) -> CommonPlaylistItem {
         CommonPlaylistItem {
             virtual_id: self.virtual_id,
@@ -396,6 +426,8 @@ impl PlaylistEntry for XtreamPlaylistItem {
                     self.get_item_type(),
                     self.get_virtual_id(),
                     self.get_category_id().unwrap_or(0),
+                    &self.url,
+                    options.default_container_extension(&self.input_name),
                 )
             })
         } else {

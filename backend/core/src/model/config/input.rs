@@ -9,10 +9,10 @@ use shared::{
     error::TuliproxError,
     foundation::Filter,
     model::{
-        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
-        FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerInputConfigDto,
-        MediaServerLibrarySelector, ProviderAccountIdentity, StagedInputType, StalkerAuthMode, StalkerDeviceProfileDto,
-        StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
+        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, EpgConfigDto,
+        EpgSourceTypeDto, FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto,
+        MediaServerInputConfigDto, MediaServerLibrarySelector, PluginHook, ProviderAccountIdentity, StagedInputType,
+        StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
     },
     utils::{
         get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string,
@@ -68,6 +68,10 @@ pub struct ConfigInputOptions {
     pub probe_live_interval_hours: u32,
     pub resolve_filter: Option<Filter>,
     pub probe_filter: Option<Filter>,
+    /// Container extension published for movies and series episodes when neither the provider nor the
+    /// stream URL states one. `None` means the built-in default applies. Applied at delivery, never
+    /// persisted into a playlist item.
+    pub default_container_extension: Option<String>,
 }
 
 macros::from_impl!(ConfigInputOptions);
@@ -117,6 +121,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             probe_live_interval_hours: dto.probe_live_interval_hours,
             resolve_filter: dto.t_resolve_filter.clone(),
             probe_filter: dto.t_probe_filter.clone(),
+            default_container_extension: dto.default_container_extension.clone(),
         }
     }
 }
@@ -157,6 +162,62 @@ impl MediaServerInputConfig {
 }
 
 impl ConfigInput {
+    /// Configured `options.default_container_extension`, when the input publishes one.
+    ///
+    /// The value is applied while a playlist document is built and never stored, so it stays the
+    /// single place where a missing VOD/series container is filled from configuration.
+    #[inline]
+    pub fn default_container_extension(&self) -> Option<&str> {
+        self.options.as_ref()?.default_container_extension.as_deref()
+    }
+
+    /// Re-resolves declared XMLTV `auto` sources using the current account and alias data.
+    pub fn refresh_auto_epg_sources(&mut self) -> Result<(), TuliproxError> {
+        let Some(epg) = self.epg.as_ref() else {
+            return Ok(());
+        };
+        let Some(sources) = epg.configured_sources.as_ref() else {
+            return Ok(());
+        };
+        if !sources
+            .iter()
+            .any(|source| source.source_type == EpgSourceTypeDto::Xmltv && source.url.eq_ignore_ascii_case("auto"))
+        {
+            return Ok(());
+        }
+        let mut input = ConfigInputDto {
+            name: Arc::clone(&self.name),
+            input_type: self.input_type,
+            url: self.url.clone(),
+            username: self.username.clone(),
+            password: self.password.clone(),
+            aliases: self.aliases.as_ref().map(|aliases| {
+                aliases
+                    .iter()
+                    .map(|alias| ConfigInputAliasDto {
+                        id: alias.id,
+                        name: Arc::clone(&alias.name),
+                        url: alias.url.clone(),
+                        username: alias.username.clone(),
+                        password: alias.password.clone(),
+                        priority: alias.priority,
+                        max_connections: alias.max_connections,
+                        exp_date: alias.exp_date,
+                        enabled: alias.enabled,
+                        stalker: None,
+                    })
+                    .collect()
+            }),
+            epg: Some(EpgConfigDto { sources: Some(sources.clone()), ..Default::default() }),
+            ..Default::default()
+        };
+        input.prepare_epg(true)?;
+        if let (Some(epg), Some(prepared)) = (self.epg.as_mut(), input.epg) {
+            epg.sources = prepared.t_sources.iter().map(crate::model::EpgSource::from).collect();
+        }
+        Ok(())
+    }
+
     /// The `media_server` block of this input, or a discovery error naming `provider`.
     fn media_server_config(&self, provider: &'static str) -> Result<&MediaServerInputConfig, MediaServerError> {
         self.media_server.as_ref().ok_or_else(|| {
@@ -559,9 +620,26 @@ pub struct ConfigInput {
     pub playback_provider: Option<String>,
     /// Resolved Stalker device identity + portal hints.
     pub stalker: Option<StalkerInputConfig>,
+    /// Id of the providing plugin; `Some` exactly for `InputType::Plugin`.
+    pub plugin: Option<Arc<str>>,
+    /// The plugin's settings for this input, flattened to the `options` pairs of
+    /// `input-request`. Empty unless `InputType::Plugin`.
+    pub plugin_options: Vec<(String, String)>,
+    pub managed_channels: Vec<shared::model::PluginRef>,
 }
 
 impl ConfigInput {
+    /// The plugin hook this input needs, for the check against the loaded
+    /// plugins right after plugin load (core does not validate it, plugins load
+    /// after the config). `None` for a disabled input, which never runs.
+    #[must_use]
+    pub fn plugin_ref(&self) -> Option<(PluginHook, &str)> {
+        if !self.enabled || !self.input_type.is_plugin() {
+            return None;
+        }
+        self.plugin.as_deref().map(|plugin| (PluginHook::FetchInput, plugin))
+    }
+
     fn resolve_provider_config(
         url: &str,
         provider_configs: &[Arc<ConfigProvider>],
@@ -754,7 +832,8 @@ impl ConfigInput {
             | InputType::Stalker
             | InputType::StalkerBatch
             | InputType::Library
-            | InputType::Staged => {}
+            | InputType::Staged
+            | InputType::Plugin => {}
         }
         Ok(())
     }
@@ -795,6 +874,14 @@ impl ConfigInput {
         Ok(())
     }
 
+    /// No main URL or credentials, only aliases: the first enabled alias becomes the main account.
+    fn is_inline_batch(&self) -> bool {
+        self.url.trim().is_empty()
+            && self.username.as_deref().is_none_or(|value| value.trim().is_empty())
+            && self.password.as_deref().is_none_or(|value| value.trim().is_empty())
+            && self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty())
+    }
+
     pub fn prepare(&mut self, provider_configs: &[Arc<ConfigProvider>]) -> Result<Option<PathBuf>, TuliproxError> {
         // Defensive fallback: From<&ConfigInputDto> for ConfigInput sets options, but ConfigInput can
         // still be built via Default::default(), batch/internal/test paths, so prepare() normalizes
@@ -804,7 +891,8 @@ impl ConfigInput {
         }
 
         // For batch definitions, validate root URL/credentials before alias promotion in prepare_batch().
-        if self.enabled && self.input_type.is_batch() {
+        // An inline batch (no main URL, aliases only) has no root account to validate.
+        if self.enabled && self.input_type.is_batch() && !self.is_inline_batch() {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
         }
@@ -880,8 +968,9 @@ impl ConfigInput {
                 InputType::Stalker
             };
 
-            self.t_batch_url = Some(self.url.clone());
-            let file_path = get_csv_file_path(self.url.as_str()).ok();
+            // Only a `batch://` CSV owns its accounts; an inline batch keeps them in the source file.
+            self.t_batch_url = self.url.starts_with(BATCH_SCHEME_PREFIX).then(|| self.url.clone());
+            let file_path = self.t_batch_url.as_deref().and_then(|url| get_csv_file_path(url).ok());
             if self.enabled {
                 if let Some(aliases) = self.aliases.as_mut() {
                     if !aliases.is_empty() {
@@ -961,6 +1050,9 @@ impl ConfigInput {
                 let password = alias.password.clone().or_else(|| cfg.password.clone());
                 StalkerInputConfig { username, password, ..cfg }
             }),
+            plugin: self.plugin.clone(),
+            plugin_options: self.plugin_options.clone(),
+            managed_channels: Vec::new(),
         }
     }
 
@@ -979,6 +1071,11 @@ impl ConfigInput {
             .flatten()
             .find(|alias| alias.enabled && !is_input_expired(alias.exp_date))
             .map(|alias| Cow::Owned(self.as_input(alias)))
+    }
+
+    /// The alias with the given name, enabled or not.
+    pub fn alias_by_name(&self, name: &str) -> Option<&ConfigInputAlias> {
+        self.aliases.iter().flatten().find(|alias| alias.name.as_ref() == name)
     }
 
     pub fn has_enabled_aliases(&self) -> bool {
@@ -1072,6 +1169,9 @@ impl From<&ConfigInputDto> for ConfigInput {
                 .stalker
                 .as_ref()
                 .map(|s| StalkerInputConfig::from(s).with_credentials(dto.username.as_ref(), dto.password.as_ref())),
+            plugin: dto.plugin.clone(),
+            plugin_options: shared::model::plugin_options(&dto.plugin_config),
+            managed_channels: dto.managed_channels.clone(),
         }
     }
 }
@@ -1165,6 +1265,58 @@ fn assemble_provider_url_at_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_input_carries_its_plugin_and_names_the_fetch_hook() {
+        let mut dto = ConfigInputDto {
+            name: "from-plugin".intern(),
+            input_type: InputType::Plugin,
+            plugin: Some("my-plugin".intern()),
+            ..ConfigInputDto::default()
+        };
+        dto.prepare(0, false, &std::collections::HashSet::new(), None).unwrap();
+        let input = ConfigInput::from(&dto);
+
+        assert_eq!(input.input_type, InputType::Plugin);
+        assert_eq!(input.plugin.as_deref(), Some("my-plugin"));
+        assert_eq!(input.plugin_ref(), Some((PluginHook::FetchInput, "my-plugin")));
+
+        let disabled = ConfigInput { enabled: false, ..input.clone() };
+        assert_eq!(disabled.plugin_ref(), None, "a disabled input never runs, so it needs no plugin");
+        let built_in = ConfigInput { input_type: InputType::M3u, plugin: None, ..input };
+        assert_eq!(built_in.plugin_ref(), None);
+    }
+    #[test]
+    fn a_plugin_input_flattens_its_plugin_config_into_the_request_options() {
+        let mut dto = ConfigInputDto {
+            name: "from-plugin".intern(),
+            input_type: InputType::Plugin,
+            plugin: Some("youtube-input".intern()),
+            plugin_config: serde_json::Map::from_iter([
+                ("mode".to_string(), serde_json::json!("live_only")),
+                ("max_uploads".to_string(), serde_json::json!(5)),
+                ("flag".to_string(), serde_json::json!(true)),
+                ("nested".to_string(), serde_json::json!({"a": "b"})),
+            ]),
+            ..ConfigInputDto::default()
+        };
+        dto.prepare(0, false, &std::collections::HashSet::new(), None).unwrap();
+        let input = ConfigInput::from(&dto);
+
+        let mut options = input.plugin_options.clone();
+        options.sort();
+        assert_eq!(
+            options,
+            [
+                ("flag".to_string(), "true".to_string()),
+                ("max_uploads".to_string(), "5".to_string()),
+                ("mode".to_string(), "live_only".to_string()),
+                ("nested.a".to_string(), "b".to_string()),
+            ],
+            "a string keeps its text, anything else its JSON text, an object flattens with dots"
+        );
+    }
+
     use crate::model::ConfigProvider;
     use shared::model::{
         ConfigInputUpdateQualityDto, ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector,
@@ -1909,7 +2061,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_xtream_batch_requires_root_url_even_with_aliases() {
+    fn test_prepare_inline_xtream_batch_promotes_first_alias() {
         let mut input = ConfigInput {
             name: "xtream_batch_missing_root_url".into(),
             input_type: InputType::XtreamBatch,
@@ -1930,10 +2082,13 @@ mod tests {
             ..Default::default()
         };
 
-        let err =
-            input.prepare(&[]).expect_err("prepare must require root URL even when aliases are attached directly");
-        assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
-        assert!(err.to_string().contains("xtream_batch_missing_root_url"), "Error: {err}");
+        // No main URL or credentials: an inline batch whose first enabled alias becomes the main account.
+        let batch_file = input.prepare(&[]).expect("an inline batch prepares from its aliases");
+        assert!(batch_file.is_none());
+        assert!(input.t_batch_url.is_none(), "inline batch accounts live in the source file, not in a CSV");
+        assert_eq!(input.url, "http://alias.example");
+        assert_eq!(input.username.as_deref(), Some("alias_user"));
+        assert_eq!(input.password.as_deref(), Some("alias_pass"));
     }
 
     #[test]

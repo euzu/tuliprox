@@ -606,6 +606,7 @@ async fn hls_entry_origin_reservation_requires_real_provider_handle() {
         UserConnectionPermission::Allowed,
         ConnectionKind::Normal,
         false,
+        None,
     )
     .await;
 
@@ -644,6 +645,7 @@ async fn hls_cache_expired_transient_manifest_with_active_binding_is_served_whil
     };
     let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
     let strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    super::support::configure_test_hls_strip(&app_state, &strip).await;
 
     let response = try_test_hls_cached_manifest_response(
         &app_state,

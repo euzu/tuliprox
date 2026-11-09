@@ -14,6 +14,10 @@ restructure chaotic upstream provider lists into a perfectly clean, personalized
 the year
 out of a messy title, rename the category based on that year, fix resolutions, or filter out specific terms globally.
 
+> Rules are for many items. For a single broken channel, movie or series, use a manual item override instead — it
+> needs no matching rule and cannot catch a second item. See
+> [Playlist Item Overrides & Playlist Explorer](./playlist-overrides.md).
+
 ## Top-level entries
 
 ```yaml

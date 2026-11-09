@@ -1,0 +1,21 @@
+{
+  "settings.title": "Notificador de Telegram",
+  "settings.bot_token.title": "Token del bot",
+  "settings.bot_token.description": "El token de tu bot de Telegram, de @BotFather. Es una credencial: solo se puede escribir y se oculta al leerla. Usa ${env:VAR} para no guardarla en el archivo de configuración.",
+  "settings.chat_ids.title": "Chats",
+  "settings.chat_ids.description": "Adónde enviar, una entrada cada uno: un id de chat (-1001234567890), un canal (@mychannel) o un tema de un grupo escrito chat_id:topic_id (-1001234567890:5). Cada chat recibe cada notificación y el bot debe ser miembro.",
+  "settings.style.title": "Estilo",
+  "settings.style.description": "html: el título y las secciones del evento como encabezados en negrita con sus líneas debajo. text: lo mismo en texto simple. Un mensaje que no cabe se divide en varios.",
+  "settings.routing.title": "Enrutamiento (lo aplica tuliprox, no el plugin)",
+  "settings.routing.description": "Enrutamiento por canal de la bandeja de salida de mensajes, el mismo bloque que admite cualquier canal. Todos los campos son opcionales; un bloque vacío hereda el notify_on global.",
+  "settings.routing.notify_on.title": "Reemplazo de notify_on",
+  "settings.routing.notify_on.description": "Patrones de ids de evento que sustituyen al notify_on global en este canal (por ejemplo, playlist.update.*).",
+  "settings.routing.min_severity.title": "Gravedad mínima (enrutamiento)",
+  "settings.routing.min_severity.description": "Umbral de gravedad en el host, evaluado con la gravedad del evento en el registro antes de llamar al plugin.",
+  "settings.routing.quiet_hours.title": "Horas de silencio",
+  "settings.routing.quiet_hours.description": "HH:MM-HH:MM en hora local. Las notificaciones dentro de la ventana se aplazan, nunca se descartan.",
+  "settings.routing.max_per_hour.title": "Máximo por hora",
+  "settings.routing.max_per_hour.description": "Cortacircuitos: tras este número de notificaciones en una hora, el canal envía un aviso de supresión y se silencia.",
+  "settings.routing.dedup_window_secs.title": "Ventana de deduplicación (segundos)",
+  "settings.routing.dedup_window_secs.description": "Suprime una clave de deduplicación repetida durante estos segundos."
+}

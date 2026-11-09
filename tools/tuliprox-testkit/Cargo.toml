@@ -8,29 +8,29 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
+axum = { workspace = true, features = ["macros", "default", "ws"] }
 base64.workspace = true
 blake3.workspace = true
 bytes.workspace = true
-clap = { version = "4.6.6", features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
 chrono.workspace = true
-crc32fast = "1.5.1"
+crc32fast.workspace = true
 futures.workspace = true
-reqwest = { version = "0.13.5", features = ["json", "stream", "rustls"] }
+reqwest = { workspace = true, features = ["default", "json", "stream", "rustls"] }
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "process", "signal", "sync", "time"] }
-tokio-tungstenite = "0.30.0"
-tempfile = "3.27.0"
+tokio-tungstenite.workspace = true
+tempfile.workspace = true
 pin-project-lite = "0.2.17"
 url.workspace = true
-hyper = { version = "1.11.0", features = ["server", "http1"] }
-hyper-util = { version = "0.1.20", features = ["server", "server-auto", "tokio"] }
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["server", "server-auto", "tokio"] }
 tower-service = "0.3.3"
 
 [dev-dependencies]
 tuliprox-mpegts.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-tokio-stream = "0.1.19"
+tokio-stream.workspace = true

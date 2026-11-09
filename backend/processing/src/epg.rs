@@ -3,7 +3,7 @@ use log::{debug, warn};
 use shared::{
     concat_string,
     error::TuliproxError,
-    model::EventSink,
+    model::{EventSink, PluginHost},
     utils::{sanitize_sensitive_info, short_hash},
 };
 use std::{
@@ -84,9 +84,9 @@ fn epg_source_cache_extension(source_type: EpgSourceType) -> &'static str {
     }
 }
 
-async fn download_epg_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+async fn download_epg_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     epg_source: &EpgSource,
-    ctx: &PlaylistProcessingContext<E, M>,
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
     headers: Option<&reqwest::header::HeaderMap>,
     storage_dir: &str,
@@ -218,8 +218,8 @@ enum EpgFetchOutcome {
     Failure { source_idx: usize, label: String, timestamp: u64, error: String },
 }
 
-pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
     headers: Option<&reqwest::header::HeaderMap>,
     storage_dir: &str,
@@ -263,27 +263,25 @@ pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
             }
 
             let input_storage = crate::input_cache::resolve_input_storage_path(storage_dir, &input.name).await;
-            let mut input_status = crate::input_cache::load_input_status_async(&input_storage).await;
-            for outcome in fetch_outcomes {
-                match outcome {
-                    EpgFetchOutcome::Success { source_idx, label, timestamp } => {
-                        crate::input_cache::update_epg_source_success(&mut input_status, source_idx, label, timestamp);
-                    }
-                    EpgFetchOutcome::Failure { source_idx, label, timestamp, error } => {
-                        crate::input_cache::update_epg_source_failure(
-                            &mut input_status,
-                            source_idx,
-                            label,
-                            timestamp,
-                            error,
-                        );
+            // Cluster acquisition and input completion also modify this status file.
+            let input_lock = ctx.get_input_lock(&input.name).await;
+            let source_count = epg_config.sources.len();
+            crate::input_cache::update_input_status(&input_storage, move |status| {
+                for outcome in fetch_outcomes {
+                    match outcome {
+                        EpgFetchOutcome::Success { source_idx, label, timestamp } => {
+                            crate::input_cache::update_epg_source_success(status, source_idx, label, timestamp);
+                        }
+                        EpgFetchOutcome::Failure { source_idx, label, timestamp, error } => {
+                            crate::input_cache::update_epg_source_failure(status, source_idx, label, timestamp, error);
+                        }
                     }
                 }
-            }
-            if input_status.epg_sources.len() > epg_config.sources.len() {
-                input_status.epg_sources.truncate(epg_config.sources.len());
-            }
-            crate::input_cache::save_input_status_async(&input_storage, &input_status).await;
+                status.epg_sources.truncate(source_count);
+                true
+            })
+            .await;
+            drop(input_lock);
 
             for suffix in ["_epg.xml", "_epg.ics"] {
                 if let Err(err) = cleanup_unlisted_epg_files(&ctx.config.file_locks, &stored_file_paths, suffix).await {
@@ -302,8 +300,8 @@ pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
 
 /// The EPG files fetched last, without contacting any source and without cleanup:
 /// deleting "unlisted" files here would throw away exactly what maintenance keeps.
-async fn persisted_epg_for_maintenance<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+async fn persisted_epg_for_maintenance<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
     epg_config: &EpgConfig,
     storage_dir: &str,

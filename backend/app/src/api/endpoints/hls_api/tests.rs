@@ -79,9 +79,11 @@ use tuliprox_hls::api::{
 };
 
 mod origin_account_rebind;
+mod origin_restart;
 mod owner_token;
 mod reduced_retry;
 mod same_account_resume;
+mod stalker_manifest;
 
 mod archive;
 mod bandwidth;
@@ -97,12 +99,14 @@ mod manifest_revision_recovery;
 mod manifest_short_window;
 mod manifest_startup;
 mod observability;
+mod origin_fetch_url;
 mod owner_handoff;
 mod provider_admission;
 mod provider_admission_retry_reservation;
 mod provider_admission_startup_reservation;
 mod runtime_policy;
 mod segment_responses;
+mod strip_entry;
 mod support;
 mod terminal_resources;
 mod terminal_tail;
@@ -129,14 +133,14 @@ use self::support::{
     spawn_test_transient_origin_with_delayed_binary_response, spawn_test_transient_origin_with_delayed_response,
     spawn_test_transient_origin_with_response, store_normal_manifest_body, store_test_sources_with_target,
     terminal_test_asset, terminal_test_plan_shape, terminalize_existing_test_lease, test_addr, test_addr_with_port,
-    test_app_state, test_app_state_with_hls_proxy, test_app_state_with_hls_proxy_and_inputs,
-    test_app_state_with_inputs, test_custom_video_buffer, test_fingerprint, test_fingerprint_with_addr,
-    test_hls_access_context, test_hls_access_context_with, test_hls_entry_stream_context, test_hls_input,
-    test_hls_sequence_iv, test_hls_share_target, test_m3u_hls_item, test_m3u_hls_share_target, test_segment_entry,
-    transient_manifest_body, transient_manifest_body_from_sequence, try_test_hls_cached_manifest_response,
-    wait_for_provider_connection_count, wait_for_runtime_policy_terminal_plan, CanonicalOwnerHandoffFixture,
-    RuntimePolicyEndpointFixture, TestBinaryOriginResponse, TestSegmentOrigin, AES_TEST_KEY_BYTES, AES_TEST_MANIFEST,
-    AES_TEST_PLAINTEXT_SEGMENT,
+    test_app_config_with_storage_dir, test_app_state, test_app_state_with_hls_proxy,
+    test_app_state_with_hls_proxy_and_inputs, test_app_state_with_inputs, test_custom_video_buffer, test_fingerprint,
+    test_fingerprint_with_addr, test_hls_access_context, test_hls_access_context_with, test_hls_entry_stream_context,
+    test_hls_input, test_hls_sequence_iv, test_hls_share_target, test_m3u_hls_item, test_m3u_hls_share_target,
+    test_segment_entry, transient_manifest_body, transient_manifest_body_from_sequence,
+    try_test_hls_cached_manifest_response, wait_for_provider_connection_count, wait_for_runtime_policy_terminal_plan,
+    CanonicalOwnerHandoffFixture, RuntimePolicyEndpointFixture, TestBinaryOriginResponse, TestSegmentOrigin,
+    AES_TEST_KEY_BYTES, AES_TEST_MANIFEST, AES_TEST_PLAINTEXT_SEGMENT,
 };
 
 mod provider_admission_account_overlap;

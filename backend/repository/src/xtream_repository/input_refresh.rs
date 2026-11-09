@@ -688,6 +688,7 @@ pub(super) async fn persist_input_xtream_playlist_clusters_to_disk_with_operatio
                     result.record_cluster_error(cluster, error);
                     break;
                 }
+                result.completed_clusters.push(cluster);
                 result.outcomes.push(if let Some(force_update) = evaluation.force_update {
                     XtreamClusterPublishOutcome::ForcePublished(force_update)
                 } else if let Some(quality_acceptance) = evaluation.quality_acceptance {
@@ -697,6 +698,7 @@ pub(super) async fn persist_input_xtream_playlist_clusters_to_disk_with_operatio
                 });
             }
             StagedXtreamClusterOutcome::RetainedPrevious(rejection) => {
+                result.completed_clusters.push(rejection.cluster);
                 result.outcomes.push(XtreamClusterPublishOutcome::RetainedPrevious(rejection));
             }
             StagedXtreamClusterOutcome::Failed { error, .. } => {

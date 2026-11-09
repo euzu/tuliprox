@@ -57,6 +57,9 @@ pub struct M3uPlaylistItem {
     pub input_stream_id: Arc<str>,
     #[serde(default, rename = "source_user_agent", alias = "upstream_user_agent", with = "arc_str_option_serde")]
     pub upstream_user_agent: Option<Arc<str>>,
+    /// URL captured before any target transformation; empty when it equals `url`.
+    #[serde(default, with = "arc_str_serde")]
+    pub input_url: Arc<str>,
 }
 
 fn write_m3u_attr(line: &mut String, name: &str, value: &str) { let _ = write!(line, " {name}=\"{value}\""); }
@@ -123,6 +126,21 @@ fn append_unified_catchup_type_attributes(
 }
 
 impl M3uPlaylistItem {
+    /// Id the override key is built from: the unchanged input stream id, falling back to `provider_id` when empty.
+    #[must_use]
+    pub fn override_source_id(&self) -> Arc<str> {
+        if self.input_stream_id.is_empty() {
+            Arc::clone(&self.provider_id)
+        } else {
+            Arc::clone(&self.input_stream_id)
+        }
+    }
+
+    /// URL the override key is built from: the unchanged input URL when target transformations rewrote `url`.
+    /// Falls back to `url` when unchanged or for old records.
+    #[must_use]
+    pub fn override_source_url(&self) -> &Arc<str> { super::header::override_source_url(&self.input_url, &self.url) }
+
     pub fn to_m3u(&self, target_options: Option<&ConfigTargetOptions>, rewrite_urls: bool) -> String {
         let options = target_options.as_ref();
         let ignore_logo = options.is_some_and(|o| o.ignore_logo);

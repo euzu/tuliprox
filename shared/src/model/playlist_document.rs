@@ -7,7 +7,7 @@ use crate::{
     },
     utils::{
         arc_str_null_is_none_serde, arc_str_option_null_if_empty_serde, arc_str_serde, arc_str_vec_serde,
-        extract_extension_from_url, Internable,
+        resolve_container_extension, Internable,
     },
 };
 use indexmap::IndexMap;
@@ -119,34 +119,42 @@ impl XtreamPlaylistItem {
     pub fn to_info_document(&self, options: &XtreamMappingOptions) -> XtreamInfoDocument {
         if self.has_details() {
             if let Some(doc) = self.additional_properties.as_ref() {
-                let mut document = doc.to_info_document(options, self.item_type, self.virtual_id, self.category_id);
-                // `StreamProperties` has no URL to fall back to, so the blank is filled here.
-                if let XtreamInfoDocument::Video(ref mut video) = document {
-                    video.movie_data.container_extension =
-                        self.container_extension_or_url_fallback(&video.movie_data.container_extension);
-                }
-                return document;
+                return doc.to_info_document(
+                    options,
+                    self.item_type,
+                    self.virtual_id,
+                    self.category_id,
+                    &self.url,
+                    options.default_container_extension(&self.input_name),
+                );
             }
         }
         self.to_info_document_no_props(options)
     }
 
-    /// Fills a blank `container_extension` from the extension carried by the item URL.
+    /// Normalizes the stored `container_extension` and fills a blank one.
     ///
     /// Providers sometimes omit `container_extension` from `get_vod_streams`, and
-    /// `arc_str_default_on_null` collapses a missing or null value to an empty string.
-    /// Clients build the playback URL as `<stream_id>.<container_extension>`, so an empty
-    /// value leaves them with nothing to append and some render the blank as a literal
-    /// `null`. The provider URL still carries the extension, so it is the fallback here,
-    /// the same one `create_vod_info_from_item` already applies to its info document.
-    fn container_extension_or_url_fallback(&self, container_extension: &Arc<str>) -> Arc<str> {
-        if !container_extension.is_empty() {
-            return Arc::clone(container_extension);
-        }
-        // `extract_extension_from_url` yields the extension with its leading dot, while
-        // `container_extension` holds it without one.
-        extract_extension_from_url(&self.url)
-            .map_or_else(|| Arc::clone(container_extension), |ext| ext.trim_start_matches('.').intern())
+    /// `arc_str_default_on_null` collapses a missing or null value to an empty string. Others send a
+    /// placeholder (`null`, `~`) or a leading dot (`.mp4`). Clients build the playback URL as
+    /// `<stream_id>.<container_extension>`, so an empty or malformed value leaves them with nothing
+    /// usable to append. The provider URL still carries the extension, so it is the fallback here, the
+    /// same one `create_vod_info_from_item` already applies to its info document.
+    ///
+    /// A Stalker item has no URL until playback, so both earlier steps miss. `configured_extension` is
+    /// the input's `options.default_container_extension`, read from the request-scoped mapping options
+    /// and never written back, so a config change applies to the next response.
+    fn container_extension_or_url_fallback(
+        &self,
+        container_extension: &Arc<str>,
+        configured_extension: Option<&Arc<str>>,
+    ) -> Arc<str> {
+        // `resolve_container_extension` rejects placeholders, strips the leading dot that
+        // `extract_extension_from_url` yields and ends at the built-in default, so a movie never
+        // publishes an empty or malformed extension.
+        resolve_container_extension(container_extension, &self.url, configured_extension.map(Arc::as_ref))
+            .as_ref()
+            .intern()
     }
 
     fn to_info_document_no_props(&self, options: &XtreamMappingOptions) -> XtreamInfoDocument {
@@ -192,7 +200,10 @@ impl XtreamPlaylistItem {
                         added: Arc::clone(&empty_str),
                         category_id: self.category_id.intern(),
                         category_ids: vec![self.category_id],
-                        container_extension: self.container_extension_or_url_fallback(&empty_str),
+                        container_extension: self.container_extension_or_url_fallback(
+                            &empty_str,
+                            options.default_container_extension(&self.input_name),
+                        ),
                         custom_sid: None,
                         direct_source: Arc::clone(&empty_str),
                     },
@@ -314,7 +325,10 @@ impl XtreamPlaylistItem {
             is_adult: video.is_adult,
             category_id: self.category_id.intern(),
             category_ids: vec![self.category_id],
-            container_extension: self.container_extension_or_url_fallback(&video.container_extension),
+            container_extension: self.container_extension_or_url_fallback(
+                &video.container_extension,
+                options.default_container_extension(&self.input_name),
+            ),
             custom_sid: video.custom_sid.clone(),
             direct_source: if options.flags.contains(XtreamMappingFlags::SkipVideoDirectSource) {
                 empty_str
@@ -384,7 +398,10 @@ impl XtreamPlaylistItem {
                 is_adult: 0,
                 category_id: self.category_id.intern(),
                 category_ids: vec![self.category_id],
-                container_extension: self.container_extension_or_url_fallback(&empty_str),
+                container_extension: self.container_extension_or_url_fallback(
+                    &empty_str,
+                    options.default_container_extension(&self.input_name),
+                ),
                 custom_sid: None,
                 direct_source: Arc::clone(&empty_str),
             }),
@@ -447,7 +464,8 @@ pub enum XtreamDocument {
 mod tests {
     use super::*;
     use crate::model::{
-        PlaylistItemType, PlaylistItemTypeSet, VideoStreamDetailProperties, VideoStreamProperties, VirtualId,
+        PlaylistEntry, PlaylistItemType, PlaylistItemTypeSet, VideoStreamDetailProperties, VideoStreamProperties,
+        VirtualId,
     };
 
     fn sample_options() -> XtreamMappingOptions {
@@ -462,6 +480,7 @@ mod tests {
             web_ui_request: false,
             encrypt_secret: [0u8; 16],
             resource_host_policies: Arc::default(),
+            default_container_extensions: Arc::default(),
         }
     }
 
@@ -487,6 +506,7 @@ mod tests {
             source_ordinal: 0,
             input_stream_id: "813563".intern(),
             upstream_user_agent: None,
+            input_url: "".intern(),
         }
     }
 
@@ -500,11 +520,33 @@ mod tests {
         }))
     }
 
+    fn options_with_default(input_name: &str, extension: &str) -> XtreamMappingOptions {
+        let mut options = sample_options();
+        let mut defaults = std::collections::HashMap::new();
+        defaults.insert(Arc::<str>::from(input_name), Arc::<str>::from(extension));
+        options.default_container_extensions = Arc::new(defaults);
+        options
+    }
+
     fn video_doc_extension(item: &XtreamPlaylistItem) -> Arc<str> {
         let XtreamDocument::Video(doc) = item.to_document(&sample_options()) else {
             panic!("expected a video document");
         };
         doc.container_extension
+    }
+
+    fn video_doc_extension_with(item: &XtreamPlaylistItem, options: &XtreamMappingOptions) -> Arc<str> {
+        let XtreamDocument::Video(doc) = item.to_document(options) else {
+            panic!("expected a video document");
+        };
+        doc.container_extension
+    }
+
+    fn video_info_doc_extension_with(item: &XtreamPlaylistItem, options: &XtreamMappingOptions) -> Arc<str> {
+        let XtreamInfoDocument::Video(doc) = item.to_info_document(options) else {
+            panic!("expected a video info document");
+        };
+        doc.movie_data.container_extension
     }
 
     fn video_info_doc_extension(item: &XtreamPlaylistItem) -> Arc<str> {
@@ -527,9 +569,9 @@ mod tests {
     }
 
     #[test]
-    fn blank_container_extension_stays_blank_without_a_url_extension() {
+    fn blank_container_extension_falls_back_to_the_builtin_default() {
         let item = video_item("http://provider.example/movie/u/p/813563", Some(video_properties("", false)));
-        assert_eq!(video_doc_extension(&item).as_ref(), "");
+        assert_eq!(video_doc_extension(&item).as_ref(), crate::defaults::DEFAULT_CONTAINER_EXTENSION);
     }
 
     #[test]
@@ -546,9 +588,77 @@ mod tests {
     }
 
     #[test]
+    fn url_fallback_applies_to_the_playlist_entry_info_document() {
+        // The provider path serves a document straight from cached details, without passing through
+        // `XtreamPlaylistItem::to_info_document`, so the resolution must live inside the document builder.
+        let item = video_item("http://provider.example/movie/u/p/813563.mkv", Some(video_properties("", true)));
+        let Some(XtreamInfoDocument::Video(doc)) = item.get_resolved_info_document(&sample_options()) else {
+            panic!("expected a video info document");
+        };
+        assert_eq!(doc.movie_data.container_extension.as_ref(), "mkv");
+    }
+
+    #[test]
+    fn placeholder_info_extension_falls_back_to_the_url() {
+        for placeholder in ["null", "~", "."] {
+            let item =
+                video_item("http://provider.example/movie/u/p/813563.mkv", Some(video_properties(placeholder, true)));
+            assert_eq!(video_info_doc_extension(&item).as_ref(), "mkv", "placeholder: {placeholder}");
+        }
+    }
+
+    #[test]
     fn url_fallback_applies_to_the_info_document_without_properties() {
         let item = video_item("http://provider.example/movie/u/p/813563.mkv", None);
         assert_eq!(video_info_doc_extension(&item).as_ref(), "mkv");
+    }
+
+    #[test]
+    fn configured_default_fills_a_blank_video_extension() {
+        let item = video_item("", Some(video_properties("", false)));
+        assert_eq!(video_doc_extension_with(&item, &options_with_default("provider", "mp4")).as_ref(), "mp4");
+    }
+
+    #[test]
+    fn configured_default_fills_a_blank_video_info_extension() {
+        let item = video_item("", Some(video_properties("", true)));
+        assert_eq!(video_info_doc_extension_with(&item, &options_with_default("provider", "mp4")).as_ref(), "mp4");
+    }
+
+    #[test]
+    fn configured_default_applies_to_the_info_document_without_properties() {
+        let item = video_item("", None);
+        assert_eq!(video_info_doc_extension_with(&item, &options_with_default("provider", "mp4")).as_ref(), "mp4");
+    }
+
+    #[test]
+    fn provider_and_url_still_win_over_the_configured_default() {
+        let provider = video_item("", Some(video_properties("mkv", false)));
+        assert_eq!(video_doc_extension_with(&provider, &options_with_default("provider", "mp4")).as_ref(), "mkv");
+
+        let url = video_item("http://provider.example/movie/u/p/813563.avi", Some(video_properties("", false)));
+        assert_eq!(video_doc_extension_with(&url, &options_with_default("provider", "mp4")).as_ref(), "avi");
+    }
+
+    #[test]
+    fn configured_default_of_another_input_does_not_leak() {
+        // The item names `provider`; only `other` configured `avi`, so the built-in default answers.
+        let item = video_item("", Some(video_properties("", false)));
+        assert_eq!(
+            video_doc_extension_with(&item, &options_with_default("other", "avi")).as_ref(),
+            crate::defaults::DEFAULT_CONTAINER_EXTENSION
+        );
+    }
+
+    #[test]
+    fn live_documents_carry_no_container_extension() {
+        let options = options_with_default("provider", "mp4");
+        let mut live = video_item("", None);
+        live.xtream_cluster = XtreamCluster::Live;
+        live.item_type = PlaylistItemType::Live;
+        // `XtreamLiveDoc` has no container_extension field, so a configured default cannot leak
+        // into live even when the input sets one; the type is the guarantee.
+        assert!(matches!(live.to_document(&options), XtreamDocument::Live(_)));
     }
 
     #[test]

@@ -147,3 +147,21 @@
   color: var(--text-button-disabled-color);
   fill: var(--text-button-disabled-color);
 }
+
+.tp__text-button__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-inline-start: var(--gap-small);
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  background: var(--theme-brand-surface-soft);
+  color: var(--theme-brand-text-muted);
+}
+
+.tp__text-button.active .tp__text-button__badge {
+  background: var(--theme-brand-primary-active-soft);
+  color: var(--theme-brand-text-title);
+}

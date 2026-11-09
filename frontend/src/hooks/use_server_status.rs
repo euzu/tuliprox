@@ -180,6 +180,7 @@ fn download_task_to_stream_with_ts(download: &RecordingTaskDto, ts: u64) -> Stre
         session_token: None,
         preserved: false,
         previous_session_id: None,
+        member_info: None,
     }
 }
 
@@ -500,6 +501,7 @@ mod tests {
             session_token: session_token.map(ToOwned::to_owned),
             preserved: false,
             previous_session_id: None,
+            member_info: None,
         }
     }
 

@@ -8,24 +8,30 @@ This chapter covers the Command Line Interface (CLI), Logging architecture, and 
 
 ## 1. Command Line Arguments (CLI Flags)
 
-While Tuliprox is usually run via Docker, understanding the CLI flags is crucial for debugging and manual interventions.
+Tuliprox supports the same CLI flags when run as a native binary or through Docker.
 
-| Flag                     | Purpose & Technical Background                                                                                                                                                                                                                                                  |
-|:-------------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `-s, --server`           | Starts continuous Server Mode (API, Web UI, Background Workers). Without this flag, Tuliprox acts as a "One-Shot" playlist generator that downloads, processes, and immediately exits.                                                                                          |
-| `-H, --home <DIR>`       | Sets the Home Directory. All relative paths in the configuration are resolved against this directory. If not set, resolves via `TULIPROX_HOME` env variable, or finally the binary's directory.                                                                                 |
-| `-c, -i, -a, -m, -T`     | Overrides specific config paths (e.g., `-c /etc/tuliprox/config.yml`). Useful for testing experimental configurations without altering the production setup.                                                                                                                    |
-| `--failover <PATH>`      | Overrides the path of the failover override file or directory (corrections of failover groups). See [Failover Groups](configuration/failover-groups.md#corrections-and-own-groups-failover-files).                                                                              |
-| `-t, --target <NAME>`    | **Targeted Processing:** Forces processing of the specified target *only*. **Crucial:** This bypasses the `enabled: false` state in the config! Extremely useful to quickly re-render a broken list via cron/shell without blocking the entire system with other heavy targets. |
-| `--genpwd`               | Interactively generates a secure `Argon2id` password hash for the `user.txt` file. Never store plaintext passwords!                                                                                                                                                             |
-| `--healthcheck`          | Docker Support: Pings the API over localhost. Returns Exit Code `0` if the server responds with `{"status": "ok"}`.                                                                                                                                                             |
-| `--sh <QUERY>`           | **Stream History Viewer:** Dumps and filters stream history records from binary archive files. Accepts inline JSON or `@file.json`. See [Stream History Viewer](#5-stream-history-viewer) below.                                                                                |
-| `--scan-library`         | Triggers an incremental scan of the local media directory (if configured).                                                                                                                                                                                                      |
-| `--force-library-rescan` | Ignores modification timestamps and forces a full TMDB/PTT re-evaluation of all local media files.                                                                                                                                                                              |
-| `--inspect-db <PATH>`    | **Database Inspection:** Inspects a B+Tree database file. Reports file size, storage version (V2/V3), detected type, healthy entries, and count of corrupted records. See [Database Migration & Inspection](#6-database-migration--inspection-migrate_dbsh--cli) below.         |
-| `--migrate-db <PATH>`    | **Database Migration:** Migrates a legacy (V1/V2) database to B+Tree V3. Automatically creates a timestamped backup before migrating. Recovers all healthy records and bypasses damaged entries.                                                                                |
-| `--db-type <TYPE>`       | Explicit database type override for inspection/migration (`series`, `xtream`, `target-xtream`, `m3u`, `target-m3u`, `epg`, etc.). Auto-detected if omitted.                                                                                                                     |
-| `--no-backup`            | Skips creating a `.bak.<timestamp>` file before running `--migrate-db`.                                                                                                                                                                                                         |
+| Flag                      | Purpose & Technical Background                                                                                                                                                                                                                                                  |
+| :------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `-s, --server`            | Starts continuous Server Mode (API, Web UI, Background Workers). Without this flag, Tuliprox acts as a "One-Shot" playlist generator that downloads, processes, and immediately exits.                                                                                          |
+| `-H, --home <DIR>`        | Sets the Home Directory. All relative paths in the configuration are resolved against this directory. If not set, resolves via `TULIPROX_HOME` env variable, or finally the binary's directory.                                                                                 |
+| `-c, -i, -a, -m, -T`      | Overrides specific config paths (e.g., `-c /etc/tuliprox/config.yml`). Useful for testing experimental configurations without altering the production setup.                                                                                                                    |
+| `--failover <PATH>`       | Overrides the path of the failover override file or directory (corrections of failover groups). See [Failover Groups](configuration/failover-groups.md#corrections-and-own-groups-failover-files).                                                                              |
+| `-t, --target <NAME>`     | **Targeted Processing:** Forces processing of the specified target *only*. **Crucial:** This bypasses the `enabled: false` state in the config! Extremely useful to quickly re-render a broken list via cron/shell without blocking the entire system with other heavy targets. |
+| `--genpwd`                | Interactively generates a secure `Argon2id` password hash for the `user.txt` file. Never store plaintext passwords!                                                                                                                                                             |
+| `--healthcheck`           | Docker Support: Pings the API over localhost. Returns Exit Code `0` if the server responds with `{"status": "ok"}`.                                                                                                                                                             |
+| `--sh <QUERY>`            | **Stream History Viewer:** Dumps and filters stream history records from binary archive files. Accepts inline JSON or `@file.json`. See [Stream History Viewer](#5-stream-history-viewer) below.                                                                                |
+| `--scan-library`          | Triggers an incremental scan of the local media directory (if configured).                                                                                                                                                                                                      |
+| `--force-library-rescan`  | Ignores modification timestamps and forces a full TMDB/PTT re-evaluation of all local media files.                                                                                                                                                                              |
+| `--inspect-db <PATH>`     | **Database Inspection:** Inspects a B+Tree database file. Reports file size, storage version (V2/V3), detected type, healthy entries, and count of corrupted records. See [Database Migration & Inspection](#6-database-migration--inspection-migrate_dbsh--cli) below.         |
+| `--migrate-db <PATH>`     | **Database Migration:** Migrates a legacy (V1/V2) database to B+Tree V3. Automatically creates a timestamped backup before migrating. Recovers all healthy records and bypasses damaged entries.                                                                                |
+| `--db-type <TYPE>`        | Explicit database type override for inspection/migration (`series`, `xtream`, `target-xtream`, `m3u`, `target-m3u`, `epg`, etc.). Auto-detected if omitted.                                                                                                                     |
+| `--no-backup`             | Skips creating a `.bak.<timestamp>` file before running `--migrate-db`.                                                                                                                                                                                                         |
+| `--user-db-get <PATH>`    | Read every user's repair fields as JSON. With `--user-db-output <FILE>`, create a new editable export; `--user-db-key <KEY>` selects one user for inspection.                                                                                                                   |
+| `--user-db-check <PATH>`  | Validate the database or an edited export supplied with `--user-db-input <FILE>` without writing database or recovery files.                                                                                                                                                    |
+| `--user-db-set <PATH>`    | Import a complete edited export with `--user-db-input <FILE>`, repeat validation, and create a backup before all-or-nothing repair. Without `--user-db-input` an unambiguous database is repaired from verified history or fully decoded records.                               |
+| `--user-db-input <FILE>`  | Complete JSON user export for `--user-db-check` or `--user-db-set`.                                                                                                                                                                                                             |
+| `--user-db-output <FILE>` | New JSON output file for `--user-db-get`; existing files are never overwritten.                                                                                                                                                                                                 |
+| `--user-db-key <KEY>`     | Select one user key for `--user-db-get`; partial exports cannot be imported.                                                                                                                                                                                                    |
 
 ---
 
@@ -353,6 +359,9 @@ Tuliprox uses a custom B+Tree storage engine. Starting with version 3.3.x, the e
 During startup or container updates, Tuliprox automatically migrates legacy V1 and V2 database files (such as `series.db`,
 `live.db`, `video.db`, `m3u_*.db`, `epg.db`) to V3.
 
+> **API user exception:** Do not use the generic salvage command for `api_user.db`; dropping one unreadable user is not safe.
+> Use [API User Database Offline Repair](#api-user-database-offline-repair), which requires every user to be recovered.
+
 ### Standalone Migration & Inspection Script (`bin/migrate_db.sh`)
 
 If you want to manually verify, repair, or migrate a database file before starting the server—or if you need to run migration
@@ -426,6 +435,39 @@ Alternatively, invoke `tuliprox` directly via `docker exec`:
 ```bash
 docker exec -it tuliprox tuliprox --migrate-db /app/data/input_dir/series.db
 ```
+
+### API User Database Offline Repair
+
+Use `--user-db-get` to export the users, resolve unassigned plan/filter values, and validate the edited file with
+`--user-db-check`. Apply the validated file with `--user-db-set`, which creates a backup before repairing the database.
+Unresolved values, invalid input or changed source data prevent the repair. Users are not skipped.
+
+A database whose records are already unambiguous needs no edited file: `--user-db-set <PATH>` without `--user-db-input`
+repairs it from verified recovery history, or from the fully decoded records, and creates fresh history.
+
+The [step-by-step example](./troubleshooting.md#6-api-user-database-migration-manual-docker-repair) uses a backup of the
+original configuration and a separate working copy. It covers export, editing, validation, repair and the final check.
+
+When `api_user_recovery/` exists but cannot be used, for example because it belongs to another database, the commands
+fall back to the live records. `--user-db-check` prints the cause as `Recovery History Reason`, and `--user-db-set`
+reports it as `Previous History`; the unusable history is moved into the repair archive and replaced.
+
+Repair archives named `api_user_repair_backup_*` are excluded from startup scanning.
+
+#### Pending write-ahead log after an unclean shutdown
+
+If `api_user.db.wal` or `api_user.db.wal.tmp` is left behind, `--user-db-get` and `--user-db-check` refuse to run: they
+promise read-only access and would otherwise report stale records.
+
+1. **Replay it.** `--user-db-set <PATH>` takes exclusive access, archives the database, the log and the recovery
+   history into an `api_user_repair_backup_*` directory, and then replays a valid log before repairing. It is the
+   normal next step even when no export is needed. A supplied `--user-db-input` document is parsed before the replay.
+2. **Keep it if the replay fails.** Never delete the `.wal` or `.wal.tmp` file of a V3 database. The log holds the
+   before-images needed to roll back a partially written transaction; without it the database can stay torn. Back up
+   the complete configuration directory, keep all files together and report the error.
+
+A V1/V2 database never writes this log. A stray `.wal` file beside such a database does not belong to it; after a
+backup, move it out of the configuration directory.
 
 ---
 

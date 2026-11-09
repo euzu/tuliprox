@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "title": "form.title",
+  "description": "form.description",
+  "columns": 2,
+  "required": [
+    "invidious_instances"
+  ],
+  "properties": {
+    "channels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "title": "form.channels.title",
+      "description": "form.channels.description",
+      "placeholder": "form.channels.placeholder",
+      "row": true
+    },
+    "invidious_instances": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^https?://[^\\s/?#]+[^\\s?#]*$",
+        "patternMessage": "form.invidious_instances.pattern"
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "title": "form.invidious_instances.title",
+      "description": "form.invidious_instances.description",
+      "placeholder": "form.invidious_instances.placeholder",
+      "helpUrl": "https://docs.invidious.io/instances/",
+      "row": true
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "recent_uploads",
+        "live_only"
+      ],
+      "default": "recent_uploads",
+      "title": "form.mode.title",
+      "description": "form.mode.description",
+      "widget": "radio",
+      "enumLabels": [
+        "form.mode.recent_uploads",
+        "form.mode.live_only"
+      ],
+      "row": true
+    },
+    "max_uploads": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 15,
+      "default": 10,
+      "title": "form.max_uploads.title",
+      "description": "form.max_uploads.description",
+      "widget": "slider"
+    },
+    "cache_ttl_minutes": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 360,
+      "default": 120,
+      "title": "form.cache_ttl_minutes.title",
+      "description": "form.cache_ttl_minutes.description",
+      "placeholder": "120"
+    }
+  }
+}

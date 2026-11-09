@@ -8,6 +8,7 @@
 
 mod format;
 mod generation;
+mod lock;
 mod schema;
 #[cfg(test)]
 mod tests;
@@ -24,6 +25,7 @@ use generation::{
     prune_generations, read_checkpoint_entries, read_current, scan_generations, scan_journal, write_current,
     CheckpointWriter, GenerationPaths, GenerationScan, RETAINED_GENERATIONS,
 };
+pub use lock::{maintenance_lease_path, RecoveryMaintenanceGuard, RecoveryUseGuard};
 pub use schema::RecoverySchema;
 use schema::{migrate_key_to_current, migrate_value_to_current, schema_fingerprint};
 use serde::{de::DeserializeOwned, Serialize};
@@ -206,6 +208,8 @@ pub struct BPlusTreeRecoveryJournal<K, V, S> {
     #[cfg(any(test, feature = "test-support"))]
     fault: Option<RecoveryFaultPoint>,
     _types: PhantomData<(K, V)>,
+    // Drop last, after the journal file and any updater have been released.
+    _use_guard: Option<RecoveryUseGuard>,
 }
 
 impl<K, V, S> BPlusTreeRecoveryJournal<K, V, S>
@@ -217,12 +221,105 @@ where
     /// Opens, creates or rebuilds the database so that it matches the newest
     /// verifiable recovery history.
     pub fn open(paths: RecoveryPaths, schema: S, policy: RecoveryPolicy) -> io::Result<(Self, RecoveryOpenReport)> {
+        Self::open_inner(paths, schema, policy, false, None)
+    }
+
+    /// Rebuilds a tracked database even when its header revision is current.
+    ///
+    /// Used when an application can read the header but not the stored value
+    /// layout. Only history belonging to that header's database identity is
+    /// accepted, and it must cover at least the database's applied revision.
+    /// Missing, stale or invalid history never replaces the original database.
+    pub fn rebuild_from_history(
+        paths: RecoveryPaths,
+        schema: S,
+        policy: RecoveryPolicy,
+    ) -> io::Result<RecoveryOpenReport> {
+        Self::open_inner(paths, schema, policy, true, None).map(|(_, report)| report)
+    }
+
+    /// Rebuild while the caller already owns the exclusive maintenance lease.
+    /// The B+Tree's operation locks are still acquired normally; reacquiring a
+    /// shared maintenance lease here would deadlock or reject our own repair.
+    pub fn rebuild_from_history_with_maintenance(
+        paths: RecoveryPaths,
+        schema: S,
+        policy: RecoveryPolicy,
+        maintenance: &RecoveryMaintenanceGuard,
+    ) -> io::Result<RecoveryOpenReport> {
+        Self::open_inner(paths, schema, policy, true, Some(maintenance)).map(|(_, report)| report)
+    }
+
+    /// Verifies that the history bound to a tracked database can rebuild it.
+    ///
+    /// Unlike [`Self::rebuild_from_history`], this never creates directories,
+    /// updates `CURRENT`, truncates a torn journal tail or replaces the
+    /// operational database. It is intended for offline inspection tools.
+    pub fn verify_rebuild_history(paths: &RecoveryPaths, schema: &S) -> io::Result<RecoveryVerificationReport> {
+        Self::read_rebuild_history(paths, schema).map(|(report, _)| report)
+    }
+
+    /// Reads the complete verified recovery snapshot without changing the
+    /// database, WAL, recovery generation or CURRENT pointer.
+    pub fn read_rebuild_history(
+        paths: &RecoveryPaths,
+        schema: &S,
+    ) -> io::Result<(RecoveryVerificationReport, BTreeMap<K, V>)> {
+        let DatabaseState::Tracked(identity) = read_database_state_read_only::<K, V>(&paths.database) else {
+            return Err(invalid_data("history verification requires a database with a readable recovery identity"));
+        };
+        if identity.schema_fingerprint != schema_fingerprint(S::NAME) {
+            return Err(schema_mismatch());
+        }
+        if identity.schema_version > S::CURRENT_VERSION {
+            return Err(invalid_data(
+                "the operational database was written by a newer schema version than this build supports",
+            ));
+        }
+        let database_id = hex16(identity.database_id);
+        let generations = scan_generations(&paths.directory, S::NAME, &database_id)?;
+        let selected = select_generation(&generations)?
+            .ok_or_else(|| invalid_data("no verifiable recovery generation matches the operational database"))?;
+        if selected.manifest.schema_version > S::CURRENT_VERSION {
+            return Err(invalid_data("the newest recovery generation was written by an unsupported future schema"));
+        }
+        if identity.applied_revision > selected.journal.revision {
+            return Err(invalid_data("the operational database is ahead of every recovery generation"));
+        }
+        let restored =
+            restore_generation::<K, V, S>(schema, &database_id, &selected.paths, selected.manifest.schema_version)?;
+        let report = RecoveryVerificationReport {
+            database_revision: identity.applied_revision,
+            recovery_revision: selected.journal.revision,
+            live_records: u64::try_from(restored.len())
+                .map_err(|_| invalid_data("recovery record count exceeds u64"))?,
+        };
+        Ok((report, restored))
+    }
+
+    /// Shared open path; `force_rebuild` replaces a current database from history, and an existing maintenance lease replaces the shared use lease.
+    fn open_inner(
+        paths: RecoveryPaths,
+        schema: S,
+        policy: RecoveryPolicy,
+        force_rebuild: bool,
+        maintenance: Option<&RecoveryMaintenanceGuard>,
+    ) -> io::Result<(Self, RecoveryOpenReport)> {
+        let use_guard = if let Some(maintenance) = maintenance {
+            maintenance.check_paths(&paths)?;
+            None
+        } else {
+            Some(RecoveryUseGuard::try_acquire(&paths)?)
+        };
         fs::create_dir_all(&paths.directory)?;
         if let Some(parent) = paths.database.parent() {
             fs::create_dir_all(parent)?;
         }
         let placement = detect_placement(&paths);
         let database_state = read_database_state::<K, V>(&paths.database);
+        if force_rebuild && !matches!(database_state, DatabaseState::Tracked(_)) {
+            return Err(invalid_data("history repair requires a database with a readable recovery identity"));
+        }
         let fingerprint = schema_fingerprint(S::NAME);
 
         let database_id = match &database_state {
@@ -263,9 +360,10 @@ where
             #[cfg(any(test, feature = "test-support"))]
             fault: None,
             _types: PhantomData,
+            _use_guard: use_guard,
         };
 
-        let report = journal.reconcile(&generations, &database_state)?;
+        let report = journal.reconcile(&generations, &database_state, force_rebuild)?;
         Ok((journal, report))
     }
 
@@ -273,6 +371,7 @@ where
         &mut self,
         generations: &[GenerationScan],
         database_state: &DatabaseState,
+        force_rebuild: bool,
     ) -> io::Result<RecoveryOpenReport> {
         let selected = select_generation(generations).inspect_err(|_| {
             self.fail(RecoveryErrorClass::ForkedHistory);
@@ -315,7 +414,8 @@ where
         match database_state {
             DatabaseState::Tracked(identity)
                 if identity.applied_revision == self.current_revision
-                    && identity.schema_version == S::CURRENT_VERSION =>
+                    && identity.schema_version == S::CURRENT_VERSION
+                    && !force_rebuild =>
             {
                 self.database_revision = identity.applied_revision;
                 self.state = RecoveryRepositoryState::Healthy;
@@ -742,46 +842,7 @@ where
 
     /// Replays a generation into an in-memory map at the current schema version.
     fn restore_state(&self, paths: &GenerationPaths, checkpoint_version: u32) -> io::Result<BTreeMap<K, V>> {
-        let mut state = BTreeMap::new();
-        read_checkpoint_entries(&paths.checkpoint, S::NAME, &self.database_id, |key, value| {
-            let key = migrate_key_to_current::<K, V, S>(&self.schema, checkpoint_version, key)?;
-            let value = migrate_value_to_current::<K, V, S>(&self.schema, checkpoint_version, value)?;
-            if state.insert(key, value).is_some() {
-                return Err(invalid_data("checkpoint holds duplicate keys after migration"));
-            }
-            Ok(())
-        })?;
-        self.replay_journal(&paths.journal, &mut state)?;
-        Ok(state)
-    }
-
-    fn replay_journal(&self, path: &Path, state: &mut BTreeMap<K, V>) -> io::Result<()> {
-        if !path.exists() {
-            return Ok(());
-        }
-        let mut reader = std::io::BufReader::new(File::open(path)?);
-        let _ = read_frames(&mut reader, |frame: DecodedFrame| {
-            frame.envelope.validate_identity(S::NAME, &self.database_id)?;
-            let version = frame.envelope.schema_version;
-            let RecordBody::Transaction { operations } = frame.envelope.body else {
-                return Err(invalid_data("recovery journal holds a non-transaction record"));
-            };
-            for operation in operations {
-                match operation {
-                    JsonOperation::Upsert { key, value } => {
-                        let key = migrate_key_to_current::<K, V, S>(&self.schema, version, key)?;
-                        let value = migrate_value_to_current::<K, V, S>(&self.schema, version, value)?;
-                        let _ = state.insert(key, value);
-                    }
-                    JsonOperation::Delete { key } => {
-                        let key = migrate_key_to_current::<K, V, S>(&self.schema, version, key)?;
-                        let _ = state.remove(&key);
-                    }
-                }
-            }
-            Ok(())
-        })?;
-        Ok(())
+        restore_generation::<K, V, S>(&self.schema, &self.database_id, paths, checkpoint_version)
     }
 
     /// Rebuilds the operational database from a generation, through staging.
@@ -808,8 +869,24 @@ where
                 tree.insert(key, value);
             }
             let _ = tree.store(&staging)?;
-            let mut query = BPlusTreeQuery::<K, V>::try_new(&staging)?;
-            let _ = query.len().map_err(crate::BPlusTreeError::to_io)?;
+            let mut verified = BPlusTreeQuery::<K, V>::try_new(&staging)?;
+            if verified.metadata() != tree.get_metadata() {
+                return Err(invalid_data("rebuilt database recovery identity differs from history"));
+            }
+            let mut expected = tree.iter();
+            for entry in verified.iter() {
+                let (key, actual) = entry?;
+                let (expected_key, expected_value) =
+                    expected.next().ok_or_else(|| invalid_data("rebuilt database contains an unexpected record"))?;
+                if &key != expected_key
+                    || self.schema.encode_current(&actual)? != self.schema.encode_current(expected_value)?
+                {
+                    return Err(invalid_data("rebuilt database record differs from recovery history"));
+                }
+            }
+            if expected.next().is_some() {
+                return Err(invalid_data("rebuilt database is missing a record"));
+            }
             Ok(())
         })();
         if let Err(error) = build {
@@ -854,6 +931,71 @@ where
     #[cfg(not(any(test, feature = "test-support")))]
     #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     fn check_fault(&mut self, _point: RecoveryFaultPointCheck) -> io::Result<()> { Ok(()) }
+}
+
+/// Rebuilds the full record map of one generation: checkpoint first, then its journal.
+fn restore_generation<K, V, S>(
+    schema: &S,
+    database_id: &str,
+    paths: &GenerationPaths,
+    checkpoint_version: u32,
+) -> io::Result<BTreeMap<K, V>>
+where
+    K: Ord + Clone + Serialize + DeserializeOwned,
+    V: Clone + Serialize + DeserializeOwned,
+    S: RecoverySchema<K, V>,
+{
+    let mut state = BTreeMap::new();
+    read_checkpoint_entries(&paths.checkpoint, S::NAME, database_id, |key, value| {
+        let key = migrate_key_to_current::<K, V, S>(schema, checkpoint_version, key)?;
+        let value = migrate_value_to_current::<K, V, S>(schema, checkpoint_version, value)?;
+        if state.insert(key, value).is_some() {
+            return Err(invalid_data("checkpoint holds duplicate keys after migration"));
+        }
+        Ok(())
+    })?;
+    replay_generation_journal::<K, V, S>(schema, database_id, &paths.journal, &mut state)?;
+    Ok(state)
+}
+
+/// Applies one generation's journal transactions to `state`, migrating each record to the current schema.
+fn replay_generation_journal<K, V, S>(
+    schema: &S,
+    database_id: &str,
+    path: &Path,
+    state: &mut BTreeMap<K, V>,
+) -> io::Result<()>
+where
+    K: Ord + Clone + Serialize + DeserializeOwned,
+    V: Clone + Serialize + DeserializeOwned,
+    S: RecoverySchema<K, V>,
+{
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut reader = std::io::BufReader::new(File::open(path)?);
+    let _ = read_frames(&mut reader, |frame: DecodedFrame| {
+        frame.envelope.validate_identity(S::NAME, database_id)?;
+        let version = frame.envelope.schema_version;
+        let RecordBody::Transaction { operations } = frame.envelope.body else {
+            return Err(invalid_data("recovery journal holds a non-transaction record"));
+        };
+        for operation in operations {
+            match operation {
+                JsonOperation::Upsert { key, value } => {
+                    let key = migrate_key_to_current::<K, V, S>(schema, version, key)?;
+                    let value = migrate_value_to_current::<K, V, S>(schema, version, value)?;
+                    let _ = state.insert(key, value);
+                }
+                JsonOperation::Delete { key } => {
+                    let key = migrate_key_to_current::<K, V, S>(schema, version, key)?;
+                    let _ = state.remove(&key);
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -913,6 +1055,24 @@ where
         return DatabaseState::Absent;
     }
     let Ok(query) = BPlusTreeQuery::<K, V>::try_new(database) else {
+        return DatabaseState::Unreadable;
+    };
+    match query.metadata() {
+        BPlusTreeMetadata::Recovery(identity) => DatabaseState::Tracked(*identity),
+        _ => DatabaseState::Legacy,
+    }
+}
+
+/// Classifies the database header without replaying or removing a pending write-ahead log.
+fn read_database_state_read_only<K, V>(database: &Path) -> DatabaseState
+where
+    K: Ord + Clone + Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+{
+    if !database.exists() {
+        return DatabaseState::Absent;
+    }
+    let Ok(query) = BPlusTreeQuery::<K, V>::try_new_read_only(database) else {
         return DatabaseState::Unreadable;
     };
     match query.metadata() {

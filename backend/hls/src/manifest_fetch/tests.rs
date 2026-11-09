@@ -15,7 +15,7 @@ use super::{
     },
     http::{
         fetch_origin_manifest_once, origin_manifest_content_coding_error, origin_manifest_fetch_error_from_io_error,
-        origin_manifest_fetch_error_from_request_error, request_failed_status_from_message,
+        origin_manifest_fetch_error_from_request_error,
     },
     recovery::{acceptance_attempt_may_start, attempt_limit_for_started_requalification, selected_manifest_candidate},
     selection_log::ManifestRetryLogKind,
@@ -115,7 +115,7 @@ fn stage_alternative_is_forwarded_to_commit_callback_selection() {
 }
 
 #[test]
-fn timeline_fingerprint_is_structured_and_ignores_origin_host_and_query_tokens() {
+fn timeline_fingerprint_preserves_queries_and_ignores_only_origin_host() {
     let manifest_a = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:7\n\
         #EXT-X-PROGRAM-DATE-TIME:2026-07-16T10:00:00Z\n#EXTINF:4,\n\
         https://origin-a.example/live/7.ts?token=secret-a\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\n\
@@ -132,14 +132,19 @@ fn timeline_fingerprint_is_structured_and_ignores_origin_host_and_query_tokens()
 
     assert!(has_media_a);
     assert!(has_media_b);
-    assert_eq!(fingerprint_a, fingerprint_b);
+    assert_ne!(fingerprint_a, fingerprint_b);
+    let same_query = manifest_b.replace("secret-b", "secret-a");
+    assert_eq!(
+        fingerprint_a,
+        build_manifest_timeline_fingerprint(&same_query, "https://origin-b.example/live/index.m3u8").timeline
+    );
     assert_eq!(fingerprint_a.segment_count, 2);
     assert_eq!(fingerprint_a.first_program_date_time_ms, Some(1_784_196_000_000));
     assert!(fingerprint_a.segment_samples[1].discontinuity_before);
 }
 
 #[test]
-fn rotating_volatile_parent_has_one_semantic_conflict_fingerprint() {
+fn different_hex_parents_have_different_semantic_conflict_fingerprints() {
     let body_a = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:490\n#EXTINF:4,\n\
         /stream/0123456789abcdef/1745190_490.ts\n#EXTINF:4,\n\
         /stream/0123456789abcdef/1745180_480.ts\n#EXTINF:4,\n\
@@ -160,7 +165,7 @@ fn rotating_volatile_parent_has_one_semantic_conflict_fingerprint() {
         OriginManifestParseOutcome::TransientPassthrough { .. } => panic!("normal manifest expected"),
     };
 
-    assert_eq!(
+    assert_ne!(
         deterministic_conflict_fingerprint(&parsed_a, body_a, "https://origin-a.example/live/index.m3u8"),
         deterministic_conflict_fingerprint(&parsed_b, &body_b, "https://origin-b.example/live/index.m3u8")
     );
@@ -391,7 +396,7 @@ fn test_clients() -> (Client, Client) {
 #[test]
 fn request_failed_status_is_extracted_from_global_provider_policy_error() {
     assert_eq!(
-        request_failed_status_from_message(
+        tuliprox_core::utils::request::request_failed_status(
             "Request failed (407 Proxy Authentication Required): provider://demo/live/u/p/1.m3u8",
         ),
         Some(StatusCode::PROXY_AUTHENTICATION_REQUIRED)

@@ -7,7 +7,7 @@ use crate::{
     error::TuliproxError,
     foundation::{get_filter, Filter},
     model::{ConfigInputUpdateQualityDto, PatternTemplate, Prepare},
-    utils::is_blank_optional_string,
+    utils::{is_blank_optional_string, normalize_container_extension},
 };
 
 #[derive(
@@ -106,6 +106,11 @@ pub struct ConfigInputOptionsDto {
     /// Bulk-fetch EPG for live channels during playlist processing.
     #[serde(default, skip_serializing_if = "is_false")]
     pub stalker_bulk_epg: bool,
+    /// Container extension published for movies and series episodes when neither the provider nor the
+    /// stream URL states one. Unset means the built-in default `mp4`. Applied at delivery only: it
+    /// fills a blank field in the Xtream response and never overrides a provider value.
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub default_container_extension: Option<String>,
 }
 
 impl Default for ConfigInputOptionsDto {
@@ -137,6 +142,7 @@ impl Default for ConfigInputOptionsDto {
             probe_filter: None,
             t_probe_filter: None,
             stalker_bulk_epg: false,
+            default_container_extension: None,
         }
     }
 }
@@ -167,6 +173,7 @@ impl ConfigInputOptionsDto {
             && self.resolve_filter.as_ref().is_none_or(|s| s.trim().is_empty())
             && self.probe_filter.as_ref().is_none_or(|s| s.trim().is_empty())
             && !self.stalker_bulk_epg
+            && self.default_container_extension.as_ref().is_none_or(|s| s.trim().is_empty())
     }
 
     pub fn clean(&mut self) {
@@ -196,6 +203,7 @@ impl ConfigInputOptionsDto {
         self.probe_filter = None;
         self.t_probe_filter = None;
         self.stalker_bulk_epg = false;
+        self.default_container_extension = None;
     }
 }
 
@@ -214,6 +222,19 @@ impl Prepare for ConfigInputOptionsDto {
         }
         if let Some(raw_filter) = &self.probe_filter {
             self.t_probe_filter = Some(get_filter(raw_filter, templates)?);
+        }
+        if let Some(raw_extension) = self.default_container_extension.as_deref() {
+            if raw_extension.trim().is_empty() {
+                self.default_container_extension = None;
+            } else {
+                let Some(normalized) = normalize_container_extension(raw_extension) else {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "options.default_container_extension '{raw_extension}' is not a container extension; use a short \
+                         alphanumeric token such as mp4 or mkv"
+                    )));
+                };
+                self.default_container_extension = Some(normalized.into_owned());
+            }
         }
         Ok(())
     }

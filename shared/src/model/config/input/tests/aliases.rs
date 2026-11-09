@@ -326,3 +326,57 @@ fn config_input_options_deserializes_legacy_prefixed_skip_aliases() {
     assert!(dto.skip_vod);
     assert!(dto.skip_series);
 }
+
+fn inline_alias(name: &str, user: &str) -> ConfigInputAliasDto {
+    ConfigInputAliasDto {
+        name: name.intern(),
+        url: "http://alias.example".to_string(),
+        username: Some(user.to_string()),
+        password: Some("pass".to_string()),
+        enabled: true,
+        ..ConfigInputAliasDto::default()
+    }
+}
+
+#[test]
+fn prepare_accepts_empty_main_with_aliases_as_inline_xtream_batch() {
+    let mut dto = ConfigInputDto {
+        name: "inline_batch".intern(),
+        input_type: InputType::Xtream,
+        url: String::new(),
+        aliases: Some(vec![inline_alias("alias_1", "u1"), inline_alias("alias_2", "u2")]),
+        ..ConfigInputDto::default()
+    };
+    assert!(dto.is_inline_batch());
+    dto.prepare(0, true, &HashSet::new(), None).expect("an empty main with aliases is an inline batch");
+    assert_eq!(dto.input_type, InputType::XtreamBatch);
+    assert_eq!(dto.aliases.as_ref().map(Vec::len), Some(2));
+}
+
+#[test]
+fn prepare_rejects_empty_main_without_aliases() {
+    let mut dto = ConfigInputDto {
+        name: "no_accounts".intern(),
+        input_type: InputType::Xtream,
+        url: String::new(),
+        aliases: Some(Vec::new()),
+        ..ConfigInputDto::default()
+    };
+    assert!(!dto.is_inline_batch());
+    let err = dto.prepare(0, true, &HashSet::new(), None).expect_err("no account at all");
+    assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
+}
+
+#[test]
+fn prepare_rejects_empty_main_url_with_main_credentials_even_with_aliases() {
+    let dto = ConfigInputDto {
+        name: "partial_main".intern(),
+        input_type: InputType::Xtream,
+        url: String::new(),
+        username: Some("root".to_string()),
+        password: Some("pw".to_string()),
+        aliases: Some(vec![inline_alias("alias_1", "u1")]),
+        ..ConfigInputDto::default()
+    };
+    assert!(!dto.is_inline_batch(), "a partly filled main mask is not an inline batch");
+}

@@ -39,6 +39,8 @@ pub struct SelectProps {
     pub error: Option<String>,
     #[prop_or_default]
     pub aria_describedby: Option<String>,
+    #[prop_or_default]
+    pub close_on_resize: bool,
 }
 
 #[component]
@@ -101,6 +103,7 @@ pub fn Select(props: &SelectProps) -> Html {
                      aria_required={props.required.then_some(true)}
                      aria_invalid={props.error.as_ref().map(|_| true)}
                      aria_describedby={aria_describedby}
+                     close_on_resize={props.close_on_resize}
                      on_select={props.on_select.clone()} />
             </div>
             { props.error.as_ref().map_or_else(Html::default, |error| html! {

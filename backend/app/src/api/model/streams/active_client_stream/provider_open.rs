@@ -1,6 +1,7 @@
 use super::{store_stream_mode, ActiveClientStreamState, StreamMode};
 use crate::{
     api::{
+        api_utils::plugin_upstream_headers,
         model::{
             connection_manager::PROVIDER_END_PREEMPTED, AppState, BoxedProviderStream, CleanupEvent,
             CustomVideoStreamType, MeteringStream, ProviderStreamFactoryOptions, StreamDetails, TimedClientStream,
@@ -13,7 +14,7 @@ use crate::{
 use axum::http::HeaderMap;
 use futures::{Future, StreamExt};
 use shared::{
-    model::{FailureStage, StreamChannel},
+    model::{FailureStage, StreamChannel, VirtualId},
     utils::sanitize_sensitive_info,
 };
 use std::{
@@ -194,12 +195,50 @@ impl ActiveClientStreamState {
     }
 }
 
+/// The plugin headers of a deferred (grace-hold) provider open: the same
+/// once-per-session-setup injection `create_stream_response_details` runs for
+/// an immediate open (plan §7 *Session-edge header injection*). `None` when
+/// nothing is deferred or no plugin injects headers.
+///
+/// Takes the deferred-open fields rather than `&StreamDetails`: the details
+/// own a provider stream that is `Send` but not `Sync`, so a reference to
+/// them may not live across the await.
+pub(super) fn deferred_open_plugin_headers<'a>(
+    app_state: &'a Arc<AppState>,
+    stream_details: &'a StreamDetails,
+    stream_channel: &'a StreamChannel,
+    username: &'a str,
+) -> impl std::future::Future<Output = Option<Vec<(String, String)>>> + Send + 'a {
+    let deferred = stream_details.has_deferred_provider_open();
+    let provider_name = stream_details.provider_name.as_deref();
+    let request_url = stream_details.request_url.as_deref();
+    let session_headers = stream_details.session_headers.as_ref();
+    async move {
+        if !deferred {
+            return None;
+        }
+        let input = find_input_by_provider_name(app_state.as_ref(), provider_name?)?;
+        let stream_url = url::Url::parse(request_url?).ok()?;
+        plugin_upstream_headers(
+            app_state,
+            stream_channel,
+            VirtualId::new(stream_channel.virtual_id),
+            &stream_url,
+            username,
+            Some(&input.headers),
+            session_headers,
+        )
+        .await
+    }
+}
+
 pub(super) fn create_deferred_provider_open_future(
     app_state: &Arc<AppState>,
     stream_details: &StreamDetails,
     fingerprint: &Fingerprint,
     stream_channel: &StreamChannel,
     req_headers: &HeaderMap,
+    plugin_headers: Option<&[(String, String)]>,
 ) -> Option<DeferredProviderOpenState> {
     if !stream_details.has_deferred_provider_open() {
         return None;
@@ -229,6 +268,7 @@ pub(super) fn create_deferred_provider_open_future(
             stream_channel: Some(stream_channel),
             connect_failure_stage: Some(FailureStage::ProviderOpen),
             content_representation: stream_details.content_representation,
+            plugin_headers,
         })
         .for_deferred_open();
     if stream_details.provider_handle.is_some() {

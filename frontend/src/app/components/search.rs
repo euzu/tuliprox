@@ -1,5 +1,7 @@
 use crate::{
-    app::components::{AppIcon, DropDownIconButton, DropDownOption, DropDownSelection, IconButton},
+    app::components::{
+        popup_menu::PopupMenuPlacement, AppIcon, DropDownIconButton, DropDownOption, DropDownSelection, IconButton,
+    },
     hooks::{is_text_input_focused, use_key_down},
     html_if,
     i18n::use_translation,
@@ -9,6 +11,9 @@ use shared::model::SearchRequest;
 use std::rc::Rc;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
+
+/// Same gap as `Select`, so the search field menu lines up like every other attached list.
+const SEARCH_POPUP_GAP_PX: f64 = 2.0;
 
 const DEBOUNCE_TIMEOUT_MS: u32 = 500;
 
@@ -184,9 +189,12 @@ pub fn Search(props: &SearchProps) -> Html {
         })
     };
 
+    // The menu attaches to the bordered field, not to the button inside it, like `Select`.
+    let field_ref = use_node_ref();
+
     html! {
         <div class={classes!("tp__search", if *invalid_search { "invalid" } else { "" })}>
-            <div class="tp__search-wrapper">
+            <div class="tp__search-wrapper" ref={field_ref.clone()}>
                <AppIcon name="Search" />
                 <input ref={input_ref.clone()} type="text"
                     name="search"
@@ -210,11 +218,30 @@ pub fn Search(props: &SearchProps) -> Html {
                      {
                       <DropDownIconButton multi_select={true}
                         class={if search_fields.as_ref().is_some_and(|fields| !fields.is_empty()) { "option-active" } else { "" }}
+                        aria_label={translate.t("LABEL.SEARCH_FIELDS")}
+                        close_on_resize=true
+                        popup_placement={PopupMenuPlacement::BottomEndFlip}
+                        popup_gap={Some(SEARCH_POPUP_GAP_PX)}
+                        popup_class={classes!("tp__popup-menu--select")}
+                        width_anchor_ref={Some(field_ref.clone())}
                         options={props.options.as_ref().unwrap().clone()} name="fields" icon="Popup" on_select={handle_options_click} />
                      }
                   )
                 }
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn search_fields_dropdown_is_labelled() {
+        let source = include_str!("search.rs").split("#[cfg(test)]").next().unwrap();
+        let dropdown = source.split("<DropDownIconButton").nth(1).expect("fields dropdown");
+        assert!(dropdown.contains("aria_label={translate.t(\"LABEL.SEARCH_FIELDS\")}"));
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../public/assets/i18n/en.json")).expect("en.json");
+        assert!(en["LABEL"]["SEARCH_FIELDS"].is_string(), "LABEL.SEARCH_FIELDS is missing from en.json");
     }
 }

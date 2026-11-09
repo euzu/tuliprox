@@ -178,6 +178,20 @@ pub fn resolve_failover_path(config_path: &str, configured: Option<&str>) -> Fai
 }
 
 #[inline]
+pub fn resolve_override_dir(config_path: &str) -> PathBuf {
+    PathBuf::from(resolve_config_scoped_path(config_path, "overrides"))
+}
+
+#[inline]
+pub fn resolve_storage_dir(storage_path: &str, config_storage_dir: &str) -> PathBuf {
+    if storage_path.trim().is_empty() {
+        PathBuf::from(config_storage_dir)
+    } else {
+        PathBuf::from(storage_path)
+    }
+}
+
+#[inline]
 pub fn resolve_mapping_file_path(config_path: &str, mapping_path: Option<&str>) -> String {
     let configured = mapping_path.map(str::trim).filter(|path| !path.is_empty()).map(ToString::to_string);
     let candidate = if shared::defaults::is_blank_or_default_mapping_path(&configured) {
@@ -623,7 +637,7 @@ pub fn get_file_extension(path: &str) -> Option<String> {
 mod tests {
     use super::{
         collect_config_yaml_files, normalize_string_path, resolve_failover_path, resolve_mapping_file_path,
-        resolve_template_file_path, resolve_template_persist_file_path, FailoverSource,
+        resolve_override_dir, resolve_template_file_path, resolve_template_persist_file_path, FailoverSource,
     };
     use std::path::PathBuf;
 
@@ -660,6 +674,14 @@ mod tests {
         let input = "";
         let normalized = normalize_string_path(input);
         assert_eq!(normalized, "");
+    }
+
+    #[test]
+    fn test_resolve_override_dir_uses_config_dir() {
+        let config_path = std::env::temp_dir().join("tuliprox").join("settings").join("config");
+        let resolved = resolve_override_dir(config_path.to_string_lossy().as_ref());
+        let expected = config_path.join("overrides");
+        assert_eq!(resolved, expected);
     }
 
     #[test]

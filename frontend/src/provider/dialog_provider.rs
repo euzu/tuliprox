@@ -14,7 +14,7 @@ pub struct DialogProviderProps {
     pub children: Children,
 }
 
-/// Provides the [`DialogService`] context and mounts a [DialogHost] that owns
+/// Provides the [`DialogService`] context and mounts a [`DialogHost`] that owns
 /// the dialog stack. The stack state intentionally lives in `DialogHost`, so
 /// pushing or popping a dialog never re-renders the application children.
 #[component]

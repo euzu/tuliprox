@@ -50,6 +50,7 @@ impl PlaylistItem {
                             .unwrap_or_default();
                         Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                             name: header.name.clone(),
+                            plugin_fingerprint: None,
                             category_id: header.category_id,
                             stream_id: header.virtual_id.get(),
                             stream_icon: "".intern(),
@@ -89,6 +90,7 @@ impl PlaylistItem {
                         } else if header.item_type == PlaylistItemType::SeriesInfo {
                             Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
                                 name: header.name.clone(),
+                                plugin_fingerprint: None,
                                 category_id: header.category_id,
                                 tmdb: None,
                                 series_id: 0,
@@ -139,6 +141,7 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
         let provider_id =
             if missing_live_input_identity { 0 } else { get_provider_id(&header.id, &header.url).unwrap_or_default() };
         let additional_properties = PlaylistItem::get_additional_properties(header);
+        let input_url = header.persisted_input_url();
 
         XtreamPlaylistItem {
             virtual_id: header.virtual_id,
@@ -165,6 +168,7 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
             source_ordinal: header.source_ordinal,
             input_stream_id,
             upstream_user_agent: header.upstream_user_agent.clone(),
+            input_url,
         }
     }
 }
@@ -175,6 +179,7 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
         let input_stream_id = Arc::clone(&header.input_stream_id);
         let missing_live_input_identity =
             input_stream_id.is_empty() && (header.item_type.is_live() || header.item_type == PlaylistItemType::Catchup);
+        let input_url = header.persisted_input_url();
         M3uPlaylistItem {
             virtual_id: header.virtual_id,
             provider_id: if missing_live_input_identity { "".intern() } else { Arc::clone(&header.id) },
@@ -204,6 +209,7 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
             additional_properties: header.additional_properties.clone(),
             input_stream_id,
             upstream_user_agent: header.upstream_user_agent.clone(),
+            input_url,
         }
     }
 }
@@ -275,6 +281,7 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
             source_ordinal: item.source_ordinal,
             input_stream_id: input_stream_id.unwrap_or_else(|| "".intern()),
             upstream_user_agent: item.upstream_user_agent.clone(),
+            input_url: Arc::clone(&item.input_url),
             failover_group: None,
             failover_group_uuid: None,
         };
@@ -309,6 +316,7 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             source_ordinal: item.source_ordinal,
             input_stream_id: item.get_input_stream_id().unwrap_or_else(|| "".intern()),
             upstream_user_agent: item.upstream_user_agent.clone(),
+            input_url: Arc::clone(&item.input_url),
             failover_group: None,
             failover_group_uuid: None,
         };
@@ -381,6 +389,7 @@ impl PlaylistItem {
             source_ordinal: 0,
             input_stream_id: stream_id_str,
             upstream_user_agent: None,
+            input_url: "".intern(),
             failover_group: None,
             failover_group_uuid: None,
         };
@@ -432,6 +441,8 @@ impl PlaylistEntry for PlaylistItem {
                     self.get_item_type(),
                     self.get_virtual_id(),
                     self.get_category_id().unwrap_or(0),
+                    &self.header.url,
+                    options.default_container_extension(&self.header.input_name),
                 )
             })
         } else {

@@ -21,6 +21,7 @@ pub const fn input_type_label_key(input_type: InputType) -> &'static str {
         InputType::Jellyfin => "LABEL.JELLYFIN",
         InputType::Plex => "LABEL.PLEX",
         InputType::Staged => "LABEL.STAGED",
+        InputType::Plugin => "LABEL.PLUGIN",
     }
 }
 
@@ -51,6 +52,7 @@ mod tests {
             InputType::Jellyfin,
             InputType::Plex,
             InputType::Staged,
+            InputType::Plugin,
         ];
         for locale in [
             include_str!("../../../../../public/assets/i18n/en.json"),

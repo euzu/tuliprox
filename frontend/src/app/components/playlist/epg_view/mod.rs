@@ -5,7 +5,7 @@ use crate::{
                 ensure_recording_available, epg_programme_to_prefill, target_name_for_id, EpgProgrammePrefillInput,
                 PaddingBounds, RecordingForm,
             },
-            EpgSourceSelector, NoContent, Search, SplitPane,
+            use_plugin_ui, Breadcrumbs, EpgSourceSelector, IconButton, NoContent, PluginSlot, Search, SplitPane,
         },
         context::ConfigContext,
     },
@@ -17,11 +17,12 @@ use crate::{
 };
 use chrono::{Datelike, Local, TimeZone, Utc};
 use gloo_timers::callback::Interval;
+use serde_json::{json, Value};
 use shared::{
     concat_string,
     model::{
-        AppConfigDto, EpgChannelFilter, EpgGroupInfo, Permission, PlaylistEpgRequest, SearchRequest, XtreamCluster,
-        MAX_EPG_GRID_ROWS,
+        AppConfigDto, EpgChannelFilter, EpgGroupInfo, Permission, PlaylistEpgRequest, PluginChannelContextDto,
+        PluginProgrammeContextDto, PluginSlotDto, SearchRequest, XtreamCluster, MAX_EPG_GRID_ROWS,
     },
 };
 use std::{
@@ -186,6 +187,28 @@ fn epg_channel_filter(search: &SearchRequest) -> Option<EpgChannelFilter> {
 
 /// The playlist id when available. Full EPG rows leave it empty and carry
 /// their EPG identity in `channel_id` so numeric EPG ids remain unambiguous.
+/// The `epg-overlay` slot context: the focused channel and programme. It carries no URL.
+fn overlay_context(channel: &EpgGridChannel, group: Option<&str>, programme: Option<usize>) -> Value {
+    let channel_context = PluginChannelContextDto {
+        virtual_id: channel.virtual_id.unwrap_or_default(),
+        name: channel.title.to_string(),
+        title: channel.title.to_string(),
+        group: group.unwrap_or_default().to_owned(),
+        item_type: "live".to_owned(),
+        epg_channel_id: Some(channel.epg_id.to_string()),
+        input_name: None,
+    };
+    let programme_context =
+        programme.and_then(|index| channel.programmes.get(index)).map(|programme| PluginProgrammeContextDto {
+            title: programme.title.to_string(),
+            start: programme.start,
+            stop: programme.stop,
+            description: None,
+            category: None,
+        });
+    json!({ "channel": channel_context, "programme": programme_context })
+}
+
 fn pending_program_source_id(channel: &EpgGridChannel) -> String {
     channel.virtual_id.map_or_else(String::new, |virtual_id| virtual_id.to_string())
 }
@@ -206,6 +229,7 @@ pub fn EpgView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let translate = use_translation();
+    let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.PLAYLIST_EPG")]));
     let grid_model = use_state(|| None::<ModelRef>);
     let container_ref = use_node_ref();
     let channels_ref = use_node_ref();
@@ -252,6 +276,9 @@ pub fn EpgView() -> Html {
     let row_height = use_state_eq(|| geometry.borrow().row_height);
     let viewport = use_state_eq(Viewport::default);
     let now_min = use_state_eq(|| 0i64);
+    // The channel (by key) and programme (by index) a plugin overlay shows, set by a click.
+    let focus = use_state(|| None::<(usize, Option<usize>)>);
+    let plugin_ui = use_plugin_ui();
     let can_write_recordings = services.auth.has_permission(Permission::RecordingCreate);
     let is_admin_role = services.auth.is_admin();
     let is_hosted_epg = matches!(*selected_epg_source, Some(PlaylistEpgRequest::Target(_)));
@@ -1161,6 +1188,17 @@ pub fn EpgView() -> Html {
         )
     };
 
+    // The same callback for every row, so rows keep equal props between renders.
+    let on_focus = {
+        let focus = focus.clone();
+        use_callback((), move |target: (usize, Option<usize>), ()| focus.set(Some(target)))
+    };
+    {
+        // A new grid has other channels: the old focus would point at a different one.
+        let focus = focus.clone();
+        use_effect_with((*grid_model).clone(), move |_| focus.set(None));
+    }
+
     let body = match (*grid_model).as_ref() {
         None if *group_index_missing => html! {
             <NoContent text={translate.t("MESSAGES.EPG.UPDATE_TARGET_FOR_GROUPS")} />
@@ -1199,7 +1237,12 @@ pub fn EpgView() -> Html {
                         let ch = &model.channels[idx];
                         html! {
                             <div key={ch.key} class="tp__epg__channel" title={concat_string!(&ch.title, " (", &ch.epg_id, ")")}
-                                 style={channel_style.clone()}>
+                                 style={channel_style.clone()}
+                                 onclick={{
+                                     let on_focus = on_focus.clone();
+                                     let key = ch.key;
+                                     Callback::from(move |_: MouseEvent| on_focus.emit((key, None)))
+                                 }}>
                                 <div class="tp__epg__channel-icon">
                                     { if let Some(icon) = &ch.icon {
                                         html! { <img src={icon.to_string()} alt={ch.title.to_string()} loading="lazy" decoding="async" /> }
@@ -1246,6 +1289,7 @@ pub fn EpgView() -> Html {
                                     row_style={row_style.clone()}
                                     can_record={can_record}
                                     on_record={handle_record.clone()}
+                                    on_focus={on_focus.clone()}
                                 />
                             }
                         }) }
@@ -1271,15 +1315,28 @@ pub fn EpgView() -> Html {
         />
     };
 
+    // The plugin overlay: shown while a channel is focused and some plugin contributes one.
+    let overlay = (*focus).and_then(|(key, programme)| {
+        let has_overlay = plugin_ui.as_ref().is_some_and(|ui| ui.has_contributions(PluginSlotDto::EpgOverlay));
+        let channel = (*grid_model).as_ref().and_then(|model| model.0.channels.get(key))?;
+        let group = (*selected_group).as_ref().map(|(_, name)| name.to_string());
+        has_overlay.then(|| overlay_context(channel, group.as_deref(), programme))
+    });
+    let close_overlay = {
+        let focus = focus.clone();
+        Callback::from(move |_: (String, MouseEvent)| focus.set(None))
+    };
+
     html! {
         <div class="tp__epg tp__list-view">
+            <Breadcrumbs items={&*breadcrumbs}/>
             <div class="tp__epg__header">
                 <h1>{translate.t("LABEL.PLAYLIST_EPG")}</h1>
                 <div class="tp__epg__header-toolbar">
                     <Search onsearch={handle_search}/>
                 </div>
             </div>
-            <EpgSourceSelector on_select={handle_select_source} />
+            <EpgSourceSelector on_select={handle_select_source} hide_title=true />
             <SplitPane
                 class="tp__epg__main"
                 first_class="tp__epg__group-panel"
@@ -1297,17 +1354,55 @@ pub fn EpgView() -> Html {
                 start_collapsed={is_mobile_viewport()}
                 storage_key="tp-epg-group-panel-width"
                 on_resize={Callback::from(move |_| recompute())}/>
+            if let Some(context) = overlay {
+                <div class="tp__epg__plugin-overlay" style="flex:0 0 auto;max-height:45vh;overflow:auto">
+                    <IconButton name="epg_overlay_close" icon="Close" onclick={close_overlay} />
+                    <PluginSlot slot={PluginSlotDto::EpgOverlay} context={Some(context)} />
+                </div>
+            }
         </div>
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{epg_channel_filter, pending_program_source_id, EpgGridModel};
+    use super::{epg_channel_filter, overlay_context, pending_program_source_id, EpgGridModel};
+    use serde_json::json;
     use shared::{
-        model::{EpgChannel, EpgChannelFilter, EpgGridRow, EpgTv, SearchRequest},
+        model::{EpgChannel, EpgChannelFilter, EpgGridProgrammeDto, EpgGridRow, EpgTv, SearchRequest},
         utils::Internable,
     };
+
+    #[test]
+    fn overlay_context_carries_the_focused_channel_and_programme_without_urls() {
+        let rows = vec![EpgGridRow {
+            virtual_id: 42,
+            name: "ZDF".intern(),
+            logo: "https://logo.example/zdf.png".intern(),
+            epg_channel_id: "zdf.de".intern(),
+            programmes: vec![EpgGridProgrammeDto { start: 1_000, stop: 2_000, title: Some("News".intern()) }],
+        }];
+        let grid = EpgGridModel::from_grid_rows(&rows, |_| 0);
+        let channel = &grid.channels[0];
+
+        let with_programme = overlay_context(channel, Some("Germany"), Some(0));
+        assert_eq!(
+            with_programme,
+            json!({
+                "channel": {
+                    "virtualId": 42, "name": "ZDF", "title": "ZDF", "group": "Germany",
+                    "itemType": "live", "epgChannelId": "zdf.de"
+                },
+                "programme": {"title": "News", "start": 1000, "stop": 2000}
+            })
+        );
+        assert!(!with_programme.to_string().contains("logo.example"), "no logo or stream URL is passed");
+
+        let channel_only = overlay_context(channel, None, None);
+        assert_eq!(channel_only["programme"], serde_json::Value::Null);
+        assert_eq!(channel_only["channel"]["group"], "");
+        assert_eq!(overlay_context(channel, None, Some(9))["programme"], serde_json::Value::Null);
+    }
 
     #[test]
     fn epg_channel_filter_maps_search() {

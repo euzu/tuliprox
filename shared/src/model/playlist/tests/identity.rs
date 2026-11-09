@@ -260,3 +260,44 @@ fn media_server_item_with_numeric_url_keeps_stable_id_after_xtream_round_trip() 
     assert_eq!(back.header.id, item.header.id);
     assert_eq!(back.header.get_uuid(), item.header.get_uuid());
 }
+
+#[test]
+fn target_records_keep_input_url_empty_when_unchanged_and_round_trip() {
+    let mut source = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "channel-1".intern(),
+            url: "http://provider.example/live/ch1.ts".intern(),
+            input_name: "input".intern(),
+            item_type: PlaylistItemType::Live,
+            xtream_cluster: XtreamCluster::Live,
+            ..Default::default()
+        },
+    };
+    source.header.freeze_input_url();
+    assert_eq!(source.header.input_url.as_ref(), "http://provider.example/live/ch1.ts");
+
+    // Unchanged URL: target records store empty input_url
+    let xtream = XtreamPlaylistItem::from(&source);
+    let m3u = M3uPlaylistItem::from(&source);
+    assert_eq!(xtream.input_url.as_ref(), "");
+    assert_eq!(m3u.input_url.as_ref(), "");
+    assert_eq!(xtream.override_source_url().as_ref(), "http://provider.example/live/ch1.ts");
+    assert_eq!(m3u.override_source_url().as_ref(), "http://provider.example/live/ch1.ts");
+
+    // Rewritten URL: target records store input_url
+    source.header.url = "http://mapped.example/live/rewritten.ts".intern();
+    let xtream_mapped = XtreamPlaylistItem::from(&source);
+    let m3u_mapped = M3uPlaylistItem::from(&source);
+    assert_eq!(xtream_mapped.input_url.as_ref(), "http://provider.example/live/ch1.ts");
+    assert_eq!(m3u_mapped.input_url.as_ref(), "http://provider.example/live/ch1.ts");
+    assert_eq!(xtream_mapped.override_source_url().as_ref(), "http://provider.example/live/ch1.ts");
+    assert_eq!(m3u_mapped.override_source_url().as_ref(), "http://provider.example/live/ch1.ts");
+
+    // Round trip back to PlaylistItem preserves input_url
+    let from_xtream = PlaylistItem::from(&xtream_mapped);
+    let from_m3u = PlaylistItem::from(&m3u_mapped);
+    assert_eq!(from_xtream.header.input_url.as_ref(), "http://provider.example/live/ch1.ts");
+    assert_eq!(from_m3u.header.input_url.as_ref(), "http://provider.example/live/ch1.ts");
+    assert_eq!(from_xtream.header.url.as_ref(), "http://mapped.example/live/rewritten.ts");
+    assert_eq!(from_m3u.header.url.as_ref(), "http://mapped.example/live/rewritten.ts");
+}

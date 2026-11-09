@@ -193,6 +193,108 @@ pub struct SegmentEntry {
     pub access: Arc<CacheAccessState>,
 }
 
+#[derive(Clone)]
+pub(crate) struct HlsRetainedGapRepair {
+    pub(crate) slot: SegmentEntry,
+    pub(crate) candidate: OriginSegmentFetchRef,
+}
+
+impl SegmentEntry {
+    pub(crate) fn is_clear_ts_origin_404(&self) -> bool {
+        matches!(self.status, SegmentCacheStatus::FailedPermanent { status: Some(StatusCode::NOT_FOUND), .. })
+            && self.proxy_file_ext.eq_ignore_ascii_case("ts")
+            && self.map_ref.is_none()
+            && self.encryption.is_none()
+    }
+}
+
+impl HlsSession {
+    /// Locate the first held slot needed by this cursor, without falling back to
+    /// a later window or to a resource known only through publication history.
+    pub(crate) fn first_playback_blocker(&self, lease: &super::HlsAccessLease) -> Option<&SegmentEntry> {
+        use super::media_reserve::HlsManifestDeliveryMode;
+        if self.startup.is_some()
+            || !matches!(self.mode, super::HlsSessionMode::NormalCacheTimeline)
+            || lease.last_manifest_snapshot.as_ref()?.delivery_mode != HlsManifestDeliveryMode::NormalCacheTimeline
+        {
+            return None;
+        }
+        let cursor = &lease.playback_cursor;
+        cursor.first_segment_started_at_ms?;
+        let mut expected = match cursor.highest_contiguous_completed_proxy_seq {
+            Some(completed) => completed.checked_add(1)?,
+            None => cursor.first_requested_proxy_seq?,
+        };
+        for (&seq, entry) in self.segments.range(expected..) {
+            if seq != expected {
+                return None;
+            }
+            if !matches!(entry.status, SegmentCacheStatus::Ready { .. })
+                || entry.map_ref.is_some()
+                || entry.encryption.is_some()
+            {
+                return Some(entry);
+            }
+            expected = expected.checked_add(1)?;
+        }
+        None
+    }
+
+    pub(crate) fn has_retained_playback_gap(&self, lease: &super::HlsAccessLease) -> bool {
+        self.first_playback_blocker(lease)
+            .is_some_and(|slot| slot.origin_key.origin_epoch < self.origin_epoch && slot.is_clear_ts_origin_404())
+    }
+
+    pub(crate) fn origin_discontinuity_before(&self, entry: &SegmentEntry) -> bool {
+        entry.discontinuity_before && !self.origin_content.proxy_only_discontinuities.contains(&entry.proxy_seq)
+    }
+
+    /// Read the overlap from the complete candidate before the handoff trims
+    /// existing mappings. The repair keeps the old proxy slot and media clock.
+    pub(crate) fn retained_gap_repair(
+        &self,
+        lease: &super::HlsAccessLease,
+        manifest: &ParsedOriginManifest,
+        anchor_proxy_seq: u64,
+    ) -> Option<HlsRetainedGapRepair> {
+        let slot = self.first_playback_blocker(lease)?;
+        let anchor = self.segments.get(&anchor_proxy_seq)?;
+        if !slot.is_clear_ts_origin_404()
+            || slot.proxy_seq >= anchor_proxy_seq
+            || slot.origin_key.origin_epoch != anchor.origin_key.origin_epoch
+            || slot.origin_key.effective_host_id != anchor.origin_key.effective_host_id
+        {
+            return None;
+        }
+        let start = manifest.segments.iter().position(|seg| seg.origin_seq == slot.origin_key.host_local_sequence)?;
+        let end = manifest.segments.iter().position(|seg| seg.origin_seq == anchor.origin_key.host_local_sequence)?;
+        let candidate = &manifest.segments[start];
+        let elapsed =
+            manifest.segments.get(start..end)?.iter().try_fold(0_u64, |ms, seg| ms.checked_add(seg.duration_ms))?;
+        if candidate.map_ref.is_some()
+            || candidate.encryption.is_some()
+            || candidate.duration_ms != slot.duration_ms
+            || candidate.discontinuity_before != self.origin_discontinuity_before(slot)
+            || candidate.program_date_time != slot.program_date_time
+            || slot.media_start_ms.checked_add(elapsed)? != anchor.media_start_ms
+            || !slot.media_resource_identity()?.matches(HlsMediaResourceIdentity::from_url(
+                &candidate.resolved_origin_url,
+                candidate.origin_byte_range,
+            ))
+        {
+            return None;
+        }
+        Some(HlsRetainedGapRepair {
+            slot: slot.clone(),
+            candidate: OriginSegmentFetchRef {
+                resolved_origin_url: candidate.resolved_origin_url.clone(),
+                byte_range: candidate.origin_byte_range,
+                valid_until_ms: None,
+            },
+        })
+    }
+}
+
 impl fmt::Debug for SegmentEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SegmentEntry")
@@ -330,6 +432,7 @@ struct TimelineDraft {
     discontinuity_sequence: u64,
     pending_handoff_discontinuity_sequence: Option<u64>,
     pending_origin_epoch_handoff: bool,
+    new_proxy_only_discontinuity: Option<u64>,
     segments: BTreeMap<u64, SegmentEntry>,
     maps: BTreeMap<ProxyMapId, MapEntry>,
     origin_map_to_proxy: HashMap<OriginMapKey, ProxyMapId>,
@@ -379,6 +482,7 @@ impl From<&HlsSession> for TimelineDraft {
             discontinuity_sequence: session.discontinuity_sequence,
             pending_handoff_discontinuity_sequence: session.pending_handoff_discontinuity_sequence,
             pending_origin_epoch_handoff: session.pending_origin_epoch_handoff,
+            new_proxy_only_discontinuity: None,
             segments: session.segments.clone(),
             maps: session.maps.clone(),
             origin_map_to_proxy: session.origin_map_to_proxy.clone(),
@@ -471,6 +575,48 @@ impl HlsSession {
         handoff_preview_from_draft(&draft, result)
     }
 
+    pub(crate) fn preview_verified_restart(
+        &self,
+        manifest: &ParsedOriginManifest,
+        effective_host_id: u64,
+    ) -> Result<HlsOriginHandoffPreview, HlsOriginHandoffPreviewError> {
+        let mut draft = TimelineDraft::from(self);
+        let result = draft.apply_verified_restart(manifest, effective_host_id)?;
+        handoff_preview_from_draft(&draft, result)
+    }
+
+    pub(crate) fn apply_verified_restart(
+        &mut self,
+        manifest: &ParsedOriginManifest,
+        effective_host_id: u64,
+        expected: &HlsOriginHandoffPreview,
+    ) -> Result<(), HlsOriginHandoffPreviewError> {
+        let mut draft = TimelineDraft::from(&*self);
+        let result = draft.apply_verified_restart(manifest, effective_host_id)?;
+        if handoff_preview_from_draft(&draft, result)? != *expected {
+            return Err(HlsOriginHandoffPreviewError::PreviewInconsistent);
+        }
+        self.commit_timeline_draft(draft);
+        Ok(())
+    }
+
+    pub(crate) fn apply_verified_query_manifest(
+        &mut self,
+        manifest: &ParsedOriginManifest,
+        effective_host_id: u64,
+        updates: &[(u64, OriginSegmentFetchRef)],
+    ) -> Result<(), TimelineMapError> {
+        let mut draft = TimelineDraft::from(&*self);
+        for (seq, fetch_ref) in updates {
+            if let Some(entry) = draft.segments.get_mut(seq) {
+                entry.origin_fetch_ref = Some(fetch_ref.clone());
+            }
+        }
+        draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)?;
+        self.commit_timeline_draft(draft);
+        Ok(())
+    }
+
     /// Commits an explicit handoff only if a freshly built draft still exactly matches the previously staged preview.
     ///
     /// The orchestration layer must call this while holding the session write lock and after checking its acceptance
@@ -510,6 +656,8 @@ impl HlsSession {
         self.pending_handoff_discontinuity_sequence = draft.pending_handoff_discontinuity_sequence;
         self.pending_origin_epoch_handoff = draft.pending_origin_epoch_handoff;
         self.segments = draft.segments;
+        self.origin_content.proxy_only_discontinuities.retain(|seq| self.segments.contains_key(seq));
+        self.origin_content.proxy_only_discontinuities.extend(draft.new_proxy_only_discontinuity);
         self.maps = draft.maps;
         self.origin_map_to_proxy = draft.origin_map_to_proxy;
         self.next_proxy_map_id = draft.next_proxy_map_id;
@@ -606,6 +754,20 @@ fn handoff_preview_from_draft(
 }
 
 impl TimelineDraft {
+    fn apply_verified_restart(
+        &mut self,
+        manifest: &ParsedOriginManifest,
+        effective_host_id: u64,
+    ) -> Result<TimelineApplyResult, TimelineMapError> {
+        self.start_new_origin_epoch(manifest.origin_manifest_sequence, OriginEpochTransitionReason::Handoff)?;
+        self.published_resource_history.begin_verified_restart(self.proxy_next_seq.unwrap_or_default());
+        self.pending_handoff_discontinuity_sequence = Some(0);
+        self.pending_origin_epoch_handoff = false;
+        self.publishable_origin_head_proxy_seq = None;
+        self.publishable_origin_tail_proxy_seq = None;
+        self.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)
+    }
+
     fn can_continue_origin_manifest(&self, manifest: &ParsedOriginManifest, effective_host_id: u64) -> bool {
         let Some(highwater) = self.origin_seq_highwater else { return false };
         if self.origin_epoch_effective_host_id != Some(effective_host_id)
@@ -717,6 +879,7 @@ impl TimelineDraft {
                 || self.should_start_new_origin_epoch_for_rollover(manifest);
         let mut segments = Vec::with_capacity(manifest.segments.len());
         let mut trimmed_published_prefix = false;
+        let mut trimmed_prefix_highwater: Option<u64> = None;
         let mut has_new_resource = false;
         let mut overlaps_publishable_tail = false;
         let mut first_published_overlap = None;
@@ -734,7 +897,10 @@ impl TimelineDraft {
                 CandidateSegmentDisposition::CurrentMapping(proxy_seq) if !explicit_handoff => {
                     // A prior epoch's prefix may lead into current overlap. New
                     // media before that overlap would contradict proxy order.
-                    if trimmed_published_prefix && has_new_resource {
+                    if trimmed_published_prefix
+                        && (has_new_resource
+                            || trimmed_prefix_highwater.is_some_and(|highwater| proxy_seq <= highwater))
+                    {
                         return Err(TimelineMapError::PublishedResourceReplay {
                             previous_proxy_tail: self.proxy_next_seq.and_then(|next| next.checked_sub(1)),
                             existing_proxy_seq: proxy_seq,
@@ -759,6 +925,8 @@ impl TimelineDraft {
                         });
                     }
                     trimmed_published_prefix = true;
+                    trimmed_prefix_highwater =
+                        Some(trimmed_prefix_highwater.map_or(proxy_seq, |value| value.max(proxy_seq)));
                     first_published_overlap.get_or_insert((
                         proxy_seq,
                         candidate_position,
@@ -828,6 +996,7 @@ impl TimelineDraft {
     fn proxy_seq_for_resource(&self, identity: HlsMediaResourceIdentity) -> Option<u64> {
         self.segments
             .values()
+            .filter(|segment| segment.proxy_seq >= self.published_resource_history.restart_proxy_floor())
             .find_map(|segment| {
                 segment
                     .media_resource_identity()
@@ -989,6 +1158,9 @@ impl TimelineDraft {
             last_rendered_at_ms: None,
             access: Arc::new(CacheAccessState::new()),
         };
+        if handoff_discontinuity_before && !parsed.discontinuity_before {
+            self.new_proxy_only_discontinuity = Some(proxy_seq);
+        }
 
         self.next_media_start_ms = self.next_media_start_ms.saturating_add(parsed.duration_ms);
         self.origin_to_proxy.insert(origin_key, proxy_seq);
@@ -1033,7 +1205,9 @@ impl TimelineDraft {
     }
 }
 
-fn map_segment_encryption(parsed: &ParsedOriginSegment) -> Result<Option<HlsSegmentEncryption>, TimelineMapError> {
+pub(crate) fn map_segment_encryption(
+    parsed: &ParsedOriginSegment,
+) -> Result<Option<HlsSegmentEncryption>, TimelineMapError> {
     parsed
         .encryption
         .as_ref()
@@ -1179,8 +1353,7 @@ mod tests {
             publish_ready_manifest(&mut state, 1);
             let epoch = state.origin_epoch;
             let cached = [state.segments[&2].clone(), state.segments[&3].clone()];
-            let next =
-                rebase_overlap_manifest(39, &["gamma.ts?token=new", "delta.ts?token=new", "epsilon.ts", "zeta.ts"]);
+            let next = rebase_overlap_manifest(39, &["gamma.ts", "delta.ts", "epsilon.ts", "zeta.ts"]);
 
             state
                 .apply_origin_rebase_manifest(
@@ -1200,7 +1373,7 @@ mod tests {
                 assert_eq!(current.origin_key, previous.origin_key);
                 assert_eq!(current.status, previous.status);
                 assert!(std::sync::Arc::ptr_eq(&current.access, &previous.access));
-                assert!(current.origin_fetch_ref.as_ref().unwrap().resolved_origin_url.ends_with("?token=new"));
+                assert_eq!(current.origin_fetch_ref, previous.origin_fetch_ref);
             }
             assert!(!state.segments[&4].discontinuity_before);
 
@@ -2274,5 +2447,51 @@ mod tests {
             vec![(3, 15_000), (4, 21_000)]
         );
         assert_eq!(session.next_media_start_ms, 24_000);
+    }
+
+    /// After a host handoff, a later refresh past the old published prefix keeps the epoch and sequence mapping.
+    #[test]
+    fn sliding_refresh_after_handoff_keeps_current_mapping_after_old_published_prefix() {
+        let mut session = session();
+        let host_a = effective_origin_host_id("cdn-a.example.com");
+        let host_b = effective_origin_host_id("cdn-b.example.com");
+        session.apply_origin_manifest_for_host(&six_segment_manifest(0), host_a).unwrap();
+        publish_ready_manifest(&mut session, 1);
+        let handoff = six_segment_manifest(3);
+        let preview = session.preview_origin_handoff_manifest(&handoff, host_b, 0).unwrap();
+        session.apply_origin_handoff_manifest_if_preview_matches(&handoff, host_b, 0, &preview).unwrap();
+        publish_ready_manifest(&mut session, 2);
+        let epoch = session.origin_epoch;
+        session
+            .apply_origin_manifest_for_host(&six_segment_manifest(4), host_b)
+            .expect("old published prefix followed by newer current mappings must remain valid");
+        assert_eq!(session.origin_epoch, epoch);
+        assert_eq!(session.origin_seq_highwater, Some(9));
+        assert_eq!(session.proxy_next_seq, Some(10));
+    }
+
+    /// After a host handoff, a refresh that reorders already published segments is rejected.
+    #[test]
+    fn sliding_refresh_after_handoff_rejects_current_mapping_behind_trimmed_prefix() {
+        let mut session = session();
+        let host_a = effective_origin_host_id("cdn-a.example.com");
+        let host_b = effective_origin_host_id("cdn-b.example.com");
+        session.apply_origin_manifest_for_host(&six_segment_manifest(0), host_a).unwrap();
+        publish_ready_manifest(&mut session, 1);
+        let handoff = six_segment_manifest(3);
+        let preview = session.preview_origin_handoff_manifest(&handoff, host_b, 0).unwrap();
+        session.apply_origin_handoff_manifest_if_preview_matches(&handoff, host_b, 0, &preview).unwrap();
+        publish_ready_manifest(&mut session, 2);
+        let contradictory = normal_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5\n\
+             #EXTINF:4,\n8.ts\n#EXTINF:4,\n6.ts\n#EXTINF:4,\n7.ts\n#EXTINF:4,\n8.ts\n#EXTINF:4,\n9.ts\n",
+        );
+        assert!(matches!(
+            session.apply_origin_manifest_for_host(&contradictory, host_b),
+            Err(TimelineMapError::PublishedResourceReplay {
+                decision: crate::timeline::HlsResourceReplayDecision::RejectContradictoryOrder,
+                ..
+            })
+        ));
     }
 }

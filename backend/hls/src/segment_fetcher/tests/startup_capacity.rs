@@ -234,7 +234,8 @@ async fn live_window_soak() -> std::io::Result<()> {
             .unwrap()
         };
         for lease_id in &lease_ids {
-            let expected = manager.prepare_access_lease_manifest_publication(lease_id, &id, now + head).await.unwrap();
+            let expected =
+                manager.prepare_access_lease_manifest_publication_for_test(lease_id, &id, now + head).await.unwrap();
             assert!(manager
                 .commit_access_lease_manifest_publication(lease_id, &id, expected, snapshot.clone(), now + head)
                 .await

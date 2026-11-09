@@ -276,6 +276,7 @@ mod tests {
             session_token: has_session.then(|| "session".to_string()),
             preserved,
             previous_session_id: None,
+            member_info: None,
         })
     }
 

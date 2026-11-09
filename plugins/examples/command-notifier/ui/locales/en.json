@@ -1,0 +1,21 @@
+{
+  "settings.title": "Command Notifier",
+  "settings.program.title": "Program",
+  "settings.program.description": "The program to run, as a full path (/config/scripts/notify.sh). It is started directly, never through a shell, as the user tuliprox runs as, and gets the event as JSON on its standard input.",
+  "settings.args.title": "Arguments",
+  "settings.args.description": "One entry per argument, passed as written. They are not read by a shell, so there is nothing to quote. Do not put a credential here: arguments are visible in the process list.",
+  "settings.timeout_secs.title": "Timeout (seconds)",
+  "settings.timeout_secs.description": "How long the program may run before it is stopped and the notification is retried. 1 to 25; the default is 20.",
+  "settings.routing.title": "Routing (applied by tuliprox, not by the plugin)",
+  "settings.routing.description": "Per-channel routing of the messaging outbox, the same block every messaging channel takes. Every field is optional; an empty block inherits the global notify_on.",
+  "settings.routing.notify_on.title": "notify_on override",
+  "settings.routing.notify_on.description": "Event id globs that replace the global notify_on for this channel (for example playlist.update.*).",
+  "settings.routing.min_severity.title": "Minimum severity (routing)",
+  "settings.routing.min_severity.description": "Host-side severity floor, judged on the event's registry severity before the plugin is called.",
+  "settings.routing.quiet_hours.title": "Quiet hours",
+  "settings.routing.quiet_hours.description": "HH:MM-HH:MM local time. Notifications inside the window are deferred, never dropped.",
+  "settings.routing.max_per_hour.title": "Max per hour",
+  "settings.routing.max_per_hour.description": "Circuit breaker: after this many notifications in an hour the channel sends one suppression notice and goes quiet.",
+  "settings.routing.dedup_window_secs.title": "Dedup window (seconds)",
+  "settings.routing.dedup_window_secs.description": "Suppress a repeated dedup key for this many seconds."
+}

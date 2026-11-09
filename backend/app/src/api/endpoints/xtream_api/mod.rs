@@ -7,13 +7,14 @@ use crate::{
             admission_failure_response, blocks_new_playback, coalesce_byte_stream, create_api_proxy_user,
             create_catchup_session_key, create_m3u_catchup_session_key, create_playback_session_fingerprint,
             create_session_fingerprint, empty_json_response_as_array, empty_json_response_as_object,
-            force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
-            get_user_target_by_credentials, internal_server_error, is_running_playback, is_seekable_media_request,
-            is_session_based_playback, is_stream_share_enabled, local_stream_response, maintenance_rejection_response,
-            redirect, redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
-            resource_proxy_response, resource_redirect_or_proxy, separate_number_and_remainder,
-            should_allow_exhausted_shared_reconnect, stream_response, stream_response_with_provider_handle,
-            try_option_bad_request, try_result_bad_request, try_unwrap_body, PlaybackSource, RedirectParams,
+            failover_group::archive_member_order, force_provider_stream_response, get_session_reservation_ttl_secs,
+            get_user_target, get_user_target_by_credentials, internal_server_error, is_running_playback,
+            is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
+            maintenance_rejection_response, redirect, redirect_response, reentry_suppressed_response,
+            resolve_initial_stalker_playback_url, resource_proxy_response, resource_redirect_or_proxy,
+            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            stream_response_with_provider_handle, try_option_bad_request, try_result_bad_request, try_unwrap_body,
+            PlaybackSource, RedirectParams,
         },
         endpoints::{
             hls_api::{
@@ -39,8 +40,9 @@ use crate::{
         ProxyUserCredentials,
     },
     repository::{
-        get_target_id_mapping, get_target_storage_path, storage_const, user_get_bouquet_filter,
-        xtream_get_collection_path, xtream_get_item_for_stream_id, xtream_load_rewrite_playlist, VirtualIdRecord,
+        get_target_id_mapping, get_target_id_mapping_file, get_target_storage_path, storage_const,
+        user_get_bouquet_filter, xtream_get_collection_path, xtream_get_item_for_stream_id,
+        xtream_load_rewrite_playlist, BPlusTreeQuery, GroupMember, VirtualIdRecord,
     },
     utils::{
         apply_timeshift, debug_if_enabled, file_exists_async, parse_timeshift, prepare_xtream_resource_hosts, request,
@@ -75,6 +77,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+use tuliprox_repository::target_stream_item::{classify_virtual_id, member_to_xtream_item, ResolvedStreamTarget};
 // https://github.com/tellytv/go.xtream-codes/blob/master/structs.go
 // Xtream api -> https://9tzx6f0ozj.apidog.io/
 
@@ -232,6 +235,44 @@ async fn get_user_info(user: &ProxyUserCredentials, app_state: &AppState) -> Opt
     ))
 }
 
+async fn lookup_catchup_parent_virtual_id(
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
+    req_virtual_id: u32,
+) -> Option<VirtualId> {
+    if target.use_memory_cache {
+        let playlists = app_state.playlists.data.read().await;
+        if let Some(storage) = playlists.get(&target.name) {
+            if let Some(id_mapping) = &storage.id_mapping {
+                if let Some(record) = id_mapping.query(&VirtualId::new(req_virtual_id)) {
+                    if record.item_type == PlaylistItemType::Catchup {
+                        return Some(record.parent_virtual_id);
+                    }
+                }
+            }
+        }
+    }
+    let config = app_state.app_config.config.load();
+    let target_path = get_target_storage_path(&config, target.name.as_str())?;
+    let target_id_mapping_file = get_target_id_mapping_file(&target_path);
+    if !target_id_mapping_file.exists() {
+        return None;
+    }
+    let file_lock = app_state.app_config.file_locks.read_lock(&target_id_mapping_file).await;
+    tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        let mut query = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&target_id_mapping_file).ok()?;
+        let record = query.query_zero_copy(&req_virtual_id).ok()??;
+        if record.item_type == PlaylistItemType::Catchup {
+            Some(record.parent_virtual_id)
+        } else {
+            None
+        }
+    })
+    .await
+    .ok()?
+}
+
 #[allow(clippy::too_many_lines)]
 async fn xtream_player_api_stream(
     fingerprint: &Fingerprint,
@@ -294,32 +335,29 @@ async fn xtream_player_api_stream(
     }
 
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let resolved_target = tuliprox_repository::target_stream_item::classify_virtual_id(
-        &app_state.app_config,
-        &app_state.playlists,
-        &target,
-        VirtualId::new(req_virtual_id),
-    )
-    .await;
+    let mut resolved_target =
+        classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, VirtualId::new(req_virtual_id)).await;
 
-    let is_group = matches!(
-        resolved_target,
-        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(_)
-            | tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { .. }
-    );
+    if resolved_target.group().is_none() {
+        if let Some(parent_vid) = lookup_catchup_parent_virtual_id(app_state, &target, req_virtual_id).await {
+            let parent_target =
+                classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, parent_vid).await;
+            if parent_target.group().is_some() {
+                resolved_target = parent_target;
+            }
+        }
+    }
+
+    let is_group = resolved_target.group().is_some();
 
     let pli_res =
         xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target, None).await;
-    let mut pli = match pli_res {
+    let pli = match pli_res {
         Ok(pli) => pli,
         Err(err) => match &resolved_target {
-            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => {
-                tuliprox_repository::target_stream_item::member_to_xtream_item(group, 0, &target)
-            }
-            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
-                tuliprox_repository::target_stream_item::member_to_xtream_item(group, *index, &target)
-            }
-            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => {
+            ResolvedStreamTarget::Group(group) => member_to_xtream_item(group, 0),
+            ResolvedStreamTarget::Member { group, index } => member_to_xtream_item(group, *index),
+            ResolvedStreamTarget::Item => {
                 error!("Failed to read xtream item for stream id {req_virtual_id}: {err}");
                 if is_hls_manifest_request {
                     return hls_custom_video_manifest_response(
@@ -340,59 +378,94 @@ async fn xtream_player_api_stream(
         },
     };
 
-    let virtual_id = pli.virtual_id;
-    let input_option = app_state.app_config.get_input_by_name(&pli.input_name);
-    let stream_ext = input_option
-        .as_deref()
-        .map_or(stream_ext, |input| override_live_hls_extension(stream_req.context, input, stream_ext));
-    let is_hls_manifest_request = stream_ext == Some(HLS_EXT);
+    let candidates: Vec<XtreamPlaylistItem> =
+        if stream_req.context == ApiStreamContext::Timeshift || pli.item_type == PlaylistItemType::Catchup {
+            if let Some(group) = resolved_target.group() {
+                let start_ts = stream_req
+                    .action_path
+                    .split_once('/')
+                    .and_then(|(_, start)| crate::iptv::m3u::parse_xtream_bridge_start(start).ok())
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp());
+                let order = archive_member_order(app_state, &target, group, start_ts);
+                if order.is_empty() {
+                    vec![pli]
+                } else {
+                    order.into_iter().map(|idx| member_to_xtream_item(group, idx)).collect()
+                }
+            } else {
+                vec![pli]
+            }
+        } else {
+            vec![pli]
+        };
 
-    let output_scope = if stream_req.context == ApiStreamContext::Timeshift {
-        HlsEntryOutputScope::LiveCluster
-    } else {
-        HlsEntryOutputScope::ItemType(pli.item_type)
-    };
-    let output_allowed = user_allows_entry_content(&user, output_scope, &pli);
-    if !output_allowed {
-        if is_hls_manifest_request {
-            return hls_custom_video_manifest_response(
-                app_state,
-                &user,
-                CustomVideoStreamType::ChannelUnavailable,
-                axum::http::StatusCode::NOT_FOUND,
-            )
-            .await;
+    let num_candidates = candidates.len();
+    let mut last_response = None;
+    for (cand_idx, cand_pli) in candidates.into_iter().enumerate() {
+        let is_last = cand_idx + 1 == num_candidates;
+        let mut pli = cand_pli;
+        let virtual_id = pli.virtual_id;
+        let input_option = app_state.app_config.get_input_by_name(&pli.input_name);
+        let stream_ext = input_option
+            .as_deref()
+            .map_or(stream_ext, |input| override_live_hls_extension(stream_req.context, input, stream_ext));
+        let is_hls_manifest_request = stream_ext == Some(HLS_EXT);
+
+        let output_scope =
+            if stream_req.context == ApiStreamContext::Timeshift || pli.item_type == PlaylistItemType::Catchup {
+                HlsEntryOutputScope::LiveCluster
+            } else {
+                HlsEntryOutputScope::ItemType(pli.item_type)
+            };
+        let output_allowed = user_allows_entry_content(&user, output_scope, &pli);
+        if !output_allowed {
+            if is_last {
+                if is_hls_manifest_request {
+                    return hls_custom_video_manifest_response(
+                        app_state,
+                        &user,
+                        CustomVideoStreamType::ChannelUnavailable,
+                        axum::http::StatusCode::NOT_FOUND,
+                    )
+                    .await;
+                }
+                return create_custom_video_stream_response(
+                    &app_state.provider_stream_ctx(),
+                    &fingerprint.addr,
+                    CustomVideoStreamType::ChannelUnavailable,
+                )
+                .into_response();
+            }
+            continue;
         }
-        return create_custom_video_stream_response(
-            &app_state.provider_stream_ctx(),
-            &fingerprint.addr,
-            CustomVideoStreamType::ChannelUnavailable,
-        )
-        .into_response();
-    }
 
-    let check_vid = match &resolved_target {
-        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group)
-        | tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, .. } => group.group_vid,
-        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => virtual_id,
-    };
-    if app_state.active_users.is_user_blocked_for_stream(&user.username, check_vid).await {
-        return axum::http::StatusCode::BAD_REQUEST.into_response();
-    }
+        let check_vid = resolved_target.group().map_or(virtual_id, |g| g.group_vid);
+        if app_state.active_users.is_user_blocked_for_stream(&user.username, check_vid).await {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
 
-    let input = try_option_bad_request!(
-        input_option,
-        true,
-        format!(
-            "Can't find input {} for target {target_name}, context {}, stream_id {virtual_id}",
-            pli.input_name, stream_req.context
-        )
-    );
+        let Some(input) = input_option else {
+            if is_last {
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            }
+            continue;
+        };
 
-    if user.permission_denied(&app_state.app_config) {
-        let stream_channel = create_stream_channel_with_type(target.id, &pli, pli.item_type);
-        if is_hls_playback_request(stream_ext, &pli) {
-            return hls_admission_failure_manifest_response(
+        if user.permission_denied(&app_state.app_config) {
+            let stream_channel = create_stream_channel_with_type(target.id, &pli, pli.item_type);
+            if is_hls_playback_request(stream_ext, &pli) {
+                return hls_admission_failure_manifest_response(
+                    app_state,
+                    fingerprint,
+                    &user,
+                    stream_channel,
+                    pli.input_name.clone(),
+                    req_headers,
+                    ConnectFailureReason::UserAccountExpired,
+                )
+                .await;
+            }
+            return admission_failure_response(
                 app_state,
                 fingerprint,
                 &user,
@@ -400,138 +473,265 @@ async fn xtream_player_api_stream(
                 pli.input_name.clone(),
                 req_headers,
                 ConnectFailureReason::UserAccountExpired,
+            );
+        }
+
+        let m3u_timeshift = if stream_req.context == ApiStreamContext::Timeshift {
+            match resolve_m3u_xtream_timeshift(&input, &pli, stream_req.action_path) {
+                Ok(m) => m,
+                Err(err) => {
+                    if is_last {
+                        debug!("M3U Xtream timeshift rejected for stream {virtual_id}: {err}");
+                        return axum::http::StatusCode::BAD_REQUEST.into_response();
+                    }
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(resolved) = m3u_timeshift.as_ref() {
+            pli.url = resolved.url.as_str().intern();
+        }
+
+        if pli.item_type.is_local() {
+            let playback_session_token =
+                create_session_fingerprint(fingerprint, &user.username, virtual_id.get(), false);
+            let user_session =
+                app_state.active_users.get_and_update_user_session(&user.username, &playback_session_token).await;
+            let (admission, _grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
+                &app_state.admission_ctx(),
+                &user,
+                fingerprint,
+                user_session.as_ref(),
+                playback_session_token.as_str(),
+                false,
+                crate::api::api_utils::EvictionReentryGuard::Session(playback_session_token.as_str()),
+                false,
+                false,
+            )
+            .await;
+            if admission.is_reentry_suppressed() {
+                return reentry_suppressed_response();
+            }
+            return local_stream_response(
+                fingerprint,
+                app_state,
+                pli.to_stream_channel(target.id),
+                req_headers,
+                &input,
+                &target,
+                &user,
+                admission.permission(),
+                admission.kind().unwrap_or(crate::api::model::ConnectionKind::Normal),
+                Some(playback_session_token.as_str()),
+                Some(request_class),
+                true,
+            )
+            .await
+            .into_response();
+        }
+
+        let (cluster, item_type) =
+            if stream_req.context == ApiStreamContext::Timeshift || pli.item_type == PlaylistItemType::Catchup {
+                (XtreamCluster::Video, PlaylistItemType::Catchup)
+            } else {
+                (pli.xtream_cluster, pli.item_type)
+            };
+
+        if !is_group {
+            pli.url = match resolve_initial_stalker_playback_url(
+                app_state,
+                &input,
+                &user,
+                pli.provider_id,
+                pli.xtream_cluster,
+                item_type,
+                &pli.url,
+            )
+            .await
+            {
+                Ok(url) => url,
+                Err(err) => {
+                    error!(
+                        "Failed to resolve initial Stalker playback URL: {}",
+                        sanitize_sensitive_info(&err.to_string())
+                    );
+                    return axum::http::StatusCode::BAD_GATEWAY.into_response();
+                }
+            };
+        }
+
+        let requested_extension = if m3u_timeshift.is_some() {
+            extract_extension_from_url(&pli.url).map(|ext| concat_string!(".", ext))
+        } else {
+            resolve_xtream_playback_extension(stream_ext, &pli)
+        }
+        .unwrap_or_default();
+        let stream_ext = (!requested_extension.is_empty()).then_some(requested_extension.as_str());
+
+        debug_if_enabled!(
+            "ID chain for xtream endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
+            stream_req.stream_id);
+        // Derive the playback extension from get_query_path so session semantics match
+        // the actual path it will route. Falls back to requested_extension when empty.
+        #[allow(clippy::needless_borrow, clippy::borrow_deref_ref)]
+        let (_, playback_ext) = get_query_path(stream_req.action_path, Some(&requested_extension), &pli, app_state);
+        #[allow(clippy::needless_borrow, clippy::borrow_deref_ref)]
+        let playback_ext: &str = if playback_ext.is_empty() { &requested_extension } else { &playback_ext };
+
+        let session_vid = if is_group { req_virtual_id } else { virtual_id.get() };
+        let session_key = if let Some(resolved) = m3u_timeshift.as_ref() {
+            create_m3u_catchup_session_key(fingerprint, &user.username, session_vid, &resolved.discriminator)
+        } else if item_type == PlaylistItemType::Catchup {
+            create_catchup_session_key(fingerprint, &user.username, session_vid, stream_req.action_path)
+        } else {
+            create_playback_session_fingerprint(
+                fingerprint,
+                &user.username,
+                virtual_id.get(),
+                item_type,
+                Some(playback_ext),
+            )
+        };
+        let eviction_reentry_guard = if item_type == PlaylistItemType::Catchup
+            || !crate::api::api_utils::is_socket_bound_playback_session(item_type, Some(playback_ext))
+        {
+            crate::api::api_utils::EvictionReentryGuard::Session(&session_key)
+        } else {
+            crate::api::api_utils::EvictionReentryGuard::SocketPlayback { virtual_id }
+        };
+        let user_session = app_state.active_users.get_and_update_user_session(&user.username, &session_key).await;
+
+        let session_url = if let Some(session) = &user_session {
+            if session.permission == UserConnectionPermission::Exhausted {
+                let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
+                if playback_ext == HLS_EXT {
+                    return hls_admission_failure_manifest_response(
+                        app_state,
+                        fingerprint,
+                        &user,
+                        stream_channel,
+                        session.provider.clone(),
+                        req_headers,
+                        ConnectFailureReason::UserConnectionsExhausted,
+                    )
+                    .await;
+                }
+                return admission_failure_response(
+                    app_state,
+                    fingerprint,
+                    &user,
+                    stream_channel,
+                    session.provider.clone(),
+                    req_headers,
+                    ConnectFailureReason::UserConnectionsExhausted,
+                );
+            }
+
+            if app_state.active_provider.is_over_limit(&session.provider) {
+                let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
+                if playback_ext == HLS_EXT {
+                    return hls_admission_failure_manifest_response(
+                        app_state,
+                        fingerprint,
+                        &user,
+                        stream_channel,
+                        session.provider.clone(),
+                        req_headers,
+                        ConnectFailureReason::ProviderConnectionsExhausted,
+                    )
+                    .await;
+                }
+                return admission_failure_response(
+                    app_state,
+                    fingerprint,
+                    &user,
+                    stream_channel,
+                    session.provider.clone(),
+                    req_headers,
+                    ConnectFailureReason::ProviderConnectionsExhausted,
+                );
+            }
+
+            let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
+
+            if session.virtual_id == virtual_id.get()
+                && is_seekable_media_request(cluster, req_headers, Some(playback_ext))
+            {
+                // partial request means we are in reverse proxy mode, seek happened
+                let (input, stream_channel) =
+                    crate::api::api_utils::sticky_playback_context(app_state, session, &input, stream_channel);
+                return force_provider_stream_response(
+                    fingerprint,
+                    app_state,
+                    session,
+                    stream_channel,
+                    api_utils::ForceStreamRequestContext {
+                        req_headers,
+                        input: &input,
+                        user: &user,
+                        session_reservation_ttl_secs: get_session_reservation_ttl_secs(app_state, item_type),
+                        content_representation:
+                            crate::api::model::ProviderContentRepresentationMode::for_playback_extension(playback_ext),
+                    },
+                    None,
+                )
+                .await
+                .into_response();
+            }
+
+            session.stream_url.clone()
+        } else {
+            pli.url.clone()
+        };
+
+        // A group checks maintenance per member during selection; its representative input says nothing.
+        if !is_group
+            && !is_running_playback(user_session.as_ref())
+            && blocks_new_playback(app_state, &input, &user, false)
+        {
+            let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
+            return maintenance_rejection_response(
+                app_state,
+                fingerprint,
+                &user,
+                stream_channel,
+                &input,
+                req_headers,
+                playback_ext == HLS_EXT,
             )
             .await;
         }
-        return admission_failure_response(
-            app_state,
-            fingerprint,
-            &user,
-            stream_channel,
-            pli.input_name.clone(),
-            req_headers,
-            ConnectFailureReason::UserAccountExpired,
-        );
-    }
 
-    let m3u_timeshift = if stream_req.context == ApiStreamContext::Timeshift {
-        try_result_bad_request!(
-            resolve_m3u_xtream_timeshift(&input, &pli, stream_req.action_path),
-            true,
-            format!("M3U Xtream timeshift rejected for stream {virtual_id}")
-        )
-    } else {
-        None
-    };
-    if let Some(resolved) = m3u_timeshift.as_ref() {
-        pli.url = resolved.url.as_str().intern();
-    }
-
-    if pli.item_type.is_local() {
-        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id.get(), false);
-        let user_session =
-            app_state.active_users.get_and_update_user_session(&user.username, &playback_session_token).await;
-        let (admission, _grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
-            &app_state.admission_ctx(),
-            &user,
-            fingerprint,
+        let (connection_admission, grace_mode, request_class) =
+            crate::api::api_utils::resolve_playback_request_admission(
+                &app_state.admission_ctx(),
+                &user,
+                fingerprint,
+                user_session.as_ref(),
+                &session_key,
+                false,
+                eviction_reentry_guard,
+                false,
+                false,
+            )
+            .await;
+        let connection_permission = connection_admission.permission();
+        let connection_kind = connection_admission
+            .kind()
+            .or(user_session.as_ref().and_then(|session| session.connection_kind))
+            .unwrap_or(crate::api::model::ConnectionKind::Normal);
+        let allow_exhausted_shared_reconnect = should_allow_exhausted_shared_reconnect(
+            is_stream_share_enabled(item_type, &target),
             user_session.as_ref(),
-            playback_session_token.as_str(),
-            false,
-            crate::api::api_utils::EvictionReentryGuard::Session(playback_session_token.as_str()),
-            false,
-            false,
-        )
-        .await;
-        if admission.is_reentry_suppressed() {
-            return reentry_suppressed_response();
-        }
-        return local_stream_response(
-            fingerprint,
-            app_state,
-            pli.to_stream_channel(target.id),
-            req_headers,
-            &input,
-            &target,
-            &user,
-            admission.permission(),
-            admission.kind().unwrap_or(crate::api::model::ConnectionKind::Normal),
-            Some(playback_session_token.as_str()),
-            Some(request_class),
-            true,
-        )
-        .await
-        .into_response();
-    }
-
-    let (cluster, item_type) = if stream_req.context == ApiStreamContext::Timeshift {
-        (XtreamCluster::Video, PlaylistItemType::Catchup)
-    } else {
-        (pli.xtream_cluster, pli.item_type)
-    };
-
-    if !is_group {
-        pli.url = match resolve_initial_stalker_playback_url(
-            app_state,
-            &input,
-            &user,
-            pli.provider_id,
-            pli.xtream_cluster,
-            item_type,
-            &pli.url,
-        )
-        .await
-        {
-            Ok(url) => url,
-            Err(err) => {
-                error!("Failed to resolve initial Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
-                return axum::http::StatusCode::BAD_GATEWAY.into_response();
-            }
-        };
-    }
-
-    let requested_extension = if m3u_timeshift.is_some() {
-        extract_extension_from_url(&pli.url).map(|ext| concat_string!(".", ext))
-    } else {
-        resolve_xtream_playback_extension(stream_ext, &pli)
-    }
-    .unwrap_or_default();
-    let stream_ext = (!requested_extension.is_empty()).then_some(requested_extension.as_str());
-
-    debug_if_enabled!(
-        "ID chain for xtream endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
-        stream_req.stream_id);
-    // Derive the playback extension from get_query_path so session semantics match
-    // the actual path it will route. Falls back to requested_extension when empty.
-    #[allow(clippy::needless_borrow, clippy::borrow_deref_ref)]
-    let (_, playback_ext) = get_query_path(stream_req.action_path, Some(&requested_extension), &pli, app_state);
-    #[allow(clippy::needless_borrow, clippy::borrow_deref_ref)]
-    let playback_ext: &str = if playback_ext.is_empty() { &requested_extension } else { &playback_ext };
-
-    let session_key = if let Some(resolved) = m3u_timeshift.as_ref() {
-        create_m3u_catchup_session_key(fingerprint, &user.username, virtual_id.get(), &resolved.discriminator)
-    } else if item_type == PlaylistItemType::Catchup {
-        create_catchup_session_key(fingerprint, &user.username, virtual_id.get(), stream_req.action_path)
-    } else {
-        create_playback_session_fingerprint(
-            fingerprint,
-            &user.username,
             virtual_id.get(),
-            item_type,
-            Some(playback_ext),
-        )
-    };
-    let eviction_reentry_guard = if item_type == PlaylistItemType::Catchup
-        || !crate::api::api_utils::is_socket_bound_playback_session(item_type, Some(playback_ext))
-    {
-        crate::api::api_utils::EvictionReentryGuard::Session(&session_key)
-    } else {
-        crate::api::api_utils::EvictionReentryGuard::SocketPlayback { virtual_id }
-    };
-    let user_session = app_state.active_users.get_and_update_user_session(&user.username, &session_key).await;
-
-    let session_url = if let Some(session) = &user_session {
-        if session.permission == UserConnectionPermission::Exhausted {
+            session_url.as_ref(),
+        );
+        if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
+            if connection_admission.is_reentry_suppressed() {
+                return reentry_suppressed_response();
+            }
             let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
             if playback_ext == HLS_EXT {
                 return hls_admission_failure_manifest_response(
@@ -539,7 +739,7 @@ async fn xtream_player_api_stream(
                     fingerprint,
                     &user,
                     stream_channel,
-                    session.provider.clone(),
+                    input.name.clone(),
                     req_headers,
                     ConnectFailureReason::UserConnectionsExhausted,
                 )
@@ -550,249 +750,157 @@ async fn xtream_player_api_stream(
                 fingerprint,
                 &user,
                 stream_channel,
-                session.provider.clone(),
+                input.name.clone(),
                 req_headers,
                 ConnectFailureReason::UserConnectionsExhausted,
             );
         }
 
-        if app_state.active_provider.is_over_limit(&session.provider) {
-            let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
-            if playback_ext == HLS_EXT {
-                return hls_admission_failure_manifest_response(
-                    app_state,
-                    fingerprint,
-                    &user,
-                    stream_channel,
-                    session.provider.clone(),
-                    req_headers,
-                    ConnectFailureReason::ProviderConnectionsExhausted,
-                )
-                .await;
-            }
-            return admission_failure_response(
-                app_state,
-                fingerprint,
-                &user,
-                stream_channel,
-                session.provider.clone(),
-                req_headers,
-                ConnectFailureReason::ProviderConnectionsExhausted,
-            );
+        let context = stream_req.context;
+
+        let redirect_params = RedirectParams {
+            item: &pli,
+            provider_id: pli.get_provider_id(),
+            cluster,
+            target_type: TargetType::Xtream,
+            target: &target,
+            input: &input,
+            user: &user,
+            stream_ext,
+            req_context: context,
+            action_path: stream_req.action_path,
+        };
+        if let Some(response) = redirect_response(app_state, &redirect_params).await {
+            return response.into_response();
         }
 
-        let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
+        #[allow(clippy::needless_borrow)]
+        let (query_path, _extension) =
+            get_query_path(stream_req.action_path, Some(&requested_extension), &pli, app_state);
 
-        if session.virtual_id == virtual_id.get() && is_seekable_media_request(cluster, req_headers, Some(playback_ext))
-        {
-            // partial request means we are in reverse proxy mode, seek happened
-            let (input, stream_channel) =
-                crate::api::api_utils::sticky_playback_context(app_state, session, &input, stream_channel);
-            return force_provider_stream_response(
+        let Some(stream_url) = get_xtream_player_api_stream_url(&input, stream_req.context, &query_path, &session_url)
+        else {
+            if is_last {
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            }
+            continue;
+        };
+
+        let is_session_request = is_session_based_playback(item_type, Some(playback_ext));
+        // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
+        if is_session_request && playback_ext == shared::defaults::HLS_EXT {
+            let Some(stream_context) = HlsEntryStreamContext::from_playlist_item(&pli) else {
+                error!("HLS input stream identity missing for virtual_id={}; refresh target playlist", pli.virtual_id);
+                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id.get());
+            let archive_reference = m3u_archive_epg_reference_ts(stream_url.as_ref())
+                .or_else(|| m3u_archive_epg_reference_ts(pli.url.as_ref()))
+                .or_else(|| m3u_catchup_epg_reference_from_session_token(&session_key));
+            return handle_hls_stream_request(
                 fingerprint,
                 app_state,
-                session,
-                stream_channel,
-                api_utils::ForceStreamRequestContext {
-                    req_headers,
-                    input: &input,
-                    user: &user,
-                    session_reservation_ttl_secs: get_session_reservation_ttl_secs(app_state, item_type),
-                    content_representation:
-                        crate::api::model::ProviderContentRepresentationMode::for_playback_extension(playback_ext),
-                },
-                None,
+                &user,
+                &target,
+                user_session.as_ref(),
+                Some(session_key.as_str()),
+                &stream_url,
+                archive_reference,
+                stream_context,
+                &input,
+                req_headers,
+                connection_permission,
+                connection_admission.kind(),
+                &original_hls_entry_path,
+                HlsRequestStage::Entry,
             )
             .await
             .into_response();
         }
 
-        session.stream_url.clone()
-    } else {
-        pli.url.clone()
-    };
-
-    // A group checks maintenance per member during selection; its representative input says nothing.
-    if !is_group && !is_running_playback(user_session.as_ref()) && blocks_new_playback(app_state, &input, &user, false)
-    {
-        let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
-        return maintenance_rejection_response(
-            app_state,
-            fingerprint,
-            &user,
-            stream_channel,
-            &input,
-            req_headers,
-            playback_ext == HLS_EXT,
-        )
-        .await;
-    }
-
-    let (connection_admission, grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
-        &app_state.admission_ctx(),
-        &user,
-        fingerprint,
-        user_session.as_ref(),
-        &session_key,
-        false,
-        eviction_reentry_guard,
-        false,
-        false,
-    )
-    .await;
-    let connection_permission = connection_admission.permission();
-    let connection_kind = connection_admission
-        .kind()
-        .or(user_session.as_ref().and_then(|session| session.connection_kind))
-        .unwrap_or(crate::api::model::ConnectionKind::Normal);
-    let allow_exhausted_shared_reconnect = should_allow_exhausted_shared_reconnect(
-        is_stream_share_enabled(item_type, &target),
-        user_session.as_ref(),
-        virtual_id.get(),
-        session_url.as_ref(),
-    );
-    if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
-        if connection_admission.is_reentry_suppressed() {
-            return reentry_suppressed_response();
-        }
-        let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
-        if playback_ext == HLS_EXT {
-            return hls_admission_failure_manifest_response(
-                app_state,
-                fingerprint,
-                &user,
-                stream_channel,
-                input.name.clone(),
-                req_headers,
-                ConnectFailureReason::UserConnectionsExhausted,
-            )
-            .await;
-        }
-        return admission_failure_response(
-            app_state,
-            fingerprint,
-            &user,
-            stream_channel,
-            input.name.clone(),
-            req_headers,
-            ConnectFailureReason::UserConnectionsExhausted,
-        );
-    }
-
-    let context = stream_req.context;
-
-    let redirect_params = RedirectParams {
-        item: &pli,
-        provider_id: pli.get_provider_id(),
-        cluster,
-        target_type: TargetType::Xtream,
-        target: &target,
-        input: &input,
-        user: &user,
-        stream_ext,
-        req_context: context,
-        action_path: stream_req.action_path,
-    };
-    if let Some(response) = redirect_response(app_state, &redirect_params).await {
-        return response.into_response();
-    }
-
-    #[allow(clippy::needless_borrow)]
-    let (query_path, _extension) = get_query_path(stream_req.action_path, Some(&requested_extension), &pli, app_state);
-
-    let stream_url = try_option_bad_request!(
-        get_xtream_player_api_stream_url(&input, stream_req.context, &query_path, &session_url),
-        true,
-        format!(
-            "Can't find stream url for target {target_name}, context {}, stream_id {virtual_id}",
-            stream_req.context
-        )
-    );
-
-    let is_session_request = is_session_based_playback(item_type, Some(playback_ext));
-    // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
-    if is_session_request && playback_ext == shared::defaults::HLS_EXT {
-        let Some(stream_context) = HlsEntryStreamContext::from_playlist_item(&pli) else {
-            error!("HLS input stream identity missing for virtual_id={}; refresh target playlist", pli.virtual_id);
-            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
-        };
-        let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id.get());
         let archive_reference = m3u_archive_epg_reference_ts(stream_url.as_ref())
             .or_else(|| m3u_archive_epg_reference_ts(pli.url.as_ref()))
             .or_else(|| m3u_catchup_epg_reference_from_session_token(&session_key));
-        return handle_hls_stream_request(
+        let mut stream_channel =
+            create_stream_channel_with_type(target.id, &pli, item_type).with_epg_reference_ts(archive_reference);
+        if let Some(group) = resolved_target.group() {
+            stream_channel.group_virtual_id = Some(group.group_vid.get());
+        }
+
+        let pinned_provider =
+            user_session.as_ref().filter(|_| item_type.requires_provider_affinity()).map(|session| &session.provider);
+
+        let source = match &resolved_target {
+            ResolvedStreamTarget::Group(group) => {
+                if stream_req.context == ApiStreamContext::Timeshift || pli.item_type == PlaylistItemType::Catchup {
+                    PlaybackSource::Single { input: &input, stream_url: &stream_url }
+                } else {
+                    let bound_prefer = user_session
+                        .as_ref()
+                        .and_then(|session| session.member_binding.as_ref())
+                        .filter(|b| b.group_vid == group.group_vid.get())
+                        .map(|b| b.member_index);
+                    PlaybackSource::Group {
+                        group: Arc::clone(group),
+                        mode: tuliprox_session::failover_group::SelectionMode::Live,
+                        prefer: bound_prefer,
+                    }
+                }
+            }
+            ResolvedStreamTarget::Member { group, index } => {
+                if stream_req.context == ApiStreamContext::Timeshift || pli.item_type == PlaylistItemType::Catchup {
+                    PlaybackSource::Single { input: &input, stream_url: &stream_url }
+                } else {
+                    PlaybackSource::Group {
+                        group: Arc::clone(group),
+                        mode: tuliprox_session::failover_group::SelectionMode::Live,
+                        prefer: Some(*index),
+                    }
+                }
+            }
+            ResolvedStreamTarget::Item => PlaybackSource::Single { input: &input, stream_url: &stream_url },
+        };
+
+        let outcome = stream_response(
             fingerprint,
             app_state,
-            &user,
-            &target,
-            user_session.as_ref(),
-            Some(session_key.as_str()),
-            &stream_url,
-            archive_reference,
-            stream_context,
-            &input,
+            session_key.as_str(),
+            Some(request_class),
+            stream_channel,
+            source,
+            pinned_provider,
             req_headers,
+            &target,
+            &user,
             connection_permission,
-            connection_admission.kind(),
-            &original_hls_entry_path,
-            HlsRequestStage::Entry,
+            connection_kind,
+            allow_exhausted_shared_reconnect,
+            grace_mode,
         )
-        .await
-        .into_response();
+        .await;
+
+        if outcome.is_success() || is_last {
+            return outcome.into_response();
+        }
+
+        let failure_class = outcome.failure_class.unwrap_or(tuliprox_session::failover_group::FailureClass::Stream);
+        app_state.active_users.terminate_session(&user.username, session_key.as_str()).await;
+        app_state.active_provider.clear_provider_reservation(session_key.as_str());
+
+        if let Some(group) = resolved_target.group() {
+            if let Some(member) = group.members.iter().find(|m| m.member_vid == pli.virtual_id) {
+                crate::api::api_utils::failover_group::record_member_failure(
+                    &app_state.member_health,
+                    member,
+                    None,
+                    failure_class,
+                );
+            }
+        }
+        last_response = Some(outcome.into_response());
     }
 
-    let archive_reference = m3u_archive_epg_reference_ts(stream_url.as_ref())
-        .or_else(|| m3u_archive_epg_reference_ts(pli.url.as_ref()))
-        .or_else(|| m3u_catchup_epg_reference_from_session_token(&session_key));
-    let stream_channel =
-        create_stream_channel_with_type(target.id, &pli, item_type).with_epg_reference_ts(archive_reference);
-
-    let pinned_provider =
-        user_session.as_ref().filter(|_| item_type.requires_provider_affinity()).map(|session| &session.provider);
-
-    let source = match resolved_target {
-        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => {
-            let bound_prefer = user_session
-                .as_ref()
-                .and_then(|session| session.member_binding.as_ref())
-                .filter(|b| b.group_vid == group.group_vid.get())
-                .map(|b| b.member_index);
-            PlaybackSource::Group {
-                group,
-                mode: tuliprox_session::failover_group::SelectionMode::Live,
-                prefer: bound_prefer,
-            }
-        }
-        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
-            PlaybackSource::Group {
-                group,
-                mode: tuliprox_session::failover_group::SelectionMode::Live,
-                prefer: Some(index),
-            }
-        }
-        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => {
-            PlaybackSource::Single { input: &input, stream_url: &stream_url }
-        }
-    };
-
-    stream_response(
-        fingerprint,
-        app_state,
-        session_key.as_str(),
-        Some(request_class),
-        stream_channel,
-        source,
-        pinned_provider,
-        req_headers,
-        &target,
-        &user,
-        connection_permission,
-        connection_kind,
-        allow_exhausted_shared_reconnect,
-        grace_mode,
-    )
-    .await
-    .into_response()
+    last_response.unwrap_or_else(|| axum::http::StatusCode::BAD_REQUEST.into_response())
 }
 
 pub(crate) fn get_query_path(
@@ -876,11 +984,11 @@ fn resolve_m3u_xtream_timeshift(
 }
 
 // Advertise M3U archives only when the timeshift bridge supports their template.
-fn pli_supports_archive(app_state: &Arc<AppState>, pli: &XtreamPlaylistItem) -> bool {
+fn single_item_supports_archive(app_state: &Arc<AppState>, pli: &XtreamPlaylistItem) -> bool {
     let Some(StreamProperties::Live(live)) = pli.additional_properties.as_ref() else {
         return false;
     };
-    if live.tv_archive.unwrap_or(0) <= 0 {
+    if live.tv_archive.unwrap_or(0) <= 0 && live.catchup.is_none() {
         return false;
     }
     let Some(input) = app_state.app_config.get_input_by_name(&pli.input_name) else {
@@ -896,6 +1004,38 @@ fn pli_supports_archive(app_state: &Arc<AppState>, pli: &XtreamPlaylistItem) -> 
         }
     } else {
         true
+    }
+}
+
+fn member_supports_archive(app_state: &Arc<AppState>, member: &GroupMember) -> bool {
+    let Some(StreamProperties::Live(live)) = member.additional_properties.as_ref() else {
+        return false;
+    };
+    if live.tv_archive.unwrap_or(0) <= 0 && live.catchup.is_none() {
+        return false;
+    }
+    let Some(input) = app_state.app_config.get_input_by_name(&member.input_name) else {
+        return false;
+    };
+    if input.input_type.is_m3u() {
+        let Some(catchup) = live.catchup.as_ref() else {
+            return false;
+        };
+        match input.resolve_url(&member.url) {
+            Ok(resolved) => is_xtream_m3u_catchup_supported(resolved.as_ref(), catchup),
+            Err(_) => false,
+        }
+    } else {
+        true
+    }
+}
+
+async fn pli_supports_archive(app_state: &Arc<AppState>, target: &ConfigTarget, pli: &XtreamPlaylistItem) -> bool {
+    let classified = classify_virtual_id(&app_state.app_config, &app_state.playlists, target, pli.virtual_id).await;
+    if let Some(group) = classified.group() {
+        group.members.iter().any(|m| member_supports_archive(app_state, m))
+    } else {
+        single_item_supports_archive(app_state, pli)
     }
 }
 
@@ -1426,6 +1566,9 @@ pub async fn xtream_get_stream_info_response(
     }
 
     let input = app_state.app_config.get_input_by_name(&pli.input_name);
+    // Resolved through the member name, so an item fetched by an alias finds its parent's option.
+    let member_input = app_state.app_config.get_input_by_member_name(&pli.input_name);
+    let configured_container_extension = member_input.as_deref().and_then(ConfigInput::default_container_extension);
     let is_media_server = input.as_ref().is_some_and(|i| i.input_type.is_media_server());
     // handle local items, media server, and items with embedded details
     // (e.g. M3U-synthesized SeriesInfo carrying seasons/episodes).
@@ -1493,7 +1636,7 @@ pub async fn xtream_get_stream_info_response(
     // fallback with basic info
     match cluster {
         XtreamCluster::Video => {
-            let content = create_vod_info_from_item(&pli);
+            let content = create_vod_info_from_item(&pli, configured_container_extension);
             try_unwrap_body!(axum::response::Response::builder()
                 .status(axum::http::StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
@@ -1531,7 +1674,7 @@ async fn xtream_get_short_epg(
                 return axum::Json(json!(ShortEpgResultDto::default())).into_response();
             }
             let config = &app_state.app_config.config.load();
-            let has_archive = pli_supports_archive(app_state, &pli);
+            let has_archive = pli_supports_archive(app_state, target, &pli).await;
             if let (Some(epg_path), Some(channel_id)) =
                 (get_epg_path_for_target_by_type(config, target, TargetType::Xtream), &pli.epg_channel_id)
             {
@@ -1676,7 +1819,7 @@ async fn xtream_get_catchup_response(
         return axum::Json(json!(ShortEpgResultDto::default())).into_response();
     };
 
-    let pli = try_result_bad_request!(
+    let mut pli = try_result_bad_request!(
         xtream_get_item_for_stream_id(
             req_virtual_id,
             &app_state.app_config,
@@ -1686,6 +1829,20 @@ async fn xtream_get_catchup_response(
         )
         .await
     );
+
+    let classified = classify_virtual_id(&app_state.app_config, &app_state.playlists, target, pli.virtual_id).await;
+    let group_parent_vid = classified.group().map(|g| g.group_vid);
+    if let Some(group) = classified.group() {
+        let start_ts = if start_time.is_empty() {
+            chrono::Utc::now().timestamp()
+        } else {
+            crate::iptv::m3u::parse_xtream_bridge_start(start_time).unwrap_or_else(|_| chrono::Utc::now().timestamp())
+        };
+        let order = archive_member_order(app_state, target, group, start_ts);
+        if let Some(&best_idx) = order.first() {
+            pli = member_to_xtream_item(group, best_idx);
+        }
+    }
 
     // Content filter: hidden items expose no catch-up table either, so a
     // plan-tier-restricted user cannot probe hidden channels via catchup.
@@ -1752,13 +1909,11 @@ async fn xtream_get_catchup_response(
                 return internal_server_error!();
             };
 
+            let parent_vid = group_parent_vid.unwrap_or_else(|| VirtualId::new(pli.provider_id));
+
             for (idx, uuid, cp_id) in tasks {
-                let virtual_id = target_id_mapping.get_and_update_virtual_id(
-                    &uuid,
-                    cp_id,
-                    PlaylistItemType::Catchup,
-                    VirtualId::new(pli.provider_id),
-                );
+                let virtual_id =
+                    target_id_mapping.get_and_update_virtual_id(&uuid, cp_id, PlaylistItemType::Catchup, parent_vid);
 
                 mapping_results.push((idx, virtual_id));
 
@@ -1767,7 +1922,7 @@ async fn xtream_get_catchup_response(
                         cp_id,
                         virtual_id,
                         PlaylistItemType::Catchup,
-                        VirtualId::new(pli.provider_id),
+                        parent_vid,
                         uuid,
                     ));
                 }

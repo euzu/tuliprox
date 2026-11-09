@@ -16,13 +16,15 @@ pub(in crate::processor) const fn dedup_match_by(value: DeduplicateMatchBy) -> C
     }
 }
 
-/// Lowercased token join with quality tokens removed, so "News HD" and
-/// "NEWS [FHD]" produce the same key.
-pub(in crate::processor) fn normalized_match_key(value: &str, match_as_ascii: bool) -> String {
-    let value = if match_as_ascii { deunicode_string(value) } else { std::borrow::Cow::Borrowed(value) };
-    let mut key = String::with_capacity(value.len());
-    for token in quality_tokens(&value) {
-        if token_quality(token).is_some() {
+/// Lowercase token join shared by the dedup keys and the configurable normalizer.
+fn joined_lowercase_tokens<'a>(
+    tokens: impl Iterator<Item = &'a str>,
+    capacity: usize,
+    mut keep: impl FnMut(&str) -> bool,
+) -> String {
+    let mut key = String::with_capacity(capacity);
+    for token in tokens {
+        if !keep(token) {
             continue;
         }
         if !key.is_empty() {
@@ -33,6 +35,13 @@ pub(in crate::processor) fn normalized_match_key(value: &str, match_as_ascii: bo
         }
     }
     key
+}
+
+/// Lowercased token join with quality tokens removed, so "News HD" and
+/// "NEWS [FHD]" produce the same key.
+pub(in crate::processor) fn normalized_match_key(value: &str, match_as_ascii: bool) -> String {
+    let value = if match_as_ascii { deunicode_string(value) } else { std::borrow::Cow::Borrowed(value) };
+    joined_lowercase_tokens(quality_tokens(&value), value.len(), |token| token_quality(token).is_none())
 }
 
 pub(in crate::processor) fn raw_match_value(header: &PlaylistItemHeader, match_by: ChannelMatchBy) -> &str {
@@ -66,7 +75,6 @@ pub(in crate::processor) fn extract_normalized_match_key(
     }
 }
 
-#[allow(dead_code)]
 pub(in crate::processor) struct MatchKeyNormalizer<'a> {
     strip: Option<&'a Regex>,
     ignore: HashSet<String>,
@@ -74,7 +82,6 @@ pub(in crate::processor) struct MatchKeyNormalizer<'a> {
     match_as_ascii: bool,
 }
 
-#[allow(dead_code)]
 impl<'a> MatchKeyNormalizer<'a> {
     pub(in crate::processor) fn new(config: &'a ChannelMatchNormalize, match_as_ascii: bool) -> Self {
         let mut normalizer = Self {
@@ -97,18 +104,9 @@ impl<'a> MatchKeyNormalizer<'a> {
     fn base_key(&self, value: &str) -> String {
         let stripped = self.strip.map_or(Cow::Borrowed(value), |regex| regex.replace_all(value, ""));
         let folded = if self.match_as_ascii { deunicode_string(&stripped) } else { stripped };
-        let mut key = String::with_capacity(folded.len());
-        for token in quality_tokens(&folded) {
-            let lower = token.to_lowercase();
-            if token_quality(token).is_some() || self.ignore.contains(&lower) {
-                continue;
-            }
-            if !key.is_empty() {
-                key.push(' ');
-            }
-            key.push_str(&lower);
-        }
-        key
+        joined_lowercase_tokens(quality_tokens(&folded), folded.len(), |token| {
+            token_quality(token).is_none() && !self.ignore.contains(&token.to_lowercase())
+        })
     }
 }
 
@@ -133,6 +131,19 @@ mod tests {
     fn strips_quality_tokens_and_lowercases() {
         assert_eq!(normalized_match_key("News HD", false), "news");
         assert_eq!(normalized_match_key("NEWS [FHD]", false), normalized_match_key("news 1080p", false));
+    }
+
+    #[test]
+    fn a_plus_suffix_names_a_different_channel() {
+        assert_ne!(
+            normalized_match_key("|NL| VIAPLAY TV HD", false),
+            normalized_match_key("|NL| VIAPLAY TV+ HD", false)
+        );
+        assert_eq!(
+            normalized_match_key("|NL| VIAPLAY TV+ HD", false),
+            normalized_match_key("|nl| viaplay tv+ 4K", false)
+        );
+        assert_ne!(normalized_match_key("RTL", false), normalized_match_key("RTL+", false));
     }
 
     #[test]

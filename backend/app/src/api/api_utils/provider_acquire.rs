@@ -1,20 +1,21 @@
 use super::{
-    activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
+    accepts_requested_stream_url, activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
     cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
     detected_catchup_hls_response,
     failover_group::{
-        acquire_group_member, group_playback_settings, group_representative, group_shared_key, open_group_member,
-        wait_for_user_capacity, GroupOpenRequest, GroupSelectionFailure, GroupSelectionRequest, OpenedGroupMember,
-        PlaybackSource, ProbedPayload,
+        acquire_group_member, group_playback_settings, group_representative, group_shared_key, open_failure_class,
+        open_group_member, wait_for_user_capacity, GroupOpenRequest, GroupSelectionFailure, GroupSelectionRequest,
+        OpenedGroupMember, PlaybackSource, ProbedPayload,
     },
     failover_group_runtime::{GroupFailoverContext, GroupFailoverDriver, GroupFailoverStream},
     get_session_reservation_ttl_secs, get_stream_options, is_socket_bound_playback_session, is_stream_share_enabled,
     mark_response_as_uncompressed, no_custom_video_fallback_status, prepare_body_stream, prepare_stream_metering,
     probe_catchup_payload, record_connect_failed_attempt, reentry_suppressed_response, resolve_request_url_for_logging,
-    resolve_xtream_vod_provider_url, select_provider_stream_url, should_pin_provider_for_session,
-    stream_admission_rejected_response, try_shared_stream_response_if_any, try_unwrap_body, CatchupPayload,
-    ConnectFailedAttempt, DetectedCatchupHlsResponseParams, ExactProviderAcquire, PlaybackRequestClass,
-    SessionActivationRequest, StreamResponseMode, StreamingAcquireOptions, LEASE_EXPIRY_RECHECK_FLOOR,
+    resolve_stalker_stream_for_account, resolve_xtream_vod_provider_url, select_provider_stream_url,
+    should_pin_provider_for_session, stalker_stream_kind, stream_admission_rejected_response,
+    try_shared_stream_response_if_any, try_unwrap_body, CatchupPayload, ConnectFailedAttempt,
+    DetectedCatchupHlsResponseParams, ExactProviderAcquire, PlaybackRequestClass, SessionActivationRequest,
+    StreamResponseMode, StreamingAcquireOptions, LEASE_EXPIRY_RECHECK_FLOOR,
 };
 use crate::{
     api::model::{
@@ -43,6 +44,7 @@ use shared::{
 use std::{borrow::Cow, sync::Arc, time::Duration};
 use tuliprox_session::{failover_group::FailureClass, ProviderSessionHeaders};
 
+/// Custom channel-unavailable response for a stream URL that maps to no account of the allocated provider.
 pub(super) fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
     ProviderStreamState::Custom {
         response: create_channel_unavailable_stream(app_config, &[], StatusCode::OK),
@@ -129,6 +131,8 @@ pub(super) async fn acquire_exact_stream_provider_handle(
     acquire_exact_provider_handle(app_state, &request, options.capacity_wait_timeout).await
 }
 
+/// Acquires a provider slot for a stream: the forced provider first, then lineup allocation when fallback is
+/// allowed. Without a forced provider the lineup decides.
 pub(super) async fn acquire_stream_provider_handle(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
@@ -185,6 +189,7 @@ pub(super) async fn acquire_stream_provider_handle(
     }
 }
 
+/// Returns `true` for VOD and series items, whose streams may fail over to another account of the provider pool.
 pub(super) fn allows_provider_pool_failover(item_type: PlaylistItemType) -> bool {
     matches!(
         item_type,
@@ -197,6 +202,8 @@ pub(super) fn allows_provider_pool_failover(item_type: PlaylistItemType) -> bool
     )
 }
 
+/// Allocates (or takes over) a provider connection and selects the stream URL for the allocated account. A Stalker
+/// URL owned by another account is replaced by a freshly resolved link for the allocated account.
 pub(super) async fn resolve_streaming_strategy_with_provider_handle(
     app_state: &Arc<AppState>,
     stream_url: &str,
@@ -231,23 +238,45 @@ pub(super) async fn resolve_streaming_strategy_with_provider_handle(
                 // it must be resolved or rewritten for the newly allocated provider account.
                 // Media-server stream refs of media-server inputs are accepted by `select_provider_stream_url`
                 // itself; native media-server URLs are no longer accepted unchecked and must match the provider.
-                let accept_requested_stream_url = (options.accept_requested_stream_url
-                    || input.input_type.is_stalker())
-                    && options.force_provider.is_none_or(|forced| forced.as_ref() == provider_cfg.name.as_ref());
-                // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
-                // alias URLs in persisted playlists until the next processing run.
-                let selected_stream = select_provider_stream_url(
-                    stream_url,
+                let accept_requested_stream_url = accepts_requested_stream_url(
                     input,
-                    provider_cfg,
-                    accept_requested_stream_url,
-                    &app_state.app_config,
-                )
-                .await
-                .or_else(|| {
-                    let url = resolve_xtream_vod_provider_url(stream_url, input, provider_cfg, stream_channel?)?;
-                    Some((Arc::clone(&provider_cfg.name), url))
-                });
+                    options.force_provider,
+                    options.stream_url_owner,
+                    options.accept_requested_stream_url,
+                    &provider_cfg.name,
+                );
+                let selected_stream = if input.input_type.is_stalker() && !accept_requested_stream_url {
+                    // A Stalker URL is account-bound (MAC/session): resolve a fresh link for the allocated account.
+                    match stream_channel {
+                        Some(channel) => {
+                            resolve_stalker_stream_for_account(
+                                app_state,
+                                input,
+                                &provider_cfg.name,
+                                channel.provider_id,
+                                stalker_stream_kind(channel.cluster, channel.item_type),
+                                false,
+                            )
+                            .await
+                        }
+                        None => None,
+                    }
+                } else {
+                    // Keep the URL only when it already targets the selected provider account. Hot reload can leave
+                    // old alias URLs in persisted playlists until the next processing run.
+                    select_provider_stream_url(
+                        stream_url,
+                        input,
+                        provider_cfg,
+                        accept_requested_stream_url,
+                        &app_state.app_config,
+                    )
+                    .await
+                    .or_else(|| {
+                        let url = resolve_xtream_vod_provider_url(stream_url, input, provider_cfg, stream_channel?)?;
+                        Some((Arc::clone(&provider_cfg.name), url))
+                    })
+                };
                 if let Some((selected_provider_name, url)) = selected_stream {
                     debug_if_enabled!(
                         "provider session: input={} provider_cfg={} user={} allocation={} stream_url={}",
@@ -297,6 +326,37 @@ pub(super) async fn resolve_streaming_strategy_with_provider_handle(
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct StreamPlaybackOutcome {
+    pub response: axum::response::Response,
+    pub failure_class: Option<FailureClass>,
+}
+
+impl StreamPlaybackOutcome {
+    pub fn success(response: axum::response::Response) -> Self { Self { response, failure_class: None } }
+
+    pub fn failure(response: axum::response::Response, class: FailureClass) -> Self {
+        Self { response, failure_class: Some(class) }
+    }
+
+    pub fn is_success(&self) -> bool { self.failure_class.is_none() && self.response.status().is_success() }
+}
+
+impl std::ops::Deref for StreamPlaybackOutcome {
+    type Target = axum::response::Response;
+    fn deref(&self) -> &Self::Target { &self.response }
+}
+
+impl std::ops::DerefMut for StreamPlaybackOutcome {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.response }
+}
+
+impl IntoResponse for StreamPlaybackOutcome {
+    fn into_response(self) -> axum::response::Response { self.response }
+}
+
+/// Admits the user session, allocates a provider connection and builds the client stream response.
+///
 /// # Panics
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn stream_response_with_provider_handle(
@@ -315,17 +375,20 @@ pub(crate) async fn stream_response_with_provider_handle(
     allow_exhausted_shared_reconnect: bool,
     grace_mode: Option<crate::api::model::GraceMode>,
     preacquired_provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
-) -> impl IntoResponse + Send {
+) -> StreamPlaybackOutcome {
     if let PlaybackSource::Single { input, .. } = &source {
         if blocks_new_playback(app_state, input, user, preacquired_provider_handle.is_some()) {
-            return admission_failure_response(
-                app_state,
-                fingerprint,
-                user,
-                stream_channel,
-                Arc::clone(&input.name),
-                req_headers,
-                ConnectFailureReason::Maintenance,
+            return StreamPlaybackOutcome::failure(
+                admission_failure_response(
+                    app_state,
+                    fingerprint,
+                    user,
+                    stream_channel,
+                    Arc::clone(&input.name),
+                    req_headers,
+                    ConnectFailureReason::Maintenance,
+                ),
+                FailureClass::Stream,
             );
         }
     }
@@ -344,14 +407,17 @@ pub(crate) async fn stream_response_with_provider_handle(
                     target_id: target.id,
                     group_vid: group.group_vid.get(),
                 });
-                return create_custom_video_stream_response(
-                    &app_state.provider_stream_ctx(),
-                    &fingerprint.addr,
-                    CustomVideoStreamType::ChannelUnavailable,
-                )
-                .into_response();
+                return StreamPlaybackOutcome::failure(
+                    create_custom_video_stream_response(
+                        &app_state.provider_stream_ctx(),
+                        &fingerprint.addr,
+                        CustomVideoStreamType::ChannelUnavailable,
+                    )
+                    .into_response(),
+                    FailureClass::Capacity,
+                );
             };
-            (input, Cow::Owned(url.to_string()))
+            (input, Cow::Borrowed(url))
         }
     };
 
@@ -415,7 +481,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             )
             .await
             {
-                return value.into_response();
+                return StreamPlaybackOutcome::success(value.into_response());
             }
         }
         Some(write_lock)
@@ -441,7 +507,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                     "Opportunistic shared stream reuse for {}",
                     sanitize_sensitive_info(shared_lookup_key.as_ref())
                 );
-                return value.into_response();
+                return StreamPlaybackOutcome::success(value.into_response());
             }
         }
         None
@@ -458,7 +524,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             )
             .await;
         if activation.admission.is_reentry_suppressed() {
-            return reentry_suppressed_response();
+            return StreamPlaybackOutcome::failure(reentry_suppressed_response(), FailureClass::Capacity);
         }
         record_connect_failed_attempt(ConnectFailedAttempt {
             app_state,
@@ -470,12 +536,15 @@ pub(crate) async fn stream_response_with_provider_handle(
             reason: ConnectFailureReason::UserConnectionsExhausted,
             failure_stage: FailureStage::Admission,
         });
-        return create_custom_video_stream_response(
-            &app_state.provider_stream_ctx(),
-            &fingerprint.addr,
-            CustomVideoStreamType::UserConnectionsExhausted,
-        )
-        .into_response();
+        return StreamPlaybackOutcome::failure(
+            create_custom_video_stream_response(
+                &app_state.provider_stream_ctx(),
+                &fingerprint.addr,
+                CustomVideoStreamType::UserConnectionsExhausted,
+            )
+            .into_response(),
+            FailureClass::Capacity,
+        );
     }
 
     if matches!(&source, PlaybackSource::Group { .. })
@@ -543,12 +612,15 @@ pub(crate) async fn stream_response_with_provider_handle(
                 reason: ConnectFailureReason::UserConnectionsExhausted,
                 failure_stage: FailureStage::Admission,
             });
-            return create_custom_video_stream_response(
-                &app_state.provider_stream_ctx(),
-                &fingerprint.addr,
-                CustomVideoStreamType::UserConnectionsExhausted,
-            )
-            .into_response();
+            return StreamPlaybackOutcome::failure(
+                create_custom_video_stream_response(
+                    &app_state.provider_stream_ctx(),
+                    &fingerprint.addr,
+                    CustomVideoStreamType::UserConnectionsExhausted,
+                )
+                .into_response(),
+                FailureClass::Capacity,
+            );
         }
         connection_permission = UserConnectionPermission::Allowed;
         if share_stream {
@@ -567,7 +639,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             )
             .await
             {
-                return value.into_response();
+                return StreamPlaybackOutcome::success(value.into_response());
             }
             let _ = shared_lock.insert(write_lock);
         }
@@ -576,9 +648,14 @@ pub(crate) async fn stream_response_with_provider_handle(
     let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
 
     // A group started on an MPEG-TS member can fail over at runtime.
-    let (mut stream_details, input, stream_url, mut stream_channel, group_runtime) = match source {
+    let (mut stream_details, input, stream_url, mut stream_channel, group_runtime) = match &source {
         PlaybackSource::Single { input, stream_url } => {
             let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+            // A replayed session URL stays owned by the session account, even when the pin below is cleared.
+            let stream_url_owner = session_state
+                .as_ref()
+                .filter(|session| !session.provider.is_empty() && session.stream_url.as_ref() == *stream_url)
+                .map(|session| Arc::clone(&session.provider));
             let pinned_provider = pinned_provider.filter(|provider| {
                 item_type.is_live()
                     || session_state
@@ -606,6 +683,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                 share_stream,
                 connection_permission,
                 pinned_provider,
+                stream_url_owner.as_ref(),
                 pinned_provider.is_none() || allows_provider_pool_failover(item_type),
                 true,
                 VirtualId::new(stream_channel.virtual_id),
@@ -634,14 +712,16 @@ pub(crate) async fn stream_response_with_provider_handle(
                         )
                         .await;
                     error!("Failed to stream: {err}");
-                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    return StreamPlaybackOutcome::failure(
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                        FailureClass::Stream,
+                    );
                 }
             };
-            (details, Arc::clone(input), Arc::<str>::from(stream_url), stream_channel, None)
+            (details, Arc::clone(input), Arc::<str>::from(*stream_url), stream_channel, None)
         }
         PlaybackSource::Group { group, mode, prefer } => {
             let playback = group_playback_settings(app_state, target);
-            let target_name: Arc<str> = Arc::from(target.name.as_str());
             let priority = connection_priority_for_kind(user, connection_kind);
             // The start budget bounds selection, provider open and payload probe of all attempts.
             let budget_secs = if playback.start.timeout_secs == 0 { 86_400 } else { playback.start.timeout_secs };
@@ -651,7 +731,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                 user,
                 fingerprint,
                 req_headers,
-                group: &group,
+                group,
                 base_channel: &stream_channel,
                 stream_options: &stream_options,
                 share_stream,
@@ -676,11 +756,11 @@ pub(crate) async fn stream_response_with_provider_handle(
                     allow_provider_grace: playback.allow_provider_grace,
                     exclude: &exclude,
                     demoted_inputs: &demoted_inputs,
-                    prefer: if attempt == 0 { prefer } else { None },
+                    prefer: if attempt == 0 { *prefer } else { None },
                     bypass_maintenance: user.is_recording_proxy_user(),
                     ..GroupSelectionRequest::new(
-                        &target_name,
-                        &group,
+                        target.name.as_str(),
+                        group,
                         playback.start,
                         &fingerprint.addr,
                         &user.username,
@@ -721,14 +801,17 @@ pub(crate) async fn stream_response_with_provider_handle(
                     )
                     .await;
                 if maintenance_only {
-                    return admission_failure_response(
-                        app_state,
-                        fingerprint,
-                        user,
-                        stream_channel,
-                        Arc::clone(&initial_input.name),
-                        req_headers,
-                        ConnectFailureReason::Maintenance,
+                    return StreamPlaybackOutcome::failure(
+                        admission_failure_response(
+                            app_state,
+                            fingerprint,
+                            user,
+                            stream_channel,
+                            Arc::clone(&initial_input.name),
+                            req_headers,
+                            ConnectFailureReason::Maintenance,
+                        ),
+                        FailureClass::Stream,
                     );
                 }
                 app_state.event_manager.send_event(EventMessage::FailoverGroupExhausted {
@@ -745,12 +828,15 @@ pub(crate) async fn stream_response_with_provider_handle(
                     reason: ConnectFailureReason::ProviderConnectionsExhausted,
                     failure_stage: FailureStage::ProviderOpen,
                 });
-                return create_custom_video_stream_response(
-                    &app_state.provider_stream_ctx(),
-                    &fingerprint.addr,
-                    CustomVideoStreamType::ProviderConnectionsExhausted,
-                )
-                .into_response();
+                return StreamPlaybackOutcome::failure(
+                    create_custom_video_stream_response(
+                        &app_state.provider_stream_ctx(),
+                        &fingerprint.addr,
+                        CustomVideoStreamType::ProviderConnectionsExhausted,
+                    )
+                    .into_response(),
+                    FailureClass::Capacity,
+                );
             };
 
             app_state.event_manager.send_event(EventMessage::FailoverGroupMemberSelected {
@@ -759,6 +845,9 @@ pub(crate) async fn stream_response_with_provider_handle(
                 member_vid: opened.member.member_vid.get(),
                 tier: opened.tier,
             });
+            // The session plays the member's provider now, not the representative's.
+            let member_provider =
+                opened.details.provider_name.clone().unwrap_or_else(|| Arc::clone(&opened.member.input_name));
             app_state
                 .active_users
                 .bind_member(
@@ -769,12 +858,11 @@ pub(crate) async fn stream_response_with_provider_handle(
                         member_vid: opened.member.member_vid.get(),
                         member_index: opened.index,
                         input_name: Arc::clone(&opened.member.input_name),
+                        member_title: Arc::clone(&opened.member.title),
+                        provider: Arc::clone(&member_provider),
                     },
                 )
                 .await;
-            // The session plays the member's provider now, not the representative's.
-            let member_provider =
-                opened.details.provider_name.clone().unwrap_or_else(|| Arc::clone(&opened.member.input_name));
             app_state
                 .active_users
                 .update_session_provider_binding(
@@ -787,7 +875,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             let OpenedGroupMember { index, details, input, url, channel, payload, .. } = opened;
             let runtime =
                 (playback.failover.enabled && payload == ProbedPayload::Ts && item_type == PlaylistItemType::Live)
-                    .then(|| (Arc::clone(&group), index, playback));
+                    .then(|| (Arc::clone(group), index, playback));
             (details, input, url, channel, runtime)
         }
     };
@@ -798,27 +886,32 @@ pub(crate) async fn stream_response_with_provider_handle(
             match probe_catchup_payload(provider_stream, probe_deadline).await {
                 Ok(CatchupPayload::Direct(provider_stream)) => stream_details.stream = Some(provider_stream),
                 Ok(CatchupPayload::HlsManifest(manifest)) => {
-                    return detected_catchup_hls_response(DetectedCatchupHlsResponseParams {
-                        app_state,
-                        stream_details,
-                        manifest,
-                        user,
-                        target,
-                        input: &input,
-                        fingerprint,
-                        session_token,
-                        virtual_id: VirtualId::new(virtual_id),
-                        connection_permission,
-                        connection_kind,
-                        fallback_stream_url: &stream_url,
-                    })
-                    .await;
+                    return StreamPlaybackOutcome::success(
+                        detected_catchup_hls_response(DetectedCatchupHlsResponseParams {
+                            app_state,
+                            stream_details,
+                            manifest,
+                            user,
+                            target,
+                            input: &input,
+                            fingerprint,
+                            session_token,
+                            virtual_id: VirtualId::new(virtual_id),
+                            connection_permission,
+                            connection_kind,
+                            fallback_stream_url: &stream_url,
+                        })
+                        .await,
+                    );
                 }
                 Err(err) => {
                     error!("Failed to inspect catch-up payload: {err}");
                     cleanup_failed_detected_catchup_hls(app_state, &mut stream_details, &user.username, session_token)
                         .await;
-                    return StatusCode::BAD_GATEWAY.into_response();
+                    return StreamPlaybackOutcome::failure(
+                        StatusCode::BAD_GATEWAY.into_response(),
+                        FailureClass::Transport,
+                    );
                 }
             }
         }
@@ -895,7 +988,10 @@ pub(crate) async fn stream_response_with_provider_handle(
                             activation.placeholder_transition_version.is_some(),
                         )
                         .await;
-                    return stream_admission_rejected_response(reason.into(), &user.username);
+                    return StreamPlaybackOutcome::failure(
+                        stream_admission_rejected_response(reason.into(), &user.username),
+                        FailureClass::Capacity,
+                    );
                 }
             }
         } else {
@@ -1004,6 +1100,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             }
             driver => driver,
         };
+        let open_failure = open_failure_class(&stream_details);
         let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -1036,7 +1133,10 @@ pub(crate) async fn stream_response_with_provider_handle(
                         )
                         .await;
                 }
-                return stream_admission_rejected_response(error, &user.username);
+                return StreamPlaybackOutcome::failure(
+                    stream_admission_rejected_response(error, &user.username),
+                    FailureClass::Capacity,
+                );
             }
         };
         let stream_resp = if is_stream_shared {
@@ -1045,7 +1145,10 @@ pub(crate) async fn stream_response_with_provider_handle(
                 sanitize_sensitive_info(log_actual_request_url.as_ref())
             );
             let Some(pending_shared_cleanup) = pending_shared_cleanup else {
-                return stream_admission_rejected_response(StreamAdmissionError::RegistrationRejected, &user.username);
+                return StreamPlaybackOutcome::failure(
+                    stream_admission_rejected_response(StreamAdmissionError::RegistrationRejected, &user.username),
+                    FailureClass::Capacity,
+                );
             };
             // Shared Stream response
             let shared_headers = provider_response.as_ref().map_or_else(Vec::new, |(h, _, _, _)| h.clone());
@@ -1183,7 +1286,12 @@ pub(crate) async fn stream_response_with_provider_handle(
             response
         };
 
-        return stream_resp.into_response();
+        let failure_class = open_failure
+            .or_else(|| (!stream_resp.status().is_success()).then(|| FailureClass::from_status(stream_resp.status())));
+        return match failure_class {
+            Some(class) => StreamPlaybackOutcome::failure(stream_resp, class),
+            None => StreamPlaybackOutcome::success(stream_resp),
+        };
     }
     app_state.connection_manager.release_managed_provider_handle(stream_details.provider_handle);
     app_state
@@ -1206,12 +1314,18 @@ pub(crate) async fn stream_response_with_provider_handle(
             reason: ConnectFailureReason::ProviderConnectionsExhausted,
             failure_stage: FailureStage::Admission,
         });
-        return create_custom_video_stream_response(
-            &app_state.provider_stream_ctx(),
-            &fingerprint.addr,
-            CustomVideoStreamType::ProviderConnectionsExhausted,
-        )
-        .into_response();
+        return StreamPlaybackOutcome::failure(
+            create_custom_video_stream_response(
+                &app_state.provider_stream_ctx(),
+                &fingerprint.addr,
+                CustomVideoStreamType::ProviderConnectionsExhausted,
+            )
+            .into_response(),
+            FailureClass::Capacity,
+        );
     }
-    no_custom_video_fallback_status(&app_state.app_config).into_response()
+    StreamPlaybackOutcome::failure(
+        no_custom_video_fallback_status(&app_state.app_config).into_response(),
+        FailureClass::Stream,
+    )
 }

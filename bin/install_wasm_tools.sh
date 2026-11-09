@@ -60,8 +60,10 @@ fi
 
 mkdir -p "${INSTALL_DIR}"
 
-echo "📦 Installing wasm tools ${VERSION} from ${download_url}"
-curl -fsSL "${download_url}" -o "${archive_path}"
+# stderr: callers capture stdout as the bin directory.
+echo "📦 Installing wasm tools ${VERSION} from ${download_url}" >&2
+# GitHub release downloads answer 5xx now and then; retry over about two minutes.
+curl -fsSL --retry 8 --retry-delay 15 --connect-timeout 30 "${download_url}" -o "${archive_path}"
 rm -rf "${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
 tar -xzf "${archive_path}" -C "${INSTALL_DIR}" --strip-components=1

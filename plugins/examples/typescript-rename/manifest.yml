@@ -1,0 +1,22 @@
+# TypeScript example: renames one playlist group in the after-filter stage. Same contract as the Rust template.
+id: typescript-rename
+name: TypeScript rename example
+version: 0.1.0
+api_version: 1
+category: playlist
+author: Your Name <you@example.com>
+description: >
+  Renames the group named by rename_from to rename_to. Written in TypeScript and built with ComponentizeJS.
+
+hooks:
+  - playlist.after-filter
+
+ui:
+  config_section:
+    schema: config-schema.json
+
+resources:
+  max_memory_mb: 64
+  max_exec_ms: 5000
+  max_instances: 2
+  fail_mode: continue

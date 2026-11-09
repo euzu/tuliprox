@@ -150,8 +150,19 @@ mappings:
             @Url = concat("provider://cdn/", parts.rest)
 ```
 
-The field does not change the playlist download, credentials, or connection limits. It only makes `provider://cdn/...`
-URLs resolvable and enables the provider's URL failover for them. Aliases inherit the binding.
+The field does not change playlist download, credentials, or connection limits. It makes `provider://<name>/...`
+URLs resolvable and enables profile-aware failover and recovery across playback:
+
+* **HLS entry resolution**: Mapped `provider://<profile>/...` media URLs retain their profile; unknown profiles fail
+  closed. Plain HTTP URLs remain unchanged.
+* **M3U catchup and archive**: Stream URLs maintain the `provider://` scheme and encoded query parameters through
+  playback resolution.
+* **Alias token lookup**: M3U alias accounts resolve upstream tokens from their own indexed streams rather than
+  spending root account credentials.
+* **Pinned session recovery**: Live HLS outage recovery cycles across alternative profile URLs within the active
+  attempt without consuming duplicate retry budget.
+
+Aliases inherit the binding.
 
 ## 2. Inputs (Data Sources) (`inputs`)
 
@@ -319,7 +330,6 @@ specific provider.
 | `user_agent_stream_index`                  | Bool     | `false` | Appends a process-local stream index to upstream `User-Agent` requests (e.g. `VLC/3.0 42`), keeping it stable for the session.                                                                                                         |
 | `flussonic_hls_audio_tracks`               | Bool     | `false` | Labels fragmented-MP4 HLS objects below Flussonic `tracks-a<N>` paths as `audio/mp4` when the provider sends no specific `Content-Type`. Enable only for Flussonic sources.                                                            |
 | `resolve_tmdb`                             | Bool     | `false` | Enables TMDB queries for this specific input based on parsed titles to fill missing posters and release years.                                                                                                                         |
-| `probe_stream`                             | Bool     | `false` | Uses FFprobe to read A/V details (HDR, 4K). Respects `max_connections`.                                                                                                                                                                |
 | `resolve_background`                       | Bool     | `true`  | Metadata scans run asynchronously in the background so the general playlist update (which blocks clients) finishes instantly.                                                                                                          |
 | `resolve_series` / `resolve_vod`           | Bool     | `false` | Fetches missing details like Plot or Cast via the Provider's API (`get_vod_info` / `get_series_info`).                                                                                                                                 |
 | `probe_series` / `probe_vod`               | Bool     | `false` | Allows explicit FFprobe analysis of movies or entire TV show seasons.                                                                                                                                                                  |
@@ -328,6 +338,7 @@ specific provider.
 | `resolve_delay` / `probe_delay`            | Int      | `2`     | **Ban Protection:** Hard wait time (in seconds) between API or Probe requests to the *same* provider! Prevents API spamming.                                                                                                           |
 | `resolve_filter`                           | String   | -       | Filter expression to selectively resolve only entries matching the condition. Uses the same Filter syntax.                                                                                                                             |
 | `probe_filter`                             | String   | -       | Filter expression to selectively probe only entries matching the condition. Uses the same Filter syntax.                                                                                                                               |
+| `default_container_extension`              | String   | `mp4`   | Extension published when neither the provider nor the stream URL states one (default `mp4`). Applied at delivery, never stored; a configured value replaces the default but never overrides a provider value. Needed for Stalker VOD.  |
 
 For M3U inputs, `flussonic_hls_catchup: bounded_archive` generates a `catchup-source` for live entries with
 `catchup="fs"`, no existing source, and a `/CHANNEL/mono.m3u8` URL. The generated URL uses
@@ -908,6 +919,11 @@ inputs:
 ```
 
 **Result:** Tuliprox treats this as a single provider source with a total pool of 1 + 2 = **3** concurrent connections.
+
+**Main fields and aliases.** Without aliases, `url`, `username` and `password` of the input are mandatory. With
+aliases you can leave all three empty: the input then works like a batch input, and its first enabled alias becomes
+the main account. If you fill in `url`, `username` and `password` are mandatory again; a partly filled main account is
+rejected.
 
 #### YAML Alias Fields
 

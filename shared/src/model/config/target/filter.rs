@@ -1,7 +1,7 @@
 use super::StagedTargetFilterDto;
 use crate::{
     error::TuliproxError,
-    foundation::{get_filter, Filter},
+    foundation::{get_filter, get_target_processing_filter, Filter},
     model::PatternTemplate,
 };
 
@@ -56,16 +56,13 @@ impl ConfigTargetFilterDto {
         fn compile_filter(
             value: Option<&str>,
             templates: Option<&[PatternTemplate]>,
+            parse: fn(&str, Option<&[PatternTemplate]>) -> Result<Filter, TuliproxError>,
         ) -> Result<Option<Filter>, TuliproxError> {
-            value
-                .map(str::trim)
-                .filter(|filter| !filter.is_empty())
-                .map(|filter| get_filter(filter, templates))
-                .transpose()
+            value.map(str::trim).filter(|filter| !filter.is_empty()).map(|filter| parse(filter, templates)).transpose()
         }
 
-        self.t_processing = compile_filter(self.processing.as_deref(), templates)?;
-        self.t_persist = compile_filter(self.persist.as_deref(), templates)?;
+        self.t_processing = compile_filter(self.processing.as_deref(), templates, get_target_processing_filter)?;
+        self.t_persist = compile_filter(self.persist.as_deref(), templates, get_filter)?;
         Ok(())
     }
 }

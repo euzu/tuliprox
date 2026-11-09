@@ -735,6 +735,7 @@ mod tests {
 
     fn target(id: u16, name: &str) -> Arc<ConfigTarget> {
         Arc::new(ConfigTarget {
+            managed_channels: Vec::new(),
             id,
             enabled: true,
             name: name.to_string(),

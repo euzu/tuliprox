@@ -72,81 +72,6 @@ impl EpgChannel {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{EpgChannel, EpgProgramme};
-    use crate::utils::Internable;
-
-    #[test]
-    fn programme_limit_handles_non_monotonic_stop_times() {
-        let channel = EpgChannel {
-            id: "channel".intern(),
-            title: None,
-            icon: None,
-            programmes: vec![
-                EpgProgramme::new(0, 100, "channel".intern()),
-                EpgProgramme::new(10, 20, "channel".intern()),
-                EpgProgramme::new(30, 40, "channel".intern()),
-            ],
-        };
-
-        let programmes = channel.get_programme_with_limit_at(1, 50);
-        assert_eq!(programmes.len(), 1);
-        assert_eq!(programmes[0].start, 0);
-    }
-
-    #[test]
-    fn programme_limit_excludes_expired_entries_after_current_programme() {
-        let channel = EpgChannel {
-            id: "channel".intern(),
-            title: None,
-            icon: None,
-            programmes: vec![
-                EpgProgramme::new(0, 100, "channel".intern()),
-                EpgProgramme::new(10, 20, "channel".intern()),
-                EpgProgramme::new(60, 80, "channel".intern()),
-            ],
-        };
-
-        let programmes = channel.get_programme_with_limit_at(2, 50);
-        assert_eq!(programmes.len(), 2);
-        assert_eq!(programmes[0].start, 0);
-        assert_eq!(programmes[1].start, 60);
-    }
-
-    #[test]
-    fn airing_status_uses_is_new_for_new() {
-        let mut p = EpgProgramme::new(0, 1, "c".intern());
-        p.is_new = true;
-        p.previously_shown = false;
-        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::New));
-    }
-
-    #[test]
-    fn airing_status_uses_previously_shown_for_repeat() {
-        let mut p = EpgProgramme::new(0, 1, "c".intern());
-        p.is_new = false;
-        p.previously_shown = true;
-        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::Repeat));
-    }
-
-    #[test]
-    fn airing_status_unknown_when_neither_flag_set() {
-        let p = EpgProgramme::new(0, 1, "c".intern());
-        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::Unknown));
-    }
-
-    #[test]
-    fn airing_status_is_new_wins_over_previously_shown() {
-        // An explicit `<new>` survives a merged `<previously-shown>`
-        // from another source.
-        let mut p = EpgProgramme::new(0, 1, "c".intern());
-        p.is_new = true;
-        p.previously_shown = true;
-        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::New));
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct EpgCategory {
     pub value: Arc<str>,
@@ -274,4 +199,79 @@ pub struct EpgProgrammeDto {
     /// Timeshift-adjusted display string.
     pub stop: String,
     pub title: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EpgChannel, EpgProgramme};
+    use crate::utils::Internable;
+
+    #[test]
+    fn programme_limit_handles_non_monotonic_stop_times() {
+        let channel = EpgChannel {
+            id: "channel".intern(),
+            title: None,
+            icon: None,
+            programmes: vec![
+                EpgProgramme::new(0, 100, "channel".intern()),
+                EpgProgramme::new(10, 20, "channel".intern()),
+                EpgProgramme::new(30, 40, "channel".intern()),
+            ],
+        };
+
+        let programmes = channel.get_programme_with_limit_at(1, 50);
+        assert_eq!(programmes.len(), 1);
+        assert_eq!(programmes[0].start, 0);
+    }
+
+    #[test]
+    fn programme_limit_excludes_expired_entries_after_current_programme() {
+        let channel = EpgChannel {
+            id: "channel".intern(),
+            title: None,
+            icon: None,
+            programmes: vec![
+                EpgProgramme::new(0, 100, "channel".intern()),
+                EpgProgramme::new(10, 20, "channel".intern()),
+                EpgProgramme::new(60, 80, "channel".intern()),
+            ],
+        };
+
+        let programmes = channel.get_programme_with_limit_at(2, 50);
+        assert_eq!(programmes.len(), 2);
+        assert_eq!(programmes[0].start, 0);
+        assert_eq!(programmes[1].start, 60);
+    }
+
+    #[test]
+    fn airing_status_uses_is_new_for_new() {
+        let mut p = EpgProgramme::new(0, 1, "c".intern());
+        p.is_new = true;
+        p.previously_shown = false;
+        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::New));
+    }
+
+    #[test]
+    fn airing_status_uses_previously_shown_for_repeat() {
+        let mut p = EpgProgramme::new(0, 1, "c".intern());
+        p.is_new = false;
+        p.previously_shown = true;
+        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::Repeat));
+    }
+
+    #[test]
+    fn airing_status_unknown_when_neither_flag_set() {
+        let p = EpgProgramme::new(0, 1, "c".intern());
+        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::Unknown));
+    }
+
+    #[test]
+    fn airing_status_is_new_wins_over_previously_shown() {
+        // An explicit `<new>` survives a merged `<previously-shown>`
+        // from another source.
+        let mut p = EpgProgramme::new(0, 1, "c".intern());
+        p.is_new = true;
+        p.previously_shown = true;
+        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::New));
+    }
 }

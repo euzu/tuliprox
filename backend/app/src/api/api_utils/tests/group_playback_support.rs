@@ -1,4 +1,4 @@
-use super::support::FakeOriginMode;
+pub(crate) use super::support::FakeOriginMode;
 use crate::{
     api::{
         api_utils::failover_group::{member_key, CircuitView},
@@ -27,10 +27,10 @@ use axum::{
 use shared::{
     foundation::Filter,
     model::{
-        AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigTargetOptions, FailoverGroupPolicy, FailoverGroupsConfig,
-        FailoverGroupsTargetConfig, HdHomeRunTargetOutputDto, InputType, LiveStreamProperties, M3uTargetOutputDto,
-        PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder, ProxyUserStatus, StreamProperties,
-        TargetType, UUIDType, VirtualId, XtreamCluster, XtreamTargetOutputDto,
+        AdmissionStrategy, CatchupProperties, ClusterFlags, ConfigPaths, ConfigTargetOptions, FailoverGroupPolicy,
+        FailoverGroupsConfig, FailoverGroupsTargetConfig, HdHomeRunTargetOutputDto, InputType, LiveStreamProperties,
+        M3uTargetOutputDto, PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder, ProxyUserStatus,
+        StreamProperties, TargetType, UUIDType, VirtualId, XtreamCluster, XtreamTargetOutputDto,
     },
     utils::Internable,
 };
@@ -333,6 +333,8 @@ impl GroupPlaybackEnv {
             sleep_timer_mins: None,
             max_connections: HashMap::new(),
             channel_unavailable_video: false,
+            m3u_inputs: std::collections::HashSet::new(),
+            aliases: Vec::new(),
         }
     }
 
@@ -474,6 +476,50 @@ impl GroupPlaybackEnv {
 
     pub fn favourite_vid(&self) -> u32 { self.favourite_vid }
 
+    pub fn last_request_path(&self, input: &str) -> String {
+        let Some(origin) = self.origins.get(input) else { return String::new() };
+        let guard = origin.requests.lock().expect("mutex");
+        let Some(last) = guard.last() else { return String::new() };
+        last.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or_default().to_string()
+    }
+
+    pub fn member_stream_id(&self, input: &str) -> String {
+        let member =
+            self.group_record.members.iter().find(|m| m.input_name.as_ref() == input).expect("member for input");
+        member.input_stream_id.to_string()
+    }
+
+    pub async fn get_xtream_timeshift(&self, vid: u32, duration: &str, start: &str) -> Response {
+        let uri = format!("/timeshift/viewer/secret/{duration}/{start}/{vid}.ts");
+        let mut req = Request::builder().uri(uri).body(Body::empty()).expect("request builder");
+        req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        self.router.clone().oneshot(req).await.expect("endpoint response")
+    }
+
+    pub async fn get_xtream_short_epg(&self, vid: u32) -> Response {
+        let uri = format!("/player_api.php?username=viewer&password=secret&action=get_short_epg&stream_id={vid}");
+        let mut req = Request::builder().uri(uri).body(Body::empty()).expect("request builder");
+        req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        self.router.clone().oneshot(req).await.expect("endpoint response")
+    }
+
+    pub async fn get_m3u_catchup(&self, vid: u32, utc: i64, duration: u32) -> Response {
+        let secret = self.app_state.get_encrypt_secret();
+        let token = crate::iptv::m3u::encode_m3u_catchup_token(
+            &secret,
+            &crate::iptv::m3u::M3uCatchupToken {
+                username: "viewer".into(),
+                target_id: self.target.id,
+                virtual_id: vid,
+            },
+        )
+        .expect("token");
+        let uri = format!("/m3u-catchup/{token}?v0={utc}&v1={duration}");
+        let mut req = Request::builder().uri(uri).body(Body::empty()).expect("request builder");
+        req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        self.router.clone().oneshot(req).await.expect("endpoint response")
+    }
+
     pub fn hold(&self, input: &str, priority: i8) -> Vec<tuliprox_core::model::provider::ProviderHandle> {
         let mut handles = Vec::new();
         while let Some(h) = self.app_state.active_provider.acquire_connection(
@@ -597,10 +643,16 @@ pub(crate) struct GroupPlaybackEnvBuilder {
     sleep_timer_mins: Option<u32>,
     max_connections: HashMap<String, u16>,
     channel_unavailable_video: bool,
+    m3u_inputs: std::collections::HashSet<String>,
+    aliases: Vec<(String, String)>,
 }
 
 #[allow(dead_code)]
 impl GroupPlaybackEnvBuilder {
+    pub fn m3u(mut self, input: &str) -> Self {
+        self.m3u_inputs.insert(input.to_string());
+        self
+    }
     pub fn hls_cache(mut self) -> Self {
         self.hls_cache = true;
         self.hls = true;
@@ -676,6 +728,13 @@ impl GroupPlaybackEnvBuilder {
         self
     }
 
+    /// Adds one enabled alias account served by its own tracked origin. The input's member URLs
+    /// carry the input's account credentials so the alias URL can be derived from them.
+    pub fn alias(mut self, input: &str, alias: &str) -> Self {
+        self.aliases.push((input.to_string(), alias.to_string()));
+        self
+    }
+
     pub fn user_limit(mut self, limit: u32) -> Self {
         self.user_limit = Some(limit);
         self
@@ -723,14 +782,30 @@ impl GroupPlaybackEnvBuilder {
             let origin = spawn_tracked_origin(mode).await;
             origins.insert(input.clone(), origin);
         }
+        for (input_name, alias_name) in &self.aliases {
+            let mode = self.origin_modes.get(input_name).cloned().unwrap_or_else(|| {
+                if self.hls {
+                    FakeOriginMode::Hls
+                } else {
+                    FakeOriginMode::FixedBytes(ts_fixture())
+                }
+            });
+            origins.insert(alias_name.clone(), spawn_tracked_origin(mode).await);
+        }
 
         let mut config_inputs = Vec::new();
         for input_name in &self.inputs {
             let origin = &origins[input_name];
             let is_stalker = self.stalker.as_deref() == Some(input_name.as_str());
+            let is_m3u = self.m3u_inputs.contains(input_name);
+            let input_url = if is_m3u {
+                format!("http://{}/playlist.m3u8?username=viewer&password=secret", origin.addr)
+            } else {
+                format!("http://{}", origin.addr)
+            };
             let provider = ConfigProvider {
                 name: Arc::from(input_name.as_str()),
-                urls: vec![Arc::from(format!("http://{}", origin.addr).as_str())],
+                urls: vec![Arc::from(input_url.as_str())],
                 provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
                 dns: None,
                 current_url_index: std::sync::atomic::AtomicUsize::new(0),
@@ -739,14 +814,39 @@ impl GroupPlaybackEnvBuilder {
             let input = Arc::new(ConfigInput {
                 id: u16::try_from(config_inputs.len()).unwrap_or(0) + 1,
                 name: Arc::from(input_name.as_str()),
-                input_type: if is_stalker { InputType::Stalker } else { InputType::Xtream },
-                url: format!("http://{}", origin.addr),
+                input_type: if is_stalker {
+                    InputType::Stalker
+                } else if is_m3u {
+                    InputType::M3u
+                } else {
+                    InputType::Xtream
+                },
+                url: input_url,
                 username: Some("viewer".to_string()),
                 password: Some("secret".to_string()),
                 priority: 1,
                 max_connections: self.max_connections.get(input_name).copied().unwrap_or(10),
                 enabled: true,
                 provider_configs: Some(vec![Arc::new(provider)]),
+                aliases: self
+                    .aliases
+                    .iter()
+                    .filter(|(owner, _)| owner == input_name)
+                    .enumerate()
+                    .map(|(index, (_, alias_name))| crate::model::ConfigInputAlias {
+                        id: u16::try_from(index).unwrap_or(0) + 100,
+                        name: Arc::from(alias_name.as_str()),
+                        url: format!("http://{}", origins[alias_name].addr),
+                        username: Some("alias-user".to_string()),
+                        password: Some("alias-pass".to_string()),
+                        priority: 1,
+                        max_connections: 2,
+                        exp_date: None,
+                        enabled: true,
+                        stalker: None,
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
                 stalker: if is_stalker {
                     Some(crate::model::StalkerInputConfig {
                         device: None,
@@ -856,6 +956,7 @@ impl GroupPlaybackEnvBuilder {
             processing_order: ProcessingOrder::default(),
             execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
+            managed_channels: Vec::new(),
             use_memory_cache: false,
         });
 
@@ -949,8 +1050,31 @@ impl GroupPlaybackEnvBuilder {
         let mut members = Vec::new();
         for (idx, input_name) in self.inputs.iter().enumerate() {
             let origin = &origins[input_name];
-            let member_url = format!("http://{}/live/101", origin.addr);
+            let is_stalker = self.stalker.as_deref() == Some(input_name.as_str());
+            let is_m3u = self.m3u_inputs.contains(input_name);
+            // An aliased input stores its own account in the URL, so the alias URL can be derived.
+            let member_url = if is_stalker {
+                String::new()
+            } else if self.aliases.iter().any(|(owner, _)| owner == input_name) {
+                format!("http://{}/live/viewer/secret/101", origin.addr)
+            } else {
+                format!("http://{}/live/101", origin.addr)
+            };
             let member_archive = self.member_archives.get(idx).copied().flatten();
+            let member_catchup = member_archive.and_then(|dur| {
+                is_m3u.then(|| CatchupProperties {
+                    mode: Some("default".intern()),
+                    days: Some(dur.to_string().intern()),
+                    source: Some(
+                        format!(
+                            "http://{}/catchup?utc={{utc}}&duration={{duration}}&username=viewer&password=secret",
+                            origin.addr
+                        )
+                        .intern(),
+                    ),
+                    ..Default::default()
+                })
+            });
             let member_additional_props = member_archive.map(|dur| {
                 StreamProperties::Live(Box::new(LiveStreamProperties {
                     name: format!("ZDF HD ({input_name})").intern(),
@@ -964,6 +1088,7 @@ impl GroupPlaybackEnvBuilder {
                     epg_channel_id: group_epg.clone(),
                     tv_archive: Some(1),
                     tv_archive_duration: Some(dur),
+                    catchup: member_catchup,
                     is_adult: 0,
                     ..Default::default()
                 }))
@@ -980,6 +1105,7 @@ impl GroupPlaybackEnvBuilder {
                     input_name: Arc::from(input_name.as_str()),
                     item_type: if self.hls { PlaylistItemType::LiveHls } else { PlaylistItemType::Live },
                     xtream_cluster: XtreamCluster::Live,
+                    time_shift: member_archive.map(|d| d.to_string().intern()).unwrap_or_default(),
                     epg_channel_id: group_epg.clone(),
                     additional_properties: member_additional_props,
                     ..PlaylistItemHeader::default()

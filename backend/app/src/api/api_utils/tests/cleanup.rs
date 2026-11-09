@@ -1411,6 +1411,7 @@ async fn test_provider_open_cancelled_during_header_wait_releases_slot_without_l
             stream_channel: None,
             connect_failure_stage: None,
             content_representation: tuliprox_session::ProviderContentRepresentationMode::PreserveOrigin,
+            plugin_headers: None,
         });
     options.set_provider_handle_tokens(
         handle.cancel_token.clone(),

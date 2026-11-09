@@ -7,7 +7,7 @@
 
 use super::{
     mcp_redact::{redact_json_body, REDACT_BODY_LIMIT},
-    mcp_tools::{find_tool, McpTool, McpToolKind, McpToolMethod, MCP_TOOLS},
+    mcp_tools::{plugin_tools, McpTool, McpToolKind, McpToolMethod, McpToolRef, OwnedMcpTool, ToolView},
 };
 use crate::{
     api::{auth_middleware::validator_authenticated, endpoints::v1_api::API_V1_PATH, model::AppState},
@@ -23,7 +23,7 @@ use axum::{
 use http_body_util::BodyExt;
 use log::{info, warn};
 use serde_json::{json, Map, Value};
-use shared::utils::concat_path_leading_slash;
+use shared::{model::PluginRpcErrorDto, utils::concat_path_leading_slash};
 use std::{fmt::Write as _, sync::Arc};
 use tower::ServiceExt;
 
@@ -58,6 +58,9 @@ struct McpState {
     read_only: bool,
     allowed_origins: Vec<String>,
     max_response_bytes: usize,
+    /// Read live for the plugin switches (`mcp.plugin_tools`, `mcp.read_only`)
+    /// and the plugin host, so a config change or an approval counts at call time.
+    app_state: Arc<AppState>,
 }
 
 /// Web auth disabled means no permission layer protects the write routes, so
@@ -87,8 +90,13 @@ where
             concat_path_leading_slash(web_ui_path, MCP_PATH)
         );
     }
-    let state =
-        Arc::new(McpState::new(v1_router.clone().with_state(Arc::clone(app_state)), mcp, read_only, web_ui_path));
+    let state = Arc::new(McpState::new(
+        v1_router.clone().with_state(Arc::clone(app_state)),
+        mcp,
+        read_only,
+        web_ui_path,
+        Arc::clone(app_state),
+    ));
     info!(
         "MCP endpoint: POST {} ({})",
         concat_path_leading_slash(web_ui_path, MCP_PATH),
@@ -98,14 +106,39 @@ where
 }
 
 impl McpState {
-    fn new(router: Router, config: &McpConfig, read_only: bool, web_ui_path: &str) -> Self {
+    fn new(router: Router, config: &McpConfig, read_only: bool, web_ui_path: &str, app_state: Arc<AppState>) -> Self {
         Self {
             router,
             api_prefix: concat_path_leading_slash(web_ui_path, API_V1_PATH),
             read_only,
             allowed_origins: config.allowed_origins.clone(),
             max_response_bytes: config.max_response_bytes,
+            app_state,
         }
+    }
+
+    /// Read-only as of now: the startup decision, or `mcp.read_only` set since
+    /// (a config without `mcp` counts as read-only). Never less strict than the
+    /// startup decision.
+    fn effective_read_only(&self) -> bool {
+        self.read_only || self.app_state.app_config.config.load().mcp.as_ref().is_none_or(|mcp| mcp.read_only)
+    }
+
+    /// The tools of this request. The plugin tools need all three switches:
+    /// `mcp.plugin_tools` is read here, the export's `mcp: true` and the admin's
+    /// approval by the plugin host, so each is re-checked on every list and call.
+    ///
+    /// Async because the plugin host reads `approvals.json` and the schema files
+    /// after a registry change: that runs on the blocking pool.
+    async fn tool_view(&self) -> ToolView {
+        let plugin_tools_enabled =
+            self.app_state.app_config.config.load().mcp.as_ref().is_some_and(|mcp| mcp.enabled && mcp.plugin_tools);
+        if !plugin_tools_enabled {
+            return ToolView::default();
+        }
+        let app_state = Arc::clone(&self.app_state);
+        let plugin = tokio::task::spawn_blocking(move || plugin_tools(&app_state)).await.unwrap_or_default();
+        ToolView::new(true, || plugin)
     }
 }
 
@@ -202,7 +235,9 @@ async fn handle_message(state: &McpState, headers: &HeaderMap, body: &[u8]) -> O
     Some(match method {
         "initialize" => rpc_result(id, initialize_result(params)),
         "ping" => rpc_result(id, json!({})),
-        "tools/list" => rpc_result(id, json!({ "tools": tools_list(state.read_only) })),
+        "tools/list" => {
+            rpc_result(id, json!({ "tools": tools_list(&state.tool_view().await, state.effective_read_only()) }))
+        }
         "tools/call" => match call_tool(state, headers, params).await {
             Ok(result) => rpc_result(id, result),
             Err(message) => rpc_error(id, INVALID_PARAMS, message),
@@ -221,18 +256,14 @@ fn initialize_result(params: Option<&Value>) -> Value {
     })
 }
 
-fn visible_tools(read_only: bool) -> impl Iterator<Item = &'static McpTool> {
-    MCP_TOOLS.iter().filter(move |tool| !read_only || tool.kind == McpToolKind::Read)
-}
-
-fn tools_list(read_only: bool) -> Vec<Value> {
-    visible_tools(read_only)
+fn tools_list(view: &ToolView, read_only: bool) -> Vec<Value> {
+    view.visible(read_only)
         .map(|tool| {
             json!({
-                "name": tool.name,
-                "description": tool.description,
+                "name": tool.name(),
+                "description": tool.description(),
                 "inputSchema": tool.schema(),
-                "annotations": { "readOnlyHint": tool.kind == McpToolKind::Read },
+                "annotations": { "readOnlyHint": tool.kind() == McpToolKind::Read },
             })
         })
         .collect()
@@ -241,10 +272,20 @@ fn tools_list(read_only: bool) -> Vec<Value> {
 /// `Err` is a JSON-RPC protocol error (-32602); everything the REST route
 /// answers, failures included, is an `isError` tool result instead.
 async fn call_tool(state: &McpState, headers: &HeaderMap, params: Option<&Value>) -> Result<Value, String> {
+    call_tool_in(state, &state.tool_view().await, headers, params).await
+}
+
+/// [`call_tool`] over `view`, the tools resolved for this request.
+async fn call_tool_in(
+    state: &McpState,
+    view: &ToolView,
+    headers: &HeaderMap,
+    params: Option<&Value>,
+) -> Result<Value, String> {
     let params = params.and_then(Value::as_object).ok_or("params must be an object")?;
     let name = params.get("name").and_then(Value::as_str).ok_or("params.name is required")?;
-    let tool = find_tool(name).ok_or_else(|| format!("Unknown tool: {name}"))?;
-    if state.read_only && tool.kind == McpToolKind::Write {
+    let tool = view.find(name).ok_or_else(|| format!("Unknown tool: {name}"))?;
+    if state.effective_read_only() && tool.kind() == McpToolKind::Write {
         return Err(format!("Tool '{name}' is not available in read-only mode"));
     }
     let arguments = match params.get("arguments") {
@@ -252,13 +293,17 @@ async fn call_tool(state: &McpState, headers: &HeaderMap, params: Option<&Value>
         Some(Value::Object(arguments)) => Some(arguments),
         Some(_) => return Ok(tool_result(true, "arguments must be an object")),
     };
-    let tool_request = match build_tool_request(tool, arguments, &state.api_prefix) {
+    let tool_request = match tool {
+        McpToolRef::Builtin(tool) => build_tool_request(tool, arguments, &state.api_prefix),
+        McpToolRef::Plugin(tool) => Ok(build_plugin_request(tool, arguments, &state.api_prefix)),
+    };
+    let tool_request = match tool_request {
         Ok(tool_request) => tool_request,
         Err(message) => return Ok(tool_result(true, &message)),
     };
 
     let mut request = Request::builder()
-        .method(tool.method.as_http())
+        .method(tool.method().as_http())
         .uri(&tool_request.uri)
         .header(header::ACCEPT, "application/json");
     if let Some(authorization) = headers.get(header::AUTHORIZATION) {
@@ -280,24 +325,68 @@ async fn call_tool(state: &McpState, headers: &HeaderMap, params: Option<&Value>
         Err(never) => match never {},
     };
     let status = response.status();
-    let text = if !tool.redact_secrets {
-        let bytes = read_capped(response.into_body(), state.max_response_bytes).await;
-        body_to_text(&bytes, state.max_response_bytes)
+    // A plugin's answer is capped at the rpc result limit, whatever `max_response_bytes` is.
+    let max_bytes = match tool {
+        McpToolRef::Builtin(_) => state.max_response_bytes,
+        McpToolRef::Plugin(_) => state.max_response_bytes.min(PLUGIN_RESULT_MAX_BYTES),
+    };
+    let retry_after = match tool {
+        McpToolRef::Plugin(_) => retry_after_secs(response.headers()),
+        McpToolRef::Builtin(_) => None,
+    };
+    let text = if !tool.redact_secrets() {
+        let bytes = read_capped(response.into_body(), max_bytes).await;
+        body_to_text(&bytes, max_bytes)
     } else if status.is_success() {
         // Redaction needs the whole document; truncation applies to the redacted text.
         let bytes = read_capped(response.into_body(), REDACT_BODY_LIMIT).await;
-        body_to_text(redact_json_body(&bytes).as_bytes(), state.max_response_bytes)
+        body_to_text(redact_json_body(&bytes).as_bytes(), max_bytes)
+    } else if matches!(tool, McpToolRef::Plugin(_)) {
+        // The rpc route's `PluginRpcErrorDto` (already sanitized and scrubbed of
+        // the plugin's secrets) tells the model what to fix; any other body of a
+        // plugin tool is not forwarded.
+        let bytes = read_capped(response.into_body(), PLUGIN_ERROR_BODY_LIMIT).await;
+        plugin_error_text(&bytes, max_bytes)
     } else {
         // An error body of a redacted tool is not forwarded; the status is enough.
         String::new()
     };
-    Ok(if status.is_success() {
+    let mut result = if status.is_success() {
         tool_result(false, &text)
-    } else if text.is_empty() {
-        tool_result(true, &format!("HTTP {status}"))
     } else {
-        tool_result(true, &format!("HTTP {status}: {text}"))
-    })
+        let mut message = if text.is_empty() { format!("HTTP {status}") } else { format!("HTTP {status}: {text}") };
+        if let Some(seconds) = retry_after {
+            let _ = write!(message, " (retry after {seconds}s)");
+        }
+        tool_result(true, &message)
+    };
+    if let McpToolRef::Plugin(plugin_tool) = tool {
+        result["_meta"] = json!({ "tuliprox/plugin": plugin_tool.plugin_id });
+    }
+    Ok(result)
+}
+
+/// The rpc route's result limit (plan §7: plugin tool results are capped at it).
+const PLUGIN_RESULT_MAX_BYTES: usize = 256 * 1024;
+
+/// The most of an rpc error body that is read: the DTO is a message and a list of fields.
+const PLUGIN_ERROR_BODY_LIMIT: usize = 64 * 1024;
+
+/// `Retry-After` of a `429`, when it is whole seconds.
+fn retry_after_secs(headers: &HeaderMap) -> Option<u64> {
+    headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim().parse().ok()
+}
+
+/// The JSON of an rpc error body, redacted like a result; empty when the body is
+/// not a `PluginRpcErrorDto` (the permission layers answer in other shapes).
+fn plugin_error_text(body: &[u8], max_bytes: usize) -> String {
+    let Ok(error) = serde_json::from_slice::<PluginRpcErrorDto>(body) else {
+        return String::new();
+    };
+    let Ok(error) = serde_json::to_vec(&error) else {
+        return String::new();
+    };
+    body_to_text(redact_json_body(&error).as_bytes(), max_bytes)
 }
 
 fn tool_result(is_error: bool, text: &str) -> Value {
@@ -341,6 +430,14 @@ fn body_to_text(bytes: &[u8], max: usize) -> String {
 struct ToolRequest {
     uri: String,
     body: Option<Vec<u8>>,
+}
+
+/// A plugin tool's arguments are the rpc payload as they are: the route
+/// validates them against the export's `input_schema`, so no argument is
+/// mapped to a path or a query here.
+fn build_plugin_request(tool: &OwnedMcpTool, arguments: Option<&Map<String, Value>>, api_prefix: &str) -> ToolRequest {
+    let body = arguments.map_or_else(|| "{}".to_string(), |arguments| Value::Object(arguments.clone()).to_string());
+    ToolRequest { uri: format!("{api_prefix}{}", tool.path), body: Some(body.into_bytes()) }
 }
 
 fn build_tool_request(
@@ -429,7 +526,7 @@ fn expand_path<'a>(template: &'a str, arguments: &Map<String, Value>) -> Result<
 /// Percent-encodes everything that is not unreserved so a value can never
 /// introduce a separator, a query or a fragment. `.` and `..` are encoded as
 /// well, otherwise they would be dot segments.
-fn encode_path_segment(value: &str) -> String {
+pub(super) fn encode_path_segment(value: &str) -> String {
     if value == "." || value == ".." {
         return value.replace('.', "%2E");
     }
@@ -438,7 +535,10 @@ fn encode_path_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        super::mcp_tools::{find_tool, MCP_TOOLS},
+        *,
+    };
     use crate::{
         api::{
             endpoints::{
@@ -491,7 +591,7 @@ mod tests {
         shared::model::McpConfigDto { enabled: true, read_only, ..Default::default() }
     }
 
-    fn token(config: &Config, permissions: Permission) -> String {
+    fn token(config: &Config, permissions: impl Into<shared::model::PermissionSet>) -> String {
         let web_auth = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).expect("web auth");
         create_jwt_web_user(
             web_auth,
@@ -588,9 +688,11 @@ mod tests {
 
     #[test]
     fn read_only_hides_write_tools() {
-        assert!(visible_tools(true).all(|tool| tool.kind == McpToolKind::Read));
-        assert!(visible_tools(false).any(|tool| tool.kind == McpToolKind::Write));
-        let names: Vec<_> = tools_list(true).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect();
+        let view = ToolView::default();
+        assert!(view.visible(true).all(|tool| tool.kind() == McpToolKind::Read));
+        assert!(view.visible(false).any(|tool| tool.kind() == McpToolKind::Write));
+        let names: Vec<_> =
+            tools_list(&view, true).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect();
         assert!(names.contains(&"get_status".to_string()));
         assert!(!names.contains(&"update_playlists".to_string()));
     }
@@ -689,7 +791,10 @@ mod tests {
 
     #[test]
     fn playlist_tools_are_listed_read_only_with_redaction() {
-        let names: Vec<_> = tools_list(true).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect();
+        let names: Vec<_> = tools_list(&ToolView::default(), true)
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
         for name in PLAYLIST_TOOLS {
             assert!(names.contains(&name.to_string()), "{name} missing in read-only tools/list");
             let tool = tool(name);
@@ -707,8 +812,10 @@ mod tests {
             assert_eq!(schema["additionalProperties"], false, "{}", tool.name);
             let properties = schema["properties"].as_object().expect("properties");
             for name in properties.keys() {
-                // a duplicated key would silently collapse during JSON parsing
-                let declaration = format!("\"{name}\":{{");
+                // A duplicated key would silently collapse during JSON parsing. Only a
+                // declaration that starts with the type is counted, so a nested object may
+                // reuse a top-level name (an override patch carries its own `name` field).
+                let declaration = format!("\"{name}\":{{\"type\"");
                 assert_eq!(tool.input_schema.matches(&declaration).count(), 1, "{} declares {name} twice", tool.name);
             }
             let required: Vec<&str> = schema
@@ -846,6 +953,215 @@ mod tests {
     fn no_arguments_means_no_query() {
         let request = build_tool_request(tool("get_status"), None, "/api/v1").unwrap();
         assert_eq!(request.uri, "/api/v1/status");
+    }
+
+    // ---- override tools ---------------------------------------------------
+
+    const OVERRIDE_TOOLS: [&str; 6] = [
+        "get_overrides",
+        "get_override_item",
+        "list_override_orphans",
+        "search_epg_ids",
+        "save_overrides",
+        "discard_overrides",
+    ];
+
+    #[test]
+    fn override_tools_are_thin_adapters_over_their_rest_routes() {
+        let expected = [
+            ("get_overrides", McpToolKind::Read, McpToolMethod::Get, "/playlist/overrides"),
+            ("get_override_item", McpToolKind::Read, McpToolMethod::Get, "/playlist/overrides/item"),
+            ("list_override_orphans", McpToolKind::Read, McpToolMethod::Get, "/playlist/overrides/orphans"),
+            ("search_epg_ids", McpToolKind::Read, McpToolMethod::Get, "/playlist/epg/search"),
+            ("save_overrides", McpToolKind::Write, McpToolMethod::Post, "/playlist/overrides"),
+            ("discard_overrides", McpToolKind::Write, McpToolMethod::Post, "/playlist/overrides/discard"),
+        ];
+        for (name, kind, method, path) in expected {
+            let tool = tool(name);
+            assert_eq!(tool.kind, kind, "{name}");
+            assert_eq!(tool.method, method, "{name}");
+            assert_eq!(tool.path, path, "{name}");
+        }
+        // The two writes are hidden as long as the server is read-only.
+        let read_only: Vec<_> = tools_list(&ToolView::default(), true)
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        let writable: Vec<_> = tools_list(&ToolView::default(), false)
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        for name in ["get_overrides", "get_override_item", "list_override_orphans", "search_epg_ids"] {
+            assert!(read_only.contains(&name.to_string()), "{name} is missing read-only");
+        }
+        for name in ["save_overrides", "discard_overrides"] {
+            assert!(!read_only.contains(&name.to_string()), "{name} must not be listed read-only");
+            assert!(writable.contains(&name.to_string()), "{name} is missing writable");
+        }
+    }
+
+    /// Every object in a schema is closed, at any depth.
+    fn assert_closed_objects(value: &Value, path: &str) {
+        let Some(object) = value.as_object() else { return };
+        if object.contains_key("properties") {
+            assert_eq!(object.get("additionalProperties"), Some(&Value::Bool(false)), "{path} is not closed");
+        }
+        for (key, child) in object {
+            assert_closed_objects(child, &format!("{path}.{key}"));
+        }
+    }
+
+    #[test]
+    fn override_schemas_are_strict_and_document_every_property() {
+        for name in OVERRIDE_TOOLS {
+            let tool = tool(name);
+            assert!(tool.description.len() > 200, "{name} description too short");
+            let schema: Value = serde_json::from_str(tool.input_schema).expect("schema is JSON");
+            assert_eq!(schema["type"], "object", "{name}");
+            assert_eq!(schema["additionalProperties"], false, "{name}");
+            assert_closed_objects(&schema, name);
+            for (property, definition) in schema["properties"].as_object().expect("properties") {
+                let description = definition["description"].as_str().unwrap_or_default();
+                assert!(!description.is_empty(), "{name}.{property} has no description");
+            }
+            for required in schema.get("required").and_then(Value::as_array).into_iter().flatten() {
+                assert!(
+                    schema["properties"].get(required.as_str().unwrap()).is_some(),
+                    "{name} requires an undeclared field"
+                );
+            }
+        }
+        assert_eq!(tool("get_overrides").schema()["required"], json!(["scope", "name"]));
+        assert_eq!(tool("list_override_orphans").schema()["required"], json!(["input"]));
+        assert_eq!(tool("search_epg_ids").schema()["required"], json!(["q"]));
+        assert_eq!(tool("get_override_item").schema()["required"], json!(["input", "kind", "id"]));
+        assert_eq!(tool("save_overrides").schema()["required"], json!(["scope", "name", "base_revision", "patches"]));
+        assert_eq!(tool("discard_overrides").schema()["required"], json!(["scope", "name", "base_revision"]));
+        assert_eq!(schema_enum("save_overrides", "scope"), ["input", "target"]);
+        assert_eq!(schema_enum("discard_overrides", "scope"), ["input", "target"]);
+    }
+
+    #[test]
+    fn override_patch_schema_documents_the_tagged_op_format() {
+        let schema = tool("save_overrides").schema();
+        let item = &schema["properties"]["patches"]["items"];
+        assert_eq!(item["additionalProperties"], false);
+        assert_eq!(item["required"], json!(["kind", "id", "patch"]));
+        assert_eq!(item["properties"]["kind"]["enum"], json!(["live", "vod", "series"]));
+        let patch = &item["properties"]["patch"];
+        assert_eq!(patch["additionalProperties"], false);
+        let fields: Vec<&String> = patch["properties"].as_object().unwrap().keys().collect();
+        assert!(fields.iter().any(|field| field.as_str() == "name"), "the patch schema has no name field");
+        for field in [
+            "audio_track",
+            "cast",
+            "chno",
+            "director",
+            "epg_channel_id",
+            "genre",
+            "group",
+            "logo",
+            "logo_small",
+            "name",
+            "parent_code",
+            "plot",
+            "rating",
+            "rec",
+            "release_date",
+            "time_shift",
+            "title",
+            "tmdb",
+        ] {
+            let definition = &patch["properties"][field];
+            assert_eq!(definition["properties"]["op"]["enum"], json!(["set", "clear", "reset"]), "{field}");
+            assert_eq!(definition["required"], json!(["op"]), "{field}");
+            assert_eq!(definition["additionalProperties"], false, "{field}");
+            assert!(definition["properties"]["value"]["type"].is_string(), "{field} has no value type");
+            assert!(
+                definition["description"].as_str().unwrap_or_default().contains("Live items only")
+                    || definition["description"].as_str().unwrap_or_default().contains("Video and series only")
+                    || definition["description"].as_str().unwrap_or_default().contains("All item kinds"),
+                "{field} does not say which item kinds it applies to"
+            );
+        }
+        assert_eq!(patch["properties"]["remove_unknown"]["items"], json!({ "type": "string" }));
+        let discard_item = &tool("discard_overrides").schema()["properties"]["items"]["items"];
+        assert_eq!(discard_item["required"], json!(["kind", "id"]));
+        assert_eq!(discard_item["additionalProperties"], false);
+    }
+
+    #[test]
+    fn override_descriptions_name_the_follow_up_tools_and_the_409_rule() {
+        let save = tool("save_overrides").description;
+        for needle in ["base_revision", "get_overrides", "409", "update_playlists", "query_playlist_items", "op"] {
+            assert!(save.contains(needle), "save_overrides description lacks {needle}");
+        }
+        for needle in ["set", "clear", "reset"] {
+            assert!(save.contains(needle), "save_overrides description lacks the {needle} op");
+        }
+        let discard = tool("discard_overrides").description;
+        for needle in ["base_revision", "get_overrides", "409", "update_playlists"] {
+            assert!(discard.contains(needle), "discard_overrides description lacks {needle}");
+        }
+        assert!(tool("get_overrides").description.contains("revision"));
+        assert!(tool("get_overrides").description.contains("query_playlist_items"));
+        assert!(tool("get_override_item").description.contains("query_playlist_items"));
+        assert!(tool("list_override_orphans").description.contains("discard_overrides"));
+        assert!(tool("search_epg_ids").description.contains("epg_channel_id"));
+    }
+
+    #[test]
+    fn override_arguments_become_the_documented_query_and_body() {
+        let request = build_tool_request(
+            tool("get_overrides"),
+            Some(&args(json!({ "scope": "target", "name": "my target" }))),
+            "/api/v1",
+        )
+        .unwrap();
+        assert_eq!(request.uri, "/api/v1/playlist/overrides?scope=target&name=my+target");
+        let request = build_tool_request(
+            tool("get_override_item"),
+            Some(&args(json!({ "input": "m3u-input", "kind": "vod", "id": "42", "target_id": 2 }))),
+            "/api/v1",
+        )
+        .unwrap();
+        assert_eq!(request.uri, "/api/v1/playlist/overrides/item?input=m3u-input&kind=vod&id=42&target_id=2");
+        let request = build_tool_request(
+            tool("search_epg_ids"),
+            Some(&args(json!({ "q": "news hd", "input": "m3u-input", "limit": 5 }))),
+            "/api/v1",
+        )
+        .unwrap();
+        assert_eq!(request.uri, "/api/v1/playlist/epg/search?q=news+hd&input=m3u-input&limit=5");
+
+        // Nested bodies survive the adapter unchanged: the REST handler sees the
+        // tagged operations, not a stringified version of them.
+        let patches = json!([{
+            "kind": "live",
+            "id": "p1",
+            "patch": { "group": { "op": "set", "value": "News" }, "title": { "op": "clear" } }
+        }]);
+        let request = build_tool_request(
+            tool("save_overrides"),
+            Some(&args(json!({ "scope": "input", "name": "m3u-input", "base_revision": "r1", "patches": patches }))),
+            "/api/v1",
+        )
+        .unwrap();
+        assert_eq!(request.uri, "/api/v1/playlist/overrides");
+        let body: Value = serde_json::from_slice(&request.body.expect("body")).unwrap();
+        assert_eq!(body["scope"], "input");
+        assert_eq!(body["base_revision"], "r1");
+        assert_eq!(body["patches"][0]["patch"]["group"], json!({ "op": "set", "value": "News" }));
+        assert_eq!(body["patches"][0]["patch"]["title"], json!({ "op": "clear" }));
+
+        let err = build_tool_request(
+            tool("save_overrides"),
+            Some(&args(json!({ "scope": "input", "name": "n", "patches": [] }))),
+            "/api/v1",
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("base_revision"), "{err}");
     }
 
     #[test]
@@ -1153,6 +1469,282 @@ mod tests {
         assert!(tool_text(&reply).starts_with("HTTP 403"), "{}", tool_text(&reply));
     }
 
+    // ---- override tools over the REST routes ------------------------------
+
+    const OVERRIDE_INPUT: &str = "m3u-input";
+    const OVERRIDE_TARGET: &str = "m3u-target";
+
+    /// A playground with one input, one target and override files in a temp dir,
+    /// so the override tools hit the real handlers of the `/api/v1` router.
+    struct OverrideFixture {
+        _dir: tempfile::TempDir,
+        router: Router,
+        reader: String,
+        writer: String,
+    }
+
+    fn override_input() -> Arc<crate::model::ConfigInput> {
+        use shared::utils::Internable;
+
+        Arc::new(crate::model::ConfigInput {
+            id: 1,
+            name: OVERRIDE_INPUT.intern(),
+            input_type: shared::model::InputType::M3u,
+            url: "http://provider.example/get.php?username=user&password=pass".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ..crate::model::ConfigInput::default()
+        })
+    }
+
+    fn override_target() -> Arc<crate::model::ConfigTarget> {
+        use shared::foundation::Filter;
+
+        Arc::new(crate::model::ConfigTarget {
+            managed_channels: Vec::new(),
+            curation: None,
+            id: 1,
+            enabled: true,
+            name: OVERRIDE_TARGET.to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default().into(),
+            output: vec![crate::model::TargetOutput::M3u(crate::model::M3uTargetOutput {
+                filename: None,
+                include_type_in_url: false,
+                mask_redirect_url: false,
+                filter: None,
+            })],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(arc_swap::ArcSwapOption::new(None)),
+            favourites: None,
+            processing_order: shared::model::ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
+            watch: None,
+            use_memory_cache: false,
+        })
+    }
+
+    /// `ConfigPaths` without any directory, as the default test state holds it.
+    fn empty_paths() -> shared::model::ConfigPaths {
+        shared::model::ConfigPaths {
+            home_path: String::new(),
+            config_path: String::new(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            failover_file_path: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        }
+    }
+
+    fn override_fixture(mcp_read_only: bool) -> OverrideFixture {
+        use shared::utils::Internable;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_dir = dir.path().join("config");
+        let storage_dir = dir.path().join("storage");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::create_dir_all(&storage_dir).expect("storage dir");
+
+        let mut config = config_with_mcp(true, enabled(mcp_read_only));
+        config.storage_dir = storage_dir.to_string_lossy().into_owned();
+        let reader = bearer(&token(&config, Permission::PlaylistRead));
+        let writer = bearer(&token(&config, Permission::PlaylistRead | Permission::PlaylistWrite));
+
+        let app_state = create_test_app_state(config);
+        app_state.app_config.paths.store(Arc::new(shared::model::ConfigPaths {
+            config_path: config_dir.to_string_lossy().into_owned(),
+            storage_path: storage_dir.to_string_lossy().into_owned(),
+            ..empty_paths()
+        }));
+        let inputs = vec![override_input()];
+        app_state.app_config.sources.store(Arc::new(crate::model::SourcesConfig {
+            group_lookup: shared::model::provider_saturation::build_group_lookup(&inputs),
+            inputs,
+            sources: vec![crate::model::ConfigSource {
+                inputs: vec![OVERRIDE_INPUT.intern()],
+                targets: vec![override_target()],
+            }],
+            ..Default::default()
+        }));
+
+        let v1 = v1_api_register(true, &app_state, "");
+        let router = mcp_api_register_if_enabled::<()>(&v1, &app_state, true, "").expect("mcp enabled").with_state(());
+        OverrideFixture { _dir: dir, router, reader, writer }
+    }
+
+    fn header_of(token: &str) -> [(&str, &str); 1] { [("authorization", token)] }
+
+    /// Reads an override file through the tool and returns its parsed body.
+    async fn read_overrides(fixture: &OverrideFixture, scope: &str, name: &str) -> Value {
+        let headers = header_of(&fixture.reader);
+        let arguments = json!({ "scope": scope, "name": name });
+        let (_, reply) = post(&fixture.router, &call("get_overrides", arguments), &headers).await;
+        assert_eq!(reply["result"]["isError"], false, "{}", tool_text(&reply));
+        serde_json::from_str(tool_text(&reply)).expect("override file JSON")
+    }
+
+    /// Saves the given patches and returns the revision the handler answered.
+    async fn save_overrides(fixture: &OverrideFixture, base: &str, patches: Value) -> Value {
+        match save_overrides_result(fixture, base, patches).await {
+            Ok(saved) => saved,
+            Err(text) => panic!("save_overrides failed: {text}"),
+        }
+    }
+
+    /// Saves the given patches and returns the revision or the tool error text.
+    async fn save_overrides_result(fixture: &OverrideFixture, base: &str, patches: Value) -> Result<Value, String> {
+        let headers = header_of(&fixture.writer);
+        let arguments = json!({ "scope": "input", "name": OVERRIDE_INPUT, "base_revision": base, "patches": patches });
+        let (_, reply) = post(&fixture.router, &call("save_overrides", arguments), &headers).await;
+        let text = tool_text(&reply).to_owned();
+        if reply["result"]["isError"] == Value::Bool(true) {
+            return Err(text);
+        }
+        serde_json::from_str(&text).map_err(|err| format!("{err}: {text}"))
+    }
+
+    #[tokio::test]
+    async fn save_overrides_round_trips_set_clear_and_reset_through_the_rest_handler() {
+        let fixture = override_fixture(false);
+        let base = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(base["entries"], json!([]), "a fresh input has no overrides");
+        let base = base["revision"].as_str().expect("revision").to_owned();
+
+        // set: the tagged op reaches the handler and is stored as the value
+        let saved = save_overrides(
+            &fixture,
+            &base,
+            json!([{ "kind": "live", "id": "p1", "patch": { "group": { "op": "set", "value": "News" } } }]),
+        )
+        .await;
+        let revision = saved["revision"].as_str().expect("revision").to_owned();
+        assert_ne!(revision, base, "a write changes the revision");
+
+        let file = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(file["revision"], revision);
+        assert_eq!(file["entries"][0]["id"], "p1");
+        assert_eq!(file["entries"][0]["kind"], "live");
+        assert_eq!(file["entries"][0]["fields"]["group"], "News");
+
+        // clear: the field is stored as a null delta next to the set one
+        let saved = save_overrides(
+            &fixture,
+            &revision,
+            json!([{ "kind": "live", "id": "p1", "patch": { "chno": { "op": "clear" } } }]),
+        )
+        .await;
+        let revision = saved["revision"].as_str().expect("revision").to_owned();
+        let file = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(file["entries"][0]["fields"]["group"], "News");
+        assert!(file["entries"][0]["fields"].as_object().unwrap().contains_key("chno"), "{file}");
+        assert_eq!(file["entries"][0]["fields"]["chno"], Value::Null);
+        // name, title and group can never be cleared; the handler rejects it as a field error
+        let unsupported = save_overrides_result(
+            &fixture,
+            &revision,
+            json!([{ "kind": "live", "id": "p1", "patch": { "title": { "op": "clear" } } }]),
+        )
+        .await
+        .expect_err("a clear of title is a field error");
+        assert!(unsupported.contains("cannot_clear"), "{unsupported}");
+
+        // reset: both overrides are dropped and the entry disappears
+        let saved = save_overrides(
+            &fixture,
+            &revision,
+            json!([{ "kind": "live", "id": "p1", "patch": {
+                "group": { "op": "reset" }, "chno": { "op": "reset" }
+            } }]),
+        )
+        .await;
+        assert!(saved["revision"].as_str().is_some_and(|revision| !revision.is_empty()));
+        let file = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(file["entries"], json!([]), "a reset of every field removes the entry: {file}");
+    }
+
+    #[tokio::test]
+    async fn save_overrides_reports_a_stale_revision_and_accepts_the_reread_one() {
+        let fixture = override_fixture(false);
+        let base = read_overrides(&fixture, "input", OVERRIDE_INPUT).await["revision"].as_str().unwrap().to_owned();
+        let patches = json!([{ "kind": "live", "id": "p1", "patch": { "group": { "op": "set", "value": "A" } } }]);
+        let saved = save_overrides(&fixture, &base, patches.clone()).await;
+        assert!(saved["revision"].as_str().is_some());
+
+        // the first revision is stale now: 409 with the revision to retry against
+        let headers = header_of(&fixture.writer);
+        let arguments = json!({ "scope": "input", "name": OVERRIDE_INPUT, "base_revision": base, "patches": patches });
+        let (_, reply) = post(&fixture.router, &call("save_overrides", arguments), &headers).await;
+        assert_eq!(reply["result"]["isError"], true);
+        let text = tool_text(&reply);
+        assert!(text.starts_with("HTTP 409"), "{text}");
+        assert!(text.contains("current_revision"), "the 409 body carries the revision to retry with: {text}");
+
+        let current = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        let current = current["revision"].as_str().unwrap().to_owned();
+        save_overrides(&fixture, &current, patches).await;
+    }
+
+    #[tokio::test]
+    async fn discard_overrides_removes_a_stored_entry_through_the_rest_handler() {
+        let fixture = override_fixture(false);
+        let base = read_overrides(&fixture, "input", OVERRIDE_INPUT).await["revision"].as_str().unwrap().to_owned();
+        let saved = save_overrides(
+            &fixture,
+            &base,
+            json!([{ "kind": "live", "id": "p1", "patch": { "name": { "op": "set", "value": "Renamed" } } }]),
+        )
+        .await;
+        let revision = saved["revision"].as_str().unwrap().to_owned();
+
+        let headers = header_of(&fixture.writer);
+        let arguments = json!({
+            "scope": "input", "name": OVERRIDE_INPUT, "base_revision": revision,
+            "items": [{ "kind": "live", "id": "p1" }]
+        });
+        let (_, reply) = post(&fixture.router, &call("discard_overrides", arguments), &headers).await;
+        assert_eq!(reply["result"]["isError"], false, "{}", tool_text(&reply));
+        let file = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(file["entries"], json!([]), "{file}");
+    }
+
+    #[tokio::test]
+    async fn override_writes_are_refused_when_the_server_is_read_only() {
+        let fixture = override_fixture(true);
+        let headers = header_of(&fixture.writer);
+        for name in ["save_overrides", "discard_overrides"] {
+            let arguments = json!({ "scope": "input", "name": OVERRIDE_INPUT, "base_revision": "r" });
+            let (_, reply) = post(&fixture.router, &call(name, arguments), &headers).await;
+            assert_eq!(reply["error"]["code"], i64::from(INVALID_PARAMS), "{name}");
+        }
+        let (_, reply) = post(&fixture.router, &rpc(1, "tools/list", json!({})), &headers).await;
+        let names: Vec<_> =
+            reply["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"save_overrides"), "{names:?}");
+        assert!(!names.contains(&"discard_overrides"), "{names:?}");
+        assert!(names.contains(&"get_overrides"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn override_writes_need_the_playlist_write_permission() {
+        let fixture = override_fixture(false);
+        let headers = header_of(&fixture.reader);
+        let arguments = json!({
+            "scope": "input", "name": OVERRIDE_INPUT, "base_revision": "r",
+            "patches": [{ "kind": "live", "id": "p1", "patch": { "group": { "op": "set", "value": "A" } } }]
+        });
+        let (_, reply) = post(&fixture.router, &call("save_overrides", arguments), &headers).await;
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(tool_text(&reply).starts_with("HTTP 403"), "{}", tool_text(&reply));
+    }
+
     #[tokio::test]
     async fn oversized_results_are_truncated_with_a_marker() {
         let mcp = shared::model::McpConfigDto { max_response_bytes: 16, ..enabled(true) };
@@ -1192,7 +1784,7 @@ mod tests {
         let router = Router::new()
             .route("/api/v1/config", axum::routing::get(move || async move { (config_status, config_body) }))
             .route("/api/v1/status", axum::routing::get(move || async move { secret_body }));
-        McpState::new(router, &McpConfig::from(enabled(true)), true, "")
+        McpState::new(router, &McpConfig::from(enabled(true)), true, "", create_test_app_state(Config::default()))
     }
 
     async fn call_stub(state: &McpState, name: &str) -> Value {
@@ -1231,10 +1823,325 @@ mod tests {
                 "list_playlist_sources",
                 "query_playlist_items",
                 "query_target_epg_channels",
-                "get_target_epg_channel"
+                "get_target_epg_channel",
+                "get_overrides",
+                "get_override_item",
+                "list_override_orphans"
             ]
         );
         let reply = call_stub(&stub_state("{}", StatusCode::OK), "get_status").await;
         assert!(tool_text(&reply).contains("\"password\":\"pw\""), "{}", tool_text(&reply));
+    }
+
+    // ---- plugin tools -----------------------------------------------------
+
+    fn plugin_tool(name: &str, kind: McpToolKind) -> OwnedMcpTool {
+        OwnedMcpTool {
+            name: name.to_string(),
+            description: "[plugin demo@1.0.0] Ping".to_string(),
+            input_schema: json!({ "type": "object", "properties": { "league": { "type": "string" } } }),
+            method: McpToolMethod::Post,
+            path: "/plugins/demo/rpc/ping".to_string(),
+            kind,
+            redact_secrets: true,
+            plugin_id: "demo".to_string(),
+        }
+    }
+
+    fn plugin_view(tools: Vec<OwnedMcpTool>) -> ToolView { ToolView::new(true, || tools) }
+
+    fn plugin_state(router: Router, read_only: bool, max_response_bytes: usize) -> McpState {
+        let dto = shared::model::McpConfigDto {
+            enabled: true,
+            read_only,
+            plugin_tools: true,
+            max_response_bytes,
+            ..Default::default()
+        };
+        let config = Config { mcp: Some(McpConfig::from(dto.clone())), ..Config::default() };
+        McpState::new(router, &McpConfig::from(dto), read_only, "", create_test_app_state(config))
+    }
+
+    fn rpc_router<H, T>(handler: H) -> Router
+    where
+        H: axum::handler::Handler<T, ()>,
+        T: 'static,
+    {
+        Router::new().route("/api/v1/plugins/demo/rpc/ping", axum::routing::post(handler))
+    }
+
+    async fn call_plugin(state: &McpState, view: &ToolView, name: &str, arguments: Value) -> Result<Value, String> {
+        let params = json!({ "name": name, "arguments": arguments });
+        call_tool_in(state, view, &HeaderMap::new(), Some(&params)).await
+    }
+
+    fn listed(view: &ToolView, read_only: bool) -> Vec<String> {
+        tools_list(view, read_only).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    fn result_text(reply: &Value) -> &str { reply["content"][0]["text"].as_str().expect("tool text") }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn plugin_tools_are_derived_on_the_blocking_pool() {
+        use crate::api::model::{counting_runtime, create_test_app_state_with_plugins, create_test_plugin_system};
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, threads) = counting_runtime();
+        runtime.block_on(async {
+            let dto = shared::model::McpConfigDto { enabled: true, plugin_tools: true, ..Default::default() };
+            let config = Config { mcp: Some(McpConfig::from(dto.clone())), ..Config::default() };
+            let app_state = create_test_app_state_with_plugins(config, Some(create_test_plugin_system(dir.path())));
+            let state = McpState::new(rpc_router(|| async { "{}" }), &McpConfig::from(dto), true, "", app_state);
+            let before = threads.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(listed(&state.tool_view().await, true).iter().all(|name| !name.starts_with("plugin_")));
+            assert!(
+                threads.load(std::sync::atomic::Ordering::SeqCst) > before,
+                "approvals were read on the async thread"
+            );
+        });
+    }
+
+    #[test]
+    fn plugin_tools_are_absent_while_the_global_switch_is_off() {
+        let asked = std::cell::Cell::new(false);
+        let view = ToolView::new(false, || {
+            asked.set(true);
+            vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]
+        });
+        assert!(!asked.get(), "the plugin host is not asked while mcp.plugin_tools is off");
+        assert!(view.find("plugin_demo_ping").is_none());
+        assert!(!listed(&view, false).contains(&"plugin_demo_ping".to_string()));
+        assert_eq!(listed(&view, false).len(), MCP_TOOLS.len());
+    }
+
+    #[tokio::test]
+    async fn a_plugin_tool_that_is_not_listed_cannot_be_called() {
+        let state = plugin_state(rpc_router(|| async { "{}" }), false, 262_144);
+        let off = ToolView::new(false, || vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]);
+        let err = call_plugin(&state, &off, "plugin_demo_ping", json!({})).await.unwrap_err();
+        assert_eq!(err, "Unknown tool: plugin_demo_ping");
+    }
+
+    #[test]
+    fn the_switch_on_lists_plugin_tools_beside_the_built_ins() {
+        let view = plugin_view(vec![
+            plugin_tool("plugin_demo_ping", McpToolKind::Read),
+            plugin_tool("plugin_demo_reset", McpToolKind::Write),
+        ]);
+        let list = tools_list(&view, false);
+        let ping = list.iter().find(|tool| tool["name"] == "plugin_demo_ping").expect("listed");
+        assert_eq!(ping["description"], "[plugin demo@1.0.0] Ping");
+        assert_eq!(ping["inputSchema"]["properties"]["league"]["type"], "string");
+        assert_eq!(ping["annotations"]["readOnlyHint"], true);
+        let reset = list.iter().find(|tool| tool["name"] == "plugin_demo_reset").expect("listed");
+        assert_eq!(reset["annotations"]["readOnlyHint"], false);
+        assert!(listed(&view, false).contains(&"get_status".to_string()));
+    }
+
+    #[test]
+    fn a_plugin_tool_never_shadows_a_built_in() {
+        let mut shadow = plugin_tool("get_status", McpToolKind::Read);
+        shadow.path = "/plugins/demo/rpc/get-status".to_string();
+        let view = plugin_view(vec![shadow]);
+        assert!(matches!(view.find("get_status"), Some(McpToolRef::Builtin(_))));
+        assert_eq!(listed(&view, false).iter().filter(|name| *name == "get_status").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_write_plugin_tool_is_absent_and_rejected_while_read_only() {
+        let view = plugin_view(vec![
+            plugin_tool("plugin_demo_ping", McpToolKind::Read),
+            plugin_tool("plugin_demo_reset", McpToolKind::Write),
+        ]);
+        let names = listed(&view, true);
+        assert!(names.contains(&"plugin_demo_ping".to_string()));
+        assert!(!names.contains(&"plugin_demo_reset".to_string()));
+
+        let hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&hit);
+        let state = plugin_state(
+            rpc_router(move || {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    "{}"
+                }
+            }),
+            true,
+            262_144,
+        );
+        let err = call_plugin(&state, &view, "plugin_demo_reset", json!({})).await.unwrap_err();
+        assert_eq!(err, "Tool 'plugin_demo_reset' is not available in read-only mode");
+        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst), "a rejected call never reaches the route");
+
+        // The same tool is listed and callable once MCP is read/write.
+        assert!(listed(&view, false).contains(&"plugin_demo_reset".to_string()));
+        let state = plugin_state(rpc_router(|| async { "{}" }), false, 262_144);
+        let reply = call_plugin(&state, &view, "plugin_demo_reset", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], false, "{reply}");
+    }
+
+    #[tokio::test]
+    async fn read_only_set_after_startup_still_rejects_write_plugin_tools() {
+        // Started read/write; the live config now says read-only.
+        let dto =
+            shared::model::McpConfigDto { enabled: true, read_only: true, plugin_tools: true, ..Default::default() };
+        let config = Config { mcp: Some(McpConfig::from(dto.clone())), ..Config::default() };
+        let state = McpState::new(
+            rpc_router(|| async { "{}" }),
+            &McpConfig::from(dto),
+            false,
+            "",
+            create_test_app_state(config),
+        );
+        assert!(state.effective_read_only());
+        let view = plugin_view(vec![plugin_tool("plugin_demo_reset", McpToolKind::Write)]);
+        assert!(call_plugin(&state, &view, "plugin_demo_reset", json!({})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn plugin_results_are_redacted_and_tagged_with_the_plugin() {
+        let state = plugin_state(
+            rpc_router(|| async { r#"{"api_key":"k-123","password":"hunter2","fixtures":[{"home":"A"}]}"# }),
+            true,
+            262_144,
+        );
+        let view = plugin_view(vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]);
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], false);
+        let text = result_text(&reply);
+        for leaked in ["k-123", "hunter2"] {
+            assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+        }
+        let parsed: Value = serde_json::from_str(text).expect("redacted JSON");
+        assert_eq!(parsed["fixtures"][0]["home"], "A");
+        assert_eq!(reply["_meta"], json!({ "tuliprox/plugin": "demo" }));
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn a_plugin_tool_is_mapped_to_a_forced_redaction_post_of_the_rpc_route() {
+        for (kind, mapped) in [
+            (tuliprox_plugins::PluginMcpToolKind::Read, McpToolKind::Read),
+            (tuliprox_plugins::PluginMcpToolKind::Write, McpToolKind::Write),
+        ] {
+            let tool = OwnedMcpTool::from(&tuliprox_plugins::PluginMcpTool {
+                name: "plugin_demo_ping".to_string(),
+                description: "[plugin demo@1.0.0]".to_string(),
+                input_schema: json!({ "type": "object" }),
+                plugin_id: "demo".to_string(),
+                method: "ping-it".to_string(),
+                kind,
+            });
+            assert!(tool.redact_secrets);
+            assert_eq!(tool.method, McpToolMethod::Post);
+            assert_eq!(tool.path, "/plugins/demo/rpc/ping-it");
+            assert_eq!(tool.kind, mapped);
+            assert_eq!(tool.plugin_id, "demo");
+        }
+    }
+
+    #[tokio::test]
+    async fn arguments_are_the_rpc_body_as_they_are() {
+        let state = plugin_state(
+            rpc_router(|body: Bytes| async move {
+                let seen: Value = serde_json::from_slice(&body).expect("the body is JSON");
+                axum::Json(json!({ "seen": seen }))
+            }),
+            true,
+            262_144,
+        );
+        let view = plugin_view(vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]);
+        // No path or query mapping: whatever the keys are, the body is the plugin's business.
+        let arguments = json!({ "league": "epl", "limit": 5, "nested": { "a": [1, 2] }, "id": "x" });
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", arguments.clone()).await.unwrap();
+        let parsed: Value = serde_json::from_str(result_text(&reply)).unwrap();
+        assert_eq!(parsed["seen"], arguments);
+
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", Value::Null).await.unwrap();
+        let parsed: Value = serde_json::from_str(result_text(&reply)).unwrap();
+        assert_eq!(parsed["seen"], json!({}));
+    }
+
+    #[test]
+    fn a_plugin_request_goes_to_the_rpc_route() {
+        let tool = plugin_tool("plugin_demo_ping", McpToolKind::Read);
+        let request = build_plugin_request(&tool, Some(&args(json!({ "league": "epl" }))), "/ui/api/v1");
+        assert_eq!(request.uri, "/ui/api/v1/plugins/demo/rpc/ping");
+        assert_eq!(serde_json::from_slice::<Value>(&request.body.unwrap()).unwrap(), json!({ "league": "epl" }));
+    }
+
+    #[tokio::test]
+    async fn a_plugin_result_is_capped_at_256_kib_whatever_the_configured_limit() {
+        let big = format!("\"{}\"", "a".repeat(300 * 1024));
+        let state = plugin_state(
+            rpc_router(move || {
+                let big = big.clone();
+                async move { big }
+            }),
+            true,
+            10 * 1024 * 1024,
+        );
+        let view = plugin_view(vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]);
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", json!({})).await.unwrap();
+        let text = result_text(&reply);
+        assert!(text.contains("[truncated: response exceeded 262144 bytes]"));
+        assert!(text.len() < PLUGIN_RESULT_MAX_BYTES + 100);
+        assert_eq!(reply["_meta"]["tuliprox/plugin"], "demo");
+    }
+
+    #[tokio::test]
+    async fn a_plugin_error_reaches_the_model_with_its_fields_and_the_retry_hint() {
+        let router = Router::new()
+            .route(
+                "/api/v1/plugins/demo/rpc/ping",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        axum::Json(PluginRpcErrorDto {
+                            error: "the payload does not match the input schema".to_string(),
+                            fields: vec![shared::model::PluginFieldErrorDto {
+                                path: "league".to_string(),
+                                message: "is required".to_string(),
+                            }],
+                        }),
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/plugins/demo/rpc/busy",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [(header::RETRY_AFTER, "3")],
+                        axum::Json(PluginRpcErrorDto { error: "slow down".to_string(), fields: Vec::new() }),
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/plugins/demo/rpc/denied",
+                axum::routing::post(|| async { (StatusCode::FORBIDDEN, "no token: s3") }),
+            );
+        let state = plugin_state(router, true, 262_144);
+        let mut busy = plugin_tool("plugin_demo_busy", McpToolKind::Read);
+        busy.path = "/plugins/demo/rpc/busy".to_string();
+        let mut denied = plugin_tool("plugin_demo_denied", McpToolKind::Read);
+        denied.path = "/plugins/demo/rpc/denied".to_string();
+        let view = plugin_view(vec![plugin_tool("plugin_demo_ping", McpToolKind::Read), busy, denied]);
+
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], true);
+        let text = result_text(&reply);
+        assert!(text.starts_with("HTTP 422 Unprocessable Entity: "), "{text}");
+        assert!(text.contains("the payload does not match the input schema") && text.contains("is required"), "{text}");
+        assert_eq!(reply["_meta"]["tuliprox/plugin"], "demo");
+
+        let reply = call_plugin(&state, &view, "plugin_demo_busy", json!({})).await.unwrap();
+        let text = result_text(&reply);
+        assert!(text.contains("slow down") && text.ends_with("(retry after 3s)"), "{text}");
+
+        // A body that is not an rpc error (a permission layer's) is not forwarded.
+        let reply = call_plugin(&state, &view, "plugin_demo_denied", json!({})).await.unwrap();
+        assert_eq!(result_text(&reply), "HTTP 403 Forbidden");
     }
 }

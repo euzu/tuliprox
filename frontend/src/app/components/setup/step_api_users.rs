@@ -85,7 +85,7 @@ pub fn ApiUsersStep() -> Html {
         })
     };
 
-    let next_title = step.next().map_or_else(
+    let next_title = setup_ctx.next_step(step).map_or_else(
         || translate.t("SETUP.LABEL.NEXT"),
         |next| format!("{}: {}", translate.t("SETUP.LABEL.NEXT"), translate.t(next.title_key())),
     );
@@ -101,8 +101,8 @@ pub fn ApiUsersStep() -> Html {
                         <span class="info">
                             {format!(
                                 "Step {}/{}: create API users for playlists and token-based access (api-proxy.yml).",
-                                step.position(),
-                                SetupStep::total()
+                                setup_ctx.step_position(step),
+                                setup_ctx.step_total()
                             )}
                         </span>
                     </div>

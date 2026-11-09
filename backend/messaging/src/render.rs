@@ -15,7 +15,7 @@ use log::{debug, error, warn};
 use serde::Deserialize;
 use shared::{
     model::{notification::registry, InputFetchMethod, WatchChanges},
-    utils::Internable,
+    utils::{human_readable_byte_size, Internable},
 };
 use std::{
     collections::HashMap,
@@ -76,20 +76,54 @@ static REGISTRY: LazyLock<RwLock<Handlebars<'static>>> = LazyLock::new(|| RwLock
 
 fn new_handlebars() -> Handlebars<'static> {
     let mut h = Handlebars::new();
-    h.register_helper(
-        "json_escape",
-        Box::new(
-            |h: &Helper, _: &Handlebars, _: &Context, _: &mut RenderContext, out: &mut dyn Output| -> HelperResult {
-                let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-                let escaped = serde_json::to_string(param).unwrap_or_default();
-                if escaped.len() >= 2 {
-                    out.write(&escaped[1..escaped.len() - 1])?;
-                }
-                Ok(())
-            },
-        ),
-    );
+    h.register_helper("json_escape", Box::new(json_escape_helper));
+    h.register_helper("bytes", Box::new(bytes_helper));
+    h.register_helper("round", Box::new(round_helper));
     h
+}
+
+/// `{{json_escape name}}` escapes a string for use inside a JSON string literal.
+fn json_escape_helper(
+    h: &Helper,
+    _: &Handlebars,
+    _: &Context,
+    _: &mut RenderContext,
+    out: &mut dyn Output,
+) -> HelperResult {
+    let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
+    let escaped = serde_json::to_string(param).unwrap_or_default();
+    if escaped.len() >= 2 {
+        out.write(&escaped[1..escaped.len() - 1])?;
+    }
+    Ok(())
+}
+
+/// `{{bytes disk.free_bytes}}` renders a byte count as `12.34 GB`.
+///
+/// Lenient on purpose: a missing or non-numeric value renders empty instead
+/// of failing, because `validate` renders every template against an empty
+/// context.
+fn bytes_helper(h: &Helper, _: &Handlebars, _: &Context, _: &mut RenderContext, out: &mut dyn Output) -> HelperResult {
+    if let Some(bytes) = h.param(0).and_then(|v| v.value().as_u64()) {
+        out.write(&human_readable_byte_size(bytes))?;
+    }
+    Ok(())
+}
+
+/// `{{round disk.percent}}` renders `95`; `{{round disk.percent decimals=1}}` renders `95.3`.
+///
+/// Halves round away from zero (`2.5` -> `3`), unlike `format!`, which
+/// rounds them to even. Lenient like `bytes`: a missing or non-numeric
+/// value renders empty, and a non-numeric `decimals` counts as `0`.
+fn round_helper(h: &Helper, _: &Handlebars, _: &Context, _: &mut RenderContext, out: &mut dyn Output) -> HelperResult {
+    if let Some(value) = h.param(0).and_then(|v| v.value().as_f64()) {
+        let decimals = h.hash_get("decimals").and_then(|v| v.value().as_u64()).unwrap_or(0).min(10);
+        let factor = 10f64.powi(i32::try_from(decimals).unwrap_or(0));
+        // `+ 0.0` turns a rounded `-0` into `0`.
+        let rounded = (value * factor).round() / factor + 0.0;
+        out.write(&format!("{rounded:.prec$}", prec = usize::try_from(decimals).unwrap_or(0)))?;
+    }
+    Ok(())
 }
 
 /// Drop every cached body and compiled template.
@@ -421,6 +455,43 @@ mod tests {
         assert_eq!(ctx["kind"], "DiskAlert");
         assert_eq!(ctx["disk"]["level"], "critical");
         assert_eq!(ctx["disk"]["percent"], 95.0);
+    }
+
+    #[test]
+    fn bytes_and_round_helpers_format_disk_values() {
+        let event = NotificationEvent::from_content(&MessageContent::DiskAlert(DiskAlert {
+            level: DiskAlertLevel::Warn,
+            total_bytes: 1_099_511_627_776,
+            free_bytes: 53_687_091_200,
+            used_bytes: 1_045_824_536_576,
+            percent: 95.117_187_5,
+        }));
+        let template = "{{round disk.percent}}% · {{round disk.percent decimals=1}}% · {{bytes disk.free_bytes}} of {{bytes disk.total_bytes}}";
+        let rendered = new_handlebars().render_template(template, &context_for(&event)).expect("render");
+        assert_eq!(rendered, "95% · 95.1% · 50.00 GB of 1.00 TB");
+    }
+
+    #[test]
+    fn bytes_and_round_helpers_pass_validation_against_empty_context() {
+        // `validate` renders against `{}`; the helpers must not turn a valid
+        // template into a config error.
+        assert!(validate("{{round disk.percent decimals=1}} {{bytes disk.free_bytes}}").is_ok());
+        let rendered = new_handlebars()
+            .render_template("[{{round missing}}][{{bytes missing}}]", &serde_json::json!({}))
+            .expect("render");
+        assert_eq!(rendered, "[][]");
+    }
+
+    #[test]
+    fn round_helper_rounds_halves_away_from_zero() {
+        let render = |template: &str, value: f64| {
+            new_handlebars().render_template(template, &serde_json::json!({ "v": value })).expect("render")
+        };
+        assert_eq!(render("{{round v}}", 0.5), "1");
+        assert_eq!(render("{{round v}}", 2.5), "3");
+        assert_eq!(render("{{round v}}", -0.4), "0");
+        assert_eq!(render("{{round v decimals=1}}", 1.25), "1.3");
+        assert_eq!(render("{{round v decimals=\"1\"}}", 1.25), "1");
     }
 
     fn watch_event() -> NotificationEvent {

@@ -59,100 +59,6 @@ impl MsgKind {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{MsgKind, WatchChange, WatchChanges, WatchGroupItems, WatchItems};
-    use std::sync::Arc;
-
-    fn titles(names: &[&str]) -> Vec<Arc<str>> { names.iter().map(|n| Arc::from(*n)).collect() }
-
-    fn sample_changes() -> WatchChanges {
-        WatchChanges::new(
-            "sports".to_string(),
-            vec![
-                WatchChange::GroupsAdded(WatchItems::complete(titles(&["Event Bundesliga"]))),
-                WatchChange::GroupsRemoved(WatchItems::complete(titles(&["DE Kids"]))),
-                WatchChange::ChannelsAdded(WatchGroupItems {
-                    group: "DE Sport HD".into(),
-                    items: WatchItems::complete(titles(&["Sky Sport 5"])),
-                }),
-            ],
-        )
-    }
-
-    #[test]
-    fn watch_changes_serialize_as_tagged_list() {
-        let json = serde_json::to_value(sample_changes()).expect("serialize");
-        assert_eq!(json["target"], "sports");
-        assert_eq!(json["changes"][0]["kind"], "groups_added");
-        assert_eq!(json["changes"][0]["items"][0], "Event Bundesliga");
-        assert_eq!(json["changes"][2]["kind"], "channels_added");
-        assert_eq!(json["changes"][2]["group"], "DE Sport HD");
-        assert_eq!(json["changes"][2]["total"], 1);
-        assert_eq!(json["changes"][2]["truncated"], false);
-        let back: WatchChanges = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back, sample_changes());
-    }
-
-    #[test]
-    fn template_view_groups_changes_by_kind() {
-        let changes = sample_changes();
-        let view = serde_json::to_value(changes.template_view()).expect("serialize view");
-        assert_eq!(view["groups_added"]["items"][0], "Event Bundesliga");
-        assert_eq!(view["groups_removed"]["total"], 1);
-        assert_eq!(view["channels_added"][0]["group"], "DE Sport HD");
-        assert!(view.get("channels_removed").is_none(), "empty views must be absent");
-        assert_eq!(view["changes"].as_array().map(Vec::len), Some(3));
-    }
-
-    #[test]
-    fn wire_name_matches_serde_rename() {
-        assert_eq!(MsgKind::Info.wire_name(), "info");
-        assert_eq!(MsgKind::Stats.wire_name(), "stats");
-        assert_eq!(MsgKind::Error.wire_name(), "error");
-        assert_eq!(MsgKind::Watch.wire_name(), "watch");
-        assert_eq!(MsgKind::DiskAlert.wire_name(), "disk_alert");
-    }
-
-    #[test]
-    fn template_filename_uses_snake_case_wire_name() {
-        // Regression test: `DiskAlert` previously resolved to
-        // `telegram_diskalert.templ` instead of `telegram_disk_alert.templ`,
-        // breaking on-disk template auto-discovery for the new variant.
-        assert_eq!(MsgKind::Info.template_filename("telegram"), "telegram_info.templ");
-        assert_eq!(MsgKind::Stats.template_filename("telegram"), "telegram_stats.templ");
-        assert_eq!(MsgKind::Error.template_filename("telegram"), "telegram_error.templ");
-        assert_eq!(MsgKind::Watch.template_filename("telegram"), "telegram_watch.templ");
-        assert_eq!(MsgKind::DiskAlert.template_filename("telegram"), "telegram_disk_alert.templ");
-        assert_eq!(MsgKind::DiskAlert.template_filename("discord"), "discord_disk_alert.templ");
-        assert_eq!(MsgKind::DiskAlert.template_filename("rest"), "rest_disk_alert.templ");
-        assert_eq!(MsgKind::DiskAlert.template_filename("pushover"), "pushover_disk_alert.templ");
-    }
-
-    #[test]
-    fn display_round_trips_through_from_str() {
-        // Regression test: `Display` emitted `DiskAlert` while `FromStr`
-        // only accepted `disk_alert`, so the frontend notify_on radio
-        // group silently dropped the selection on the way back.
-        let kinds = [
-            MsgKind::Info,
-            MsgKind::Stats,
-            MsgKind::Error,
-            MsgKind::Watch,
-            MsgKind::DiskAlert,
-            MsgKind::RecordingStarted,
-            MsgKind::RecordingCompleted,
-            MsgKind::RecordingFailed,
-        ];
-        for kind in kinds {
-            assert!(
-                kind.to_string().parse::<MsgKind>().is_ok_and(|parsed| parsed == kind),
-                "round-trip failed for {kind}"
-            );
-        }
-    }
-}
-
 /// Every watch change one target refresh detected.
 ///
 /// Lives here rather than in `tuliprox-core` because it is an event payload:
@@ -318,4 +224,98 @@ pub struct ConfigReloadFailure {
     /// The formatted path list the watcher reported.
     pub paths: String,
     pub error: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MsgKind, WatchChange, WatchChanges, WatchGroupItems, WatchItems};
+    use std::sync::Arc;
+
+    fn titles(names: &[&str]) -> Vec<Arc<str>> { names.iter().map(|n| Arc::from(*n)).collect() }
+
+    fn sample_changes() -> WatchChanges {
+        WatchChanges::new(
+            "sports".to_string(),
+            vec![
+                WatchChange::GroupsAdded(WatchItems::complete(titles(&["Event Bundesliga"]))),
+                WatchChange::GroupsRemoved(WatchItems::complete(titles(&["DE Kids"]))),
+                WatchChange::ChannelsAdded(WatchGroupItems {
+                    group: "DE Sport HD".into(),
+                    items: WatchItems::complete(titles(&["Sky Sport 5"])),
+                }),
+            ],
+        )
+    }
+
+    #[test]
+    fn watch_changes_serialize_as_tagged_list() {
+        let json = serde_json::to_value(sample_changes()).expect("serialize");
+        assert_eq!(json["target"], "sports");
+        assert_eq!(json["changes"][0]["kind"], "groups_added");
+        assert_eq!(json["changes"][0]["items"][0], "Event Bundesliga");
+        assert_eq!(json["changes"][2]["kind"], "channels_added");
+        assert_eq!(json["changes"][2]["group"], "DE Sport HD");
+        assert_eq!(json["changes"][2]["total"], 1);
+        assert_eq!(json["changes"][2]["truncated"], false);
+        let back: WatchChanges = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, sample_changes());
+    }
+
+    #[test]
+    fn template_view_groups_changes_by_kind() {
+        let changes = sample_changes();
+        let view = serde_json::to_value(changes.template_view()).expect("serialize view");
+        assert_eq!(view["groups_added"]["items"][0], "Event Bundesliga");
+        assert_eq!(view["groups_removed"]["total"], 1);
+        assert_eq!(view["channels_added"][0]["group"], "DE Sport HD");
+        assert!(view.get("channels_removed").is_none(), "empty views must be absent");
+        assert_eq!(view["changes"].as_array().map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn wire_name_matches_serde_rename() {
+        assert_eq!(MsgKind::Info.wire_name(), "info");
+        assert_eq!(MsgKind::Stats.wire_name(), "stats");
+        assert_eq!(MsgKind::Error.wire_name(), "error");
+        assert_eq!(MsgKind::Watch.wire_name(), "watch");
+        assert_eq!(MsgKind::DiskAlert.wire_name(), "disk_alert");
+    }
+
+    #[test]
+    fn template_filename_uses_snake_case_wire_name() {
+        // Regression test: `DiskAlert` previously resolved to
+        // `telegram_diskalert.templ` instead of `telegram_disk_alert.templ`,
+        // breaking on-disk template auto-discovery for the new variant.
+        assert_eq!(MsgKind::Info.template_filename("telegram"), "telegram_info.templ");
+        assert_eq!(MsgKind::Stats.template_filename("telegram"), "telegram_stats.templ");
+        assert_eq!(MsgKind::Error.template_filename("telegram"), "telegram_error.templ");
+        assert_eq!(MsgKind::Watch.template_filename("telegram"), "telegram_watch.templ");
+        assert_eq!(MsgKind::DiskAlert.template_filename("telegram"), "telegram_disk_alert.templ");
+        assert_eq!(MsgKind::DiskAlert.template_filename("discord"), "discord_disk_alert.templ");
+        assert_eq!(MsgKind::DiskAlert.template_filename("rest"), "rest_disk_alert.templ");
+        assert_eq!(MsgKind::DiskAlert.template_filename("pushover"), "pushover_disk_alert.templ");
+    }
+
+    #[test]
+    fn display_round_trips_through_from_str() {
+        // Regression test: `Display` emitted `DiskAlert` while `FromStr`
+        // only accepted `disk_alert`, so the frontend notify_on radio
+        // group silently dropped the selection on the way back.
+        let kinds = [
+            MsgKind::Info,
+            MsgKind::Stats,
+            MsgKind::Error,
+            MsgKind::Watch,
+            MsgKind::DiskAlert,
+            MsgKind::RecordingStarted,
+            MsgKind::RecordingCompleted,
+            MsgKind::RecordingFailed,
+        ];
+        for kind in kinds {
+            assert!(
+                kind.to_string().parse::<MsgKind>().is_ok_and(|parsed| parsed == kind),
+                "round-trip failed for {kind}"
+            );
+        }
+    }
 }

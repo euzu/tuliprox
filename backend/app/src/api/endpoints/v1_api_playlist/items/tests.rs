@@ -6,18 +6,19 @@ use super::{
 };
 use crate::{
     api::endpoints::v1_api_playlist::inspect_common::{CaseInsensitiveNeedle, PageWindow},
+    model::ConfigInput,
     repository::LockedReceiverStream,
     utils::{canonicalize_untrusted_epg_id, EpgIdOutputCase},
 };
 use shared::{
     error::TuliproxError,
     model::{
-        CatchupAttribute, CatchupProperties, EpisodeStreamProperties, LiveStreamProperties, M3uPlaylistItem,
+        CatchupAttribute, CatchupProperties, EpisodeStreamProperties, InputType, LiveStreamProperties, M3uPlaylistItem,
         PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamProperties,
         StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, VirtualId, XtreamCluster,
         XtreamPlaylistItem,
     },
-    utils::Internable,
+    utils::{extract_id_from_url, Internable},
 };
 use std::{
     collections::HashSet,
@@ -26,6 +27,7 @@ use std::{
         Arc,
     },
 };
+use tuliprox_core::model::InputAliasMap;
 
 /// A provider URL as stored on records: the credentials sit in the path.
 pub(in crate::api::endpoints::v1_api_playlist) const SECRET_URL: &str =
@@ -63,6 +65,7 @@ pub(in crate::api::endpoints::v1_api_playlist) fn m3u_item(
         additional_properties: None,
         input_stream_id: provider_id.intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
@@ -94,11 +97,19 @@ pub(in crate::api::endpoints::v1_api_playlist) fn xtream_item(
         source_ordinal: 7,
         input_stream_id: provider_id.to_string().intern(),
         upstream_user_agent: None,
+        input_url: "".intern(),
     }
 }
 
 fn no_filter<'a>() -> ItemFilter<'a> {
-    ItemFilter { needle: None, search_fields: DEFAULT_SEARCH_FIELDS, group: None, epg: None, epg_status: &[] }
+    ItemFilter {
+        needle: None,
+        search_fields: DEFAULT_SEARCH_FIELDS,
+        group: None,
+        epg: None,
+        epg_status: &[],
+        aliases: None,
+    }
 }
 
 fn lookup(keys: &[&str], case: EpgIdOutputCase) -> EpgLookup {
@@ -368,7 +379,7 @@ fn series_cluster_of_a_target_hides_episode_rows_like_the_web_ui_listing() {
 #[test]
 fn default_projection_is_compact_and_ordered() {
     let item = xtream_item(11, 22, "Name", "Group", Some("epg.id"));
-    let projected = row_json(&project(&item, DEFAULT_ITEM_FIELDS, None));
+    let projected = row_json(&project(&item, DEFAULT_ITEM_FIELDS, None, None));
     let keys: Vec<&str> = projected.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
@@ -396,7 +407,8 @@ fn default_projection_is_compact_and_ordered() {
 #[test]
 fn projection_honors_requested_fields_and_order() {
     let item = xtream_item(11, 22, "Name", "Group", None);
-    let projected = row_json(&project(&item, &[ItemField::SourceOrdinal, ItemField::InputName, ItemField::Logo], None));
+    let projected =
+        row_json(&project(&item, &[ItemField::SourceOrdinal, ItemField::InputName, ItemField::Logo], None, None));
     let keys: Vec<&str> = projected.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(keys, ["source_ordinal", "input_name", "logo"]);
     assert_eq!(projected["source_ordinal"], 7);
@@ -425,9 +437,9 @@ fn opt_in_fields_are_not_in_the_default_set() {
 #[test]
 fn epg_status_field_is_null_without_a_lookup_and_classified_with_one() {
     let item = xtream_item(1, 1, "n", "g", Some("known"));
-    assert_eq!(field_value(&item, ItemField::EpgStatus, None), serde_json::Value::Null);
+    assert_eq!(field_value(&item, ItemField::EpgStatus, None, None), serde_json::Value::Null);
     let lookup = lookup(&["known"], EpgIdOutputCase::Preserve);
-    assert_eq!(field_value(&item, ItemField::EpgStatus, Some(&lookup)), "matched");
+    assert_eq!(field_value(&item, ItemField::EpgStatus, Some(&lookup), None), "matched");
 }
 
 #[test]
@@ -442,7 +454,7 @@ fn url_is_never_returned_for_any_field_or_item_type() {
     m3u.additional_properties = with_props.additional_properties.clone();
 
     assert!(!ItemField::NAMES.contains(&"url"));
-    for projected in [project(&with_props, ItemField::ALL, None), project(&m3u, ItemField::ALL, None)] {
+    for projected in [project(&with_props, ItemField::ALL, None, None), project(&m3u, ItemField::ALL, None, None)] {
         assert!(row_json(&projected).get("url").is_none());
         let json = serde_json::to_string(&projected).unwrap();
         assert!(!json.contains("secret-user"), "{json}");
@@ -456,8 +468,8 @@ fn logo_with_credentials_is_not_returned() {
     let mut item = m3u_item(1, "p", "n", "g", None);
     item.logo = "http://user:pw@cdn.example/logo.png".intern();
     item.logo_small = "http://cdn.example/l.png?username=a&password=b".intern();
-    assert_eq!(field_value(&item, ItemField::Logo, None), serde_json::Value::Null);
-    assert_eq!(field_value(&item, ItemField::LogoSmall, None), serde_json::Value::Null);
+    assert_eq!(field_value(&item, ItemField::Logo, None, None), serde_json::Value::Null);
+    assert_eq!(field_value(&item, ItemField::LogoSmall, None, None), serde_json::Value::Null);
 }
 
 #[test]
@@ -603,10 +615,10 @@ fn xtream_and_m3u_records_normalize_to_the_same_projection() {
         ItemField::SourceOrdinal,
         ItemField::AdditionalProperties,
     ];
-    assert_eq!(project(&xtream, &shared_fields, None), project(&m3u, &shared_fields, None));
+    assert_eq!(project(&xtream, &shared_fields, None, None), project(&m3u, &shared_fields, None, None));
     // M3U records have no category id.
-    assert_eq!(field_value(&xtream, ItemField::CategoryId, None), 9);
-    assert_eq!(field_value(&m3u, ItemField::CategoryId, None), serde_json::Value::Null);
+    assert_eq!(field_value(&xtream, ItemField::CategoryId, None, None), 9);
+    assert_eq!(field_value(&m3u, ItemField::CategoryId, None, None), serde_json::Value::Null);
 }
 
 #[test]
@@ -619,7 +631,7 @@ fn m3u_cluster_is_derived_from_the_item_type() {
         (PlaylistItemType::SeriesInfo, "series"),
     ] {
         item.item_type = item_type;
-        assert_eq!(field_value(&item, ItemField::Cluster, None), cluster);
+        assert_eq!(field_value(&item, ItemField::Cluster, None, None), cluster);
         assert_eq!(cluster_name(item.cluster()), cluster);
     }
 }
@@ -844,23 +856,23 @@ fn item_rows_serialize_as_objects_in_field_order() {
     let item = xtream_item(11, 22, "Name", "Group", Some("epg.id"));
     // Deliberately not alphabetical: the output follows the requested order.
     let fields = [ItemField::Name, ItemField::VirtualId, ItemField::Group, ItemField::ProviderId, ItemField::Cluster];
-    let row = project(&item, &fields, None);
+    let row = project(&item, &fields, None, None);
     assert_eq!(
         serde_json::to_string(&row).unwrap(),
         r#"{"name":"Name","virtual_id":11,"group":"Group","provider_id":"22","cluster":"live"}"#
     );
-    assert_eq!(serde_json::to_string(&project(&item, &[], None)).unwrap(), "{}");
+    assert_eq!(serde_json::to_string(&project(&item, &[], None, None)).unwrap(), "{}");
 }
 
 #[test]
 fn item_rows_serialize_like_the_former_string_keyed_map() {
     let item = xtream_item(11, 22, "Name", "Group", Some("epg.id"));
     let former = |fields: &[ItemField]| -> serde_json::Map<String, serde_json::Value> {
-        fields.iter().map(|field| (field.name().to_string(), field_value(&item, *field, None))).collect()
+        fields.iter().map(|field| (field.name().to_string(), field_value(&item, *field, None, None))).collect()
     };
     for fields in [DEFAULT_ITEM_FIELDS, ItemField::ALL, &[ItemField::SourceOrdinal, ItemField::Name]] {
         assert_eq!(
-            serde_json::to_string(&project(&item, fields, None)).unwrap(),
+            serde_json::to_string(&project(&item, fields, None, None)).unwrap(),
             serde_json::to_string(&former(fields)).unwrap()
         );
     }
@@ -879,4 +891,187 @@ async fn items_response_carries_the_rows_in_field_order() {
         ),
         "{json}"
     );
+}
+
+// ---- override_id -----------------------------------------------------------
+
+/// The alias map of one configured input, as the request builds it from the sources.
+fn aliases_for(input_name: &str, input_type: InputType) -> InputAliasMap {
+    let input = ConfigInput {
+        name: input_name.intern(),
+        input_type,
+        url: "http://provider.example/get.php?username=secret-user&password=secret-pass".to_string(),
+        username: Some("secret-user".to_string()),
+        password: Some("secret-pass".to_string()),
+        ..ConfigInput::default()
+    };
+    InputAliasMap::from_inputs(&[Arc::new(input)])
+}
+
+#[test]
+fn override_id_of_an_xtream_item_is_its_provider_id() {
+    let item = xtream_item(1, 4321, "n", "g", None);
+    let aliases = aliases_for("input-a", InputType::Xtream);
+    assert_eq!(item.override_id(&aliases).as_deref(), Some("4321"));
+    assert_eq!(field_value(&item, ItemField::OverrideId, None, Some(&aliases)), "4321");
+    let fields = [ItemField::ProviderId, ItemField::OverrideId];
+    assert_eq!(
+        row_json(&project(&item, &fields, None, Some(&aliases))),
+        serde_json::json!({ "provider_id": "4321", "override_id": "4321" })
+    );
+}
+
+#[test]
+fn override_id_of_an_m3u_item_without_numeric_id_is_the_url_hash() {
+    let url = "http://provider.example:8080/live/secret-user/secret-pass/channel.m3u8";
+    let mut item = m3u_item(1, "", "Hash Chan", "UK", None);
+    item.url = url.intern();
+    item.provider_id = extract_id_from_url(url).intern();
+    let aliases = aliases_for("input-a", InputType::M3u);
+
+    let override_id = item.override_id(&aliases).expect("an m3u url-hash item has an override id");
+    assert!(override_id.starts_with("urlhash-v1:"), "{override_id}");
+    assert_eq!(field_value(&item, ItemField::OverrideId, None, Some(&aliases)), serde_json::json!(&*override_id));
+
+    // A numeric m3u id is the provider id, not a url hash.
+    let numeric = m3u_item(2, "5555", "Num", "UK", None);
+    assert_eq!(numeric.override_id(&aliases).as_deref(), Some("5555"));
+}
+
+#[test]
+fn override_id_of_xtream_target_items_from_m3u_input_without_numeric_id_uses_input_stream_id() {
+    let url1 = "http://host:5004/auto/v5.1";
+    let url2 = "http://host:5004/auto/v5.2";
+    let hash1 = extract_id_from_url(url1);
+    let hash2 = extract_id_from_url(url2);
+    let aliases = aliases_for("input-a", InputType::M3u);
+
+    let mut m3u1 = m3u_item(1, "", "WRAL HD", "Live", None);
+    m3u1.url = url1.intern();
+    m3u1.provider_id = hash1.clone().intern();
+    m3u1.input_stream_id = hash1.clone().intern();
+
+    let mut m3u2 = m3u_item(2, "", "WRAL DT", "Live", None);
+    m3u2.url = url2.intern();
+    m3u2.provider_id = hash2.clone().intern();
+    m3u2.input_stream_id = hash2.clone().intern();
+
+    let mut xtream1 = xtream_item(1, 0, "WRAL HD", "Live", None);
+    xtream1.url = url1.intern();
+    xtream1.input_stream_id = hash1.intern();
+
+    let mut xtream2 = xtream_item(2, 0, "WRAL DT", "Live", None);
+    xtream2.url = url2.intern();
+    xtream2.input_stream_id = hash2.intern();
+
+    let m3u1_id = m3u1.override_id(&aliases).expect("m3u1 override id");
+    let m3u2_id = m3u2.override_id(&aliases).expect("m3u2 override id");
+    assert_ne!(m3u1_id, m3u2_id);
+
+    let xtream1_id = xtream1.override_id(&aliases).expect("xtream1 override id");
+    let xtream2_id = xtream2.override_id(&aliases).expect("xtream2 override id");
+
+    assert_ne!(xtream1_id, xtream2_id);
+    assert_eq!(xtream1_id, m3u1_id);
+    assert_eq!(xtream2_id, m3u2_id);
+}
+
+#[test]
+fn override_id_of_target_records_after_url_mapping_matches_input_record() {
+    let input_url = "http://host:5004/auto/v5.2";
+    let input_hash = extract_id_from_url(input_url);
+    let aliases = aliases_for("input-a", InputType::M3u);
+
+    let mut m3u_input = m3u_item(1, "", "WRAL DT", "Live", None);
+    m3u_input.url = input_url.intern();
+    m3u_input.provider_id = input_hash.clone().intern();
+    m3u_input.input_stream_id = input_hash.clone().intern();
+
+    let expected_id = m3u_input.override_id(&aliases).expect("m3u input override id");
+    assert!(expected_id.starts_with("urlhash-v1:"), "{expected_id}");
+
+    let mapped_url = "http://other/live/123.ts";
+
+    // Xtream target record after URL mapping
+    let mut xtream_target = xtream_item(1, 0, "WRAL DT", "Live", None);
+    xtream_target.url = mapped_url.intern();
+    xtream_target.input_url = input_url.intern();
+    xtream_target.input_stream_id = input_hash.clone().intern();
+
+    assert_eq!(xtream_target.override_id(&aliases).as_deref(), Some(&*expected_id));
+
+    // M3U target record after URL mapping and provider_id rewriting
+    let mut m3u_target = m3u_item(1, "mapped-provider-id", "WRAL DT", "Live", None);
+    m3u_target.url = mapped_url.intern();
+    m3u_target.input_url = input_url.intern();
+    m3u_target.input_stream_id = input_hash.intern();
+
+    assert_eq!(m3u_target.override_id(&aliases).as_deref(), Some(&*expected_id));
+}
+
+#[test]
+fn override_id_of_an_xtream_item_with_empty_input_stream_id_falls_back_to_provider_id() {
+    let mut item = xtream_item(1, 4321, "n", "g", None);
+    item.input_stream_id = "".intern();
+    let aliases = aliases_for("input-a", InputType::Xtream);
+    assert_eq!(item.override_id(&aliases).as_deref(), Some("4321"));
+}
+
+#[test]
+fn override_id_is_computed_only_when_requested() {
+    let item = xtream_item(1, 22, "n", "g", None);
+    assert!(!DEFAULT_ITEM_FIELDS.contains(&ItemField::OverrideId), "override_id is opt-in");
+    let default_row = row_json(&project(&item, DEFAULT_ITEM_FIELDS, None, None));
+    assert!(default_row.get("override_id").is_none(), "{default_row}");
+    // A projection that does not ask for the id never consults the alias map.
+    let fields = [ItemField::ProviderId, ItemField::Name];
+    assert_eq!(row_json(&project(&item, &fields, None, None)), serde_json::json!({ "provider_id": "22", "name": "n" }));
+
+    // Requested without a map, or for an input the map does not know, the value is null rather than guessed.
+    assert_eq!(field_value(&item, ItemField::OverrideId, None, None), serde_json::Value::Null);
+    let empty = InputAliasMap::default();
+    assert_eq!(field_value(&item, ItemField::OverrideId, None, Some(&empty)), serde_json::Value::Null);
+
+    // The request only builds the map when the id is projected or searched.
+    let plain = ValidatedItemsQuery::parse(target_query()).unwrap();
+    assert!(!plain.wants_override_id());
+    let projected =
+        ValidatedItemsQuery::parse(ItemsQuery { fields: Some(vec!["override_id".to_string()]), ..target_query() })
+            .unwrap();
+    assert!(projected.wants_override_id());
+    let searched = ValidatedItemsQuery::parse(ItemsQuery {
+        search: Some("p1".to_string()),
+        search_field: Some(vec!["override_id".to_string()]),
+        ..target_query()
+    })
+    .unwrap();
+    assert!(searched.wants_override_id());
+    let searched_without_text = ValidatedItemsQuery::parse(ItemsQuery {
+        search_field: Some(vec!["override_id".to_string()]),
+        ..target_query()
+    })
+    .unwrap();
+    assert!(!searched_without_text.wants_override_id(), "without search text nothing is searched");
+}
+
+#[test]
+fn search_by_override_id_is_exact() {
+    let aliases = aliases_for("input-a", InputType::Xtream);
+    let by_override_id = [ItemSearchField::OverrideId];
+
+    let exact = needle("1042");
+    let filter =
+        ItemFilter { needle: Some(&exact), search_fields: &by_override_id, aliases: Some(&aliases), ..no_filter() };
+    assert!(filter.matches(&xtream_item(1, 1042, "n", "g", None)));
+    assert!(!filter.matches(&xtream_item(1, 1043, "n", "g", None)));
+
+    // Unlike provider_id, override_id is not a substring match: part of a hash is not the item.
+    let part = needle("042");
+    let filter =
+        ItemFilter { needle: Some(&part), search_fields: &by_override_id, aliases: Some(&aliases), ..no_filter() };
+    assert!(!filter.matches(&xtream_item(1, 1042, "n", "g", None)));
+
+    // Without the alias map the field cannot match anything.
+    let filter = ItemFilter { needle: Some(&exact), search_fields: &by_override_id, ..no_filter() };
+    assert!(!filter.matches(&xtream_item(1, 1042, "n", "g", None)));
 }

@@ -1,0 +1,13 @@
+{
+  "name": "@tuliprox/plugin-ui-types",
+  "version": "1.0.0",
+  "description": "TypeScript definitions for the tuliprox plugin sandboxed-frame bridge (host ABI 1): window.tuliprox, bridge messages, slot contexts and plugin DTOs",
+  "license": "MIT",
+  "private": true,
+  "types": "index.d.ts",
+  "files": [
+    "index.d.ts",
+    "README.md"
+  ],
+  "tuliproxAbi": "1"
+}

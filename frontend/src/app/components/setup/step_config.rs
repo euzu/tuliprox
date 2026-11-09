@@ -128,7 +128,7 @@ pub fn ConfigStep(props: &ConfigStepProps) -> Html {
     };
 
     let context = ConfigViewContext { edit_mode: edit_mode.clone(), show_restart_notice: false, on_form_change };
-    let next_title = step.next().map_or_else(
+    let next_title = setup_ctx.next_step(step).map_or_else(
         || translate.t("SETUP.LABEL.NEXT"),
         |next| format!("{}: {}", translate.t("SETUP.LABEL.NEXT"), translate.t(next.title_key())),
     );
@@ -149,8 +149,8 @@ pub fn ConfigStep(props: &ConfigStepProps) -> Html {
                                     <span class="info">
                                         {format!(
                                             "Step {}/{}: {}",
-                                            step.position(),
-                                            SetupStep::total(),
+                                            setup_ctx.step_position(step),
+                                            setup_ctx.step_total(),
                                             translate.t(step.description_key())
                                         )}
                                     </span>

@@ -20,6 +20,7 @@ async fn library_context(root: &Path, order: ProcessingOrder) -> PlaylistProcess
         path: media.to_string_lossy().into_owned(),
         content_type: LibraryContentType::Movie,
         recursive: true,
+        follow_symlinks: true,
     }];
     config.library = Some(library);
     let mut metadata = MetadataUpdateConfig::default();
@@ -546,12 +547,14 @@ async fn manual_update_library_empty_does_not_authorize_foreign_forced_empty_tar
         &mut Vec::new(),
         ClusterFlags::Vod,
         false,
+        &HashMap::new(),
+        &Arc::default(),
         &Arc::default(),
     )
     .await
     .unwrap();
     assert_eq!(prepared.library_empty, tuliprox_repository::LibraryEmptyPublication::Contribution);
-    let (result, _) = finalize_prepared_target(Arc::new(ctx), prepared).await;
+    let (result, _, _) = finalize_prepared_target(Arc::new(ctx), prepared).await;
     assert!(result.is_err(), "Library must not relax the existing non-Xtream force-empty output guard");
     assert!(!temp.path().join("selected.m3u").exists());
 }

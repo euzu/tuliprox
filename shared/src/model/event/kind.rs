@@ -67,6 +67,12 @@ pub enum EventKind {
     FailoverGroupCircuitChanged,
     FailoverGroupMemberSwitched,
     FailoverOverridesChanged,
+    /// A marketplace update of an installed plugin waits for an admin (W10).
+    PluginUpdateAvailable,
+    /// A marketplace update of an installed plugin is active (W10).
+    PluginUpdateApplied,
+    /// A marketplace update was rejected or rolled back (W10).
+    PluginUpdateFailed,
 }
 
 impl EventKind {
@@ -74,7 +80,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 51] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -123,6 +129,9 @@ impl EventKind {
         Self::FailoverGroupCircuitChanged,
         Self::FailoverGroupMemberSwitched,
         Self::FailoverOverridesChanged,
+        Self::PluginUpdateAvailable,
+        Self::PluginUpdateApplied,
+        Self::PluginUpdateFailed,
     ];
 
     /// This kind's bit position.
@@ -191,7 +200,10 @@ impl EventKind {
             | Self::FailoverGroupMemberSelected
             | Self::FailoverGroupExhausted
             | Self::FailoverGroupCircuitChanged
-            | Self::FailoverGroupMemberSwitched => Permission::SystemRead,
+            | Self::FailoverGroupMemberSwitched
+            | Self::PluginUpdateAvailable
+            | Self::PluginUpdateApplied
+            | Self::PluginUpdateFailed => Permission::SystemRead,
             Self::MaintenanceChanged => Permission::MaintenanceRead,
             // The failover files back the failover group editor, which is a playlist view.
             Self::FailoverOverridesChanged => Permission::PlaylistRead,
@@ -299,6 +311,9 @@ impl EventKind {
             Self::FailoverGroupCircuitChanged => "failover_group.circuit_changed",
             Self::FailoverGroupMemberSwitched => "failover_group.member_switched",
             Self::FailoverOverridesChanged => "failover.overrides_changed",
+            Self::PluginUpdateAvailable => "plugin.update.available",
+            Self::PluginUpdateApplied => "plugin.update.applied",
+            Self::PluginUpdateFailed => "plugin.update.failed",
         }
     }
 
