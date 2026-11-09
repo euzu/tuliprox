@@ -156,8 +156,10 @@ pub(super) async fn detached(work: impl std::future::Future<Output = Response> +
     })
 }
 
-/// `GET /api/v1/plugins/{id}/staged`: the capability review of the package
-/// staged for `id` (an update waiting for approval). `404` when none is staged.
+/// `GET /api/v1/plugins/{id}/staged`: the capability review of the package an
+/// approve of `id` would pin: the one staged for `id` (an update waiting for
+/// approval), or the installed `pending_approval` one when nothing is staged.
+/// `404` for an unknown id, `409` for a plugin not waiting for approval.
 #[cfg(feature = "plugins")]
 async fn get_plugin_staged(State(app_state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let Some(plugins) = app_state.plugins.as_ref() else {

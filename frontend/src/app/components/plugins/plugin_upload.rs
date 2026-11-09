@@ -24,6 +24,10 @@ pub struct PluginUploadProps {
     /// instead of on the file picker.
     #[prop_or_default]
     pub initial_review: Option<PluginUploadReviewDto>,
+    /// `initial_review` is of an installed package waiting for approval:
+    /// approving pins it in place, so the dialog says approve, not install.
+    #[prop_or_default]
+    pub approve_in_place: bool,
 }
 
 /// The `network` capability needs a warning of its own.
@@ -80,7 +84,18 @@ fn render_capabilities(translate: &YewI18n, review: &PluginUploadReviewDto) -> H
 
 /// What an update changes in the approval besides the added capabilities:
 /// the ones no longer asked for, and that MCP exposure starts off again.
-fn render_capability_diff(translate: &YewI18n, review: &PluginUploadReviewDto) -> Html {
+/// The i18n key of the note that an earlier MCP approval is not carried over:
+/// to the new version of an update, or to an installed package that changed
+/// since it was approved.
+const fn mcp_reset_key(in_place: bool) -> &'static str {
+    if in_place {
+        "MESSAGES.PLUGIN_APPROVAL_MCP_RESET"
+    } else {
+        "MESSAGES.PLUGIN_UPDATE_MCP_RESET"
+    }
+}
+
+fn render_capability_diff(translate: &YewI18n, review: &PluginUploadReviewDto, in_place: bool) -> Html {
     let Some(diff) = review.capability_diff.as_ref() else {
         return html! {};
     };
@@ -92,7 +107,7 @@ fn render_capability_diff(translate: &YewI18n, review: &PluginUploadReviewDto) -
                 </p>
             }
             if diff.mcp_was_approved {
-                <p class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_UPDATE_MCP_RESET") }</p>
+                <p class="tp__plugins__muted">{ translate.t(mcp_reset_key(in_place)) }</p>
             }
         </>
     }
@@ -176,6 +191,7 @@ fn render_review(
     review: &PluginUploadReviewDto,
     expose_mcp: bool,
     on_mcp: &Callback<Event>,
+    in_place: bool,
 ) -> Html {
     html! {
         <>
@@ -204,7 +220,7 @@ fn render_review(
             </p>
             { render_network_warning(translate, review) }
             { render_capabilities(translate, review) }
-            { render_capability_diff(translate, review) }
+            { render_capability_diff(translate, review, in_place) }
             { render_custom_ui(translate, review) }
             { render_rpc_exports(translate, review) }
             if !review.secrets.is_empty() {
@@ -253,6 +269,7 @@ pub fn PluginUpload(props: &PluginUploadProps) -> Html {
     let busy = use_state(|| false);
     let error = use_state(|| None::<PluginActionError>);
     let expose_mcp = use_state(|| false);
+    let in_place = props.approve_in_place;
 
     let on_file = {
         let file = file.clone();
@@ -324,14 +341,11 @@ pub fn PluginUpload(props: &PluginUploadProps) -> Html {
             let busy = busy.clone();
             let on_installed = on_installed.clone();
             let on_close = on_close.clone();
+            let done_key = if in_place { "MESSAGES.PLUGIN_APPROVED" } else { "MESSAGES.PLUGIN_INSTALLED" };
             spawn_local(async move {
                 match services.plugins.approve(&reviewed.id, &body).await {
                     Ok(summary) => {
-                        services.toastr.success(format!(
-                            "{}: {}",
-                            translate.t("MESSAGES.PLUGIN_INSTALLED"),
-                            summary.name
-                        ));
+                        services.toastr.success(format!("{}: {}", translate.t(done_key), summary.name));
                         on_installed.emit(());
                         on_close.emit(());
                     }
@@ -357,7 +371,7 @@ pub fn PluginUpload(props: &PluginUploadProps) -> Html {
     let primary = if review.is_some() {
         DialogAction::new(
             "approve",
-            "LABEL.PLUGIN_APPROVE_INSTALL",
+            if in_place { "LABEL.PLUGIN_APPROVE" } else { "LABEL.PLUGIN_APPROVE_INSTALL" },
             DialogResult::Ok,
             Some("Save".to_owned()),
             Some("primary".to_owned()),
@@ -385,7 +399,7 @@ pub fn PluginUpload(props: &PluginUploadProps) -> Html {
     };
 
     let body = if let Some(reviewed) = review.as_ref() {
-        render_review(&translate, reviewed, *expose_mcp, &on_mcp)
+        render_review(&translate, reviewed, *expose_mcp, &on_mcp, in_place)
     } else {
         html! {
             <>
@@ -406,7 +420,7 @@ pub fn PluginUpload(props: &PluginUploadProps) -> Html {
 
     let content = html! {
         <div class="tp__plugin-upload">
-            <h2>{ translate.t("LABEL.PLUGIN_INSTALL") }</h2>
+            <h2>{ translate.t(if in_place { "LABEL.PLUGIN_APPROVE" } else { "LABEL.PLUGIN_INSTALL" }) }</h2>
             <div class="tp__plugin-upload__body">{ body }</div>
         </div>
     };
@@ -501,6 +515,12 @@ mod tests {
         });
         assert_eq!(approve_body(&update, false).capabilities, ["network", "storage"]);
         assert!(!approve_body(&update, false).mcp, "the earlier MCP approval is not carried over");
+    }
+
+    #[test]
+    fn the_mcp_reset_note_names_what_it_is_not_carried_over_to() {
+        assert_eq!(mcp_reset_key(false), "MESSAGES.PLUGIN_UPDATE_MCP_RESET");
+        assert_eq!(mcp_reset_key(true), "MESSAGES.PLUGIN_APPROVAL_MCP_RESET");
     }
 
     #[test]

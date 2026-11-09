@@ -1407,6 +1407,14 @@
 
 ## 🐛 Fixes
 
+- **A plugin shipped in the plugins directory can be approved from the Web UI.** A package placed in
+  `<config dir>/plugins/<id>/` without a config entry, for example one shipped inside a Docker image, showed
+  **Pending approval** with no way to review or approve it. The chip now opens the capability review as **Approve plugin**,
+  and approving pins the installed package in place. A plugin that changed on disk since
+  an earlier approval shows the added and dropped capabilities. `GET /api/v1/plugins/{id}/staged` returns the review of the installed
+  `pending_approval` package when nothing is staged, and answers `409` instead of `404` for an installed plugin that is
+  not waiting for approval.
+
 - **Library extensions are matched in any notation.** Entries in `library.supported_extensions` such as `.mp3`, `MP3`
   or ` mp3 ` are normalized to `mp3`. Before, an entry with a leading dot or spaces matched no file, so the scan found
   nothing for it. Local `.mp3` files are now served as `audio/mpeg`.

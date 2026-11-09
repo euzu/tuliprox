@@ -72,6 +72,12 @@ const fn can_toggle(state: PluginStateDto) -> bool {
     )
 }
 
+/// Whether approving a review opened from the list pins the installed package
+/// in place. The list reviews only listed plugins: a staged update names the
+/// version it replaces, and the installed package waiting for approval
+/// replaces nothing.
+fn approves_in_place(review: &PluginUploadReviewDto) -> bool { review.replaces.is_none() }
+
 /// One plugin with what the list loads for it besides the summary. Stats and
 /// tasks are `None` when their request failed, as it does for a plugin that
 /// never loaded.
@@ -207,7 +213,8 @@ struct RowActions<'a> {
     on_logs: &'a Callback<String>,
     on_toggle: &'a Callback<(String, bool)>,
     on_uninstall: &'a Callback<(String, String)>,
-    /// Open the review of the update staged for this plugin id.
+    /// Open the review of what an approve of this plugin id would pin: the
+    /// staged update, or the installed package waiting for approval.
     on_review_update: &'a Callback<String>,
     /// Ask to roll back: plugin id, name and the version it would return to.
     on_rollback: &'a Callback<(String, String, String)>,
@@ -282,9 +289,21 @@ fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'
                     if let Some(version) = summary.version.as_ref() {
                         <span class="tp__plugins__version">{ format!("{} {version}", translate.t("LABEL.VERSION")) }</span>
                     }
-                    <span class={classes!("tp__task-status", state_modifier(summary.state))}>
-                        { translate.t(state_label_key(summary.state)) }
-                    </span>
+                    if actions.can_write && summary.state == PluginStateDto::PendingApproval {
+                        <TextButton
+                            name={format!("review-approval-{}", summary.id)}
+                            class="tp__plugins__state-action"
+                            title={translate.t(state_label_key(summary.state))}
+                            hint={Some(translate.t("LABEL.PLUGIN_REVIEW_APPROVAL"))}
+                            aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_REVIEW_APPROVAL"), summary.name)}
+                            disabled={actions.busy}
+                            onclick={review_update.clone()}
+                        />
+                    } else {
+                        <span class={classes!("tp__task-status", state_modifier(summary.state))}>
+                            { translate.t(state_label_key(summary.state)) }
+                        </span>
+                    }
                     if let Some(category) = summary.category.as_ref() {
                         <span class="tp__plugin-badge">{ category_label(translate, category) }</span>
                     }
@@ -988,7 +1007,8 @@ pub fn PluginsView() -> Html {
             }
             if let Some(review) = (*update_review).clone().filter(|_| can_write) {
                 <PluginUpload key={format!("update-{}", review.id)} on_close={on_close_update}
-                    on_installed={on_installed} initial_review={Some(review.clone())} />
+                    on_installed={on_installed} approve_in_place={approves_in_place(&review)}
+                    initial_review={Some(review.clone())} />
             }
             if let Some((_, name, version)) = (*rollback_for).clone() {
                 <ConfirmDialog
@@ -1058,6 +1078,35 @@ mod tests {
         assert_eq!(added_capabilities_text(&update), None);
         update.added_capabilities = vec!["network".to_string(), "epg_write".to_string()];
         assert_eq!(added_capabilities_text(&update).as_deref(), Some("network, epg_write"));
+    }
+
+    #[test]
+    fn only_a_review_that_replaces_nothing_approves_in_place() {
+        let mut review = PluginUploadReviewDto {
+            id: "demo".to_string(),
+            name: "Demo".to_string(),
+            version: "1.0.0".to_string(),
+            author: None,
+            homepage: None,
+            description: None,
+            abi: "1.0.0".to_string(),
+            wasm_sha256: None,
+            capabilities: Vec::new(),
+            hooks: Vec::new(),
+            events: Vec::new(),
+            tasks: Vec::new(),
+            secrets: Vec::new(),
+            custom_ui: false,
+            contributions: Vec::new(),
+            rpc_exports: Vec::new(),
+            mcp_requested: false,
+            replaces: None,
+            capability_diff: None,
+            warnings: Vec::new(),
+        };
+        assert!(approves_in_place(&review), "an installed plugin waiting for approval");
+        review.replaces = Some("0.9.0".to_string());
+        assert!(!approves_in_place(&review), "a staged update installs over the prior");
     }
 
     #[test]

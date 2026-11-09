@@ -299,6 +299,41 @@
     gap: var(--margin-micro) var(--margin-mini);
     color: var(--theme-brand-text-muted);
     font-size: var(--font-size-xs);
+
+    // The "Pending approval" pill opens the review: a TextButton that keeps
+    // the pill look of `tp__task-status--waiting` and inverts on hover.
+    .tp__text-button.tp__plugins__state-action {
+      min-height: 0;
+      max-height: none;
+      padding: var(--padding-micro) var(--padding-mini);
+      border: 1px solid var(--warn-color);
+      border-radius: var(--tag-border-radius);
+      color: var(--warn-color);
+      background-color: var(--warn-background-color);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      font-size: var(--font-size-sm);
+      font-weight: normal;
+      cursor: pointer;
+
+      // Hover only for mouse pointers: touch browsers keep :hover after a tap.
+      &:focus-visible {
+        color: var(--warn-background-color);
+        background-color: var(--warn-color);
+        outline: none;
+      }
+
+      @media (hover: hover) and (pointer: fine) {
+        &:hover:not(:disabled) {
+          color: var(--warn-background-color);
+          background-color: var(--warn-color);
+        }
+      }
+
+      &:disabled {
+        cursor: default;
+      }
+    }
   }
 
   // Icon-only buttons: the label is the tooltip and the accessible name.
