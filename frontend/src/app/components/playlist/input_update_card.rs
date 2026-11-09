@@ -944,13 +944,18 @@ fn input_content(
                             )
                         })}
                     }
-                    if !view.localized_progress_details.is_empty() {
+                    if !view.localized_progress_details.is_empty() || view.failure_reason.is_some() {
                         <section class="tp__playlist-update-view__progress-details">
                             <h4>{translate("MESSAGES.PLAYLIST_UPDATE.RUN_DETAILS")}</h4>
                             <ul>
                                 {for view.localized_progress_details.iter().map(|detail| {
                                     html! { <li>{translate(progress_detail_label_key(*detail))}</li> }
                                 })}
+                                if let Some(reason) = view.failure_reason.as_deref() {
+                                    <li class="tp__playlist-update-view__failure-reason">
+                                        {translate("MESSAGES.PLAYLIST_UPDATE.DETAIL_FAILURE_REASON").replace("{reason}", reason)}
+                                    </li>
+                                }
                             </ul>
                         </section>
                     }

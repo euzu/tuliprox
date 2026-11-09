@@ -10,6 +10,7 @@ description: >
 capabilities:
   network: true
   storage: true
+  process: true
 provides:
   input_type: true
 hooks:

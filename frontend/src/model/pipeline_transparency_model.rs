@@ -31,6 +31,8 @@ pub struct InputUpdateRunView {
     pub progress_details: Vec<String>,
     /// Structured details safe for localized presentation.
     pub localized_progress_details: Vec<PlaylistUpdateProgressDetail>,
+    /// Why the input failed or completed partially, credentials already masked by the server.
+    pub failure_reason: Option<String>,
     pub cluster_results: Vec<InputClusterRunView>,
     pub target_results: Vec<TargetRunView>,
 }
@@ -177,6 +179,7 @@ pub fn build_input_update_run_views(
                 last_update_at: card.last_update_at,
                 progress_details: runtime.details().to_vec(),
                 localized_progress_details: runtime.localized_details().to_vec(),
+                failure_reason: runtime.failure_reason().map(str::to_string),
                 cluster_results,
                 target_results,
             }

@@ -2692,6 +2692,7 @@
       "DETAIL_INPUT_COMPLETED_PARTIALLY": "Input update completed partially.",
       "DETAIL_INPUT_COMPLETED_SUCCESSFULLY": "Input update completed successfully.",
       "DETAIL_INPUT_FAILED": "Input update failed.",
+      "DETAIL_FAILURE_REASON": "Grund: {reason}",
       "DETAIL_LIBRARY_RESCAN_COMPLETED": "Library rescan completed; rebuilding selected targets.",
       "DETAIL_LIBRARY_RESCAN_FAILED": "Library rescan failed; selected targets were not rebuilt.",
       "DETAIL_LIBRARY_RESCAN_STARTED": "Library rescan started; selected target rebuild is waiting.",

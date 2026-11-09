@@ -92,6 +92,10 @@ fn normalized_trace(
                 // Only the globally allocated test-run order is normalized. All
                 // input identities, states, messages and telemetry remain exact.
                 progress.execution_order = Some(1.into());
+                // The failure reason names a per-run temporary path; keep only its stable part.
+                progress.failure_reason = progress
+                    .failure_reason
+                    .map(|reason| reason.split("/tmp/").next().unwrap_or_default().trim_end().to_string());
                 Some(progress)
             }
             _ => None,

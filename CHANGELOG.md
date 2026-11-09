@@ -219,6 +219,12 @@
 
 ## 🌟 New Features
 
+- **youtube-input supports yt-dlp as an optional stream resolver.** The plugin can now resolve playable YouTube streams
+  using a user-provided `yt-dlp` executable instead of Invidious. The input form selects the resolver (`invidious` or
+  `yt-dlp`) and accepts an optional `ytdlp_path` (defaulting to `/app/bin/yt-dlp` then `PATH`). Invidious instances are
+  optional when `yt-dlp` is selected, and all cache-missing videos in a fetch are resolved in a single batch process.
+  The plugin manifest declares the `process` capability.
+
 - **Official plugin packages are published as GitHub Releases.** Built `.tlpx` files are no longer stored in the
   source repository. A CI workflow builds every new plugin version and publishes it as the release
   `plugin-<id>-v<version>`; published versions are never replaced and stay installable for older Tuliprox versions. The
@@ -1462,6 +1468,17 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **The playlist update card says why an input failed.** "Run details" showed only "Input update failed." (once per
+  affected target). The card now shows each detail once and adds the reason of the first error, with credentials
+  masked, for a failed or partial input. The progress event carries it as `failure_reason`.
+
+- **Plugin approval dialog:** version and plugin id no longer run together in the title.
+
+- **youtube-input names Invidious instances that refuse the video API.** Public Invidious instances
+  usually block the API the plugin needs. The input form's **Check** button now asks each instance for a video instead
+  of its status page and reports `refuses the video API`; a fetch whose instances all refuse fails with that reason
+  instead of a generic error. The plugin documentation explains why and how to run your own instance.
 
 - **An input with aliases can be saved without a main account.** Leaving `url`, `username` and `password` of an
   Xtream (or M3U/Stalker) input empty while aliases exist was rejected as "url for input is mandatory". Such an input now

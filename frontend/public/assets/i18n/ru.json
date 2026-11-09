@@ -2683,6 +2683,7 @@
       "DETAIL_INPUT_COMPLETED_PARTIALLY": "Обновление источника завершено частично.",
       "DETAIL_INPUT_COMPLETED_SUCCESSFULLY": "Источник успешно обновлён.",
       "DETAIL_INPUT_FAILED": "Не удалось обновить источник.",
+      "DETAIL_FAILURE_REASON": "Причина: {reason}",
       "DETAIL_LIBRARY_RESCAN_COMPLETED": "Повторное сканирование библиотеки завершено; выбранные цели перестраиваются.",
       "DETAIL_LIBRARY_RESCAN_FAILED": "Повторное сканирование библиотеки не удалось; выбранные цели не перестроены.",
       "DETAIL_LIBRARY_RESCAN_STARTED": "Начато повторное сканирование библиотеки; перестроение выбранных целей ожидает.",

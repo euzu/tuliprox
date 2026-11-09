@@ -2683,6 +2683,7 @@
       "DETAIL_INPUT_COMPLETED_PARTIALLY": "La actualización de la entrada se completó parcialmente.",
       "DETAIL_INPUT_COMPLETED_SUCCESSFULLY": "La actualización de la entrada se completó correctamente.",
       "DETAIL_INPUT_FAILED": "La actualización de la entrada falló.",
+      "DETAIL_FAILURE_REASON": "Motivo: {reason}",
       "DETAIL_LIBRARY_RESCAN_COMPLETED": "Reescaneo de la biblioteca completado; reconstruyendo los destinos seleccionados.",
       "DETAIL_LIBRARY_RESCAN_FAILED": "El reescaneo de la biblioteca falló; los destinos seleccionados no se reconstruyeron.",
       "DETAIL_LIBRARY_RESCAN_STARTED": "Reescaneo de la biblioteca iniciado; la reconstrucción de los destinos seleccionados está en espera.",

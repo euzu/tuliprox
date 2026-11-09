@@ -5,6 +5,7 @@ mod cache;
 mod check;
 mod discovery;
 mod resolver;
+mod ytdlp;
 
 use discovery::{extract_channel_id_from_html, extract_live_info_from_html, parse_atom_feed, parse_target, TargetKind};
 use resolver::ResolvedStream;
@@ -23,6 +24,10 @@ mod plugin {
     pub struct Settings {
         #[serde(default)]
         pub channels: Vec<String>,
+        #[serde(default = "default_resolver")]
+        pub resolver: String,
+        #[serde(default)]
+        pub ytdlp_path: String,
         #[serde(default = "default_mode")]
         pub mode: String,
         #[serde(default = "default_max_uploads")]
@@ -33,6 +38,7 @@ mod plugin {
         pub cache_ttl_minutes: u32,
     }
 
+    fn default_resolver() -> String { "invidious".to_string() }
     fn default_mode() -> String { "recent_uploads".to_string() }
     fn default_max_uploads() -> u32 { 10 }
     fn default_cache_ttl_minutes() -> u32 { 120 }
@@ -42,6 +48,8 @@ mod plugin {
     /// Every field the input leaves unset keeps the plugin's own setting.
     #[derive(Debug, Default, PartialEq)]
     pub(super) struct InputOverrides {
+        pub(super) resolver: Option<String>,
+        pub(super) ytdlp_path: Option<String>,
         pub(super) mode: Option<String>,
         pub(super) max_uploads: Option<u32>,
         pub(super) cache_ttl_minutes: Option<u32>,
@@ -69,6 +77,8 @@ mod plugin {
                 continue;
             }
             match key.as_str() {
+                "resolver" => overrides.resolver = Some(value.to_string()),
+                "ytdlp_path" => overrides.ytdlp_path = Some(value.to_string()),
                 "mode" => overrides.mode = Some(value.to_string()),
                 "max_uploads" => match value.parse::<u32>() {
                     Ok(limit) => overrides.max_uploads = Some(limit),
@@ -100,12 +110,74 @@ mod plugin {
         overrides
     }
 
+    enum StreamResolver<'a> {
+        Invidious { instances: &'a [String], active_cursor: &'a mut usize },
+        YtDlp { program: String },
+    }
+
+    impl<'a> StreamResolver<'a> {
+        fn is_invidious(&self) -> bool { matches!(self, Self::Invidious { .. }) }
+
+        fn resolve_stream(
+            &mut self,
+            video_id: &str,
+            ttl_minutes: u32,
+            deadline: i64,
+        ) -> Result<ResolvedStream, String> {
+            match self {
+                Self::Invidious { instances, active_cursor } => {
+                    resolver::resolve_stream(video_id, instances, active_cursor, ttl_minutes, deadline)
+                }
+                Self::YtDlp { program } => {
+                    let mut map = ytdlp::resolve_streams(program, &[video_id], ttl_minutes, deadline)?;
+                    map.remove(video_id).ok_or_else(|| format!("failed to resolve stream for video {video_id}"))
+                }
+            }
+        }
+
+        fn resolve_streams(
+            &mut self,
+            video_ids: &[&str],
+            ttl_minutes: u32,
+            deadline: i64,
+        ) -> Result<std::collections::HashMap<String, ResolvedStream>, String> {
+            match self {
+                Self::Invidious { instances, active_cursor } => {
+                    let mut results = std::collections::HashMap::new();
+                    let mut last_err = None;
+                    for &id in video_ids {
+                        if clock::now_unix() >= deadline - 2 {
+                            break;
+                        }
+                        match resolver::resolve_stream(id, instances, active_cursor, ttl_minutes, deadline) {
+                            Ok(stream) => {
+                                results.insert(id.to_string(), stream);
+                            }
+                            Err(e) => {
+                                warn!("invidious query failed for {id}: {e}");
+                                last_err = Some(e);
+                            }
+                        }
+                    }
+                    if results.is_empty() && !video_ids.is_empty() {
+                        if let Some(err) = last_err {
+                            return Err(err);
+                        }
+                    }
+                    Ok(results)
+                }
+                Self::YtDlp { program } => ytdlp::resolve_streams(program, video_ids, ttl_minutes, deadline),
+            }
+        }
+    }
+
     struct FetchCtx<'a> {
-        instances: &'a [String],
-        active_cursor: &'a mut usize,
+        resolver: StreamResolver<'a>,
         deadline: i64,
         cache_ttl_minutes: u32,
         input_name: &'a str,
+        /// The last stream resolve error; it names the cause when the whole fetch fails.
+        last_resolve_error: Option<String>,
     }
 
     pub struct YoutubeInputPlugin;
@@ -114,7 +186,7 @@ mod plugin {
         fn fetch_playlist(req: &InputRequest) -> Result<Vec<Channel>, String> {
             let settings = Settings::current().map_err(|e| e.to_string())?;
 
-            // 1. Validate the mode setting; an input's own `plugin_config` overrides it.
+            // 1. Validate the mode and resolver settings; an input's own `plugin_config` overrides them.
             let overrides = input_overrides(req);
             let mode = overrides.mode.as_deref().unwrap_or(settings.mode.as_str());
             if mode != "recent_uploads" && mode != "live_only" {
@@ -124,13 +196,21 @@ mod plugin {
                 ));
             }
 
+            let resolver_choice = overrides.resolver.as_deref().unwrap_or(settings.resolver.as_str());
+            if resolver_choice != "invidious" && resolver_choice != "yt-dlp" {
+                return Err(format!(
+                    "input '{}' has invalid resolver '{resolver_choice}': set Resolver to 'invidious' or 'yt-dlp'",
+                    req.input_name
+                ));
+            }
+
             // Every setting can be overridden per input; the plugin's own value is the default.
             let instances = overrides.invidious_instances.as_deref().unwrap_or(&settings.invidious_instances);
             let cache_ttl_minutes = overrides.cache_ttl_minutes.unwrap_or(settings.cache_ttl_minutes).clamp(10, 360);
 
-            if instances.is_empty() {
+            if resolver_choice == "invidious" && instances.is_empty() {
                 return Err(format!(
-                    "input '{}' has no Invidious instance: set at least one URL in its Invidious Instances field",
+                    "input '{}' has no Invidious instance: set at least one URL in its Invidious Instances field or choose the yt-dlp resolver",
                     req.input_name
                 ));
             }
@@ -168,11 +248,11 @@ mod plugin {
             }
 
             info!(
-                "fetching YouTube playlist for input '{}' ({} target(s), mode '{}', {} instance(s))",
+                "fetching YouTube playlist for input '{}' ({} target(s), mode '{}', resolver '{}')",
                 req.input_name,
                 targets.len(),
                 mode,
-                instances.len()
+                resolver_choice
             );
 
             // 3. Wall-clock deadline budget: 25 seconds (fits within any host max_exec >= 2.5s)
@@ -181,12 +261,24 @@ mod plugin {
             let mut active_cursor = 0;
             let max_uploads = overrides.max_uploads.unwrap_or(settings.max_uploads).clamp(1, 15);
 
+            let resolver = if resolver_choice == "yt-dlp" {
+                let custom_path = overrides
+                    .ytdlp_path
+                    .as_deref()
+                    .or_else(|| (!settings.ytdlp_path.is_empty()).then_some(settings.ytdlp_path.as_str()));
+                let (program, _version) =
+                    ytdlp::find_ytdlp(custom_path).map_err(|tried| ytdlp::not_found_error(&tried))?;
+                StreamResolver::YtDlp { program }
+            } else {
+                StreamResolver::Invidious { instances, active_cursor: &mut active_cursor }
+            };
+
             let mut ctx = FetchCtx {
-                instances,
-                active_cursor: &mut active_cursor,
+                resolver,
                 deadline,
                 cache_ttl_minutes,
                 input_name: &req.input_name,
+                last_resolve_error: None,
             };
 
             let mut channels = Vec::new();
@@ -208,13 +300,7 @@ mod plugin {
                         had_hard_error = true;
                     }
                     TargetKind::VideoId(video_id) => {
-                        match resolver::resolve_stream(
-                            &video_id,
-                            ctx.instances,
-                            ctx.active_cursor,
-                            ctx.cache_ttl_minutes,
-                            ctx.deadline,
-                        ) {
+                        match ctx.resolver.resolve_stream(&video_id, ctx.cache_ttl_minutes, ctx.deadline) {
                             Ok(resolved) => {
                                 if mode == "live_only" && !resolved.is_live {
                                     continue;
@@ -230,6 +316,7 @@ mod plugin {
                             }
                             Err(err) => {
                                 warn!("failed to resolve single video {video_id}: {err}");
+                                ctx.last_resolve_error = Some(err);
                                 had_hard_error = true;
                             }
                         }
@@ -274,10 +361,26 @@ mod plugin {
                         // In recent_uploads mode, resolve the channel ID and fetch its RSS feed
                         let resolved_channel_id = match &page {
                             TargetKind::ChannelId(id) => Some(id.clone()),
-                            TargetKind::Handle(_) => resolve_channel_via_youtube_html(&path, ctx.deadline)
-                                .or_else(|| resolve_handle_via_invidious(&path, ctx.instances, ctx.deadline)),
-                            _ => resolve_channel_via_youtube_html(&path, ctx.deadline)
-                                .or_else(|| resolve_url_via_invidious(&path, ctx.instances, ctx.deadline)),
+                            TargetKind::Handle(_) => {
+                                let from_html = resolve_channel_via_youtube_html(&path, ctx.deadline);
+                                if from_html.is_some() || !ctx.resolver.is_invidious() {
+                                    from_html
+                                } else if let StreamResolver::Invidious { instances, .. } = ctx.resolver {
+                                    resolve_handle_via_invidious(&path, instances, ctx.deadline)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => {
+                                let from_html = resolve_channel_via_youtube_html(&path, ctx.deadline);
+                                if from_html.is_some() || !ctx.resolver.is_invidious() {
+                                    from_html
+                                } else if let StreamResolver::Invidious { instances, .. } = ctx.resolver {
+                                    resolve_url_via_invidious(&path, instances, ctx.deadline)
+                                } else {
+                                    None
+                                }
+                            }
                         };
 
                         match resolved_channel_id {
@@ -305,10 +408,11 @@ mod plugin {
 
             // 4. Distinguish between hard errors (all targets failed or invalid) vs legitimate empty (0 channels live)
             if !targets.is_empty() && channels.is_empty() && had_hard_error {
-                return Err(format!(
-                    "configured YouTube targets ({}) failed to resolve: invalid target configuration or Invidious instances unreachable",
-                    targets.len()
-                ));
+                let cause = ctx
+                    .last_resolve_error
+                    .take()
+                    .unwrap_or_else(|| "invalid target configuration or Invidious instances unreachable".to_string());
+                return Err(format!("configured YouTube targets ({}) failed to resolve: {cause}", targets.len()));
             }
 
             info!("YouTube input '{}' finished successfully: {} channel(s) available", req.input_name, channels.len());
@@ -368,8 +472,7 @@ mod plugin {
             return Ok(());
         };
 
-        match resolver::resolve_stream(&video_id, ctx.instances, ctx.active_cursor, ctx.cache_ttl_minutes, ctx.deadline)
-        {
+        match ctx.resolver.resolve_stream(&video_id, ctx.cache_ttl_minutes, ctx.deadline) {
             Ok(resolved) => {
                 if resolved.is_live {
                     let fallback_title = format!("{group_fallback} Live");
@@ -386,6 +489,7 @@ mod plugin {
             }
             Err(e) => {
                 warn!("failed to resolve live video {video_id}: {e}");
+                ctx.last_resolve_error = Some(e.clone());
                 return Err(e);
             }
         }
@@ -439,20 +543,29 @@ mod plugin {
             }
         };
 
+        if videos.is_empty() {
+            return;
+        }
+
+        let video_ids: Vec<&str> = videos.iter().map(|v| v.video_id.as_str()).collect();
+        let resolved_map = match ctx.resolver.resolve_streams(&video_ids, ctx.cache_ttl_minutes, ctx.deadline) {
+            Ok(res) => res,
+            Err(err) => {
+                warn!("failed to resolve streams for feed {feed_url}: {err}");
+                ctx.last_resolve_error = Some(err);
+                *had_hard_error = true;
+                return;
+            }
+        };
+
         for video in videos {
             if clock::now_unix() >= ctx.deadline - 2 {
                 warn!("deadline budget limit reached, stopping feed resolution early");
                 break;
             }
 
-            match resolver::resolve_stream(
-                &video.video_id,
-                ctx.instances,
-                ctx.active_cursor,
-                ctx.cache_ttl_minutes,
-                ctx.deadline,
-            ) {
-                Ok(resolved) => {
+            match resolved_map.get(&video.video_id) {
+                Some(resolved) => {
                     if mode == "live_only" && !resolved.is_live {
                         continue;
                     }
@@ -470,12 +583,15 @@ mod plugin {
                         &video.title,
                         group_name,
                         &video.thumbnail_url,
-                        &resolved,
+                        resolved,
                         ctx.input_name,
                     ));
                 }
-                Err(err) => {
-                    warn!("failed to resolve stream for video {}: {err}", video.video_id);
+                None => {
+                    warn!("failed to resolve stream for video {}", video.video_id);
+                    if ctx.last_resolve_error.is_none() {
+                        ctx.last_resolve_error = Some(format!("failed to resolve stream for video {}", video.video_id));
+                    }
                     *had_hard_error = true;
                 }
             }
@@ -625,12 +741,16 @@ mod tests {
     #[test]
     fn input_options_override_every_setting() {
         let overrides = plugin::input_overrides(&request(&[
+            ("resolver", "yt-dlp"),
+            ("ytdlp_path", "/custom/bin/yt-dlp"),
             ("mode", "live_only"),
             ("max_uploads", "5"),
             ("cache_ttl_minutes", "30"),
             ("invidious_instances", r#"["https://a.test","https://b.test"]"#),
             ("unknown", "ignored"),
         ]));
+        assert_eq!(overrides.resolver.as_deref(), Some("yt-dlp"));
+        assert_eq!(overrides.ytdlp_path.as_deref(), Some("/custom/bin/yt-dlp"));
         assert_eq!(overrides.mode.as_deref(), Some("live_only"));
         assert_eq!(overrides.max_uploads, Some(5));
         assert_eq!(overrides.cache_ttl_minutes, Some(30));
@@ -1132,5 +1252,138 @@ mod tests {
         req.url = "@tagesschau".to_string();
         let err = plugin::YoutubeInputPlugin::fetch_playlist(&req).unwrap_err();
         assert!(err.contains("input 'feed'") && err.contains("Mode"), "{err}");
+    }
+
+    #[test]
+    fn an_invalid_resolver_names_the_input() {
+        let _settings = lock_settings();
+        mock::reset();
+        mock::set_config("{}");
+        assert!(plugin::Settings::reload().is_ok());
+
+        let mut req = request(&[("resolver", "unknown")]);
+        req.url = "dQw4w9WgXcQ".to_string();
+        let err = plugin::YoutubeInputPlugin::fetch_playlist(&req).unwrap_err();
+        assert!(err.contains("input 'feed'") && err.contains("Resolver"), "{err}");
+    }
+
+    #[test]
+    fn resolver_switch_uses_ytdlp_and_invidious_instances_are_optional() {
+        let _settings = lock_settings();
+        mock::reset();
+        mock::set_now(1_000);
+        mock::set_config("{}");
+        assert!(plugin::Settings::reload().is_ok());
+
+        // yt-dlp version check responds
+        mock::process_respond(
+            "/app/bin/yt-dlp",
+            Ok(tuliprox_plugin_sdk::process::Output {
+                status: Some(0),
+                stdout: b"2024.11.04\n".to_vec(),
+                stderr: Vec::new(),
+            }),
+        );
+        // yt-dlp batch resolve responds for single video
+        mock::process_respond(
+            "/app/bin/yt-dlp",
+            Ok(tuliprox_plugin_sdk::process::Output {
+                status: Some(0),
+                stdout: b"dQw4w9WgXcQ\tFalse\thttps://stream.example/rick.mp4\n".to_vec(),
+                stderr: Vec::new(),
+            }),
+        );
+
+        let mut req = request(&[("resolver", "yt-dlp")]);
+        req.url = "dQw4w9WgXcQ".to_string();
+        let channels = plugin::YoutubeInputPlugin::fetch_playlist(&req).expect("yt-dlp resolves");
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].url, "https://stream.example/rick.mp4");
+        assert_eq!(channels[0].item_type, ItemType::Video);
+        // No HTTP requests were made to Invidious
+        assert!(mock::http_requests().is_empty());
+    }
+
+    #[test]
+    fn feed_videos_are_resolved_in_single_ytdlp_batch_process() {
+        let _settings = lock_settings();
+        mock::reset();
+        mock::set_now(1_000);
+        mock::set_config("{}");
+        assert!(plugin::Settings::reload().is_ok());
+
+        // Version check
+        mock::process_respond(
+            "/app/bin/yt-dlp",
+            Ok(tuliprox_plugin_sdk::process::Output {
+                status: Some(0),
+                stdout: b"2024.11.04\n".to_vec(),
+                stderr: Vec::new(),
+            }),
+        );
+        // Feed Atom XML has two videos: vid1 and vid2
+        let feed_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+  <title>News Feed</title>
+  <entry>
+    <yt:videoId>vid1</yt:videoId>
+    <title>Video 1</title>
+  </entry>
+  <entry>
+    <yt:videoId>vid2</yt:videoId>
+    <title>Video 2</title>
+  </entry>
+</feed>"#;
+        mock::http_respond(
+            Method::Get,
+            "https://www.youtube.com/feeds/videos.xml?channel_id=UC1234567890123456789012",
+            200,
+            feed_xml,
+        );
+
+        // One batch run responds for both videos
+        mock::process_respond(
+            "/app/bin/yt-dlp",
+            Ok(tuliprox_plugin_sdk::process::Output {
+                status: Some(0),
+                stdout: b"vid1\tFalse\thttps://stream.example/vid1.mp4\nvid2\tTrue\thttps://stream.example/live.m3u8\n"
+                    .to_vec(),
+                stderr: Vec::new(),
+            }),
+        );
+
+        let mut req = request(&[("resolver", "yt-dlp")]);
+        req.url = "UC1234567890123456789012".to_string();
+        let channels = plugin::YoutubeInputPlugin::fetch_playlist(&req).expect("batch resolve");
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channels[0].url, "https://stream.example/vid1.mp4");
+        assert_eq!(channels[0].item_type, ItemType::Video);
+        assert_eq!(channels[1].url, "https://stream.example/live.m3u8");
+        assert_eq!(channels[1].item_type, ItemType::Live);
+
+        // Verify that yt-dlp was run exactly twice: once for --version, once for the batch of videos
+        let runs = mock::process_runs();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].args, vec!["--version"]);
+        assert!(runs[1].args.contains(&"https://www.youtube.com/watch?v=vid1".to_string()));
+        assert!(runs[1].args.contains(&"https://www.youtube.com/watch?v=vid2".to_string()));
+    }
+
+    #[test]
+    fn ytdlp_not_found_fails_fetch_with_clear_error() {
+        let _settings = lock_settings();
+        mock::reset();
+        mock::set_now(1_000);
+        mock::set_config("{}");
+        assert!(plugin::Settings::reload().is_ok());
+
+        mock::process_respond("/app/bin/yt-dlp", Err("no binary"));
+        mock::process_respond("yt-dlp", Err("not on path"));
+
+        let mut req = request(&[("resolver", "yt-dlp")]);
+        req.url = "dQw4w9WgXcQ".to_string();
+        let err = plugin::YoutubeInputPlugin::fetch_playlist(&req).unwrap_err();
+        assert!(err.contains("yt-dlp not found (tried /app/bin/yt-dlp, yt-dlp)"), "{err}");
+        assert!(err.contains("see the youtube-input documentation"), "{err}");
     }
 }

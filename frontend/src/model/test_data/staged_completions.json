@@ -119,6 +119,7 @@
           ]
         },
         "detail": "input_failed",
+        "failure_reason": "repository Network error: can't read input url:",
         "target": "failed-companion",
         "message": "Input 'failed-companion' failed during update"
       }
@@ -246,6 +247,7 @@
           ]
         },
         "detail": "input_failed",
+        "failure_reason": "repository Network error: can't read input url:",
         "target": "failed-companion",
         "message": "Input 'failed-companion' failed during update"
       }
@@ -292,6 +294,7 @@
           ]
         },
         "detail": "input_failed",
+        "failure_reason": "repository XTream error: Failed to map to xtream streams live for input staged: expected ident at line 1 column 2",
         "target": "staged",
         "message": "Input 'staged' failed during update"
       },
@@ -330,6 +333,7 @@
           ]
         },
         "detail": "input_failed",
+        "failure_reason": "repository XTream error: Failed to map to xtream streams live for input staged: expected ident at line 1 column 2",
         "target": "parent",
         "message": "Input 'parent' failed during update"
       },
@@ -368,6 +372,7 @@
           ]
         },
         "detail": "input_failed",
+        "failure_reason": "repository Network error: can't read input url:",
         "target": "failed-companion",
         "message": "Input 'failed-companion' failed during update"
       }

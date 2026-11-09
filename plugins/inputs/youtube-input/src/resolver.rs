@@ -12,9 +12,35 @@ pub struct ResolvedStream {
     pub is_live: bool,
 }
 
+/// What an instance answers when it does not serve the video API to us. Public instances usually block it because
+/// YouTube throttles them and scrapers abuse them; a self-hosted instance does not.
+pub(crate) const API_REFUSED: &str = "refuses the video API";
+
+/// The error of every resolve when all instances refuse the video API.
+pub(crate) const ALL_REFUSED: &str = "every Invidious instance refuses the video API (public instances usually do); \
+     run your own Invidious instance, see the youtube-input documentation";
+
+/// Why an instance did not answer a video request, from its HTTP status and body. A refusal is named as such, so the
+/// user learns the instance blocks the API instead of reading a bare status code.
+pub(crate) fn describe_http_failure(status: u16, body: &str) -> String {
+    let detail = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| json.get("error").and_then(serde_json::Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| body.split_whitespace().take(6).collect::<Vec<_>>().join(" "));
+    let refused = matches!(status, 401 | 403 | 429)
+        || ["access_denied", "Endpoint disabled", "Forbidden"].iter().any(|marker| body.contains(marker));
+    match (refused, detail.is_empty()) {
+        (true, true) => format!("{API_REFUSED} (HTTP {status})"),
+        (true, false) => format!("{API_REFUSED} (HTTP {status}: {detail})"),
+        (false, _) => format!("HTTP status {status}"),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InvidiousVideoResponse {
+    /// Set instead of the video when the instance rejects the request with a 200 answer.
+    error: Option<String>,
     live_now: Option<bool>,
     hls_url: Option<String>,
     format_streams: Option<Vec<InvidiousFormatStream>>,
@@ -63,6 +89,7 @@ pub fn resolve_stream(
     // 2. Query instances starting from active_cursor (sticky failover)
     let num_instances = instances.len();
     let mut last_error = String::new();
+    let mut refusals = 0usize;
 
     for offset in 0..num_instances {
         let now = clock::now_unix();
@@ -96,11 +123,15 @@ pub fn resolve_stream(
             }
             Err(err) => {
                 warn!("invidious query failed for {clean_instance} ({err})");
+                refusals += usize::from(err.starts_with(API_REFUSED));
                 last_error = err;
             }
         }
     }
 
+    if refusals == num_instances {
+        return Err(ALL_REFUSED.to_string());
+    }
     Err(format!("all Invidious instances failed for video {video_id}. Last error: {last_error}"))
 }
 
@@ -118,10 +149,14 @@ fn query_invidious_endpoint(
         .map_err(|e| format!("request error: {e}"))?;
 
     if !resp.is_success() {
-        return Err(format!("HTTP status {}", resp.status()));
+        let status = resp.status();
+        return Err(describe_http_failure(status, &resp.text().unwrap_or_default()));
     }
 
     let body: InvidiousVideoResponse = resp.json().map_err(|e| format!("JSON decode error: {e}"))?;
+    if let Some(error) = body.error.filter(|error| !error.is_empty()) {
+        return Err(describe_http_failure(403, &format!(r#"{{"error":"{error}"}}"#)));
+    }
 
     let is_live = body.live_now.unwrap_or(false);
 
@@ -240,6 +275,49 @@ mod tests {
         let res = resolve_stream("dQw4w9WgXcQ", &instances, &mut cursor, 120, 1_030).unwrap();
         assert_eq!(res.url, "https://inv.test/latest_version?id=dQw4w9WgXcQ&itag=22&local=true");
         assert!(!res.is_live);
+    }
+
+    #[test]
+    fn instances_that_all_refuse_the_video_api_are_named_as_such() {
+        mock::reset();
+        mock::set_now(1_000);
+        let instances = vec!["https://a.test".to_string(), "https://b.test".to_string()];
+        let mut cursor = 0;
+        mock::http_respond(Method::Get, "https://a.test/api/v1/videos/vid?local=true", 403, "<h1>403 Forbidden</h1>");
+        mock::http_respond(
+            Method::Get,
+            "https://b.test/api/v1/videos/vid?local=true",
+            200,
+            r#"{"error":"access_denied"}"#,
+        );
+        let err = resolve_stream("vid", &instances, &mut cursor, 120, 1_030).unwrap_err();
+        assert_eq!(err, ALL_REFUSED);
+    }
+
+    #[test]
+    fn a_refusal_among_other_failures_keeps_the_last_error() {
+        mock::reset();
+        mock::set_now(1_000);
+        let instances = vec!["https://a.test".to_string(), "https://b.test".to_string()];
+        let mut cursor = 0;
+        mock::http_respond(Method::Get, "https://a.test/api/v1/videos/vid?local=true", 403, "");
+        mock::http_respond(Method::Get, "https://b.test/api/v1/videos/vid?local=true", 502, "bad gateway");
+        let err = resolve_stream("vid", &instances, &mut cursor, 120, 1_030).unwrap_err();
+        assert!(err.contains("HTTP status 502"), "{err}");
+    }
+
+    #[test]
+    fn http_failures_name_refusals_and_their_detail() {
+        assert_eq!(describe_http_failure(403, ""), "refuses the video API (HTTP 403)");
+        assert_eq!(
+            describe_http_failure(500, r#"{"error":"access_denied"}"#),
+            "refuses the video API (HTTP 500: access_denied)"
+        );
+        assert_eq!(
+            describe_http_failure(502, "Endpoint disabled"),
+            "refuses the video API (HTTP 502: Endpoint disabled)"
+        );
+        assert_eq!(describe_http_failure(503, "busy"), "HTTP status 503");
     }
 
     #[test]

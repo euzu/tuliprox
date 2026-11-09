@@ -58,6 +58,9 @@ fn playlist_update_run_failure_text_makes_no_unverified_previous_data_claim() {
     assert!(progress.iter().all(|event| event.execution_order == Some(execution_order)));
     assert!(progress.iter().all(|event| event.state == Some(PlaylistUpdateState::Failure)));
     assert!(progress.iter().all(|event| !event.message.contains("secret")));
+    // The failure reason names the error, with the credentials of its URL masked.
+    assert!(progress.iter().all(|event| event.failure_reason.as_deref().is_some_and(|reason| !reason.is_empty())));
+    assert!(progress.iter().all(|event| !event.failure_reason.as_deref().unwrap_or_default().contains("secret")));
     assert!(progress.iter().all(|event| !event.message.contains("previous accepted data")));
 }
 

@@ -4,9 +4,6 @@
   "title": "form.title",
   "description": "form.description",
   "columns": 2,
-  "required": [
-    "invidious_instances"
-  ],
   "properties": {
     "channels": {
       "type": "array",
@@ -20,6 +17,29 @@
       "placeholder": "form.channels.placeholder",
       "row": true
     },
+    "resolver": {
+      "type": "string",
+      "enum": [
+        "invidious",
+        "yt-dlp"
+      ],
+      "default": "invidious",
+      "title": "form.resolver.title",
+      "description": "form.resolver.description",
+      "widget": "radio",
+      "enumLabels": [
+        "form.resolver.invidious",
+        "form.resolver.ytdlp"
+      ],
+      "row": true
+    },
+    "ytdlp_path": {
+      "type": "string",
+      "title": "form.ytdlp_path.title",
+      "description": "form.ytdlp_path.description",
+      "placeholder": "form.ytdlp_path.placeholder",
+      "row": true
+    },
     "invidious_instances": {
       "type": "array",
       "items": {
@@ -27,7 +47,6 @@
         "pattern": "^https?://[^\\s/?#]+[^\\s?#]*$",
         "patternMessage": "form.invidious_instances.pattern"
       },
-      "minItems": 1,
       "uniqueItems": true,
       "title": "form.invidious_instances.title",
       "description": "form.invidious_instances.description",

@@ -220,9 +220,23 @@ pub(crate) fn report_input_job_completion<E: EventSink>(
         &result.input_name,
         result.update_state(),
         result.input_telemetry.as_ref(),
+        &result.errors,
     );
 }
 
+/// The longest failure reason shown on an update card; the full error stays in the log.
+const MAX_FAILURE_REASON_CHARS: usize = 300;
+
+/// The first error of an input as the update card shows it: credentials masked, cut to a readable length.
+fn input_failure_reason(errors: &[TuliproxError]) -> Option<String> {
+    let text = sanitize_sensitive_info(&errors.first()?.to_string()).into_owned();
+    Some(match text.char_indices().nth(MAX_FAILURE_REASON_CHARS) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(in crate::processor::playlist) fn report_input_completion<E: EventSink>(
     events: &E,
     run_id: &PlaylistUpdateRunId,
@@ -231,6 +245,7 @@ pub(in crate::processor::playlist) fn report_input_completion<E: EventSink>(
     input_name: &str,
     state: PlaylistUpdateState,
     input_telemetry: Option<&PlaylistUpdateInputTelemetry>,
+    errors: &[TuliproxError],
 ) {
     let input_name = sanitize_sensitive_info(input_name).into_owned();
     let message = match state {
@@ -245,7 +260,8 @@ pub(in crate::processor::playlist) fn report_input_completion<E: EventSink>(
         state,
         input_name,
         message,
-    );
+    )
+    .with_failure_reason((state != PlaylistUpdateState::Success).then(|| input_failure_reason(errors)).flatten());
     let progress = match input_telemetry {
         Some(input_telemetry) => progress.with_input_telemetry(input_telemetry.clone()),
         None => progress,
