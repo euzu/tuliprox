@@ -685,9 +685,12 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
     html! {
         <div class="tp__failover-groups__editor">
             <div class="tp__failover-groups__statusbar">
-                <span class="tp__failover-groups__file">
-                    { file.clone().unwrap_or_else(|| translate.t("MESSAGES.FAILOVER_GROUPS_NEW_FILE")) }
-                </span>
+                // Monospace only for a real file path; the "new file" notice is ordinary text.
+                if let Some(path) = file.clone() {
+                    <span class="tp__failover-groups__file">{ path }</span>
+                } else {
+                    <span class="tp__failover-groups__hint">{ translate.t("MESSAGES.FAILOVER_GROUPS_NEW_FILE") }</span>
+                }
                 <Chip class={Some(status_chip_class(status).to_string())} label={translate.t(status_label_key(status))}/>
                 if status == SaveStatus::ApplyPending && can_edit {
                     <span class="tp__failover-groups__hint">{ translate.t("MESSAGES.FAILOVER_GROUPS_APPLY_HINT") }</span>

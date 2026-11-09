@@ -14,7 +14,7 @@ for example `https://raw.githubusercontent.com/<owner>/<repo>/main/marketplace.j
 not at the repository page.
 
 The official Tuliprox catalog
-(`https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json`) is included by default
+(`https://github.com/euzu/tuliprox/releases/download/plugin-marketplace/marketplace.json`) is included by default
 when `repositories` is omitted. Set `repositories: []` to use no sources.
 
 You can add sources in two places. Both edit the same list in `config.yml`:

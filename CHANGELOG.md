@@ -219,6 +219,15 @@
 
 ## 🌟 New Features
 
+- **Official plugin packages are published as GitHub Releases.** Built `.tlpx` files are no longer stored in the
+  source repository. A CI workflow builds every new plugin version and publishes it as the release
+  `plugin-<id>-v<version>`; published versions are never replaced and stay installable for older Tuliprox versions. The
+  catalog is generated from the plugin manifests and every published version, and is served from a URL that never
+  changes: `https://github.com/euzu/tuliprox/releases/download/plugin-marketplace/marketplace.json`. This is the new
+  default marketplace source. A `config.yml` that names the old raw URL keeps working with the plugin versions it
+  already lists; switch to the new URL to get new plugin versions. See
+  [Publishing to a Marketplace](docs/src/plugins/marketplace-publishing.md#the-official-tuliprox-catalog).
+
 - **Resizable panes in the Web UI.** The new `SplitPane` component splits an area horizontally or vertically with a
   divider that is dragged with the mouse or moved with the arrow keys; the size is remembered per browser. The
   failover groups editor uses it for the group list / detail split and shows the groups and the candidate panel as

@@ -6,8 +6,8 @@ publish = false
 description = "Example tuliprox plugin: deliver notifications to a Matrix room (notification provider, schema-only UI)"
 
 # Not a member of the tuliprox workspace: it targets wasm32-wasip2 and is built
-# by `bin/package-plugin.sh plugins/examples/matrix-notifier`. The official
-# marketplace package is published under plugins/packages/.
+# by `bin/package-plugin.sh plugins/examples/matrix-notifier`. Official plugin
+# packages are published as GitHub Releases by .github/workflows/plugins-release.yml.
 [workspace]
 
 [lib]

@@ -115,6 +115,27 @@ Any HTTPS file host works. The simplest setup is a GitHub repository:
 Limits on the host side: the catalog is at most 2 MiB, a package at most 32 MiB, and the download must finish in 30
 seconds (catalog) or 120 seconds (package). Package URLs that resolve to local or loopback addresses are refused.
 
+### The official Tuliprox catalog
+
+The official plugins are not stored as packages in the source repository. The workflow
+`.github/workflows/plugins-release.yml` runs `bin/publish-plugins.sh` on every push to `develop` that touches `plugins/`:
+
+1. For each plugin under `plugins/inputs/`, it reads `id` and `version` from `manifest.yml`. If the release
+   `plugin-<id>-v<version>` does not exist yet, it builds the package and creates that release with
+   `<id>-<version>.tlpx` and `<id>-<version>.release.json` (the catalog entry of this version). An existing release is
+   never replaced; a changed plugin needs a new version in its manifest.
+2. It rebuilds `marketplace.json` from the `release.json` of every plugin release and uploads it to the fixed release
+   `plugin-marketplace`. The catalog URL never changes:
+   `https://github.com/euzu/tuliprox/releases/download/plugin-marketplace/marketplace.json`.
+
+The catalog data comes from the manifest: `name`, `description`, `author`, `category`, `homepage` (default: the plugin
+folder on GitHub), `min_tuliprox_version`, `api_version` (as `plugin_api`) and the enabled `capabilities`. Every published
+version stays in the catalog with the requirements of that version, so an older Tuliprox still installs the newest
+version it is compatible with. Plugin releases are never marked as the repository's latest release.
+
+`plugins/marketplace.json` in the repository is kept for Tuliprox 3.3.192 and older, whose default source is its raw URL.
+It is not updated by the workflow.
+
 ## Building packages
 
 Build each `.tlpx` with `bin/package-plugin.sh` (see [Packaging and Publishing](packaging.md)). Check that the
