@@ -1,5 +1,5 @@
 use super::*;
-use aes::cipher::{Block, BlockEncrypt, KeyInit};
+use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
 use mpeg2ts_reader::mpegts_crc;
 use std::{
     cell::Cell,

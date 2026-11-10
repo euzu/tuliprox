@@ -214,7 +214,7 @@ fn extract(bytes: &[u8], target: &Path) -> Result<(), String> {
     let mut buffer = vec![0_u8; 64 * 1024];
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|err| format!("cannot read entry {index}: {err}"))?;
-        let raw = entry.name().to_string();
+        let raw = entry.name().map_err(|err| format!("cannot read entry {index} name: {err}"))?.to_string();
         let relative = entry_path(&raw, entry.enclosed_name())?;
         let kind = entry.unix_mode().map_or(0, |mode| mode & S_IFMT);
         if kind == S_IFLNK {

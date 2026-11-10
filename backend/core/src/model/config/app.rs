@@ -9,7 +9,7 @@ use crate::{
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, warn};
-use rand::Rng;
+use rand::RngExt;
 use shared::{
     defaults::{
         CHANNEL_UNAVAILABLE, HLS_SESSION_OR_LEASE_EXPIRED, LOW_PRIORITY_PREEMPTED, MAINTENANCE, PANEL_API_PROVISIONING,
@@ -30,9 +30,10 @@ use std::{
 use tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer;
 
 fn generate_secret() -> [u8; 32] {
-    let mut rng = rand::rng();
     let mut secret = [0u8; 32];
-    rng.fill(&mut secret);
+    // The thread RNG is a ChaCha CSPRNG seeded from the operating system; unlike `SysRng` it cannot fail, so the
+    // config load never panics over entropy.
+    rand::rng().fill(&mut secret);
     secret
 }
 

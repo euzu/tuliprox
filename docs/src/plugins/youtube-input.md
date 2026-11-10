@@ -172,7 +172,8 @@ live broadcasts to HLS manifest URLs.
   ```bash
   curl -fL -o ./yt-dlp.new https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_musllinux \
     && chmod +x ./yt-dlp.new && mv ./yt-dlp.new ./yt-dlp
-  docker compose restart tuliprox
+  docker compose restart tuliprox     # Compose
+  # docker restart <container-name>   # docker run
   ```
 
 * **Bare metal:** Place `yt-dlp` at `/app/bin/yt-dlp`, put it on the host's `PATH`, or specify its location in the

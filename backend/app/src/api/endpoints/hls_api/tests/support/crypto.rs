@@ -2,7 +2,7 @@ use super::{
     super::{Aes128, Arc, AsyncReadExt, AsyncWriteExt, AtomicUsize, Block, Ordering, RwLock, TcpListener},
     path_has_extension, TestSegmentOrigin,
 };
-use aes::cipher::{BlockEncrypt, KeyInit as _};
+use aes::cipher::{BlockCipherEncrypt, KeyInit as _};
 
 pub(in crate::api::endpoints::hls_api::tests) const AES_TEST_MANIFEST: &[u8] = b"#EXTM3U\n#EXT-X-VERSION:5\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:77\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",KEYFORMAT=\"identity\",KEYFORMATVERSIONS=\"1\"\n#EXTINF:12,\n77.ts\n#EXTINF:12,\n78.ts\n#EXTINF:12,\n79.ts\n#EXTINF:12,\n80.ts\n#EXTINF:12,\n81.ts\n#EXTINF:12,\n82.ts\n";
 

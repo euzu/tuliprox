@@ -172,12 +172,14 @@ async fn a_wasm_that_is_not_a_component_is_a_422() {
 
 // --- extraction through the route's entry point ----------------------------
 
-async fn upload_refused(env: &Env, bytes: Vec<u8>, needle: &str) {
+async fn upload_refused(env: &Env, bytes: Vec<u8>, needle: &str) { upload_refused_any(env, bytes, &[needle]).await; }
+
+async fn upload_refused_any(env: &Env, bytes: Vec<u8>, needles: &[&str]) {
     let guard = env.system.install_lock().await;
     let rejection = env.system.api_upload(&guard, bytes).await.unwrap_err();
     assert_eq!(rejection.status, StatusCode::UNPROCESSABLE_ENTITY);
     let problems = rejection.body.problems.join("; ");
-    assert!(problems.contains(needle), "`{problems}` does not mention `{needle}`");
+    assert!(needles.iter().any(|needle| problems.contains(needle)), "`{problems}` does not mention any of {needles:?}");
     assert_eq!(staging_entries(env), Vec::<String>::new(), "the staging directory is cleaned");
     assert!(!env.data.join("evil.txt").exists() && !env.plugins.join("evil.txt").exists());
 }
@@ -222,7 +224,7 @@ async fn unsafe_archives_are_refused_and_cleaned_up() {
     bytes[22..26].copy_from_slice(&1_u32.to_le_bytes());
     let central = bytes.windows(4).rposition(|window| window == b"PK\x01\x02").unwrap();
     bytes[central + 24..central + 28].copy_from_slice(&1_u32.to_le_bytes());
-    upload_refused(&env, bytes, "inflates past").await;
+    upload_refused_any(&env, bytes, &["inflates past", "larger than its declared uncompressed size"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

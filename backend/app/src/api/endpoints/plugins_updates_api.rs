@@ -226,8 +226,9 @@ impl From<TuliproxError> for UpdateStoreError {
 /// One edit of the update fields of the `plugins:` block.
 #[cfg(feature = "plugins")]
 enum UpdateChange {
-    /// `auto_update_on_boot` and the (already checked) `boot_update_budget`.
-    Globals(PluginUpdateSettingsDto),
+    /// `auto_update_on_boot`, the (already checked) `boot_update_budget` and, when the request named it,
+    /// `directory`. A request without `directory` keeps the configured one.
+    Globals { settings: PluginUpdateSettingsDto, directory_supplied: bool },
     /// One entry's policy.
     Policy(String, shared::model::PluginUpdatePolicy),
 }
@@ -249,11 +250,12 @@ async fn persist_update_fields(
     let mut dto = read_written_dto(app_config).await?;
     let plugins = dto.plugins.get_or_insert_with(PluginsConfigDto::default);
     match &change {
-        UpdateChange::Globals(settings) => {
+        UpdateChange::Globals { settings, directory_supplied } => {
             plugins.auto_update_on_boot = settings.auto_update_on_boot;
             plugins.boot_update_budget.clone_from(&settings.boot_update_budget);
-            // An overridden directory is shown read-only and has no effect, so keep what config.yml has.
-            if !directory_overridden(plugins) {
+            // An overridden directory is shown read-only and has no effect, so keep what config.yml has; a request
+            // that does not name `directory` keeps it as well.
+            if *directory_supplied && !directory_overridden(plugins) {
                 let dir = settings.directory.trim();
                 if is_default_plugins_directory(dir) {
                     plugins.directory = DEFAULT_PLUGINS_DIR.to_string();
@@ -279,7 +281,7 @@ async fn persist_update_fields(
 
     let mut next = app_config.plugins.load_full().map(|current| (*current).clone()).unwrap_or_default();
     match &change {
-        UpdateChange::Globals(_) => {
+        UpdateChange::Globals { .. } => {
             let config_path = app_config.paths.load().config_path.clone();
             let mut runtime = PluginsConfig::from(&written);
             let _ = runtime.prepare(&config_path);
@@ -295,7 +297,7 @@ async fn persist_update_fields(
         }
     }
     let directories_changed = match &change {
-        UpdateChange::Globals(_) => prev_directory != next.directory || prev_directories != next.directories,
+        UpdateChange::Globals { .. } => prev_directory != next.directory || prev_directories != next.directories,
         UpdateChange::Policy(_, _) => false,
     };
     app_config.plugins.store(Some(Arc::new(next.clone())));
@@ -324,13 +326,25 @@ fn store_failure(err: UpdateStoreError) -> Response {
 /// when the budget is not a duration with a unit or is zero, or the directory contains control characters;
 /// only those fields of `config.yml` change.
 #[cfg(feature = "plugins")]
-async fn put_update_settings(
-    State(app_state): State<Arc<AppState>>,
-    Json(body): Json<PluginUpdateSettingsDto>,
-) -> Response {
+async fn put_update_settings(State(app_state): State<Arc<AppState>>, Json(raw): Json<serde_json::Value>) -> Response {
     if let Err(response) = plugins_on(&app_state) {
         return *response;
     }
+    // An omitted `directory` must not reset the configured one, so look at the raw body before the serde default.
+    let directory_supplied = raw.get("directory").is_some();
+    let body: PluginUpdateSettingsDto = match serde_json::from_value(raw) {
+        Ok(body) => body,
+        Err(err) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(PluginUploadErrorDto {
+                    error: "invalid update settings".to_string(),
+                    problems: vec![err.to_string()],
+                }),
+            )
+                .into_response();
+        }
+    };
     let settings = match checked_settings(&body) {
         Ok(dto) => PluginUpdateSettingsDto {
             auto_update_on_boot: dto.auto_update_on_boot,
@@ -357,7 +371,8 @@ async fn put_update_settings(
         let _guard = plugins.install_lock().await;
         let file_path = config_file_path(&app_state);
         let _lock = app_state.app_config.file_locks.write_lock(std::path::Path::new(&file_path)).await;
-        match persist_update_fields(&app_state.app_config, UpdateChange::Globals(settings)).await {
+        match persist_update_fields(&app_state.app_config, UpdateChange::Globals { settings, directory_supplied }).await
+        {
             Ok((written, directories_changed)) => {
                 if directories_changed {
                     crate::api::model::reload_plugins(&app_state.plugins, &app_state.app_config).await;
@@ -865,6 +880,19 @@ mod tests {
             assert!(dto.directory_overridden);
             assert_eq!(dto.effective_directory, "/app/plugins");
             assert_eq!(dto.search_directories, vec!["/app/plugins"]);
+        }
+
+        #[tokio::test]
+        async fn a_request_without_directory_keeps_the_configured_one() {
+            let dir = TempDir::new().unwrap();
+            let yaml = format!("{BASE}plugins:\n  enabled: true\n  directory: custom_plugins\n");
+            let (app_state, _) = app_state_for(&dir, &yaml);
+            let router = router(&app_state);
+            let body = r#"{"autoUpdateOnBoot":true,"bootUpdateBudget":"45s"}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            let written = read_written_dto(&app_state.app_config).await.unwrap().plugins.unwrap();
+            assert_eq!(written.directory, "custom_plugins", "an omitted directory must not reset the configured one");
+            assert!(written.auto_update_on_boot);
         }
 
         #[tokio::test]

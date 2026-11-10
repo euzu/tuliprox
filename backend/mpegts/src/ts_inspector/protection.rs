@@ -3,7 +3,7 @@ use super::{
     AES_128_BLOCK_BYTES,
 };
 use aes::{
-    cipher::{Block, BlockDecrypt, KeyInit},
+    cipher::{Block, BlockCipherDecrypt, KeyInit},
     Aes128,
 };
 use zeroize::{Zeroize, Zeroizing};

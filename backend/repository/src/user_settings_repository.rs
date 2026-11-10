@@ -290,20 +290,23 @@ impl UserSettingsEntity {
 fn parse_document(content: &[u8], owner: &SettingsOwner) -> Result<UserSettingsEntity, SettingsError> {
     let text = std::str::from_utf8(content).map_err(|_| SettingsError::Invalid)?;
     let mut depth = 0usize;
-    for event in saphyr_parser::Parser::new_from_str(text) {
+    for event in serde_saphyr::granit_parser::Parser::new_from_str(text) {
         let (event, _) = event.map_err(|_| SettingsError::Invalid)?;
         match event {
-            saphyr_parser::Event::Scalar(_, _, _, Some(_))
-            | saphyr_parser::Event::MappingStart(_, Some(_))
-            | saphyr_parser::Event::SequenceStart(_, Some(_))
-            | saphyr_parser::Event::Alias(_) => return Err(SettingsError::Invalid),
-            saphyr_parser::Event::MappingStart(_, _) | saphyr_parser::Event::SequenceStart(_, _) => {
+            serde_saphyr::granit_parser::Event::Scalar(_, _, _, Some(_))
+            | serde_saphyr::granit_parser::Event::MappingStart(_, _, Some(_))
+            | serde_saphyr::granit_parser::Event::SequenceStart(_, _, Some(_))
+            | serde_saphyr::granit_parser::Event::Alias(_) => return Err(SettingsError::Invalid),
+            serde_saphyr::granit_parser::Event::MappingStart(..)
+            | serde_saphyr::granit_parser::Event::SequenceStart(..) => {
                 depth += 1;
                 if depth > 16 {
                     return Err(SettingsError::Limits);
                 }
             }
-            saphyr_parser::Event::MappingEnd | saphyr_parser::Event::SequenceEnd => depth = depth.saturating_sub(1),
+            serde_saphyr::granit_parser::Event::MappingEnd | serde_saphyr::granit_parser::Event::SequenceEnd => {
+                depth = depth.saturating_sub(1);
+            }
             _ => {}
         }
     }

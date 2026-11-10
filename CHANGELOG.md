@@ -1469,6 +1469,10 @@
 
 ## 🐛 Fixes
 
+- **Dependencies updated, including `zip` 9 for a high-risk vulnerability.** Plugin package extraction keeps all its
+  path, size and symlink checks. Random IVs come only from the operating system RNG; the YAML pre-check of user
+  settings uses the parser bundled with `serde-saphyr` instead of a separately pinned copy.
+
 - **The playlist explorer lists channels again.** Since the stale-target notice wrapped the explorer, its group and
   channel area had no height and stayed empty for every target. When filters hide every entry, the explorer now
   says so and offers "Reset filters". The Live/VOD/Series counts use the strongest text color of the theme.
