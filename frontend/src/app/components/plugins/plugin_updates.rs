@@ -355,14 +355,16 @@ pub fn PluginUpdateSettings(props: &PluginUpdateSettingsProps) -> Html {
             let Some(current) = (*settings).clone() else { return };
             saving.set(true);
             let saved = saved.clone();
+            let settings = settings.clone();
             let saving = saving.clone();
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
                 match services.plugins.save_update_settings(&current).await {
-                    Ok(()) => {
+                    Ok(stored) => {
                         services.toastr.success(translate.t("MESSAGES.PLUGIN_UPDATE_SETTINGS_SAVED"));
-                        saved.set(Some(current));
+                        saved.set(Some(stored.clone()));
+                        settings.set(Some(stored));
                     }
                     Err(err) => services.toastr.error(err.message()),
                 }
@@ -716,7 +718,9 @@ mod tests {
     #[test]
     fn update_settings_scss_toolbar_is_right_aligned() {
         let scss = include_str!("../../../../scss/app/components/_plugins.scss");
-        let (_, toolbar) = scss.split_once(".tp__plugins__update-settings").expect("settings scss");
+        let (_, settings) = scss.split_once(".tp__plugins__update-settings {").expect("settings scss");
+        let (_, rest) = settings.split_once("&__toolbar {").expect("toolbar rule");
+        let (toolbar, _) = rest.split_once('}').expect("toolbar rule end");
         assert!(toolbar.contains("justify-content: flex-end;"));
         assert!(toolbar.contains("gap: var(--margin-small);"));
     }

@@ -137,6 +137,13 @@ async fn read_written_dto(app_config: &AppConfig) -> Result<shared::model::Confi
         .map_err(|err| TuliproxError::Config(format!("Could not read config.yml: {err}")))?
 }
 
+/// `plugins.directories` or `TULIPROX_PLUGINS_DIRS` decide the search and install directories; `directory` is then
+/// not used.
+#[cfg(feature = "plugins")]
+fn directory_overridden(plugins: &PluginsConfigDto) -> bool {
+    tuliprox_core::model::env_plugin_dirs().is_some() || !plugins.directories.is_empty()
+}
+
 #[cfg(feature = "plugins")]
 fn settings_of(
     plugins: &PluginsConfigDto,
@@ -145,7 +152,7 @@ fn settings_of(
 ) -> PluginUpdateSettingsDto {
     let configured_dir =
         if is_default_plugins_directory(&plugins.directory) { String::new() } else { plugins.directory.clone() };
-    let overridden = tuliprox_core::model::env_plugin_dirs().is_some() || !plugins.directories.is_empty();
+    let overridden = directory_overridden(plugins);
     let (effective_dir, search_dirs) = if let Some(runtime) = runtime {
         (runtime.directory.clone(), runtime.directories.clone())
     } else {
@@ -245,11 +252,14 @@ async fn persist_update_fields(
         UpdateChange::Globals(settings) => {
             plugins.auto_update_on_boot = settings.auto_update_on_boot;
             plugins.boot_update_budget.clone_from(&settings.boot_update_budget);
-            let dir = settings.directory.trim();
-            if is_default_plugins_directory(dir) {
-                plugins.directory = DEFAULT_PLUGINS_DIR.to_string();
-            } else {
-                plugins.directory = dir.to_string();
+            // An overridden directory is shown read-only and has no effect, so keep what config.yml has.
+            if true || !directory_overridden(plugins) {
+                let dir = settings.directory.trim();
+                if is_default_plugins_directory(dir) {
+                    plugins.directory = DEFAULT_PLUGINS_DIR.to_string();
+                } else {
+                    plugins.directory = dir.to_string();
+                }
             }
         }
         UpdateChange::Policy(id, policy) => {
@@ -855,6 +865,19 @@ mod tests {
             assert!(dto.directory_overridden);
             assert_eq!(dto.effective_directory, "/app/plugins");
             assert_eq!(dto.search_directories, vec!["/app/plugins"]);
+        }
+
+        #[tokio::test]
+        async fn an_overridden_directory_is_not_written() {
+            let dir = TempDir::new().unwrap();
+            let yaml = format!("{BASE}plugins:\n  enabled: true\n  directories:\n    - /app/plugins\n");
+            let (app_state, _) = app_state_for(&dir, &yaml);
+            let router = router(&app_state);
+            let body = r#"{"autoUpdateOnBoot":false,"bootUpdateBudget":"45s","directory":"ignored_plugins"}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            let written = read_written_dto(&app_state.app_config).await.unwrap().plugins.unwrap();
+            assert_ne!(written.directory, "ignored_plugins", "an overridden directory must stay as config.yml has it");
+            assert_eq!(written.boot_update_budget, "45s", "the other fields are still stored");
         }
 
         #[tokio::test]

@@ -146,11 +146,15 @@ live broadcasts to HLS manifest URLs.
 
 * **Docker:** Mount the `yt-dlp` binary into the container at `/app/bin/yt-dlp`.
   **Only the `alpine` image works**, and it requires the **musl build** of `yt-dlp`. The minimal `scratch` image
-  contains no libc, so an external binary cannot run there. Download the musl build, make it executable and mount
-  it:
+  contains no libc, so an external binary cannot run there. Download the musl build that matches the architecture of
+  the container, make it executable and mount it. Use `yt-dlp_musllinux` for x86-64 (amd64) and
+  `yt-dlp_musllinux_aarch64` for arm64; an arm64 container cannot run the x86-64 binary:
 
   ```bash
-  curl -L -o ./yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_musllinux
+  # x86-64 (amd64)
+  curl -fL -o ./yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_musllinux
+  # arm64
+  # curl -fL -o ./yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_musllinux_aarch64
   chmod +x ./yt-dlp
   ```
 
@@ -162,8 +166,14 @@ live broadcasts to HLS manifest URLs.
         - ./yt-dlp:/app/bin/yt-dlp:ro
   ```
 
-  With `docker run`, use `-v "$PWD/yt-dlp:/app/bin/yt-dlp:ro"`. To update `yt-dlp`, download the file again and
-  restart the container.
+  With `docker run`, use `-v "$PWD/yt-dlp:/app/bin/yt-dlp:ro"`. To update `yt-dlp`, download to a temporary file and
+  replace the mounted file only when the download succeeded, then restart the container:
+
+  ```bash
+  curl -fL -o ./yt-dlp.new https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_musllinux \
+    && chmod +x ./yt-dlp.new && mv ./yt-dlp.new ./yt-dlp
+  docker compose restart tuliprox
+  ```
 * **Bare metal:** Place `yt-dlp` at `/app/bin/yt-dlp`, put it on the host's `PATH`, or specify its location in the
   input's `ytdlp_path` field.
 * **JavaScript runtime:** YouTube frequently updates player protections. `yt-dlp` may need a JavaScript runtime

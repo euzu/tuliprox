@@ -342,14 +342,20 @@ impl PluginService {
     }
 
     /// `PUT …/updates/settings` (`422` when the budget is not a duration with a unit).
-    pub async fn save_update_settings(&self, settings: &PluginUpdateSettingsDto) -> Result<(), PluginActionError> {
+    /// Store the update settings and return them as the server now has them (resolved directories included).
+    pub async fn save_update_settings(
+        &self,
+        settings: &PluginUpdateSettingsDto,
+    ) -> Result<PluginUpdateSettingsDto, PluginActionError> {
         let payload =
             serde_json::to_string(settings).map_err(|_| PluginActionError::transport(&Error::RequestError))?;
         let url = concat_path(&self.plugins_path, "updates/settings");
         let response =
             request_raw(Request::put(&url), Some(payload)).await.map_err(|err| PluginActionError::transport(&err))?;
         match response.status {
-            200..=299 => Ok(()),
+            200..=299 => {
+                serde_json::from_str(&response.body).map_err(|_| PluginActionError::transport(&Error::RequestError))
+            }
             status => Err(action_error(status, &response.body)),
         }
     }
