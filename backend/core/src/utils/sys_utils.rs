@@ -131,7 +131,7 @@ fn read_fallback_memory_snapshot() -> Option<(u64, u64)> {
     let refresh_kind = RefreshKind::nothing()
         .with_memory(MemoryRefreshKind::nothing().with_ram())
         .with_processes(ProcessRefreshKind::nothing().with_memory());
-    let mut sys = System::new_with_specifics(refresh_kind);
+    let mut sys = System::new_with_specifics(refresh_kind).ok()?;
     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     sys.refresh_memory();
 

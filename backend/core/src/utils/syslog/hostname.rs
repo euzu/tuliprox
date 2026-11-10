@@ -8,7 +8,7 @@ pub(crate) fn system_hostname() -> Option<String> {
         }
     }
     #[cfg(not(target_os = "linux"))]
-    if let Some(name) = sysinfo::System::host_name() {
+    if let Ok(name) = sysinfo::System::host_name() {
         let name = name.trim();
         if !name.is_empty() {
             return Some(name.to_string());
