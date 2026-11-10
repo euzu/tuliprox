@@ -253,7 +253,7 @@ async fn persist_update_fields(
             plugins.auto_update_on_boot = settings.auto_update_on_boot;
             plugins.boot_update_budget.clone_from(&settings.boot_update_budget);
             // An overridden directory is shown read-only and has no effect, so keep what config.yml has.
-            if true || !directory_overridden(plugins) {
+            if !directory_overridden(plugins) {
                 let dir = settings.directory.trim();
                 if is_default_plugins_directory(dir) {
                     plugins.directory = DEFAULT_PLUGINS_DIR.to_string();

@@ -174,6 +174,7 @@ live broadcasts to HLS manifest URLs.
     && chmod +x ./yt-dlp.new && mv ./yt-dlp.new ./yt-dlp
   docker compose restart tuliprox
   ```
+
 * **Bare metal:** Place `yt-dlp` at `/app/bin/yt-dlp`, put it on the host's `PATH`, or specify its location in the
   input's `ytdlp_path` field.
 * **JavaScript runtime:** YouTube frequently updates player protections. `yt-dlp` may need a JavaScript runtime
