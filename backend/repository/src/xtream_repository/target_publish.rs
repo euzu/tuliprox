@@ -97,7 +97,7 @@ where
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) enum TargetEmptyReplacementMode {
+pub(crate) enum TargetEmptyReplacementMode {
     #[default]
     Persist,
     #[cfg(test)]
@@ -108,14 +108,14 @@ pub(super) enum TargetEmptyReplacementMode {
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
-pub(super) struct TargetEmptyPublicationHook {
-    pub(super) backup_window_entered: Arc<std::sync::Barrier>,
-    pub(super) resume_publication: Arc<std::sync::Barrier>,
+pub(crate) struct TargetEmptyPublicationHook {
+    pub(crate) backup_window_entered: Arc<std::sync::Barrier>,
+    pub(crate) resume_publication: Arc<std::sync::Barrier>,
 }
 
 #[cfg(test)]
 impl TargetEmptyPublicationHook {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             backup_window_entered: Arc::new(std::sync::Barrier::new(2)),
             resume_publication: Arc::new(std::sync::Barrier::new(2)),
@@ -133,7 +133,7 @@ struct TargetEmptyClusterPaths {
 }
 
 impl TargetEmptyClusterPaths {
-    pub(super) fn new(storage_path: &Path, cluster: XtreamCluster) -> Self {
+    fn new(storage_path: &Path, cluster: XtreamCluster) -> Self {
         let token = Uuid::new_v4().simple();
         let cluster_name = cluster.as_str().to_lowercase();
         let published_database = xtream_get_file_path(storage_path, cluster);
@@ -149,9 +149,10 @@ impl TargetEmptyClusterPaths {
     }
 }
 
-struct TargetFileReplacement {
-    published: PathBuf,
-    staging: PathBuf,
+pub(crate) struct TargetFileReplacement {
+    pub(crate) published: PathBuf,
+    staging: Option<PathBuf>,
+    staging_database: Option<BPlusTreeStagingArtifacts>,
     backup: PathBuf,
     previous_moved: bool,
     replacement_published: bool,
@@ -220,17 +221,52 @@ pub(super) fn move_target_file_platform(
 }
 
 impl TargetFileReplacement {
-    pub(super) fn new(published: &Path, staging: &Path, token: uuid::fmt::Simple) -> Self {
+    pub(crate) fn new(published: &Path, staging: Option<&Path>, token: uuid::fmt::Simple) -> Self {
         let filename =
             published.file_name().map_or_else(|| "target-artifact".into(), |name| name.to_string_lossy().into_owned());
         Self {
             published: published.to_path_buf(),
-            staging: staging.to_path_buf(),
+            staging: staging.map(Path::to_path_buf),
+            staging_database: None,
             backup: published.with_file_name(format!(".{filename}.force-empty-backup-{token}")),
             previous_moved: false,
             replacement_published: false,
         }
     }
+
+    pub(crate) fn database(published: &Path, staging: &Path, token: uuid::fmt::Simple) -> io::Result<Self> {
+        let mut replacement = Self::new(published, Some(staging), token);
+        replacement.staging_database = Some(BPlusTreeStagingArtifacts::new(published, staging)?);
+        Ok(replacement)
+    }
+}
+
+impl Drop for TargetFileReplacement {
+    fn drop(&mut self) {
+        let cleanup = if let Some(database) = &self.staging_database {
+            database.remove_owned_staging_artifacts()
+        } else if let Some(staging) = &self.staging {
+            remove_file_if_exists(staging)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = cleanup {
+            warn!("Failed to clean up staging for {}: {error}", self.published.display());
+        }
+    }
+}
+
+/// Keep the cleanup owner in the blocking task until it can no longer write staging files.
+pub(crate) async fn write_target_staging<A: Send + 'static, T: Send + 'static>(
+    artifacts: A,
+    write: impl FnOnce() -> Result<T, TuliproxError> + Send + 'static,
+) -> Result<(A, T), TuliproxError> {
+    tokio::task::spawn_blocking(move || {
+        let output = write()?;
+        Ok((artifacts, output))
+    })
+    .await
+    .map_err(|error| TuliproxError::RepositoryPlaylist(format!("Failed to join target staging: {error}")))?
 }
 
 fn cleanup_target_empty_staging(
@@ -288,32 +324,40 @@ fn rollback_target_file_replacements(replacements: &mut [TargetFileReplacement])
     }
 }
 
-fn publish_target_file_replacements(
-    paths: &TargetEmptyClusterPaths,
+pub(crate) fn publish_target_file_replacements(
+    replacements: &mut [TargetFileReplacement],
     mode: &TargetEmptyReplacementMode,
 ) -> io::Result<()> {
     #[cfg(not(test))]
     let _ = &mode;
-    let staging_artifacts = BPlusTreeStagingArtifacts::new(&paths.published_database, &paths.staging_database)?;
-    let token = Uuid::new_v4().simple();
-    let mut replacements = vec![
-        TargetFileReplacement::new(&paths.published_database, &paths.staging_database, token),
-        TargetFileReplacement::new(&paths.published_index, &paths.staging_index, token),
-        TargetFileReplacement::new(&paths.published_categories, &paths.staging_categories, token),
-    ];
+    let mut parents = replacements.iter().map(|entry| entry.published.as_path()).collect::<Vec<_>>();
+    parents.sort_unstable_by(|left, right| left.parent().cmp(&right.parent()));
+    parents.dedup_by(|left, right| left.parent() == right.parent());
+
+    // Preflight all paths and sync staged bytes before moving any published file.
+    for replacement in replacements.iter() {
+        if let Some(staging) = &replacement.staging {
+            require_same_parent_directory(staging, &replacement.published)?;
+            File::open(staging)?.sync_all()?;
+        }
+        match std::fs::symlink_metadata(&replacement.published) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(io::Error::other(format!(
+                    "Target artifact is not a file: {}",
+                    replacement.published.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // Keep owned parent paths for directory sync during rollback as well.
+    let parents = parents.into_iter().map(Path::to_path_buf).collect::<Vec<_>>();
+    let sync_parents = || parents.iter().try_for_each(|path| sync_published_file_parent(path));
 
     let publication = (|| -> io::Result<()> {
-        for replacement in &replacements {
-            require_same_parent_directory(&replacement.staging, &replacement.published)?;
-            if !replacement.staging.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("missing prepared target artifact {}", replacement.staging.display()),
-                ));
-            }
-        }
-
-        for replacement in &mut replacements {
+        for replacement in replacements.iter_mut() {
             if replacement.published.exists() {
                 move_target_file_platform(
                     &replacement.published,
@@ -331,12 +375,10 @@ fn publish_target_file_replacements(
         }
 
         for (index, replacement) in replacements.iter_mut().enumerate() {
-            move_target_file_platform(
-                &replacement.staging,
-                &replacement.published,
-                TargetFileMoveMode::ReplaceDestination,
-            )?;
-            replacement.replacement_published = true;
+            if let Some(staging) = &replacement.staging {
+                move_target_file_platform(staging, &replacement.published, TargetFileMoveMode::ReplaceDestination)?;
+                replacement.replacement_published = true;
+            }
             #[cfg(test)]
             if matches!(mode, TargetEmptyReplacementMode::FailAt(TargetEmptyReplacementFailure::Publication))
                 && index == 0
@@ -346,13 +388,12 @@ fn publish_target_file_replacements(
             #[cfg(not(test))]
             let _ = index;
         }
-        sync_published_file_parent(&paths.published_database)?;
-        cleanup_target_empty_staging(&staging_artifacts, &paths.staging_categories)
+        sync_parents()
     })();
 
     if let Err(publication_error) = publication {
-        let rollback_result = rollback_target_file_replacements(&mut replacements);
-        let durability_result = sync_published_file_parent(&paths.published_database);
+        let rollback_result = rollback_target_file_replacements(replacements);
+        let durability_result = sync_parents();
         return match (rollback_result, durability_result) {
             (Ok(()), Ok(())) => Err(publication_error),
             (rollback, durability) => Err(io::Error::new(
@@ -369,14 +410,79 @@ fn publish_target_file_replacements(
     for replacement in replacements {
         if replacement.previous_moved {
             if let Err(error) = remove_file_if_exists(&replacement.backup) {
-                warn!(
-                    "Target empty replacement was published, but backup cleanup failed for {}: {error}",
-                    replacement.backup.display()
-                );
+                warn!("Target replacement backup cleanup failed for {}: {error}", replacement.backup.display());
             }
         }
     }
     Ok(())
+}
+
+fn cluster_replacements(paths: &TargetEmptyClusterPaths, token: uuid::fmt::Simple) -> [TargetFileReplacement; 3] {
+    [
+        TargetFileReplacement::new(&paths.published_database, Some(&paths.staging_database), token),
+        TargetFileReplacement::new(&paths.published_index, Some(&paths.staging_index), token),
+        TargetFileReplacement::new(&paths.published_categories, Some(&paths.staging_categories), token),
+    ]
+}
+
+pub(crate) async fn stage_complete_xtream_playlist(
+    storage_path: &Path,
+    playlist: &mut [PlaylistGroup],
+    use_memory_cache: bool,
+    replacements: &mut Vec<TargetFileReplacement>,
+    lock_paths: &mut Vec<PathBuf>,
+) -> Result<Option<crate::PlaylistXtreamStorage>, TuliproxError> {
+    let categories = create_categories(playlist, storage_path).await;
+    let mut streams: HashMap<_, Vec<_>> = HashMap::new();
+    for item in playlist.iter().flat_map(|group| &group.channels) {
+        streams.entry(item.header.xtream_cluster).or_default().push(item);
+    }
+    let mut cached = Vec::new();
+    let token = Uuid::new_v4().simple();
+    for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
+        let paths = TargetEmptyClusterPaths::new(storage_path, cluster);
+        let staged_files = [
+            TargetFileReplacement::database(&paths.published_database, &paths.staging_database, token).map_err(
+                |error| TuliproxError::RepositoryXtream(format!("Failed to reserve {cluster} staging paths: {error}")),
+            )?,
+            TargetFileReplacement::new(&paths.published_index, Some(&paths.staging_index), token),
+            TargetFileReplacement::new(&paths.published_categories, Some(&paths.staging_categories), token),
+        ];
+        lock_paths.extend([paths.published_database, target_category_lock_path(&paths.published_categories)]);
+        let data =
+            categories.iter().filter_map(|(kind, category)| (*kind == cluster).then_some(category)).collect::<Vec<_>>();
+        let data = serde_json::to_vec(&data).map_err(|error| {
+            TuliproxError::RepositoryXtream(format!("Failed to stage {cluster} categories: {error}"))
+        })?;
+        let items =
+            streams.remove(&cluster).unwrap_or_default().into_iter().map(XtreamPlaylistItem::from).collect::<Vec<_>>();
+        let (staged_files, prepared) = write_target_staging(staged_files, move || {
+            std::fs::write(&paths.staging_categories, data).map_err(|error| {
+                TuliproxError::RepositoryXtream(format!("Failed to stage {cluster} categories: {error}"))
+            })?;
+            let mut tree = BPlusTree::<u32, XtreamPlaylistItem>::new();
+            for item in items {
+                tree.insert(item.virtual_id.get(), item);
+            }
+            tree.store_with_index(&paths.staging_database, |item| item.source_ordinal).map_err(|error| {
+                TuliproxError::RepositoryXtream(format!("Failed to stage {cluster} streams: {error}"))
+            })?;
+            let cache = use_memory_cache.then(|| {
+                let order = crate::PlaylistXtreamStorage::build_cluster_order(cluster, &tree);
+                (tree, order)
+            });
+            Ok(cache)
+        })
+        .await?;
+        replacements.extend(staged_files);
+        cached.extend(prepared);
+    }
+    Ok(match <[_; 3]>::try_from(cached) {
+        Ok([(live, live_order), (vod, vod_order), (series, series_order)]) => {
+            Some(crate::PlaylistXtreamStorage { live, live_order, vod, vod_order, series, series_order })
+        }
+        Err(_) => None,
+    })
 }
 
 async fn replace_target_xtream_cluster_with_empty(
@@ -453,7 +559,11 @@ async fn replace_target_xtream_cluster_with_empty(
         };
         let publication_mode = mode.clone();
         tokio::task::spawn_blocking(move || {
-            let result = publish_target_file_replacements(&publication_paths, &publication_mode);
+            let token = Uuid::new_v4().simple();
+            let result = publish_target_file_replacements(
+                &mut cluster_replacements(&publication_paths, token),
+                &publication_mode,
+            );
             drop(file_locks);
             result
         })
@@ -656,6 +766,7 @@ pub(super) async fn xtream_write_playlist_with_mode(
         let config = app_cfg.config.load();
         ensure_xtream_storage_path(&config, target.name.as_str()).await?
     };
+    let _category_view = app_cfg.file_locks.write_lock(&super::xtream_category_view_lock_path(&path)).await;
     let mut errors = Vec::new();
     let mut cat_live_col = Vec::with_capacity(1_000);
     let mut cat_series_col = Vec::with_capacity(1_000);

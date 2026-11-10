@@ -477,6 +477,7 @@ async fn run_manual_update_worker(
                 Arc::clone(&app_state.event_manager),
             )
             .with_expected_scope(request.expected_scope)
+            .with_replace_target_contents(request.replace_target_contents)
             .with_manual_input_update(request.input_action)
             .with_bootstrap({
                 let state = Arc::clone(&app_state);

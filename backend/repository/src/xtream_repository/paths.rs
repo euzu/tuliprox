@@ -56,6 +56,9 @@ pub fn xtream_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBu
     Xtream::storage_path(cfg, target_name)
 }
 
+/// Lock key for a read that combines category metadata with stream visibility.
+pub fn xtream_category_view_lock_path(storage_path: &Path) -> PathBuf { storage_path.join(".category-view") }
+
 pub fn xtream_get_file_path(storage_path: &Path, cluster: XtreamCluster) -> PathBuf {
     xtream_get_file_path_for_name(storage_path, &cluster.as_str().to_lowercase())
 }

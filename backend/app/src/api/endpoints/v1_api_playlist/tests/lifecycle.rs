@@ -28,6 +28,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn manual_update_request(
             action: shared::model::InputUpdateAction::Provider(policy),
         }),
         expected_scope: None,
+        replace_target_contents: false,
     }
 }
 
@@ -66,7 +67,7 @@ async fn manual_update_target_ids_keep_conflict_instead_of_accepting_a_dropped_f
                 targets: Vec::new(),
                 target_ids: Some(vec![1]),
                 input_refresh: Some(InputRefreshOverride { input_id: input.id, policy: InputRefreshPolicy::FORCE }),
-                input_action: None,
+                ..Default::default()
             })),
         )
         .await

@@ -461,6 +461,9 @@ pub struct ConfigTarget {
 }
 
 impl ConfigTarget {
+    #[must_use]
+    pub fn is_xtream_only(&self) -> bool { matches!(self.output.as_slice(), [TargetOutput::Xtream(_)]) }
+
     /// Normalize only for execution; the original config declaration remains untouched.
     pub fn effective_curation(&self) -> Option<Cow<'_, CurationConfig>> {
         self.curation.as_ref().map(Cow::Borrowed).or_else(|| {

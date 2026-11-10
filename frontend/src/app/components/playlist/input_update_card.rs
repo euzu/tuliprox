@@ -2,7 +2,7 @@ use super::{input_type_label_key, processing::PlaylistProcessingStage};
 use crate::{
     app::components::{
         popup_menu::{PopupMenuPlacement, PopupMenuWidth},
-        Card, DropDownOption, DropDownSelection, NoContent, PlaylistProcessing, Select, TextButton,
+        Card, DropDownOption, DropDownSelection, NoContent, PlaylistProcessing, Select, TextButton, ToggleSwitch,
     },
     error::Error,
     hooks::use_service_context,
@@ -78,6 +78,7 @@ impl InputUpdateCardInteractionState {
             controls: InputUpdateCardState {
                 selected_target_ids: model.targets.iter().map(|target| target.id).collect(),
                 policy: InputRefreshPolicy::NORMAL,
+                replace_target_contents: false,
             },
             targets: model.targets.clone(),
             submitting_for: None,
@@ -107,6 +108,7 @@ enum InputUpdateCardAction {
     /// "All" is a selection, not a toggle: it always selects every target.
     SelectAll(Vec<u16>),
     SelectPolicy(InputRefreshPolicy),
+    SetReplacement(bool),
     SyncPolicy(InputUpdateCapabilities),
     SyncTargets(Vec<InputUpdateCardTarget>),
     BeginSubmission(WebSocketConnectionContext),
@@ -136,6 +138,7 @@ fn reduce_input_update_card_state(
 ) -> InputUpdateCardInteractionState {
     match action {
         InputUpdateCardAction::ToggleTarget(target_id) if !state.is_submitting() => {
+            state.controls.replace_target_contents = false;
             if state.controls.selected_target_ids.contains(&target_id) {
                 state.controls.selected_target_ids.retain(|id| *id != target_id);
             } else {
@@ -143,13 +146,26 @@ fn reduce_input_update_card_state(
             }
         }
         InputUpdateCardAction::SelectAll(target_ids) if !state.is_submitting() => {
-            state.controls.selected_target_ids = target_ids;
+            if state.controls.selected_target_ids != target_ids {
+                state.controls.replace_target_contents = false;
+                state.controls.selected_target_ids = target_ids;
+            }
         }
-        InputUpdateCardAction::SelectPolicy(policy) if !state.is_submitting() => state.controls.policy = policy,
+        InputUpdateCardAction::SetReplacement(replace) if !state.is_submitting() => {
+            state.controls.replace_target_contents = replace;
+        }
+        InputUpdateCardAction::SelectPolicy(policy) if !state.is_submitting() => {
+            if state.controls.policy != policy {
+                state.controls.replace_target_contents = false;
+                state.controls.policy = policy;
+            }
+        }
         InputUpdateCardAction::SyncPolicy(capabilities) => {
             state.controls.policy = state.policy_for_capabilities(capabilities);
+            state.controls.replace_target_contents = false;
         }
         InputUpdateCardAction::SyncTargets(targets) => {
+            state.controls.replace_target_contents = false;
             let selected = &state.controls.selected_target_ids;
             state.controls.selected_target_ids = targets
                 .iter()
@@ -176,11 +192,13 @@ fn reduce_input_update_card_state(
             state.submitting_for = None;
             if matches!(outcome, PlaylistUpdateActionOutcome::Accepted(_)) {
                 state.controls.policy = InputRefreshPolicy::NORMAL;
+                state.controls.replace_target_contents = false;
             }
         }
         InputUpdateCardAction::ToggleTarget(_)
         | InputUpdateCardAction::SelectAll(_)
         | InputUpdateCardAction::SelectPolicy(_)
+        | InputUpdateCardAction::SetReplacement(_)
         | InputUpdateCardAction::BeginSubmission(_)
         | InputUpdateCardAction::CancelSubmission(_)
         | InputUpdateCardAction::FinishSubmission { .. } => {}
@@ -273,6 +291,20 @@ fn current_submission_outcome(
     outcome: PlaylistUpdateActionOutcome,
 ) -> Option<PlaylistUpdateActionOutcome> {
     request_connection_context.is_same_live_connection(current_connection_context).then_some(outcome)
+}
+
+fn replacement_unavailable_reason(
+    targets: &[InputUpdateCardTarget],
+    selected_target_ids: &[u16],
+) -> Option<&'static str> {
+    let mut selected = targets.iter().filter(|target| selected_target_ids.contains(&target.id)).peekable();
+    if selected.peek().is_none() {
+        Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_TARGET")
+    } else if selected.any(|target| !target.xtream_only) {
+        Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_XTREAM_ONLY")
+    } else {
+        None
+    }
 }
 
 fn selected_current_target_ids(model: &InputUpdateCardModel, selected_target_ids: &[u16]) -> Vec<u16> {
@@ -851,6 +883,16 @@ fn format_local_timestamp(timestamp: u64) -> String {
         .map_or_else(|| timestamp.to_string(), |date| date.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
+fn scroll_open_update_details(event: Event) {
+    let Some(details) = event.target_dyn_into::<web_sys::Element>() else { return };
+    if !details.has_attribute("open") {
+        return;
+    }
+    let Some(body) = details.closest(".tp__playlist-update-view__input-card-body").ok().flatten() else { return };
+    let offset = details.get_bounding_client_rect().top() - body.get_bounding_client_rect().top();
+    body.set_scroll_top(body.scroll_top() + (offset - 8.0).clamp(0.0, 112.0) as i32);
+}
+
 // Render the complete content hierarchy independently of interaction hooks.
 // Target controls and Last update keep their existing owners and callbacks.
 fn input_content(
@@ -920,9 +962,10 @@ fn input_content(
             {targets}
             </div>
             {actions}
-            <details class="tp__playlist-update-view__update-details">
+            <details class="tp__playlist-update-view__update-details" ontoggle={scroll_open_update_details}>
                 <summary>{translate("MESSAGES.PLAYLIST_UPDATE.UPDATE_DETAILS")}</summary>
-                <div class="tp__playlist-update-view__update-details-body">
+                <div class="tp__playlist-update-view__update-details-slot">
+                <div class="tp__playlist-update-view__update-details-body" tabindex="0" aria-label={translate("MESSAGES.PLAYLIST_UPDATE.UPDATE_DETAILS")}>
                     if let Some(policy) = view.refresh_policy.filter(|_| capabilities != InputUpdateCapabilities::Rescan) {
                         <dl class="tp__playlist-update-view__run-context">
                             {detail_row(
@@ -956,24 +999,25 @@ fn input_content(
                             )
                         })}
                     }
-                    if !view.localized_progress_details.is_empty() || view.failure_reason.is_some() {
+                    if !view.localized_progress_details.is_empty() || !view.failure_reasons.is_empty() {
                         <section class="tp__playlist-update-view__progress-details">
                             <h4>{translate("MESSAGES.PLAYLIST_UPDATE.RUN_DETAILS")}</h4>
                             <ul>
                                 {for view.localized_progress_details.iter().map(|detail| {
                                     html! { <li>{translate(progress_detail_label_key(*detail))}</li> }
                                 })}
-                                if let Some(reason) = view.failure_reason.as_deref() {
+                                {for view.failure_reasons.iter().map(|reason| html! {
                                     <li class="tp__playlist-update-view__failure-reason">
                                         {translate("MESSAGES.PLAYLIST_UPDATE.DETAIL_FAILURE_REASON").replace("{reason}", reason)}
                                     </li>
-                                }
+                                })}
                             </ul>
                         </section>
                     }
                     if !view.target_results.is_empty() {
                         {target_details(view, target_pipeline_heading_id.clone(), &translate)}
                     }
+                </div>
                 </div>
             </details>
         </div>
@@ -1045,6 +1089,18 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
     // Render consistently while the effect synchronizes the retained reducer state.
     let effective_policy = state.policy_for_capabilities(model.capabilities);
     let policy_options = policy_options(model.capabilities, effective_policy, |key| translate.t(key));
+    let show_replacement = effective_policy == InputRefreshPolicy::NORMAL
+        && (target_update_only || model.capabilities.supports(InputRefreshPolicy::NORMAL));
+    let replacement_reason = replacement_unavailable_reason(&model.targets, &state.controls.selected_target_ids);
+    let can_replace = show_replacement && can_submit && replacement_reason.is_none();
+    let replace_target_contents = can_replace && state.controls.replace_target_contents;
+    let replacement_id = format!("input-update-{}-replace", model.input_id);
+    let replacement_help_id = format!("{replacement_id}-help");
+    let replacement_label = translate.t("MESSAGES.PLAYLIST_UPDATE.REPLACE_TARGET_CONTENTS");
+    let on_replacement_change = {
+        let state = state.clone();
+        Callback::from(move |replace| state.dispatch(InputUpdateCardAction::SetReplacement(replace)))
+    };
 
     let on_policy_select = {
         let state = state.clone();
@@ -1129,7 +1185,16 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                     ConfirmationSubmissionDecision::IgnoreStale => return,
                 }
 
-                let result = if target_update_only {
+                let result = if replace_target_contents {
+                    services
+                        .playlist
+                        .replace_target_contents(
+                            &target_ids,
+                            (!target_update_only).then_some(model.input_id),
+                            &update_revision,
+                        )
+                        .await
+                } else if target_update_only {
                     services.playlist.update_target_ids(&target_ids, Some(&update_revision)).await
                 } else {
                     services
@@ -1332,6 +1397,24 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                         )} aria-live="polite">
                             {policy_description}
                         </p>
+                        if show_replacement {
+                            <div class="tp__playlist-update-view__replace-option">
+                                <label for={replacement_id.clone()} class="tp__playlist-update-view__replace-copy">
+                                    <span class="tp__playlist-update-view__replace-label">{replacement_label.clone()}</span>
+                                    <span id={replacement_help_id.clone()} class="tp__playlist-update-view__replace-help" aria-live="polite">
+                                        {translate.t(replacement_reason.unwrap_or("MESSAGES.PLAYLIST_UPDATE.REPLACE_HELP"))}
+                                    </span>
+                                </label>
+                                <ToggleSwitch
+                                    input_id={Some(replacement_id)}
+                                    aria_label={Some(replacement_label)}
+                                    aria_describedby={Some(replacement_help_id)}
+                                    readonly={!can_replace || state.is_submitting()}
+                                    value={replace_target_contents}
+                                    on_change={on_replacement_change}
+                                />
+                            </div>
+                        }
                     </div>
                         },
                         |key| translate.t(key),
@@ -1380,7 +1463,11 @@ mod tests {
             }),
             targets: targets
                 .iter()
-                .map(|(target_id, name)| InputUpdateCardTarget { id: *target_id, name: name.clone() })
+                .map(|(target_id, name)| InputUpdateCardTarget {
+                    id: *target_id,
+                    name: name.clone(),
+                    xtream_only: true,
+                })
                 .collect(),
             last_update_at: None,
         }
@@ -1707,7 +1794,9 @@ mod tests {
         let summary = source.split_once("class=\"tp__playlist-update-view__pipeline-summary\"").unwrap().1;
         assert!(summary.contains("if view.cluster_results.is_empty()"));
         assert!(summary.contains("\"LABEL.INPUT\""));
-        assert!(source.contains("<details class=\"tp__playlist-update-view__update-details\">"));
+        assert!(source.contains(
+            "<details class=\"tp__playlist-update-view__update-details\" ontoggle={scroll_open_update_details}>"
+        ));
         assert!(source.contains("cluster.refresh_policy.or(view.refresh_policy)"));
         assert_ne!(ClusterSummaryStatus::Rejected, ClusterSummaryStatus::TechnicalError);
     }
@@ -1798,6 +1887,7 @@ mod tests {
                     assert_eq!(state.policy_for_capabilities(capabilities), InputRefreshPolicy::NORMAL);
                     let synchronized = reduce(state.clone(), InputUpdateCardAction::SyncPolicy(capabilities));
                     state.controls.policy = InputRefreshPolicy::NORMAL;
+                    state.controls.replace_target_contents = false;
                     assert_eq!(synchronized, state);
                     assert!(!capabilities.supports(synchronized.controls.policy));
                     let expected_options =
@@ -1940,6 +2030,43 @@ mod tests {
         ] {
             assert!(source.contains(binding), "missing effective policy binding: {binding}");
         }
+    }
+
+    #[test]
+    fn replace_target_contents_is_one_shot_and_checks_the_current_selection() {
+        let mut model = card(7, &[1, 2]);
+        model.targets[1].xtream_only = false;
+        let initial = InputUpdateCardInteractionState::from_model(&model);
+        assert!(!initial.controls.replace_target_contents);
+        assert_eq!(
+            replacement_unavailable_reason(&model.targets, &[]),
+            Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_TARGET")
+        );
+        assert_eq!(
+            replacement_unavailable_reason(&model.targets, &initial.controls.selected_target_ids),
+            Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_XTREAM_ONLY")
+        );
+        let selected = reduce(initial, InputUpdateCardAction::ToggleTarget(2));
+        assert_eq!(replacement_unavailable_reason(&model.targets, &selected.controls.selected_target_ids), None);
+        let enabled = reduce(selected, InputUpdateCardAction::SetReplacement(true));
+        assert!(enabled.controls.replace_target_contents);
+        for reset in [
+            InputUpdateCardAction::ToggleTarget(2),
+            InputUpdateCardAction::SelectPolicy(InputRefreshPolicy::REFRESH),
+            InputUpdateCardAction::SelectPolicy(InputRefreshPolicy::FORCE),
+        ] {
+            assert!(!reduce(enabled.clone(), reset).controls.replace_target_contents);
+        }
+        let submitting = reduce(enabled, InputUpdateCardAction::BeginSubmission(connection(1)));
+        let after = reduce(
+            submitting,
+            InputUpdateCardAction::FinishSubmission {
+                connection_context: connection(1),
+                outcome: PlaylistUpdateActionOutcome::Accepted(None),
+            },
+        );
+        assert!(!after.controls.replace_target_contents);
+        assert_eq!(after.controls.selected_target_ids, [1]);
     }
 
     #[test]

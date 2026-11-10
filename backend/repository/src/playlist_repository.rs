@@ -15,6 +15,7 @@ mod episode;
 mod input;
 mod persist;
 mod publication;
+mod replacement;
 mod target;
 #[cfg(test)]
 use episode::{
@@ -45,4 +46,5 @@ use publication::TargetCacheReloadStage;
 pub use publication::{
     InputPlaylistPersistOptions, LibraryEmptyPublication, PlaylistPublicationPlan, TargetPlaylistPersistOptions,
 };
+pub use replacement::TargetReplacementDeadline;
 pub use target::{get_target_id_mapping, load_m3u_target_storage, load_xtream_target_storage};

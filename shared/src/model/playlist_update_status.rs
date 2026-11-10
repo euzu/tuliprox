@@ -141,6 +141,8 @@ pub struct PlaylistUpdateTargetDto {
     pub id: u16,
     pub name: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub xtream_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

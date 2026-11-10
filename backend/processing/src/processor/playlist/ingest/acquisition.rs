@@ -541,7 +541,24 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         playlist_download_result.download_err.extend(alias_errors);
     }
 
-    if mark_as_processed
+    let replacement_failure = if ctx.replace_target_contents {
+        if !playlist_download_result.quality_rejections.is_empty() {
+            Some(TuliproxError::RepositoryPlaylist(format!(
+                "Input '{}' was rejected by the quality policy",
+                input.name
+            )))
+        } else if ctx.is_input_in_maintenance(&input.name) {
+            Some(TuliproxError::RepositoryPlaylist(format!("Input '{}' is in maintenance", input.name)))
+        } else {
+            playlist_download_result.download_err.first().cloned().or_else(|| error.clone())
+        }
+    } else {
+        None
+    };
+    if let Some(failure) = replacement_failure.as_ref() {
+        // Reuse in a second source must not turn a fallback into a successful build.
+        ctx.mark_input_failed(input.name.clone(), Some(failure.clone())).await;
+    } else if mark_as_processed
         && !playlist_download_result.partial
         && error.is_none()
         && (!playlist.is_empty() || !accepted_empty_clusters.is_empty() || authoritative_library)
@@ -573,6 +590,13 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
 
     // Explicitly release per-input lock after load/persist/mark steps are completed.
     drop(input_lock);
+
+    if ctx.replace_target_contents
+        && ctx.is_input_in_maintenance(&input.name)
+        && playlist_download_result.download_err.is_empty()
+    {
+        playlist_download_result.download_err.extend(replacement_failure);
+    }
 
     InputDownloadResult {
         authoritative_library,

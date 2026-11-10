@@ -11,7 +11,7 @@ fn target_force_empty_authorization_is_limited_to_xtream_outputs() {
         accepted_empty_clusters: ClusterFlags::Vod,
         ..TargetPlaylistPersistOptions::default()
     };
-    assert!(validate_target_playlist_persistence(&xtream_target, true, options).is_ok());
+    assert!(validate_target_playlist_persistence(&xtream_target, true, &options).is_ok());
 
     let mixed_target = target_with_outputs(vec![
         TargetOutput::Xtream(XtreamTargetOutput { flags: XtreamTargetFlagsSet::new(), trakt: None, filter: None }),
@@ -22,7 +22,7 @@ fn target_force_empty_authorization_is_limited_to_xtream_outputs() {
             filter: None,
         }),
     ]);
-    let error = validate_target_playlist_persistence(&mixed_target, true, options)
+    let error = validate_target_playlist_persistence(&mixed_target, true, &options)
         .expect_err("fully empty mixed output must fail before persistence");
     assert!(error.to_string().contains("non-Xtream outputs"));
 }
@@ -466,4 +466,203 @@ fn rewrite_series_info_updates_local_episode_ids_when_episodes_come_first() {
     assert_eq!(episodes[1].id, 7002);
     assert!(playlist[0].channels[0].header.parent_code.is_empty());
     assert!(playlist[0].channels[1].header.parent_code.is_empty());
+}
+
+#[tokio::test]
+async fn replace_target_contents_rolls_back_all_artifacts_then_allows_a_retry() {
+    use crate::{get_live_cat_collection_path, xtream_get_item_for_stream_id};
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let state = Arc::new(PlaylistStorageState::new());
+    let target = xtream_target("replace", true);
+    let other = xtream_target("unselected", true);
+    seed_memory_cached_xtream_target(&app, &state, &target).await;
+    seed_memory_cached_xtream_target(&app, &state, &other).await;
+    let before = cached_target_signature(&state, &target.name).await;
+    let other_before = cached_target_signature(&state, &other.name).await;
+    let config = app.config.load();
+    let target_path = get_target_storage_path(&config, &target.name).unwrap();
+    let storage = xtream_get_storage_path(&config, &target.name).unwrap();
+    let category_paths = [
+        get_live_cat_collection_path(&storage),
+        get_vod_cat_collection_path(&storage),
+        get_series_cat_collection_path(&storage),
+    ];
+    let old_categories = category_paths.iter().map(|path| std::fs::read(path).unwrap()).collect::<Vec<_>>();
+    let mapping_path = crate::get_target_id_mapping_file(&target_path);
+    let old_mapping = std::fs::read(&mapping_path).unwrap();
+    let options = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+    let mut candidate = vec![target_group(XtreamCluster::Live, 102, "new-live")];
+
+    let errors = persist_playlist_with_mode(
+        &app,
+        &mut candidate,
+        None,
+        &target,
+        Some(&state),
+        options.clone(),
+        TargetPersistenceMode::FailEmptyReplacementAt(crate::TargetEmptyReplacementFailure::Publication),
+    )
+    .await
+    .unwrap_err();
+    assert!(errors[0].message().contains("injected"));
+    assert_eq!(cached_target_signature(&state, &target.name).await, before);
+    assert_eq!(std::fs::read(&mapping_path).unwrap(), old_mapping);
+    for (path, previous) in category_paths.iter().zip(&old_categories) {
+        assert_eq!(&std::fs::read(path).unwrap(), previous);
+    }
+    let on_disk = load_xtream_target_storage(&app, &target).await.unwrap();
+    assert_eq!([on_disk.live.len(), on_disk.vod.len(), on_disk.series.len()], [1, 1, 1]);
+
+    persist_playlist_with_mode(
+        &app,
+        &mut candidate,
+        None,
+        &target,
+        Some(&state),
+        options.clone(),
+        TargetPersistenceMode::Persist,
+    )
+    .await
+    .unwrap();
+    let cached = cached_target_signature(&state, &target.name).await;
+    assert_eq!(cached.0, before.0 + 1);
+    assert_eq!(
+        cached.1.iter().map(|(cluster, _, name)| (*cluster, name.as_ref())).collect::<Vec<_>>(),
+        [(XtreamCluster::Live, "new-live")]
+    );
+    let on_disk = load_xtream_target_storage(&app, &target).await.unwrap();
+    assert_eq!([on_disk.live.len(), on_disk.vod.len(), on_disk.series.len()], [1, 0, 0]);
+    for (cluster, id, _) in before.1 {
+        assert!(xtream_get_item_for_stream_id(id, &app, &state, &target, Some(cluster)).await.is_err());
+    }
+    assert_eq!(std::fs::read_to_string(&category_paths[1]).unwrap(), "[]");
+    assert_eq!(std::fs::read_to_string(&category_paths[2]).unwrap(), "[]");
+    assert_eq!(cached_target_signature(&state, &other.name).await, other_before);
+
+    persist_playlist_with_mode(&app, &mut [], None, &target, Some(&state), options, TargetPersistenceMode::Persist)
+        .await
+        .unwrap();
+    let on_disk = load_xtream_target_storage(&app, &target).await.unwrap();
+    assert_eq!([on_disk.live.len(), on_disk.vod.len(), on_disk.series.len()], [0, 0, 0]);
+    assert_eq!(cached_target_signature(&state, &target.name).await, (cached.0, Vec::new()));
+    for path in &category_paths {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "[]");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn replace_target_contents_deadline_waits_for_started_publication() {
+    use crate::{xtream_repository::target_publish::TargetEmptyPublicationHook, TargetReplacementDeadline};
+    use std::time::Duration;
+    use tokio::time::{advance, Instant};
+
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let state = Arc::new(PlaylistStorageState::new());
+    let target = xtream_target("deadline-started", true);
+    seed_memory_cached_xtream_target(&app, &state, &target).await;
+
+    let deadline = Arc::new(TargetReplacementDeadline::new(Instant::now() + Duration::from_secs(60)));
+    let options = TargetPlaylistPersistOptions {
+        replace_target_contents: true,
+        replacement_deadline: Some(deadline.clone()),
+        ..Default::default()
+    };
+    let hook = TargetEmptyPublicationHook::new();
+    let entered = Arc::clone(&hook.backup_window_entered);
+    let resume = Arc::clone(&hook.resume_publication);
+    let writer = tokio::spawn({
+        let (app, state, target) = (app.clone(), state.clone(), target.clone());
+        async move {
+            let mut candidate = [target_group(XtreamCluster::Live, 102, "new-live")];
+            deadline
+                .run(async {
+                    persist_playlist_with_mode(
+                        &app,
+                        &mut candidate,
+                        None,
+                        &target,
+                        Some(&state),
+                        options,
+                        TargetPersistenceMode::PauseDuringReplacement(hook),
+                    )
+                    .await
+                    .unwrap();
+                    std::future::pending::<()>().await;
+                })
+                .await
+        }
+    });
+
+    tokio::task::spawn_blocking(move || entered.wait()).await.unwrap();
+    advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    let returned_before_commit = writer.is_finished();
+    tokio::task::spawn_blocking(move || resume.wait()).await.unwrap();
+    assert!(!returned_before_commit, "the run must retain the publication result after the deadline");
+    let published = tokio::time::timeout(Duration::from_secs(1), writer)
+        .await
+        .expect("only the active commit may delay the timeout")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(published.as_slice(), std::slice::from_ref(&target.name));
+
+    let stored = load_xtream_target_storage(&app, &target).await.unwrap();
+    assert_eq!([stored.live.len(), stored.vod.len(), stored.series.len()], [1, 0, 0]);
+    assert_eq!(cached_target_signature(&state, &target.name).await.1[0].2.as_ref(), "new-live");
+    let config = app.config.load();
+    let storage = xtream_get_storage_path(&config, &target.name).unwrap();
+    assert_eq!(std::fs::read_to_string(get_vod_cat_collection_path(&storage)).unwrap(), "[]");
+}
+
+#[tokio::test(start_paused = true)]
+async fn replace_target_contents_deadline_rejects_late_publication() {
+    use crate::{xtream_category_view_lock_path, TargetReplacementDeadline};
+    use std::time::Duration;
+    use tokio::time::{advance, Instant};
+
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let state = Arc::new(PlaylistStorageState::new());
+    let target = xtream_target("deadline-expired", true);
+    seed_memory_cached_xtream_target(&app, &state, &target).await;
+    let before = cached_target_signature(&state, &target.name).await;
+    let storage = xtream_get_storage_path(&app.config.load(), &target.name).unwrap();
+    let vod_path = get_vod_cat_collection_path(&storage);
+    let categories = std::fs::read(&vod_path).unwrap();
+    let reader = app.file_locks.read_lock(&xtream_category_view_lock_path(&storage)).await;
+
+    let deadline = Arc::new(TargetReplacementDeadline::new(Instant::now() + Duration::from_secs(60)));
+    let options = TargetPlaylistPersistOptions {
+        replace_target_contents: true,
+        replacement_deadline: Some(deadline.clone()),
+        ..Default::default()
+    };
+    let mut writer = tokio::spawn({
+        let (app, state, target) = (app.clone(), state.clone(), target.clone());
+        async move {
+            persist_playlist_with_mode(
+                &app,
+                &mut [],
+                None,
+                &target,
+                Some(&state),
+                options,
+                TargetPersistenceMode::Persist,
+            )
+            .await
+        }
+    });
+    advance(Duration::from_secs(61)).await;
+    // Keep the test task alive across timeout to exercise the final guard even
+    // if its caller no longer waits for it.
+    assert_eq!(deadline.run(&mut writer).await.unwrap_err(), Vec::<String>::new());
+    drop(reader);
+    let errors = writer.await.unwrap().unwrap_err();
+    assert!(errors[0].message().contains("deadline expired before publication"));
+    let stored = load_xtream_target_storage(&app, &target).await.unwrap();
+    assert_eq!([stored.live.len(), stored.vod.len(), stored.series.len()], [1, 1, 1]);
+    assert_eq!(cached_target_signature(&state, &target.name).await, before);
+    assert_eq!(std::fs::read(&vod_path).unwrap(), categories);
 }

@@ -285,6 +285,7 @@ async fn manual_update_run_target_ids_and_refresh_override_keep_the_accepted_que
             target_ids: Some(vec![4, 1]),
             input_refresh: Some(input_refresh),
             input_action: None,
+            replace_target_contents: false,
         })),
     )
     .await
@@ -336,18 +337,25 @@ async fn manual_update_target_ids_reject_unknown_empty_and_ambiguous_selections(
             }),
             ..PlaylistUpdateRequestDto::default()
         },
-        PlaylistUpdateRequestDto { targets: Vec::new(), target_ids: Some(vec![99]), input_refresh, input_action: None },
+        PlaylistUpdateRequestDto {
+            targets: Vec::new(),
+            target_ids: Some(vec![99]),
+            input_refresh,
+            ..Default::default()
+        },
         PlaylistUpdateRequestDto {
             targets: Vec::new(),
             target_ids: Some(Vec::new()),
             input_refresh,
             input_action: None,
+            replace_target_contents: false,
         },
         PlaylistUpdateRequestDto {
             targets: vec!["known-target".to_string()],
             target_ids: Some(vec![1]),
             input_refresh,
             input_action: None,
+            replace_target_contents: false,
         },
     ];
 
@@ -390,6 +398,7 @@ async fn manual_update_target_ids_preserve_named_legacy_and_empty_bulk_requests(
             target_ids: None,
             input_refresh: None,
             input_action: None,
+            replace_target_contents: false,
         }),
         PlaylistUpdateRequestPayload::LegacyTargets(vec!["shared-name".to_string()]),
         PlaylistUpdateRequestPayload::Current(PlaylistUpdateRequestDto {
@@ -397,6 +406,7 @@ async fn manual_update_target_ids_preserve_named_legacy_and_empty_bulk_requests(
             target_ids: None,
             input_refresh: None,
             input_action: None,
+            replace_target_contents: false,
         }),
     ];
 
@@ -701,4 +711,87 @@ async fn playlist_update_status_reader_runs_off_the_async_worker() {
 async fn playlist_update_status_reader_join_failure_returns_server_error_not_empty_status() {
     let result = super::super::read_playlist_update_input_status(|| panic!("simulated status reader failure")).await;
     assert_eq!(result.unwrap_err(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targets() {
+    use crate::{
+        auth::create_jwt_web_user,
+        model::{TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput},
+    };
+    use shared::model::{Permission, UserId, WebAuthConfigDto, WebUiConfigDto};
+
+    let mut eligible = playlist_update_target(1, "eligible");
+    Arc::make_mut(&mut eligible).output.push(TargetOutput::Xtream(XtreamTargetOutput {
+        flags: XtreamTargetFlagsSet::new(),
+        trakt: None,
+        filter: None,
+    }));
+    let mut other = eligible.clone();
+    Arc::make_mut(&mut other).id = 2;
+    Arc::make_mut(&mut other).name = "other".into();
+    let mut mixed = eligible.clone();
+    Arc::make_mut(&mut mixed).id = 3;
+    Arc::make_mut(&mut mixed).name = "mixed".into();
+    Arc::make_mut(&mut mixed).output.push(TargetOutput::M3u(crate::model::M3uTargetOutput {
+        filename: None,
+        include_type_in_url: false,
+        mask_redirect_url: false,
+        filter: None,
+    }));
+    let input = Arc::new(ConfigInput { id: 4, name: "provider".intern(), enabled: true, ..Default::default() });
+    let config = Arc::new(test_app_config(
+        input.clone(),
+        ConfigSource { inputs: vec![input.name.clone()], targets: vec![eligible, other, mixed] },
+    ));
+    let auth =
+        WebAuthConfigDto { issuer: "local-fixture".into(), secret: "fixture signing key".into(), ..Default::default() };
+    let web = crate::model::WebUiConfig::from(&WebUiConfigDto { auth: Some(auth), ..Default::default() });
+    let token = |name, permission: Permission| {
+        create_jwt_web_user(web.auth.as_ref().unwrap(), name, permission.into(), 0, UserId::web(name)).unwrap()
+    };
+    let writer = token("writer", Permission::PlaylistWrite);
+    let reader = token("reader", Permission::PlaylistRead);
+    config.config.store(Arc::new(Config { web_ui: Some(web), ..Config::default() }));
+    let revision = config.sources.load().playlist_update_scope().revision();
+    let (sender, mut queue) = mpsc::channel(1);
+    let app = test_app_state_with_manual_update_sender(config, sender);
+    let router = super::super::v1_api_playlist_register_with_permissions(Router::new(), &app).with_state(app);
+    let post = |token: &str, scope: Option<&str>, body: serde_json::Value| {
+        let mut request = Request::post("/playlist/update")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"));
+        if let Some(scope) = scope {
+            request = request.header("if-match", scope);
+        }
+        router.clone().oneshot(request.body(Body::from(body.to_string())).unwrap())
+    };
+    let valid = json!({"target_ids":[2,1],"replace_target_contents":true});
+    for (token, scope, body, status) in [
+        (&reader, Some(revision.as_str()), valid.clone(), StatusCode::FORBIDDEN),
+        (&writer, None, valid.clone(), StatusCode::PRECONDITION_REQUIRED),
+        (&writer, Some("\"stale\""), valid.clone(), StatusCode::PRECONDITION_FAILED),
+        (&writer, Some(&revision), json!({"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (&writer, Some(&revision), json!({"target_ids":[],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (&writer, Some(&revision), json!({"target_ids":[1,3],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (
+            &writer,
+            Some(&revision),
+            json!({"target_ids":[1],"replace_target_contents":true,
+            "input_refresh":{"input_id":4,"policy":{"cache":"bypass","quality":"enforce"}}}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(post(token, scope, body).await.unwrap().status(), status);
+        assert!(queue.try_recv().is_err());
+    }
+    assert_eq!(post(&writer, Some(&revision), valid).await.unwrap().status(), StatusCode::ACCEPTED);
+    let accepted = queue.try_recv().unwrap();
+    assert_eq!(accepted.targets.targets, [2, 1]);
+    assert!(accepted.replace_target_contents);
+    assert_eq!(accepted.expected_scope.unwrap().revision(), revision);
+
+    let ordinary = json!({"target_ids":[3],"replace_target_contents":false});
+    assert_eq!(post(&writer, None, ordinary).await.unwrap().status(), StatusCode::ACCEPTED);
+    assert!(!queue.try_recv().unwrap().replace_target_contents);
 }

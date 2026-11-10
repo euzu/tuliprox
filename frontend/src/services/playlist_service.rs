@@ -11,12 +11,12 @@ use log::error;
 use shared::{
     model::{
         EpgChannel, EpgChannelFilter, EpgGridRequest, EpgGridRow, EpgGroupInfo, EpgGroupsRequest, EpgSearchResultDto,
-        EpgTv, FieldError, InputRefreshOverride, OperationRunAccepted, OverrideConflictDto, OverrideDiscardRequest,
-        OverrideFieldErrorsDto, OverrideFileDto, OverrideItemKind, OverrideOrphansDto, OverrideProvenanceDto,
-        OverrideRevisionDto, OverrideSaveRequest, OverrideScopeDto, PlaylistEpgRequest, PlaylistRequest,
-        PlaylistUpdateRequestDto, PlaylistUpdateViewSnapshotDto, PlaylistUrlResolveRequest, SeriesStreamProperties,
-        StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto, UiPlaylistCategories,
-        UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
+        EpgTv, FieldError, InputRefreshOverride, InputRefreshPolicy, OperationRunAccepted, OverrideConflictDto,
+        OverrideDiscardRequest, OverrideFieldErrorsDto, OverrideFileDto, OverrideItemKind, OverrideOrphansDto,
+        OverrideProvenanceDto, OverrideRevisionDto, OverrideSaveRequest, OverrideScopeDto, PlaylistEpgRequest,
+        PlaylistRequest, PlaylistUpdateRequestDto, PlaylistUpdateViewSnapshotDto, PlaylistUrlResolveRequest,
+        SeriesStreamProperties, StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto,
+        UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
     utils::{concat_path_leading_slash, HEADER_IF_MATCH, HEADER_PLAYLIST_SCOPE_REVISION},
 };
@@ -109,6 +109,19 @@ impl PlaylistService {
     ) -> Result<OperationRunAccepted, Error> {
         let request = build_target_id_update_request(target_ids)?;
         self.submit_update_request_with_revision(&request, revision).await
+    }
+
+    pub async fn replace_target_contents(
+        &self,
+        target_ids: &[u16],
+        provider_input_id: Option<u16>,
+        revision: &str,
+    ) -> Result<OperationRunAccepted, Error> {
+        let mut request = build_target_id_update_request(target_ids)?;
+        request.replace_target_contents = true;
+        request.input_refresh =
+            provider_input_id.map(|input_id| InputRefreshOverride { input_id, policy: InputRefreshPolicy::NORMAL });
+        self.submit_update_request_with_revision(&request, Some(revision)).await
     }
 
     pub async fn update_all_inputs(&self) -> Result<OperationRunAccepted, Error> {
@@ -498,7 +511,7 @@ fn build_playlist_update_request(targets: &[&str]) -> PlaylistUpdateRequestDto {
         targets: targets.iter().map(|target| (*target).to_string()).collect(),
         target_ids: None,
         input_refresh: None,
-        input_action: None,
+        ..PlaylistUpdateRequestDto::default()
     }
 }
 
@@ -538,7 +551,7 @@ fn build_input_playlist_update_request(
         targets: Vec::new(),
         target_ids: Some(target_ids.to_vec()),
         input_refresh: Some(input_refresh),
-        input_action: None,
+        ..PlaylistUpdateRequestDto::default()
     }
 }
 

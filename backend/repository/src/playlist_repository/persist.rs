@@ -5,6 +5,7 @@ use super::{
         persist_xtream_target_playlist, playlist_has_items, prepare_target_output_playlists,
         validate_force_empty_output_filters, validate_target_playlist_persistence, TargetPersistenceMode,
     },
+    replacement::TargetReplacement,
     target::load_target_memory_cache_snapshot,
     PlaylistStorageState, TargetPlaylistPersistOptions,
 };
@@ -12,7 +13,8 @@ use crate::{
     ensure_target_storage_path, epg_write_for_target, lineup_guide_index_carry_over, lineup_guide_index_remove,
     lineup_guide_index_view, lineup_guide_index_write, load_input_local_library_playlist, m3u_lineup_guide_index_path,
     m3u_write_playlist, persist_input_library_playlist, write_strm_playlist, xtream_get_file_path,
-    xtream_get_storage_path, xtream_lineup_guide_index_path, FailoverGroupBatch, FailoverGroupRecord,
+    xtream_get_storage_path, xtream_lineup_guide_index_path,
+    xtream_repository::target_publish::TargetEmptyReplacementMode, FailoverGroupBatch, FailoverGroupRecord,
     FailoverGroupStore, GroupMember, LineupGuideCarryOver, LineupGuideView, MemberArchive, PendingFailoverGroup,
     TargetIdMapping,
 };
@@ -216,7 +218,7 @@ async fn persist_playlist_views_with_mode(
 ) -> Result<(), Vec<TuliproxError>> {
     let playlist_is_empty = !playlist_has_items(base_playlist)
         && xtream_playlist.as_deref().is_none_or(|playlist| !playlist_has_items(playlist));
-    if let Err(error) = validate_target_playlist_persistence(target, playlist_is_empty, options) {
+    if let Err(error) = validate_target_playlist_persistence(target, playlist_is_empty, &options) {
         return Err(vec![error]);
     }
     let mut errors = vec![];
@@ -226,11 +228,17 @@ async fn persist_playlist_views_with_mode(
         Err(err) => return Err(vec![err]),
     };
 
-    let (mut target_id_mapping, file_lock) =
-        match get_target_id_mapping(app_config, &target_path, target.use_memory_cache).await {
-            Ok(result) => result,
+    let (mut target_id_mapping, file_lock, replacement) = if options.replace_target_contents {
+        match TargetReplacement::stage_mapping(app_config, &target_path, target).await {
+            Ok((mapping, lock, replacement)) => (mapping, lock, Some(replacement)),
             Err(err) => return Err(vec![err]),
-        };
+        }
+    } else {
+        match get_target_id_mapping(app_config, &target_path, target.use_memory_cache).await {
+            Ok((mapping, lock)) => (mapping, lock, None),
+            Err(err) => return Err(vec![err]),
+        }
+    };
 
     let mut source_ordinal = 0u32;
     prepare_target_playlist_for_persistence(base_playlist, target, &mut target_id_mapping, &mut source_ordinal);
@@ -245,7 +253,7 @@ async fn persist_playlist_views_with_mode(
     }
 
     let mut prepared_outputs = prepare_target_output_playlists(target, base_playlist, xtream_playlist.as_deref());
-    if let Err(error) = validate_force_empty_output_filters(target, &prepared_outputs, options) {
+    if let Err(error) = validate_force_empty_output_filters(target, &prepared_outputs, &options) {
         target_id_mapping.discard_unpersisted_changes();
         drop(target_id_mapping);
         drop(file_lock);
@@ -285,6 +293,35 @@ async fn persist_playlist_views_with_mode(
                 ))]);
             }
         };
+
+    if let Some(replacement) = replacement {
+        let source_playlist = xtream_playlist.as_deref_mut().unwrap_or(base_playlist);
+        let playlist = prepared_outputs[0].as_deref_mut().unwrap_or(source_playlist);
+        let mode = match persistence_mode {
+            #[cfg(test)]
+            TargetPersistenceMode::FailEmptyReplacementAt(failure) => TargetEmptyReplacementMode::FailAt(failure),
+            #[cfg(test)]
+            TargetPersistenceMode::PauseDuringReplacement(hook) => {
+                TargetEmptyReplacementMode::PauseDuringPublication(hook)
+            }
+            _ => TargetEmptyReplacementMode::Persist,
+        };
+        return replacement
+            .publish(
+                app_config,
+                target,
+                playlist,
+                epg,
+                playlist_state,
+                target_id_mapping,
+                file_lock,
+                staged_groups,
+                mode,
+                options.replacement_deadline,
+            )
+            .await
+            .map_err(|err| vec![err]);
+    }
 
     // Only the view `lineup.json` is published from keeps a guide index. Any other index would
     // describe a playlist the reader no longer asks, and a later re-configuration could mistake it
@@ -362,7 +399,8 @@ async fn persist_playlist_views_with_mode(
 
         let result = match output {
             TargetOutput::Xtream(_xtream_output) => {
-                persist_xtream_target_playlist(app_config, target, pl, replace_empty_clusters, persistence_mode).await
+                persist_xtream_target_playlist(app_config, target, pl, replace_empty_clusters, persistence_mode.clone())
+                    .await
             }
             TargetOutput::M3u(m3u_output) => {
                 m3u_write_playlist(app_config, target, m3u_output, &target_path, pl, allows_empty_base).await

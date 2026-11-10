@@ -537,6 +537,7 @@ impl SourcesConfig {
                         id: target.id,
                         name: target.name.clone(),
                         enabled: target.enabled,
+                        xtream_only: target.is_xtream_only(),
                     })
                     .collect(),
             })

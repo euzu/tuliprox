@@ -4,6 +4,8 @@
   --update-card-spacing: 20px;
   --update-action-width: 220px;
   --update-control-gap: 12px;
+  --replace-on-surface: #142749;
+  --replace-on-border: #3f6fae;
   container: update-view / inline-size;
   display: flex;
   flex-flow: column;
@@ -52,7 +54,8 @@
   &__cards-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    align-items: start;
+    grid-auto-rows: 1fr;
+    align-items: stretch;
     gap: var(--update-card-spacing);
   }
 
@@ -66,11 +69,13 @@
   &__input-card article {
     display: flex;
     flex-flow: column;
+    height: 100%;
     min-width: 0;
   }
 
   &__input-card-header {
     display: flex;
+    flex-shrink: 0;
     align-items: flex-start;
     justify-content: space-between;
     flex-wrap: wrap;
@@ -98,12 +103,19 @@
 
   &__input-card-body {
     container: update-card / inline-size;
+    flex: 1 1 auto;
+    min-block-size: 0;
     min-width: 0;
+    overflow-y: auto;
+    scrollbar-color: var(--modest-text-color) transparent;
+    scrollbar-width: thin;
+    scrollbar-gutter: stable;
   }
 
   &__input-content {
     display: flex;
     flex-flow: column;
+    min-block-size: 100%;
     min-width: 0;
   }
 
@@ -285,6 +297,10 @@
     min-width: 0;
   }
 
+  &__action-area {
+    padding-block-end: 16px;
+  }
+
   &__policy-select,
   &__input-actions .tp__text-button {
     width: 100%;
@@ -326,10 +342,69 @@
     }
   }
 
+  &__replace-option {
+    position: relative;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    min-height: 64px;
+    margin-block-start: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    transition: background-color 140ms ease, border-color 140ms ease;
+
+    &:has(input:checked) {
+      background-color: var(--replace-on-surface);
+      border-color: var(--replace-on-border);
+    }
+
+    &:hover:has(input:enabled) {
+      border-color: var(--input-focus-border-color);
+    }
+
+    &:has(input:disabled) {
+      .tp__playlist-update-view__replace-label { color: var(--modest-text-color); }
+      .tp__playlist-update-view__replace-copy::before { cursor: default; }
+    }
+
+    .tp__toggle-switch { z-index: 1; }
+  }
+
+  &__replace-copy::before {
+    position: absolute;
+    inset: 0;
+    content: "";
+    cursor: pointer;
+  }
+
+  &__replace-label,
+  &__replace-help {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+
+  &__replace-label {
+    font-size: 14px;
+    font-weight: bold;
+    line-height: 20px;
+  }
+
+  &__replace-help {
+    margin-block-start: 2px;
+    color: var(--modest-text-color);
+    font-size: 12px;
+    line-height: 18px;
+  }
+
   &__update-details {
-    margin-block-start: 16px;
+    margin-block-start: auto;
     min-width: 0;
     border-block-start: 1px solid var(--border-color);
+
+    &[open] { margin-block-start: 0; }
 
     summary {
       width: fit-content;
@@ -345,12 +420,22 @@
     }
   }
 
+  // Keep the detail body in the card's scroll range without affecting grid track sizing.
+  &__update-details-slot {
+    block-size: 0;
+  }
+
   &__update-details-body {
     display: flex;
     flex-direction: column;
     min-width: 0;
     font-size: 15px;
     line-height: 1.4;
+
+    &:focus-visible {
+      outline: 2px solid var(--input-focus-border-color);
+      outline-offset: -2px;
+    }
 
     > * { width: 100%; min-width: 0; box-sizing: border-box; }
     dl { margin: 0; }
@@ -499,6 +584,11 @@
   &__last-update {
     color: var(--text-color);
   }
+}
+
+body[data-theme="bright"] .tp__playlist-update-view {
+  --replace-on-surface: #eaf2ff;
+  --replace-on-border: #6992d2;
 }
 
 @container update-list (min-width: 1100px) {

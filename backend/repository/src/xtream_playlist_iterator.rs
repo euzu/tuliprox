@@ -168,12 +168,12 @@ impl XtreamPlaylistIterator {
 
         if let Some(storage_path) = xtream_get_storage_path(&config, target.name.as_str()) {
             let xtream_path = xtream_get_file_path(&storage_path, cluster);
-            if !xtream_path.exists() {
-                return Err(TuliproxError::Config(format!("No {cluster} entries found for target {}", target.name)));
-            }
             // One read lock, shared by the stream (LockedReceiverStream) and the background reader.
             // A second read lock on the same path would deadlock behind a queued writer.
             let file_lock = Arc::new(app_config.file_locks.read_lock(&xtream_path).await);
+            if !xtream_path.exists() {
+                return Err(TuliproxError::Config(format!("No {cluster} entries found for target {}", target.name)));
+            }
             let bg_lock = Arc::clone(&file_lock);
 
             let xtream_path = xtream_path.clone();

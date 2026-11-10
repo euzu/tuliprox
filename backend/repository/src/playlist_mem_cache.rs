@@ -1,6 +1,9 @@
 use super::{BPlusTree, VirtualIdRecord};
 use shared::model::{M3uPlaylistItem, PlaylistItem, PlaylistItemType, VirtualId, XtreamCluster, XtreamPlaylistItem};
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::RwLock;
 use tuliprox_core::model::ConfigTarget;
 
@@ -131,7 +134,7 @@ pub struct TargetPlaylistStorage {
 pub type TargetPlaylistStorageMap = HashMap<String, TargetPlaylistStorage>;
 
 pub struct PlaylistStorageState {
-    pub data: RwLock<TargetPlaylistStorageMap>,
+    pub data: Arc<RwLock<TargetPlaylistStorageMap>>,
     /// Generation of the persisted failover groups per target name; a missing entry is generation 0.
     failover_group_generations: Mutex<HashMap<String, u64>>,
     pub failover_groups: crate::FailoverGroupCache,
@@ -144,7 +147,7 @@ impl Default for PlaylistStorageState {
 impl PlaylistStorageState {
     pub fn new() -> Self {
         Self {
-            data: RwLock::new(HashMap::new()),
+            data: Arc::new(RwLock::new(HashMap::new())),
             failover_group_generations: Mutex::new(HashMap::new()),
             failover_groups: crate::FailoverGroupCache::new(),
         }

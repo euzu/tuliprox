@@ -392,15 +392,24 @@ pub async fn xtream_get_playlist_categories(
     target_name: &str,
     cluster: XtreamCluster,
 ) -> Option<Vec<PlaylistXtreamCategory>> {
+    let content = xtream_read_playlist_categories(app_config, target_name, cluster).await.ok()?;
+    serde_json::from_str::<Vec<PlaylistXtreamCategory>>(&content).ok()
+}
+
+pub async fn xtream_read_playlist_categories(
+    app_config: &AppConfig,
+    target_name: &str,
+    cluster: XtreamCluster,
+) -> io::Result<String> {
     let file_path = {
         let config = app_config.config.load();
-        let storage_path = xtream_get_storage_path(&config, target_name)?;
+        let storage_path = xtream_get_storage_path(&config, target_name)
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Xtream target storage path is unavailable"))?;
         get_collection_path(&storage_path, xtream_cluster_category_collection(cluster))
     };
     let category_lock_path = target_category_lock_path(&file_path);
     let _file_lock = app_config.file_locks.read_lock(&category_lock_path).await;
-    let content = tokio::fs::read_to_string(&file_path).await.ok()?;
-    serde_json::from_str::<Vec<PlaylistXtreamCategory>>(&content).ok()
+    tokio::fs::read_to_string(&file_path).await
 }
 
 impl XtreamClusterPublishBatchResult {

@@ -40,9 +40,9 @@ use crate::{
         ProxyUserCredentials,
     },
     repository::{
-        get_target_id_mapping, get_target_id_mapping_file, get_target_storage_path, storage_const,
-        user_get_bouquet_filter, xtream_get_collection_path, xtream_get_item_for_stream_id,
-        xtream_load_rewrite_playlist, BPlusTreeQuery, GroupMember, VirtualIdRecord,
+        get_target_id_mapping, get_target_id_mapping_file, get_target_storage_path, user_get_bouquet_filter,
+        xtream_get_item_for_stream_id, xtream_load_rewrite_playlist, xtream_read_playlist_categories, BPlusTreeQuery,
+        GroupMember, VirtualIdRecord,
     },
     utils::{
         apply_timeshift, debug_if_enabled, file_exists_async, parse_timeshift, prepare_xtream_resource_hosts, request,
@@ -1769,10 +1769,10 @@ async fn xtream_player_api_handle_content_action(
     category_id: Option<u32>,
     user: &ProxyUserCredentials,
 ) -> Option<impl IntoResponse> {
-    let (collection, cluster) = match action {
-        crate::model::XC_ACTION_GET_LIVE_CATEGORIES => (storage_const::COL_CAT_LIVE, XtreamCluster::Live),
-        crate::model::XC_ACTION_GET_VOD_CATEGORIES => (storage_const::COL_CAT_VOD, XtreamCluster::Video),
-        crate::model::XC_ACTION_GET_SERIES_CATEGORIES => (storage_const::COL_CAT_SERIES, XtreamCluster::Series),
+    let cluster = match action {
+        crate::model::XC_ACTION_GET_LIVE_CATEGORIES => XtreamCluster::Live,
+        crate::model::XC_ACTION_GET_VOD_CATEGORIES => XtreamCluster::Video,
+        crate::model::XC_ACTION_GET_SERIES_CATEGORIES => XtreamCluster::Series,
         // we dont handle this action
         _ => return None,
     };
@@ -1781,35 +1781,44 @@ async fn xtream_player_api_handle_content_action(
     }
     let config = app_state.app_config.config.load();
     let target_name = target.name.as_str();
-    if let Ok(file_path) = xtream_get_collection_path(&config, target_name, collection) {
-        match tokio::fs::read_to_string(&file_path).await {
-            Ok(content) => {
-                let filter =
-                    user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
-
-                match serde_json::from_str::<Vec<XtreamCategoryEntry>>(&content) {
-                    Ok(mut categories) => {
-                        if let Some(fltr) = filter {
-                            categories.retain(|c| fltr.contains(&c.category_id));
-                        }
-                        // Hide categories fully filtered out by the user's content filter.
-                        if let Some(visible) = crate::api::endpoints::user_visibility::collect_visible_category_ids(
-                            &app_state.app_config,
-                            target,
-                            cluster,
-                            user,
-                        )
-                        .await
-                        {
-                            categories.retain(|c| c.category_id.parse::<u32>().is_ok_and(|id| visible.contains(&id)));
-                        }
-                        return Some(axum::Json(categories).into_response());
+    let _category_view = if user.t_filter.is_some() {
+        let Some(storage) = crate::repository::xtream_get_storage_path(&config, target_name) else {
+            return Some(api_utils::empty_json_list_response().into_response());
+        };
+        let path = crate::repository::xtream_category_view_lock_path(&storage);
+        Some(app_state.app_config.file_locks.read_lock(&path).await)
+    } else {
+        None
+    };
+    match xtream_read_playlist_categories(&app_state.app_config, target_name, cluster).await {
+        Ok(content) => {
+            let filter =
+                user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
+            match serde_json::from_str::<Vec<XtreamCategoryEntry>>(&content) {
+                Ok(mut categories) => {
+                    if let Some(fltr) = filter {
+                        categories.retain(|category| fltr.contains(&category.category_id));
                     }
-                    Err(err) => error!("Failed to parse json file {}: {err}", file_path.display()),
+                    // Hide categories fully filtered out by the user's content filter.
+                    if let Some(visible) = crate::api::endpoints::user_visibility::collect_visible_category_ids(
+                        &app_state.app_config,
+                        target,
+                        cluster,
+                        user,
+                    )
+                    .await
+                    {
+                        categories.retain(|category| {
+                            category.category_id.parse::<u32>().is_ok_and(|id| visible.contains(&id))
+                        });
+                    }
+                    return Some(axum::Json(categories).into_response());
                 }
+                Err(err) => error!("Failed to parse {cluster} categories for target '{target_name}': {err}"),
             }
-            Err(err) => error!("Failed to read collection file {}: {err}", file_path.display()),
         }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => error!("Failed to read {cluster} categories for target '{target_name}': {err}"),
     }
 
     Some(api_utils::empty_json_list_response().into_response())

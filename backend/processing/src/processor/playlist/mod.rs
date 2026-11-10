@@ -31,8 +31,9 @@ use shared::{
         InputUpdateRequest, MappingStage, NoPlugins, PipelineStats, PlaylistEntry, PlaylistGroup, PlaylistItem,
         PlaylistItemType, PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PlaylistUpdateRunId,
         PlaylistUpdateRunOrder, PlaylistUpdateScopeDto, PlaylistUpdateState, PlaylistUpdateSummary, PluginAbort,
-        PluginGroupMerge, PluginHook, PluginHost, PluginKeepers, PluginRunReport, PluginSortKeys, StreamProperties,
-        TargetStats, UUIDType, WatchContext, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        PluginGroupMerge, PluginHook, PluginHost, PluginKeepers, PluginRunReport, PluginSortKeys, SourceStats,
+        StreamProperties, TargetStats, UUIDType, WatchContext, WatchDisabled, WatchDisabledReason, WatchUnmatched,
+        XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, Internable},
 };
@@ -64,6 +65,7 @@ use tuliprox_curation::{
 use tuliprox_repository::{
     persist_playlist_views_with_groups, CategoryKey, FailoverGroupBatch, FailoverGroupMeta, MemoryPlaylistSource,
     PlaylistPublicationPlan, PlaylistSource, PlaylistStorageState, TargetPlaylistPersistOptions,
+    TargetReplacementDeadline,
 };
 use tuliprox_session::ActiveProviderManager;
 
@@ -187,6 +189,7 @@ pub struct ProcessingRun<
     plugins: P,
     override_status: Option<Arc<tuliprox_repository::OverrideStatusStore>>,
     expected_scope: Option<PlaylistUpdateScopeDto>,
+    replace_target_contents: bool,
 }
 
 impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataSink> {
@@ -223,6 +226,7 @@ impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataS
             plugins: NoPlugins,
             override_status: None,
             expected_scope: None,
+            replace_target_contents: false,
         }
     }
 }
@@ -256,6 +260,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
             plugins: self.plugins,
             override_status: self.override_status,
             expected_scope: self.expected_scope,
+            replace_target_contents: self.replace_target_contents,
         }
     }
 
@@ -319,6 +324,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
             plugins: self.plugins,
             override_status: self.override_status,
             expected_scope: self.expected_scope,
+            replace_target_contents: self.replace_target_contents,
         }
     }
 
@@ -347,6 +353,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
             plugins,
             override_status: self.override_status,
             expected_scope: self.expected_scope,
+            replace_target_contents: self.replace_target_contents,
         }
     }
 
@@ -398,6 +405,12 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
     }
 
     #[must_use]
+    pub fn with_replace_target_contents(mut self, replace: bool) -> Self {
+        self.replace_target_contents = replace;
+        self
+    }
+
+    #[must_use]
     pub fn with_expected_scope(mut self, expected_scope: Option<PlaylistUpdateScopeDto>) -> Self {
         self.expected_scope = expected_scope;
         self
@@ -433,6 +446,7 @@ pub async fn exec_processing<
         plugins,
         override_status,
         expected_scope,
+        replace_target_contents,
     } = run;
     let mut events =
         ScopedUpdateEvents { sink: events, revision: expected_scope.as_ref().map(PlaylistUpdateScopeDto::revision) };
@@ -502,6 +516,9 @@ pub async fn exec_processing<
 
     log_memory_snapshot("exec_processing start");
 
+    let deadline = tokio::time::Instant::now() + max_update_duration;
+    let replacement_deadline = replace_target_contents.then(|| Arc::new(TargetReplacementDeadline::new(deadline)));
+
     // Initialize Context
     let ctx = PlaylistProcessingContext {
         client,
@@ -527,6 +544,8 @@ pub async fn exec_processing<
         },
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        replace_target_contents,
+        replacement_deadline: replacement_deadline.clone(),
         input_refresh,
         library_update_mode,
         maintenance,
@@ -535,11 +554,12 @@ pub async fn exec_processing<
     };
 
     let start_time = Instant::now();
-    let process_result = tokio::time::timeout(
-        max_update_duration,
-        std::panic::AssertUnwindSafe(manual_update::process_manual_update(&ctx, update_guard.as_ref())).catch_unwind(),
-    )
-    .await;
+    let operation =
+        std::panic::AssertUnwindSafe(manual_update::process_manual_update(&ctx, update_guard.as_ref())).catch_unwind();
+    let process_result = match replacement_deadline {
+        Some(deadline) => deadline.run(operation).await,
+        None => tokio::time::timeout_at(deadline, operation).await.map_err(|_| Vec::new()),
+    };
     let (stats, errors) = match process_result {
         Ok(Ok((stats, errors))) => (stats, errors),
         Ok(Err(_)) => {
@@ -551,15 +571,23 @@ pub async fn exec_processing<
             )));
             return;
         }
-        Err(_) => {
-            error!(
-                "Playlist processing timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
-            );
-            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
-                run_id,
-                execution_order,
-                shared::model::PlaylistUpdateState::Failure,
-            )));
+        Err(published_targets) => {
+            let reason = format!("Playlist processing timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs");
+            error!("{reason} while holding playlist lock");
+            let state =
+                if published_targets.is_empty() { PlaylistUpdateState::Failure } else { PlaylistUpdateState::Partial };
+            let mut summary = PlaylistUpdateSummary::for_run(run_id, execution_order, state);
+            if let Some(deadline) = &ctx.replacement_deadline {
+                target::report_target_replacement_timeout(
+                    &ctx,
+                    &published_targets,
+                    &deadline.reported_failures(),
+                    &reason,
+                );
+                summary.error = Some(reason);
+                summary.stats = published_targets_by_source(&app_config, &published_targets);
+            }
+            events.emit(EventMessage::PlaylistUpdate(summary));
             return;
         }
     };
@@ -593,6 +621,14 @@ pub async fn exec_processing<
         has_quality_rejections: ctx.had_quality_rejections.load(std::sync::atomic::Ordering::Acquire),
     }
     .state();
+    let outcome = if replace_target_contents
+        && outcome == PlaylistUpdateState::Failure
+        && stats.iter().flat_map(|source| &source.targets).any(|target| target.success)
+    {
+        PlaylistUpdateState::Partial
+    } else {
+        outcome
+    };
     events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary {
         run_id: Some(run_id.clone()),
         execution_order: Some(execution_order),
@@ -617,6 +653,24 @@ pub async fn exec_processing<
     //trim_allocator_after_update();
 
     info!("{update_finished_message}");
+}
+
+fn published_targets_by_source(config: &AppConfig, published: &[String]) -> Vec<SourceStats> {
+    config
+        .sources
+        .load()
+        .sources
+        .iter()
+        .filter_map(|source| {
+            let targets: Vec<_> = source
+                .targets
+                .iter()
+                .filter(|target| published.contains(&target.name))
+                .map(|target| TargetStats::success(&target.name))
+                .collect();
+            (!targets.is_empty()).then_some(SourceStats { inputs: Vec::new(), targets })
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

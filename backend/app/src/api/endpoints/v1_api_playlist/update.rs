@@ -33,6 +33,7 @@ pub(in crate::api) fn enqueue_manual_playlist_update(
     targets: Arc<ProcessTargets>,
     input_action: Option<InputUpdateRequest>,
     expected_scope: Option<PlaylistUpdateScopeDto>,
+    replace_target_contents: bool,
 ) -> Result<PlaylistUpdateRunId, ManualUpdateEnqueueError> {
     let permit = sender.try_reserve().map_err(|error| match error {
         tokio::sync::mpsc::error::TrySendError::Full(()) => ManualUpdateEnqueueError::Busy,
@@ -44,6 +45,7 @@ pub(in crate::api) fn enqueue_manual_playlist_update(
         targets,
         input_action,
         expected_scope,
+        replace_target_contents,
     });
     Ok(run_id)
 }
@@ -84,6 +86,12 @@ pub(super) async fn playlist_update(
                 .into_response();
         }
         Some(scope)
+    } else if request.replace_target_contents {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            axum::Json(json!({"error": "Replacing target contents requires If-Match"})),
+        )
+            .into_response();
     } else {
         None
     };
@@ -96,6 +104,7 @@ pub(super) async fn playlist_update(
                 valid_targets,
                 input_action,
                 expected_scope,
+                request.replace_target_contents,
             ) {
                 Ok(run_id) => {
                     (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted::playlist_update(run_id)))
@@ -124,6 +133,16 @@ pub(in crate::api) fn resolve_manual_playlist_update_targets(
 ) -> Result<ProcessTargets, TuliproxError> {
     let manual_action =
         request.manual_input_update().map_err(|error| TuliproxError::ConfigSource(error.to_string()))?;
+    if request.replace_target_contents {
+        if request.target_ids.as_ref().is_none_or(Vec::is_empty) {
+            return Err(TuliproxError::ConfigSource("Replacing target contents requires explicit target IDs"));
+        }
+        if manual_action.is_some_and(|manual| {
+            manual.action != InputUpdateAction::Provider(shared::model::InputRefreshPolicy::NORMAL)
+        }) {
+            return Err(TuliproxError::ConfigSource("Replacing target contents requires the regular update policy"));
+        }
+    }
     let manual_input = if let Some(manual) = manual_action {
         let input = sources
             .inputs
@@ -169,6 +188,12 @@ pub(in crate::api) fn resolve_manual_playlist_update_targets(
             })
         }) {
             return Err(TuliproxError::ConfigSource("Target does not belong to the selected input".to_string()));
+        }
+        if request.replace_target_contents && !target.is_xtream_only() {
+            return Err(TuliproxError::ConfigSource(format!(
+                "Target '{}' must have only an Xtream output to replace its contents",
+                target.name
+            )));
         }
         targets.push(target.id);
         target_names.push(target.name.clone());

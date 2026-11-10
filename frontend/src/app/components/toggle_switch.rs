@@ -10,6 +10,10 @@ pub struct ToggleSwitchProps {
     pub compact: bool,
     #[prop_or_default]
     pub aria_label: Option<String>,
+    #[prop_or_default]
+    pub input_id: Option<String>,
+    #[prop_or_default]
+    pub aria_describedby: Option<String>,
     #[prop_or_else(Callback::noop)]
     pub on_change: Callback<bool>,
 }
@@ -50,6 +54,8 @@ pub fn ToggleSwitch(props: &ToggleSwitchProps) -> Html {
         )}>
             <input type="checkbox"
                    role="switch"
+                   id={props.input_id.clone()}
+                   aria-describedby={props.aria_describedby.clone()}
                    aria-label={props.aria_label.clone()}
                    aria-checked={toggled.to_string()}
                    checked={*toggled}

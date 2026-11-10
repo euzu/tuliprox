@@ -242,6 +242,10 @@ impl FailoverGroupStagedPublication {
 
     pub fn discard(self) { drop(self); }
 
+    pub(crate) fn files(&self) -> impl Iterator<Item = (PathBuf, Option<&Path>)> {
+        self.staged.iter().zip(PUBLISHED_FILES).map(|(staged, name)| (self.target_path.join(name), staged.as_deref()))
+    }
+
     pub fn publish(mut self) -> std::io::Result<()> {
         for (slot, name) in self.staged.iter_mut().zip(PUBLISHED_FILES) {
             let published = self.target_path.join(name);

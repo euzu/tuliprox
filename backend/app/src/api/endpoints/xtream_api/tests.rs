@@ -1084,3 +1084,107 @@ async fn playlist_webplayer_stream_routes_group_virtual_id() {
     assert_eq!(env.origin_hits("korath"), 1, "webplayer token route should pick preferred member korath");
     assert_eq!(env.origin_hits("solis"), 0);
 }
+
+#[tokio::test]
+async fn filtered_xtream_categories_keep_one_generation_during_replacement() {
+    use crate::repository::{
+        persist_playlist, xtream_category_view_lock_path, xtream_get_file_path, TargetPlaylistPersistOptions,
+    };
+    use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
+    use std::time::Duration;
+
+    let directory = tempdir().unwrap();
+    let state = create_test_app_state(Config {
+        storage_dir: directory.path().to_string_lossy().into_owned(),
+        ..Default::default()
+    });
+    let target = ConfigTarget { use_memory_cache: false, ..short_epg_target() };
+    let group = |name: &str, id: u32| {
+        let name = name.intern();
+        let mut header = PlaylistItemHeader {
+            id: id.to_string().intern(),
+            name: name.clone(),
+            title: name.clone(),
+            group: name.clone(),
+            item_type: PlaylistItemType::Live,
+            xtream_cluster: XtreamCluster::Live,
+            url: format!("http://fixture.invalid/live/{id}").intern(),
+            ..Default::default()
+        };
+        header.gen_uuid();
+        PlaylistGroup { id, title: name, channels: vec![PlaylistItem { header }], xtream_cluster: XtreamCluster::Live }
+    };
+    persist_playlist(
+        &state.app_config,
+        &mut [group("Old category", 101)],
+        None,
+        &target,
+        None,
+        TargetPlaylistPersistOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    let mut user = ProxyUserCredentials::default();
+    user.username = "filtered-fixture".into();
+    user.t_filter = Some(Arc::new(shared::foundation::get_filter(r#"Name ~ "category$""#, None).unwrap()));
+    user.output_clusters = ClusterFlags::all();
+    let read_categories = |state: Arc<AppState>, target: ConfigTarget, user: ProxyUserCredentials| async move {
+        let response = super::xtream_player_api_handle_content_action(
+            &state,
+            &target,
+            crate::model::XC_ACTION_GET_LIVE_CATEGORIES,
+            None,
+            &user,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        let json: serde_json::Value = serde_json::from_str(&response_body_text(response).await.unwrap()).unwrap();
+        let categories = json.as_array().unwrap();
+        assert_eq!(categories.len(), 1);
+        (
+            categories[0]["category_name"].as_str().unwrap().to_owned(),
+            categories[0]["category_id"].as_str().unwrap().to_owned(),
+        )
+    };
+
+    let storage = xtream_get_storage_path(&state.app_config.config.load(), &target.name).unwrap();
+    let locks = &state.app_config.file_locks;
+    let visibility_block = locks.write_lock(&xtream_get_file_path(&storage, XtreamCluster::Live)).await;
+    let category_view = xtream_category_view_lock_path(&storage);
+    let reader = tokio::spawn(read_categories(state.clone(), target.clone(), user.clone()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while locks.try_write_lock(&category_view).await.is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reader must hold the view lock while its stream scan is blocked");
+
+    let writer = tokio::spawn({
+        let (app, target) = (state.app_config.clone(), target.clone());
+        async move {
+            let options = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+            persist_playlist(&app, &mut [group("New category", 102)], None, &target, None, options).await.unwrap();
+        }
+    });
+    let config = state.app_config.config.load();
+    let target_path = crate::repository::get_target_storage_path(&config, &target.name).unwrap();
+    let mapping = crate::repository::get_target_id_mapping_file(&target_path);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while locks.try_write_lock(&mapping).await.is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement must enter staging while the reader is held");
+    assert!(!writer.is_finished());
+    drop(visibility_block);
+    let old = reader.await.unwrap();
+    writer.await.unwrap();
+    let new = read_categories(state, target, user).await;
+    assert_eq!(old.0, "Old category");
+    assert_eq!(new.0, "New category");
+    assert_ne!(old.1, new.1, "mixed generations would yield an empty intersection");
+}

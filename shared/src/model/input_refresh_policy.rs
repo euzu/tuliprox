@@ -63,6 +63,8 @@ pub struct PlaylistUpdateRequestDto {
     pub input_refresh: Option<InputRefreshOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_action: Option<InputUpdateRequest>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace_target_contents: bool,
 }
 
 impl PlaylistUpdateRequestDto {
@@ -122,6 +124,7 @@ mod tests {
             target_ids: Some(vec![4, 1]),
             input_refresh: Some(InputRefreshOverride { input_id: 17, policy: InputRefreshPolicy::FORCE }),
             input_action: None,
+            replace_target_contents: false,
         };
 
         let encoded = serde_json::to_string(&request)?;
@@ -174,6 +177,7 @@ mod tests {
                 target_ids: None,
                 input_refresh: None,
                 input_action: None,
+                replace_target_contents: false,
             }
         );
         Ok(())

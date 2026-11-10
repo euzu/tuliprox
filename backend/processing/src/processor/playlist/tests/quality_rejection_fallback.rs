@@ -243,6 +243,8 @@ fn processing_context_with_events<E: EventSink>(storage_dir: &Path, events: E) -
         stalker_refresh_mode: StalkerRefreshMode::Complete,
         partial_refresh: Arc::new(AtomicBool::new(false)),
         had_quality_rejections: Arc::new(AtomicBool::new(false)),
+        replace_target_contents: false,
+        replacement_deadline: None,
         maintenance: None,
         plugins: shared::model::NoPlugins,
         override_status: None,
@@ -1868,3 +1870,121 @@ fn resolve_stage_checks_maintenance_before_any_provider_work() {
 }
 
 mod cluster_status_evidence;
+
+#[tokio::test]
+async fn replace_target_contents_respects_normal_cache_and_only_changes_selected_targets() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = TestXtreamServer::start([2, 2, 2]);
+    let mut ctx = processing_context(temp.path());
+    let input = test_input(&server.base_url, ConfigInputUpdateQualityDto::default(), 3600, &[]);
+    let mut alpha = xtream_target(true);
+    Arc::make_mut(&mut alpha).filter = get_filter("Type = live", None).unwrap().into();
+    let mut beta = alpha.clone();
+    Arc::make_mut(&mut beta).name = "second-target".into();
+    Arc::make_mut(&mut beta).id = 2;
+    let mut other = alpha.clone();
+    Arc::make_mut(&mut other).name = "unselected-target".into();
+    Arc::make_mut(&mut other).id = 3;
+
+    let cache = Arc::new(PlaylistStorageState::new());
+    ctx.playlist_state = Some(cache.clone());
+    seed_baseline(&ctx, &input).await;
+    seed_valid_cluster_cache(&ctx, &input).await;
+    for target in [&alpha, &beta, &other] {
+        seed_xtream_target(&ctx, target, &cache).await;
+    }
+    install_source(&ctx, &input, &alpha);
+    let mut sources = (*ctx.config.sources.load_full()).clone();
+    sources.sources[0].targets.extend([beta.clone(), other.clone()]);
+    ctx.config.sources.store(Arc::new(sources));
+
+    let run = |ids: Vec<u16>, replace, run_id| {
+        let sources = ctx.config.sources.load();
+        let names = sources.sources[0]
+            .targets
+            .iter()
+            .filter(|target| ids.contains(&target.id))
+            .map(|target| target.name.clone())
+            .collect();
+        ProcessingRun::for_run(
+            run_id,
+            ctx.client.clone(),
+            ctx.config.clone(),
+            Arc::new(ProcessTargets { enabled: true, inputs: vec![input.id], targets: ids, target_names: names }),
+            ctx.events,
+        )
+        .with_expected_scope(Some(sources.playlist_update_scope()))
+        .with_playlist_state(cache.clone())
+        .with_replace_target_contents(replace)
+    };
+
+    exec_processing(run(vec![1], false, "ordinary".into())).await;
+    assert_target_counts(&ctx.config, &alpha, [2, 2, 2]).await;
+    exec_processing(run(vec![1], true, "replace-one".into())).await;
+    assert_target_counts(&ctx.config, &alpha, [2, 0, 0]).await;
+    assert_target_counts(&ctx.config, &beta, [2, 2, 2]).await;
+    assert_empty_target_categories(&ctx.config, &alpha, &[XtreamCluster::Video, XtreamCluster::Series]).await;
+
+    let mut sources = (*ctx.config.sources.load_full()).clone();
+    for target in &mut sources.sources[0].targets[..2] {
+        Arc::make_mut(target).filter = get_filter(r#"Name = "nothing matches""#, None).unwrap().into();
+    }
+    ctx.config.sources.store(Arc::new(sources));
+    exec_processing(run(vec![1, 2], true, "replace-two".into())).await;
+    for target in [&alpha, &beta] {
+        assert_target_counts(&ctx.config, target, [0, 0, 0]).await;
+        assert_empty_target_categories(&ctx.config, target, &XTREAM_CLUSTER).await;
+    }
+    assert_target_counts(&ctx.config, &other, [2, 2, 2]).await;
+    for cluster in XTREAM_CLUSTER {
+        assert_eq!(count_input_xtream_cluster(&ctx.config, &input, cluster).await.unwrap(), Some(2));
+    }
+    assert!(server.finish().is_empty(), "valid cache should not make upstream requests");
+}
+
+#[tokio::test]
+async fn replace_target_contents_rejects_quality_and_technical_fallbacks_across_sources() {
+    for technical_error in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let statuses = if technical_error {
+            HashMap::from([("get_vod_streams".to_string(), reqwest::StatusCode::SERVICE_UNAVAILABLE)])
+        } else {
+            HashMap::new()
+        };
+        let server = TestXtreamServer::start_with_statuses(fixture_responses([2, 1, 2]), statuses);
+        let mut ctx = processing_context_with_events(temp.path(), CollectSink::default());
+        ctx.replace_target_contents = true;
+        let input =
+            test_input(&server.base_url, ConfigInputUpdateQualityDto { live: 100, vod: 100, series: 100 }, 0, &[]);
+        let alpha = xtream_target(true);
+        let mut beta = alpha.clone();
+        Arc::make_mut(&mut beta).id = 2;
+        Arc::make_mut(&mut beta).name = "also-selected".into();
+        let cache = Arc::new(PlaylistStorageState::new());
+        ctx.playlist_state = Some(cache.clone());
+        seed_baseline(&ctx, &input).await;
+        for target in [&alpha, &beta] {
+            seed_xtream_target(&ctx, target, &cache).await;
+        }
+        install_source(&ctx, &input, &alpha);
+        let mut sources = (*ctx.config.sources.load_full()).clone();
+        sources.sources.push(ConfigSource { inputs: vec![input.name.clone()], targets: vec![beta.clone()] });
+        ctx.config.sources.store(Arc::new(sources));
+        let ctx = Arc::new(ctx);
+
+        for (source, target) in [&alpha, &beta].into_iter().enumerate() {
+            let (_, stats, errors) = process_source(source, ctx.clone()).await;
+            assert_eq!(stats.len(), 1);
+            assert!(!stats[0].success);
+            assert!(errors.iter().any(|error| error.message().contains(&target.name)));
+            assert_target_counts(&ctx.config, target, [2, 2, 2]).await;
+            assert!(ctx.events.0.lock().unwrap().iter().any(|event| {
+                matches!(event, EventMessage::PlaylistUpdateProgress(progress)
+                if progress.failure_reason.as_ref().is_some_and(|reason| {
+                    reason.contains(&target.name) && (technical_error || reason.contains("quality"))
+                }))
+            }));
+        }
+        server.finish();
+    }
+}

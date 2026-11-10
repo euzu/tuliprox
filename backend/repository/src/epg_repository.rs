@@ -1,8 +1,9 @@
 use crate::{
     build_epg_group_index, epg_group_index_remove, epg_group_index_store,
     error_macros::{cant_open_result, cant_query_result},
-    m3u_get_epg_file_path_for_target, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTree,
-    BPlusTreeQuery,
+    m3u_get_epg_file_path_for_target, xtream_get_epg_file_path_for_target, xtream_get_storage_path,
+    xtream_repository::target_publish::{write_target_staging, TargetFileReplacement},
+    BPlusTree, BPlusTreeQuery,
 };
 use shared::{
     error::TuliproxError,
@@ -10,7 +11,7 @@ use shared::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::task;
@@ -222,6 +223,34 @@ pub async fn epg_write_for_target(
         })??;
     }
     Ok(())
+}
+
+/// Stages the Xtream guide and both group trees for a whole-target publication.
+pub(crate) async fn stage_replacement_epg(
+    target: &ConfigTarget,
+    epg: &Epg,
+    playlist: &[PlaylistGroup],
+    database: PathBuf,
+    group_index: PathBuf,
+    group_channels: PathBuf,
+    artifacts: Vec<TargetFileReplacement>,
+) -> Result<Vec<TargetFileReplacement>, TuliproxError> {
+    let options = target.options.as_ref().map_or_else(EpgOutputOptions::default, |options| options.epg_output.clone());
+    let output_case = EpgIdOutputCase::from_lowercase(options.lowercase_ids);
+    let (rename, order) = build_epg_maps(Some(playlist), output_case);
+    let keys = epg_written_keys(epg, output_case).unwrap_or_default();
+    let (mut groups, mut channels) = build_epg_group_index(playlist, &keys, output_case);
+    let target_name = target.name.clone();
+    let epg = epg.clone();
+    let (artifacts, ()) = write_target_staging(artifacts, move || {
+        epg_write_file(&target_name, &epg, &database, &rename, Some(&order), &options)?;
+        groups.store(&group_index).and_then(|_| channels.store(&group_channels)).map_err(|error| {
+            TuliproxError::RepositoryEpg(format!("Failed to stage EPG group index for target '{target_name}': {error}"))
+        })?;
+        Ok(())
+    })
+    .await?;
+    Ok(artifacts)
 }
 
 /// Queries EPG channels by exact target-storage keys.
