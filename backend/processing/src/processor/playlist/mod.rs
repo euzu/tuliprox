@@ -484,12 +484,12 @@ pub async fn exec_processing<
     let sources = app_config.sources.load_full();
     let scope = sources.playlist_update_scope();
     if expected_scope.is_some_and(|expected| scope != expected) {
-        warn!("Playlist update scope changed while the request was queued; update skipped");
-        events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
-            run_id,
-            execution_order,
-            shared::model::PlaylistUpdateState::Failure,
-        )));
+        let reason = "Playlist update scope changed while the request was queued";
+        warn!("{reason}; update skipped");
+        let mut summary =
+            PlaylistUpdateSummary::for_run(run_id, execution_order, shared::model::PlaylistUpdateState::Failure);
+        summary.error = Some(reason.to_string());
+        events.emit(EventMessage::PlaylistUpdate(summary));
         return;
     }
     events.revision = Some(scope.revision());

@@ -173,7 +173,8 @@ async fn manual_update_scope_change_before_processing_writes_no_target() {
     assert!(!temp.path().join("unselected.m3u").exists());
     let events = ctx.events.0.lock().unwrap();
     assert!(matches!(events.as_slice(), [EventMessage::PlaylistUpdate(summary)]
-        if summary.state == PlaylistUpdateState::Failure && summary.run_id.as_ref() == Some(&run_id)));
+        if summary.state == PlaylistUpdateState::Failure && summary.run_id.as_ref() == Some(&run_id)
+            && summary.error.as_deref() == Some("Playlist update scope changed while the request was queued")));
 }
 
 #[tokio::test]

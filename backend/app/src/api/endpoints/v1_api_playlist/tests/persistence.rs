@@ -15,7 +15,8 @@ async fn playlist_update_scope_preserves_write_only_access_without_status_reads(
         Router,
     };
     use shared::model::{
-        Permission, PermissionSet, PlaylistUpdateViewSnapshotDto, UserId, WebAuthConfigDto, WebUiConfigDto,
+        Permission, PermissionSet, PlaylistUpdateStatusDto, PlaylistUpdateViewSnapshotDto, UserId, WebAuthConfigDto,
+        WebUiConfigDto,
     };
     use tower::ServiceExt;
     let input = Arc::new(ConfigInput { id: 2, name: "source".intern(), ..ConfigInput::default() });
@@ -50,7 +51,7 @@ async fn playlist_update_scope_preserves_write_only_access_without_status_reads(
     let snapshot: PlaylistUpdateViewSnapshotDto =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(snapshot.scope.inputs[0].id, 2);
-    assert_eq!(snapshot.status, Default::default());
+    assert_eq!(snapshot.status, PlaylistUpdateStatusDto::default());
 }
 
 #[tokio::test]
@@ -76,7 +77,7 @@ async fn playlist_update_status_reload_rejects_progress_for_a_reused_input_id() 
     config.sources.store(Arc::new(sources));
     let Json(new) = super::super::playlist_update_status(State(app)).await.unwrap();
     assert_eq!(new.inputs[0].input_id, 2);
-    assert!(new.active_updates.is_empty());
+    assert_eq!(new.active_updates, [] as [PlaylistUpdateProgressEvent; 0]);
 }
 
 #[tokio::test]

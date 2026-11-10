@@ -171,7 +171,9 @@ pub fn SchedulesConfigView() -> Html {
     };
 
     let stale_targets = *selected_type == ScheduleTaskType::PlaylistUpdate
-        && selected_targets.as_ref().is_some_and(|targets| targets.iter().any(|target| !all_targets.contains(target)));
+        && selected_targets.as_ref().is_some_and(|targets| {
+            targets.iter().any(|target| target != ALL_TARGETS_SENTINEL && !all_targets.contains(target))
+        });
     let handle_add_schedule = {
         let services = services_ctx.clone();
         let translate = translate.clone();

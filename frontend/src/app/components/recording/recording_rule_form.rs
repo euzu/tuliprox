@@ -256,11 +256,12 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
                 .collect::<Vec<DropDownOption>>()
         });
 
-    let stale_target = form_state
-        .form
-        .target_id
-        .as_ref()
-        .is_some_and(|name| !filtered_targets.iter().any(|target| &target.name == name));
+    let stale_target = props.existing.is_none()
+        && form_state
+            .form
+            .target_id
+            .as_ref()
+            .is_some_and(|name| !filtered_targets.iter().any(|target| &target.name == name));
     let kind_options = use_memo(form_state.form.kind.clone(), |kind| {
         vec![
             DropDownOption {

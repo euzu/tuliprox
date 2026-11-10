@@ -1672,14 +1672,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().to_string_lossy().to_string();
         let sources_file = temp_dir.path().join("source.yml");
-        let input_dto = shared::model::ConfigInputDto {
-            name: "input1".into(),
-            url: "http://example.com/playlist.m3u".to_string(),
-            ..Default::default()
-        };
         let curation: shared::model::CurationConfigDto = serde_json::from_value(serde_json::json!({"enabled": false, "catalog_selection": "curated", "tmdb": {"api": {"access_token": "discovery-test-token"}, "trending": [{"kind": "movie", "time_window": "week", "limit": 37, "create_xtream_category": false}]}})).unwrap();
         let initial_sources = SourcesConfigDto {
-            inputs: vec![input_dto.clone()],
+            inputs: vec![shared::model::ConfigInputDto {
+                name: "input1".into(),
+                url: "http://example.com/playlist.m3u".to_string(),
+                ..Default::default()
+            }],
             sources: vec![shared::model::ConfigSourceDto {
                 inputs: vec!["input1".into()],
                 targets: vec![shared::model::ConfigTargetDto {
@@ -1700,19 +1699,12 @@ mod tests {
             ..crate::model::Config::default()
         };
         let app_state = create_test_app_state(test_config);
-        app_state.app_config.paths.store(Arc::new(shared::model::ConfigPaths {
-            home_path: config_path.clone(),
-            config_path: config_path.clone(),
-            storage_path: config_path.clone(),
-            config_file_path: String::new(),
-            sources_file_path: sources_file.to_string_lossy().to_string(),
-            mapping_file_path: None,
-            mapping_files_used: None,
-            template_file_path: None,
-            template_files_used: None,
-            api_proxy_file_path: String::new(),
-            custom_stream_response_path: None,
-        }));
+        let mut paths = (*app_state.app_config.paths.load_full()).clone();
+        paths.home_path.clone_from(&config_path);
+        paths.config_path.clone_from(&config_path);
+        paths.storage_path = config_path;
+        paths.sources_file_path = sources_file.to_string_lossy().into_owned();
+        app_state.app_config.paths.store(Arc::new(paths));
         super::ConfigFile::load_sources(&app_state).await.unwrap();
 
         tuliprox_repository::save_target_bouquet(
@@ -1730,20 +1722,8 @@ mod tests {
         .await
         .unwrap();
 
-        let updated_sources = SourcesConfigDto {
-            inputs: vec![input_dto],
-            sources: vec![shared::model::ConfigSourceDto {
-                inputs: vec!["input1".into()],
-                targets: vec![shared::model::ConfigTargetDto {
-                    id: 1,
-                    name: "target_renamed".to_string(),
-                    curation: Some(curation.clone()),
-                    output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto::default())],
-                    ..Default::default()
-                }],
-            }],
-            ..Default::default()
-        };
+        let mut updated_sources = initial_sources;
+        updated_sources.sources[0].targets[0].name = "target_renamed".to_string();
 
         let mut events = app_state.event_manager.get_event_channel();
         let previous_scope = app_state.app_config.sources.load().playlist_update_scope().revision();
