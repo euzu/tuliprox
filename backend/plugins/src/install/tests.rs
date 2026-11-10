@@ -107,7 +107,11 @@ fn an_inflated_bomb_with_a_lying_header_is_stopped_by_the_running_count() {
     let bytes = lying_bomb("bomb.bin", 40);
     assert!(bytes.len() < 1024 * 1024, "the archive itself is small: {} bytes", bytes.len());
     let (root, result) = extract_package(&bytes);
-    assert!(result.unwrap_err().contains("inflates past"));
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("inflates past") || err.contains("larger than its declared uncompressed size"),
+        "unexpected error: {err}"
+    );
     // what was written stops at the cap
     let written = fs::metadata(root.path().join("work/bomb.bin")).unwrap().len();
     assert!(written <= MAX_ENTRY_BYTES + 64 * 1024, "{written} bytes were written");

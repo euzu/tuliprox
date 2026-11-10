@@ -115,9 +115,19 @@ requests. The network capability is described in [Security Model](./security.md)
 ## Plugin directories and search order
 
 The `plugins.directories` list specifies the search directories holding plugins. Relative entries are resolved
-against the config directory. When the list is empty, tuliprox searches `plugins.directory` (default `plugins`)
-alone, preceded by `/app/plugins` when that directory exists (the bundled plugins of the container image). In
-Docker the default is therefore `[/app/plugins, /app/config/plugins]`, and installs land on the config volume.
+against the config directory. When the list is empty, tuliprox searches `plugins.directory` (default `plugins`,
+resolved to `<config>/plugins`) alone, preceded by `/app/plugins` when that directory exists (the bundled plugins
+of the container image). In Docker the default is therefore `[/app/plugins, /app/config/plugins]`, and installs land
+on the config volume.
+
+`plugins.directory` serves as the target directory for custom plugin installations and uploads when `directories` is
+not configured. Bundled plugins (such as `/app/plugins`) are listed separately and are not affected. In the Web UI, it
+is labelled **Custom plugins directory** on the Plugins page's Updates card (as well as on the Config page); relative
+paths stay relative to the config directory (default `plugins`, resolving to `<config>/plugins`), and default values
+(`plugins` or empty) are omitted from `config.yml`. The UI shows the list of effective search directories as muted
+text (bundled first, custom last). When `plugins.directories` or the environment variable `TULIPROX_PLUGINS_DIRS` is
+set, `directory` is overridden and the field is displayed as read-only. Saving a changed directory triggers an
+immediate reload and rescan of the plugin system without requiring a restart or config hot reload.
 
 ```yaml
 plugins:

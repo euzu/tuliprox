@@ -127,9 +127,9 @@ async fn parse_sources_file_with_revision(
     let parsed = tokio::task::spawn_blocking(move || {
         let reader = utils::file_reader(std::io::Cursor::new(content));
         if resolve_env {
-            serde_saphyr::from_reader::<_, SourcesConfigDto>(utils::EnvResolvingReader::new(reader))
+            shared::utils::yaml_from_reader::<_, SourcesConfigDto>(utils::EnvResolvingReader::new(reader))
         } else {
-            serde_saphyr::from_reader::<_, SourcesConfigDto>(reader)
+            shared::utils::yaml_from_reader::<_, SourcesConfigDto>(reader)
         }
     })
     .await
@@ -245,7 +245,7 @@ pub fn read_config_file_with_options(config_file: &str, opts: ReadConfigOptions)
     match open_file(&std::path::PathBuf::from(config_file)) {
         Ok(file) => {
             let maybe_config: Result<ConfigDto, _> =
-                serde_saphyr::from_reader(config_file_reader(file, opts.resolve_env));
+                shared::utils::yaml_from_reader(config_file_reader(file, opts.resolve_env));
             match maybe_config {
                 Ok(mut config) => {
                     if opts.resolve_env {
@@ -270,7 +270,7 @@ pub fn read_config_file_with_options(config_file: &str, opts: ReadConfigOptions)
 /// that message names neither the new name nor what moved.
 fn renamed_config_block(config_file: &str) -> Option<&'static str> {
     let file = open_file(&std::path::PathBuf::from(config_file)).ok()?;
-    let raw: serde_json::Value = serde_saphyr::from_reader(config_file_reader(file, false)).ok()?;
+    let raw: serde_json::Value = shared::utils::yaml_from_reader(config_file_reader(file, false)).ok()?;
     raw.get("video").and_then(|video| video.get("download")).map(|_| {
         "`video.download` is now `video.recording`: rename the block, move the keys of its nested `recording` \
          block up into it, and replace `download_priority` / `recording_priority` with `priority` (see the \
@@ -758,7 +758,7 @@ pub fn read_api_proxy_file_with_templates(
 ) -> Result<Option<ApiProxyConfigDto>, TuliproxError> {
     open_file(&std::path::PathBuf::from(api_proxy_file)).map_or(Ok(None), |file| {
         let maybe_api_proxy: Result<ApiProxyConfigDto, _> =
-            serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+            shared::utils::yaml_from_reader(config_file_reader(file, resolve_env));
         match maybe_api_proxy {
             Ok(mut api_proxy_dto) => {
                 if resolve_env {
@@ -964,7 +964,7 @@ pub fn plans_file_path(api_proxy_file_path: &str) -> PathBuf {
 
 pub fn read_plans_file(plans_file: &str, resolve_env: bool) -> Result<Option<PlansConfigDto>, TuliproxError> {
     open_file(&PathBuf::from(plans_file)).map_or(Ok(None), |file| {
-        let parsed: Result<PlansConfigDto, _> = serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+        let parsed: Result<PlansConfigDto, _> = shared::utils::yaml_from_reader(config_file_reader(file, resolve_env));
         match parsed {
             Ok(mut dto) => {
                 if resolve_env {
@@ -1030,7 +1030,7 @@ fn read_legacy_api_proxy_plans(config: &AppConfig, resolve_env: bool) -> Option<
         paths.api_proxy_file_path.clone()
     };
     let file = open_file(&PathBuf::from(api_proxy_file.as_str())).ok()?;
-    let parsed: Result<LegacyApiProxyPlans, _> = serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+    let parsed: Result<LegacyApiProxyPlans, _> = shared::utils::yaml_from_reader(config_file_reader(file, resolve_env));
     match parsed {
         Ok(dto) if !dto.plans.is_empty() => Some(dto.plans),
         _ => None,

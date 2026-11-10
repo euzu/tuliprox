@@ -14,7 +14,7 @@ use axum::{body::Body, http::Request, response::IntoResponse};
 use base64::Engine;
 use log::{debug, error, warn};
 use lol_html::{element, RewriteStrSettings};
-use rand::{rngs::OsRng, RngCore, TryRngCore};
+use rand::{rngs::SysRng, Rng, TryRng};
 use serde_json::json;
 use shared::{
     model::{AuthAuditEvent, EventMessage, EventSink, TokenResponse, UserCredential, UserId, TOKEN_NO_AUTH},
@@ -382,7 +382,7 @@ async fn index(
 
             // ContentSecurityPolicy nonce
             let mut rnd = [0u8; 32];
-            if OsRng.try_fill_bytes(&mut rnd).is_err() {
+            if SysRng.try_fill_bytes(&mut rnd).is_err() {
                 rand::rng().fill_bytes(&mut rnd);
             }
             let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(rnd);

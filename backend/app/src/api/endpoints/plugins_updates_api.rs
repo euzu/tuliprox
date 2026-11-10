@@ -35,9 +35,9 @@ use shared::model::{PluginUpdatePolicyDto, PluginUpdateRequestDto, PluginUpdateS
 use shared::{
     error::TuliproxError,
     model::{
-        is_valid_plugin_id, EventMessage, PluginBootReportDto, PluginUpdateBlockerDto, PluginUpdateEvent,
-        PluginUpdateOutcome, PluginUpdateResultDto, PluginUpdateResultKindDto, PluginUpdateSourceErrorDto,
-        PluginUploadErrorDto, PluginsConfigDto, Prepare,
+        is_default_plugins_directory, is_valid_plugin_id, EventMessage, PluginBootReportDto, PluginUpdateBlockerDto,
+        PluginUpdateEvent, PluginUpdateOutcome, PluginUpdateResultDto, PluginUpdateResultKindDto,
+        PluginUpdateSourceErrorDto, PluginUploadErrorDto, PluginsConfigDto, Prepare, DEFAULT_PLUGINS_DIR,
     },
 };
 use std::sync::Arc;
@@ -137,15 +137,40 @@ async fn read_written_dto(app_config: &AppConfig) -> Result<shared::model::Confi
         .map_err(|err| TuliproxError::Config(format!("Could not read config.yml: {err}")))?
 }
 
+/// `plugins.directories` or `TULIPROX_PLUGINS_DIRS` decide the search and install directories; `directory` is then
+/// not used.
 #[cfg(feature = "plugins")]
-fn settings_of(plugins: &PluginsConfigDto) -> PluginUpdateSettingsDto {
+fn directory_overridden(plugins: &PluginsConfigDto) -> bool {
+    tuliprox_core::model::env_plugin_dirs().is_some() || !plugins.directories.is_empty()
+}
+
+#[cfg(feature = "plugins")]
+fn settings_of(
+    plugins: &PluginsConfigDto,
+    runtime: Option<&PluginsConfig>,
+    config_path: &str,
+) -> PluginUpdateSettingsDto {
+    let configured_dir =
+        if is_default_plugins_directory(&plugins.directory) { String::new() } else { plugins.directory.clone() };
+    let overridden = directory_overridden(plugins);
+    let (effective_dir, search_dirs) = if let Some(runtime) = runtime {
+        (runtime.directory.clone(), runtime.directories.clone())
+    } else {
+        let mut tmp = PluginsConfig::from(plugins);
+        let _ = tmp.prepare(config_path);
+        (tmp.directory, tmp.directories)
+    };
     PluginUpdateSettingsDto {
         auto_update_on_boot: plugins.auto_update_on_boot,
         boot_update_budget: plugins.boot_update_budget.clone(),
+        directory: configured_dir,
+        effective_directory: effective_dir,
+        directory_overridden: overridden,
+        search_directories: search_dirs,
     }
 }
 
-/// `GET /api/v1/plugins/updates/settings`: the two global update fields as
+/// `GET /api/v1/plugins/updates/settings`: the global update fields and plugin directory as
 /// `config.yml` has them (the defaults when the file does not list them).
 #[cfg(feature = "plugins")]
 async fn get_update_settings(State(app_state): State<Arc<AppState>>) -> Response {
@@ -153,7 +178,12 @@ async fn get_update_settings(State(app_state): State<Arc<AppState>>) -> Response
         return *response;
     }
     match read_written_dto(&app_state.app_config).await {
-        Ok(dto) => Json(settings_of(&dto.plugins.unwrap_or_default())).into_response(),
+        Ok(dto) => {
+            let plugins = dto.plugins.unwrap_or_default();
+            let runtime = app_state.app_config.plugins.load();
+            let config_path = app_state.app_config.paths.load().config_path.clone();
+            Json(settings_of(&plugins, runtime.as_deref(), &config_path)).into_response()
+        }
         Err(err) => {
             log::error!("Cannot read config.yml for the update settings: {err}");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "cannot read config.yml")
@@ -161,13 +191,17 @@ async fn get_update_settings(State(app_state): State<Arc<AppState>>) -> Response
     }
 }
 
-/// The budget through the shared `plugins:` check (a duration with a unit, not
-/// zero), returned normalised, or the problem text.
+/// The budget and directory through the shared `plugins:` check, returned normalised,
+/// or the problem text.
 #[cfg(feature = "plugins")]
 fn checked_settings(body: &PluginUpdateSettingsDto) -> Result<PluginsConfigDto, String> {
+    if body.directory.chars().any(char::is_control) {
+        return Err("plugins.directory must not contain control characters".to_string());
+    }
     let mut dto = PluginsConfigDto {
         auto_update_on_boot: body.auto_update_on_boot,
         boot_update_budget: body.boot_update_budget.clone(),
+        directory: body.directory.clone(),
         ..PluginsConfigDto::default()
     };
     Prepare::prepare(&mut dto, ()).map_err(|err| err.to_string())?;
@@ -192,8 +226,9 @@ impl From<TuliproxError> for UpdateStoreError {
 /// One edit of the update fields of the `plugins:` block.
 #[cfg(feature = "plugins")]
 enum UpdateChange {
-    /// `auto_update_on_boot` and the (already checked) `boot_update_budget`.
-    Globals(PluginUpdateSettingsDto),
+    /// `auto_update_on_boot`, the (already checked) `boot_update_budget` and, when the request named it,
+    /// `directory`. A request without `directory` keeps the configured one.
+    Globals { settings: PluginUpdateSettingsDto, directory_supplied: bool },
     /// One entry's policy.
     Policy(String, shared::model::PluginUpdatePolicy),
 }
@@ -206,7 +241,7 @@ enum UpdateChange {
 async fn persist_update_fields(
     app_config: &AppConfig,
     change: UpdateChange,
-) -> Result<PluginsConfigDto, UpdateStoreError> {
+) -> Result<(PluginsConfigDto, bool), UpdateStoreError> {
     let (file_path, backup_dir) = {
         let paths = app_config.paths.load();
         let config = app_config.config.load();
@@ -215,9 +250,19 @@ async fn persist_update_fields(
     let mut dto = read_written_dto(app_config).await?;
     let plugins = dto.plugins.get_or_insert_with(PluginsConfigDto::default);
     match &change {
-        UpdateChange::Globals(settings) => {
+        UpdateChange::Globals { settings, directory_supplied } => {
             plugins.auto_update_on_boot = settings.auto_update_on_boot;
             plugins.boot_update_budget.clone_from(&settings.boot_update_budget);
+            // An overridden directory is shown read-only and has no effect, so keep what config.yml has; a request
+            // that does not name `directory` keeps it as well.
+            if *directory_supplied && !directory_overridden(plugins) {
+                let dir = settings.directory.trim();
+                if is_default_plugins_directory(dir) {
+                    plugins.directory = DEFAULT_PLUGINS_DIR.to_string();
+                } else {
+                    plugins.directory = dir.to_string();
+                }
+            }
         }
         UpdateChange::Policy(id, policy) => {
             let Some(entry) = plugins.plugins.iter_mut().find(|entry| entry.id == *id) else {
@@ -229,10 +274,19 @@ async fn persist_update_fields(
     let written = plugins.clone();
     crate::config_loader::save_main_config(&file_path, &backup_dir, &dto).await?;
 
+    let (prev_directory, prev_directories) = {
+        let current = app_config.plugins.load();
+        current.as_ref().map(|c| (c.directory.clone(), c.directories.clone())).unwrap_or_default()
+    };
+
     let mut next = app_config.plugins.load_full().map(|current| (*current).clone()).unwrap_or_default();
     match &change {
-        UpdateChange::Globals(_) => {
-            let runtime = PluginsConfig::from(&written);
+        UpdateChange::Globals { .. } => {
+            let config_path = app_config.paths.load().config_path.clone();
+            let mut runtime = PluginsConfig::from(&written);
+            let _ = runtime.prepare(&config_path);
+            next.directory = runtime.directory;
+            next.directories = runtime.directories;
             next.auto_update_on_boot = runtime.auto_update_on_boot;
             next.boot_update_budget = runtime.boot_update_budget;
         }
@@ -242,13 +296,17 @@ async fn persist_update_fields(
             }
         }
     }
+    let directories_changed = match &change {
+        UpdateChange::Globals { .. } => prev_directory != next.directory || prev_directories != next.directories,
+        UpdateChange::Policy(_, _) => false,
+    };
     app_config.plugins.store(Some(Arc::new(next.clone())));
     app_config.config.rcu(|current| {
         let mut config = current.as_ref().clone();
         config.plugins = Some(next.clone());
         Arc::new(config)
     });
-    Ok(written)
+    Ok((written, directories_changed))
 }
 
 #[cfg(feature = "plugins")]
@@ -264,19 +322,38 @@ fn store_failure(err: UpdateStoreError) -> Response {
     }
 }
 
-/// `PUT /api/v1/plugins/updates/settings`: save the two global fields. `422`
-/// when the budget is not a duration with a unit or is zero; only those two
-/// fields of `config.yml` change.
+/// `PUT /api/v1/plugins/updates/settings`: save the global fields. `422`
+/// when the budget is not a duration with a unit or is zero, or the directory contains control characters;
+/// only those fields of `config.yml` change.
 #[cfg(feature = "plugins")]
-async fn put_update_settings(
-    State(app_state): State<Arc<AppState>>,
-    Json(body): Json<PluginUpdateSettingsDto>,
-) -> Response {
+async fn put_update_settings(State(app_state): State<Arc<AppState>>, Json(raw): Json<serde_json::Value>) -> Response {
     if let Err(response) = plugins_on(&app_state) {
         return *response;
     }
+    // An omitted `directory` must not reset the configured one, so look at the raw body before the serde default.
+    let directory_supplied = raw.get("directory").is_some();
+    let body: PluginUpdateSettingsDto = match serde_json::from_value(raw) {
+        Ok(body) => body,
+        Err(err) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(PluginUploadErrorDto {
+                    error: "invalid update settings".to_string(),
+                    problems: vec![err.to_string()],
+                }),
+            )
+                .into_response();
+        }
+    };
     let settings = match checked_settings(&body) {
-        Ok(dto) => settings_of(&dto),
+        Ok(dto) => PluginUpdateSettingsDto {
+            auto_update_on_boot: dto.auto_update_on_boot,
+            boot_update_budget: dto.boot_update_budget,
+            directory: body.directory,
+            effective_directory: String::new(),
+            directory_overridden: false,
+            search_directories: Vec::new(),
+        },
         Err(problem) => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -294,14 +371,22 @@ async fn put_update_settings(
         let _guard = plugins.install_lock().await;
         let file_path = config_file_path(&app_state);
         let _lock = app_state.app_config.file_locks.write_lock(std::path::Path::new(&file_path)).await;
-        match persist_update_fields(&app_state.app_config, UpdateChange::Globals(settings.clone())).await {
-            Ok(_) => {
+        match persist_update_fields(&app_state.app_config, UpdateChange::Globals { settings, directory_supplied }).await
+        {
+            Ok((written, directories_changed)) => {
+                if directories_changed {
+                    crate::api::model::reload_plugins(&app_state.plugins, &app_state.app_config).await;
+                }
+                let config_path = app_state.app_config.paths.load().config_path.clone();
+                let runtime = app_state.app_config.plugins.load();
+                let answer = settings_of(&written, runtime.as_deref(), &config_path);
                 log::info!(
-                    "Plugin update settings saved: auto_update_on_boot={}, boot_update_budget={}",
-                    settings.auto_update_on_boot,
-                    settings.boot_update_budget
+                    "Plugin update settings saved: auto_update_on_boot={}, boot_update_budget={}, directory={}",
+                    answer.auto_update_on_boot,
+                    answer.boot_update_budget,
+                    answer.directory
                 );
-                Json(settings).into_response()
+                Json(answer).into_response()
             }
             Err(err) => store_failure(err),
         }
@@ -611,9 +696,11 @@ mod tests {
             let app_state = create_test_app_state_with_plugins(config_in(dir), Some(system));
             let mut paths = app_state.app_config.paths.load().as_ref().clone();
             paths.config_file_path = file.to_string_lossy().to_string();
+            paths.config_path = dir.path().to_string_lossy().to_string();
             app_state.app_config.paths.store(Arc::new(paths));
             let written = crate::config_loader::read_config_file(&file.to_string_lossy(), false, false).unwrap();
-            let runtime = written.plugins.as_ref().map(PluginsConfig::from).unwrap_or_default();
+            let mut runtime = written.plugins.as_ref().map(PluginsConfig::from).unwrap_or_default();
+            let _ = runtime.prepare(&dir.path().to_string_lossy());
             app_state.app_config.plugins.store(Some(Arc::new(runtime)));
             (app_state, file)
         }
@@ -719,6 +806,149 @@ mod tests {
             assert_eq!(status(&router, "POST", "/plugins/ghost-plugin/update", body).await, StatusCode::NOT_FOUND);
             // an installed plugin without a marketplace origin has no candidate either
             assert_eq!(status(&router, "POST", "/plugins/demo/update", body).await, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn plugin_directory_settings_round_trip_validation_and_override() {
+            let dir = TempDir::new().unwrap();
+            let yaml = format!("{BASE}plugins:\n  enabled: true\n");
+            let (app_state, file) = app_state_for(&dir, &yaml);
+            let router = router(&app_state);
+            let get = |router: Router| async move {
+                let request = Request::builder().uri("/plugins/updates/settings").body(Body::empty()).unwrap();
+                let response = router.oneshot(request).await.unwrap();
+                let bytes = http_body_util::BodyExt::collect(response.into_body()).await.unwrap().to_bytes();
+                serde_json::from_slice::<PluginUpdateSettingsDto>(&bytes).unwrap()
+            };
+
+            // 1. Initial GET: directory is default (""), not overridden, effective directory is resolved to config/plugins
+            let initial = get(router.clone()).await;
+            assert_eq!(initial.directory, "");
+            assert!(!initial.directory_overridden);
+            assert!(initial.effective_directory.ends_with("plugins"));
+
+            // 2. PUT with custom relative directory: stored, relative path stays relative, effective directory updated
+            let body = r#"{"autoUpdateOnBoot":false,"bootUpdateBudget":"30s","directory":"custom_plugins"}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            let updated = get(router.clone()).await;
+            assert_eq!(updated.directory, "custom_plugins");
+            assert!(!updated.directory_overridden);
+            assert!(updated.effective_directory.ends_with("custom_plugins"));
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(text.contains("directory: custom_plugins"), "{text}");
+            // runtime config is updated
+            let runtime = app_state.app_config.plugins.load_full().unwrap();
+            assert!(runtime.directory.ends_with("custom_plugins"));
+
+            // 3. PUT with default directory ("plugins" or empty): default is not written to config.yml
+            let body = r#"{"autoUpdateOnBoot":false,"bootUpdateBudget":"30s","directory":"plugins"}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            let cleared = get(router.clone()).await;
+            assert_eq!(cleared.directory, "");
+            assert!(cleared.effective_directory.ends_with("plugins"));
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(!text.contains("directory:"), "{text}");
+
+            // Empty string also resets to default and is omitted from config.yml
+            let body = r#"{"autoUpdateOnBoot":false,"bootUpdateBudget":"30s","directory":"  "}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            let cleared_empty = get(router.clone()).await;
+            assert_eq!(cleared_empty.directory, "");
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(!text.contains("directory:"), "{text}");
+
+            // 4. PUT with control characters: rejected with 422, file unchanged
+            let before = std::fs::read_to_string(&file).unwrap();
+            for bad in [r"bad\ndir", r"bad\u0000dir", r"bad\tdir", r"bad\rdir"] {
+                let body = format!(r#"{{"autoUpdateOnBoot":false,"bootUpdateBudget":"30s","directory":"{bad}"}}"#);
+                let code = status(&router, "PUT", "/plugins/updates/settings", &body).await;
+                assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY, "directory with control char `{bad}`");
+                assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+            }
+        }
+
+        #[tokio::test]
+        async fn directory_reports_overridden_when_directories_configured() {
+            let dir = TempDir::new().unwrap();
+            let yaml = format!("{BASE}plugins:\n  enabled: true\n  directories:\n    - /app/plugins\n");
+            let (app_state, _) = app_state_for(&dir, &yaml);
+            let router = router(&app_state);
+            let request = Request::builder().uri("/plugins/updates/settings").body(Body::empty()).unwrap();
+            let response = router.oneshot(request).await.unwrap();
+            let bytes = http_body_util::BodyExt::collect(response.into_body()).await.unwrap().to_bytes();
+            let dto = serde_json::from_slice::<PluginUpdateSettingsDto>(&bytes).unwrap();
+            assert!(dto.directory_overridden);
+            assert_eq!(dto.effective_directory, "/app/plugins");
+            assert_eq!(dto.search_directories, vec!["/app/plugins"]);
+        }
+
+        #[tokio::test]
+        async fn a_request_without_directory_keeps_the_configured_one() {
+            let dir = TempDir::new().unwrap();
+            let yaml = format!("{BASE}plugins:\n  enabled: true\n  directory: custom_plugins\n");
+            let (app_state, _) = app_state_for(&dir, &yaml);
+            let router = router(&app_state);
+            let body = r#"{"autoUpdateOnBoot":true,"bootUpdateBudget":"45s"}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            let written = read_written_dto(&app_state.app_config).await.unwrap().plugins.unwrap();
+            assert_eq!(written.directory, "custom_plugins", "an omitted directory must not reset the configured one");
+            assert!(written.auto_update_on_boot);
+        }
+
+        #[tokio::test]
+        async fn an_overridden_directory_is_not_written() {
+            let dir = TempDir::new().unwrap();
+            let yaml = format!("{BASE}plugins:\n  enabled: true\n  directories:\n    - /app/plugins\n");
+            let (app_state, _) = app_state_for(&dir, &yaml);
+            let router = router(&app_state);
+            let body = r#"{"autoUpdateOnBoot":false,"bootUpdateBudget":"45s","directory":"ignored_plugins"}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            let written = read_written_dto(&app_state.app_config).await.unwrap().plugins.unwrap();
+            assert_ne!(written.directory, "ignored_plugins", "an overridden directory must stay as config.yml has it");
+            assert_eq!(written.boot_update_budget, "45s", "the other fields are still stored");
+        }
+
+        #[tokio::test]
+        async fn directory_change_reloads_and_rescans_plugins_while_budget_only_does_not() {
+            let dir = TempDir::new().unwrap();
+            let yaml = format!("{BASE}plugins:\n  enabled: true\n");
+            let (app_state, _) = app_state_for(&dir, &yaml);
+            let router = router(&app_state);
+
+            let system = app_state.plugins.as_ref().unwrap();
+            let changes = system.changes();
+            let initial_gen = *changes.borrow();
+            // Initially, demo plugin is in <dir>/plugins/demo
+            assert_eq!(system.plugin_ids(), vec!["demo"]);
+
+            // 1. Budget-only change: saved successfully, but no plugin reload or rescan occurs
+            let body = r#"{"autoUpdateOnBoot":false,"bootUpdateBudget":"45s"}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            assert_eq!(*changes.borrow(), initial_gen, "generation must not advance on budget-only change");
+            assert_eq!(system.plugin_ids(), vec!["demo"]);
+
+            // 2. Prepare a new custom directory with another plugin "second_demo"
+            let custom_plugin_dir = dir.path().join("custom_plugins").join("second_demo");
+            std::fs::create_dir_all(&custom_plugin_dir).unwrap();
+            std::fs::write(
+                custom_plugin_dir.join("manifest.yml"),
+                "id: second_demo\nname: Second Demo\nversion: 1.0.0\napi_version: 1\nui:\n  config_section:\n    schema: config-schema.json\n",
+            ).unwrap();
+            std::fs::write(custom_plugin_dir.join("config-schema.json"), r#"{"type":"object"}"#).unwrap();
+
+            // 3. Directory change: triggers reload_plugins and rescan immediately
+            let body = r#"{"autoUpdateOnBoot":false,"bootUpdateBudget":"45s","directory":"custom_plugins"}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            let new_gen = *changes.borrow();
+            assert!(new_gen > initial_gen, "generation must advance after directory reload");
+            // The plugin system rescanned the new directory and now discovers second_demo instead of demo
+            assert_eq!(system.plugin_ids(), vec!["second_demo"]);
+
+            // 4. PUT again with the same directory (e.g. changing budget again): no reload occurs
+            let body = r#"{"autoUpdateOnBoot":false,"bootUpdateBudget":"50s","directory":"custom_plugins"}"#;
+            assert_eq!(status(&router, "PUT", "/plugins/updates/settings", body).await, StatusCode::OK);
+            assert_eq!(*changes.borrow(), new_gen, "generation must not advance when directory is unchanged");
+            assert_eq!(system.plugin_ids(), vec!["second_demo"]);
         }
 
         #[tokio::test]

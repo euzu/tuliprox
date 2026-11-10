@@ -36,7 +36,6 @@ rmp-serde.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
 serde-saphyr.workspace = true
-saphyr-parser = { package = "granit-parser", version = "0.0.2" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs", "time", "macros", "sync"] }

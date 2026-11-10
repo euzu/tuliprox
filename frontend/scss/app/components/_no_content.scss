@@ -21,8 +21,10 @@
     color: var(--tag-color);
     fill: currentColor;
     border-radius: 50%;
-    min-width: 48px;
-    min-height: 48px;
+    min-width: 32px;
+    min-height: 32px;
+    width: 32px;
+    height: 32px;
 
     .svg-icon {
       flex-shrink: 0;

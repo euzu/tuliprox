@@ -664,7 +664,7 @@ async fn scan_library_cli(app_config: &Arc<AppConfig>, force_rescan: bool) -> i3
 async fn healthcheck(config_file: &str) -> bool {
     let path = std::path::PathBuf::from(config_file);
     match File::open(path) {
-        Ok(file) => match serde_saphyr::from_reader::<_, HealthcheckConfig>(config_file_reader(file, true)) {
+        Ok(file) => match shared::utils::yaml_from_reader::<_, HealthcheckConfig>(config_file_reader(file, true)) {
             Ok(config) => {
                 match reqwest::Client::new()
                     .get(format!("http://localhost:{}/healthcheck", config.api.port))

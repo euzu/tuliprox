@@ -1562,7 +1562,7 @@ async fn assign_playlist_epg<P: PluginHost>(
 mod tests {
     use super::{EpgChannel, EpgProgramme, HookCtx, PluginChannelProgrammes, PluginEpgChannel, PluginHook, PluginHost};
     use crate::{fetched_playlist::FetchedPlaylist, parser::xmltv::TVGuide};
-    use rand::{distr::Alphanumeric, Rng};
+    use rand::{distr::Alphanumeric, RngExt};
     use rphonetic::{DoubleMetaphone, Encoder};
     use shared::{
         model::{ConfigInputDto, NoPlugins, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType},

@@ -59,7 +59,7 @@ fn read_failover_file(path: &Path) -> Result<FailoverFileDto, TuliproxError> {
     if is_blank_yaml(&content) {
         return Ok(FailoverFileDto { version: FAILOVER_FILE_VERSION, targets: Vec::new() });
     }
-    let dto: FailoverFileDto = serde_saphyr::from_str(&content)
+    let dto: FailoverFileDto = shared::utils::yaml_from_str(&content)
         .map_err(|err| failover_error(format!("Failed to parse failover file {}: {err}", path.display())))?;
     if dto.version != FAILOVER_FILE_VERSION {
         return Err(failover_error(format!(

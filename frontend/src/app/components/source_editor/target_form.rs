@@ -1,4 +1,7 @@
-use super::{failover_groups_form::TargetFailoverGroupsView, ManagedChannelsEditor, WatchEntriesEditor};
+use super::{
+    failover_groups_form::TargetFailoverGroupsView, is_managed_channel_available, ManagedChannelsEditor,
+    WatchEntriesEditor,
+};
 use crate::{
     app::{
         components::{
@@ -11,6 +14,7 @@ use crate::{
     config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_list_option,
     edit_field_text, generate_form_reducer,
     hooks::use_service_context,
+    html_if,
     i18n::use_translation,
     services::TargetBouquetService,
 };
@@ -18,8 +22,8 @@ use shared::{
     error::TuliproxError,
     model::{
         permission::Permission, ClusterFlags, ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions,
-        ConfigWatchDto, CurationCatalogSelection, CurationConfigDto, FailoverGroupsTargetConfig, ProcessingOrder,
-        TargetBouquetMode, TargetBouquetStatusDto,
+        ConfigWatchDto, CurationCatalogSelection, CurationConfigDto, FailoverGroupsTargetConfig, PluginSummaryDto,
+        ProcessingOrder, TargetBouquetMode, TargetBouquetStatusDto,
     },
     utils::Internable,
 };
@@ -52,7 +56,9 @@ const LABEL_LOWERCASE_XMLTV_DISPLAY_NAMES: &str = "LABEL.LOWERCASE_XMLTV_DISPLAY
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 const LABEL_BOUQUETS: &str = "LABEL.BOUQUETS";
+const LABEL_FAILOVER: &str = "LABEL.FAILOVER";
 const LABEL_FAILOVER_GROUPS: &str = "LABEL.FAILOVER_GROUPS";
+const LABEL_MANAGED_CHANNELS: &str = "LABEL.MANAGED_CHANNELS";
 const LABEL_CURATION_CATALOG_SELECTION_FULL: &str = "LABEL.TRAKT_CATALOG_SELECTION_FULL";
 const LABEL_CURATION_CATALOG_SELECTION_CURATED: &str = "LABEL.TRAKT_CATALOG_SELECTION_CURATED";
 
@@ -78,13 +84,14 @@ fn curation_summary(curation: &CurationConfigDto, catalog_selection: &str) -> St
     )
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum TargetFormPage {
     Main,
     Options,
     FailoverGroups,
     Mapping,
     Watch,
+    ManagedChannels,
 }
 
 impl TargetFormPage {
@@ -93,6 +100,7 @@ impl TargetFormPage {
     const FAILOVER_GROUPS: &str = "FailoverGroups";
     const MAPPING: &str = "Mapping";
     const WATCH: &str = "Watch";
+    const MANAGED_CHANNELS: &str = "ManagedChannels";
 }
 
 impl FromStr for TargetFormPage {
@@ -105,6 +113,7 @@ impl FromStr for TargetFormPage {
             Self::FAILOVER_GROUPS => Ok(TargetFormPage::FailoverGroups),
             Self::MAPPING => Ok(TargetFormPage::Mapping),
             Self::WATCH => Ok(TargetFormPage::Watch),
+            Self::MANAGED_CHANNELS => Ok(TargetFormPage::ManagedChannels),
             _ => Err(TuliproxError::Config(format!("Unknown target form page: {s}"))),
         }
     }
@@ -118,6 +127,7 @@ impl Display for TargetFormPage {
             TargetFormPage::FailoverGroups => write!(f, "{}", TargetFormPage::FAILOVER_GROUPS),
             TargetFormPage::Mapping => write!(f, "{}", TargetFormPage::MAPPING),
             TargetFormPage::Watch => write!(f, "{}", TargetFormPage::WATCH),
+            TargetFormPage::ManagedChannels => write!(f, "{}", TargetFormPage::MANAGED_CHANNELS),
         }
     }
 }
@@ -130,6 +140,7 @@ impl Internable for TargetFormPage {
             Self::FailoverGroups => TargetFormPage::FAILOVER_GROUPS,
             Self::Mapping => TargetFormPage::MAPPING,
             Self::Watch => TargetFormPage::WATCH,
+            Self::ManagedChannels => TargetFormPage::MANAGED_CHANNELS,
         }
         .intern()
     }
@@ -266,6 +277,29 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     let bouquet_status = use_state(|| BouquetStatus::Loading);
     let bouquet_target_name = props.target.as_ref().map_or_else(String::new, |target| target.name.clone());
     let can_read_bouquets = services.auth.has_permission(Permission::PlaylistRead);
+
+    let plugins = use_state(Vec::<PluginSummaryDto>::new);
+    {
+        let plugins = plugins.clone();
+        let services = services.clone();
+        use_effect_with((), move |()| {
+            spawn_local(async move {
+                if let Ok(list) = services.plugins.list().await {
+                    plugins.set(list);
+                }
+            });
+        });
+    }
+
+    let show_managed = is_managed_channel_available(&plugins, !target_form_state.form.managed_channels.is_empty());
+    {
+        let view_visible = view_visible.clone();
+        use_effect_with(show_managed, move |show| {
+            if !*show && *view_visible == TargetFormPage::ManagedChannels {
+                view_visible.set(TargetFormPage::Main);
+            }
+        });
+    }
 
     {
         let bouquet_status = bouquet_status.clone();
@@ -574,7 +608,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         html! {
             { config_field_child!(translate.t(LABEL_FAILOVER_GROUPS), "TARGET_FORM.FAILOVER_GROUPS_LINK", {
                 html! {
-                    <TextButton name="open_failover_groups" icon="Group" class="tertiary"
+                    <TextButton name="open_failover_groups" icon="Failover" class="tertiary"
                         title={translate.t(LABEL_FAILOVER_GROUPS)} onclick={on_open}/>
                 }
             }) }
@@ -673,11 +707,15 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         };
         html! {
             <Card class="tp__config-view__card">
-                <TargetFailoverGroupsView
-                    config={target_options_state.form.failover_groups}
-                    readonly={!props.allow_write}
-                    on_change={on_change}
-                />
+                { config_field_child!(translate.t(LABEL_FAILOVER), dto_field_id(&target_options_state.form, "failover_groups"), {
+                    html! {
+                        <TargetFailoverGroupsView
+                            config={target_options_state.form.failover_groups}
+                            readonly={!props.allow_write}
+                            on_change={on_change}
+                        />
+                    }
+                })}
             </Card>
         }
     };
@@ -741,7 +779,6 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={TargetFormPage::Main.intern()} active={view_visible.intern()}>
                 {render_target()}
-                {render_managed()}
                 </Panel>
                 <Panel value={TargetFormPage::Options.intern()} active={view_visible.intern()}>
                 {render_options()}
@@ -755,6 +792,11 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <Panel value={TargetFormPage::Watch.intern()} active={view_visible.intern()}>
                 {render_watch()}
                 </Panel>
+                {html_if!(show_managed, {
+                    <Panel value={TargetFormPage::ManagedChannels.intern()} active={view_visible.intern()}>
+                    {render_managed()}
+                    </Panel>
+                })}
             </div>
             </div>
         }
@@ -765,9 +807,12 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             <div class="tp__source-editor-form__sidebar">
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Main, if *view_visible == TargetFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={TargetFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Options, if *view_visible == TargetFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={TargetFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::FailoverGroups, if *view_visible == TargetFormPage::FailoverGroups { " active" } else {""})}  icon="Nodes" hint={translate.t(LABEL_FAILOVER_GROUPS)} name={TargetFormPage::FailoverGroups.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::FailoverGroups, if *view_visible == TargetFormPage::FailoverGroups { " active" } else {""})}  icon="Failover" hint={translate.t(LABEL_FAILOVER_GROUPS)} name={TargetFormPage::FailoverGroups.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Mapping, if *view_visible == TargetFormPage::Mapping { " active" } else {""})}  icon="Mapping" hint={translate.t(LABEL_MAPPING)} name={TargetFormPage::Mapping.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Watch, if *view_visible == TargetFormPage::Watch { " active" } else {""})}  icon="Visibility" hint={translate.t(LABEL_WATCH)} name={TargetFormPage::Watch.to_string()} onclick={&handle_menu_click}></IconButton>
+            {html_if!(show_managed, {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::ManagedChannels, if *view_visible == TargetFormPage::ManagedChannels { " active" } else {""})} icon="Plugin" hint={translate.t(LABEL_MANAGED_CHANNELS)} name={TargetFormPage::ManagedChannels.to_string()} onclick={&handle_menu_click}></IconButton>
+            })}
           </div>
         }
     };
@@ -820,9 +865,9 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigTargetOptionsFormAction, ConfigTargetOptionsFormState};
+    use super::{ConfigTargetOptionsFormAction, ConfigTargetOptionsFormState, TargetFormPage};
     use shared::model::{ConfigTargetOptions, CurationCatalogSelection, CurationConfigDto};
-    use std::rc::Rc;
+    use std::{rc::Rc, str::FromStr};
     use yew::prelude::Reducible;
 
     fn default_options_state() -> Rc<ConfigTargetOptionsFormState> {
@@ -903,5 +948,23 @@ mod tests {
         assert!(state.form.epg_output.lowercase_xmltv_display_names);
         assert!(state.modified);
         assert!(!state.form.epg_output.lowercase_ids);
+    }
+
+    #[test]
+    fn target_form_page_failover_groups_round_trips() {
+        assert_eq!(
+            TargetFormPage::from_str(TargetFormPage::FAILOVER_GROUPS).ok(),
+            Some(TargetFormPage::FailoverGroups)
+        );
+        assert_eq!(TargetFormPage::FailoverGroups.to_string(), TargetFormPage::FAILOVER_GROUPS);
+    }
+
+    #[test]
+    fn target_form_page_managed_channels_round_trips() {
+        assert_eq!(
+            TargetFormPage::from_str(TargetFormPage::MANAGED_CHANNELS).ok(),
+            Some(TargetFormPage::ManagedChannels)
+        );
+        assert_eq!(TargetFormPage::ManagedChannels.to_string(), TargetFormPage::MANAGED_CHANNELS);
     }
 }

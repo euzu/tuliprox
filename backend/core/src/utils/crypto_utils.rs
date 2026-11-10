@@ -9,7 +9,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 use aes::Aes128;
 use base64::{engine::general_purpose, Engine as _};
 use ctr::cipher::{KeyIvInit, StreamCipher};
-use rand::{rngs::OsRng, RngCore, TryRngCore};
+use rand::{rngs::SysRng, TryRng};
 use shared::{error::TuliproxError, utils::encode_base64_string};
 
 type Aes128Ctr = ctr::Ctr128BE<Aes128>;
@@ -52,9 +52,9 @@ pub use shared::utils::{deobscure_authenticated_bytes, obscure_authenticated_byt
 
 pub fn obscure_text(secret: &[u8; 16], url: &str) -> Result<String, TuliproxError> {
     let mut iv = [0u8; 16];
-    if OsRng.try_fill_bytes(&mut iv).is_err() {
-        rand::rng().fill_bytes(&mut iv);
-    }
+    SysRng
+        .try_fill_bytes(&mut iv)
+        .map_err(|e| TuliproxError::Crypto(format!("Failed to generate secure random IV: {e}")))?;
 
     let mut ciphertext = url.as_bytes().to_vec();
     apply_aes_128_ctr(secret, &iv, &mut ciphertext)?;
@@ -90,7 +90,7 @@ mod tests {
         obscure_authenticated_bytes, obscure_text, AES_128_CTR_IV_LEN, AUTH_TOKEN_VERSION,
     };
     use base64::{engine::general_purpose, Engine as _};
-    use rand::Rng;
+    use rand::RngExt;
 
     #[test]
     fn test_obscure() {

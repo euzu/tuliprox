@@ -65,7 +65,7 @@ const fn default_batch_size() -> u32 { DEFAULT_PLUGINS_BATCH_SIZE }
 const fn default_plugin_priority() -> i32 { DEFAULT_PLUGIN_PRIORITY }
 const fn default_settings_version() -> u32 { DEFAULT_PLUGIN_SETTINGS_VERSION }
 
-fn is_default_plugins_directory(value: &str) -> bool { value.trim().is_empty() || value == DEFAULT_PLUGINS_DIR }
+pub fn is_default_plugins_directory(value: &str) -> bool { value.trim().is_empty() || value == DEFAULT_PLUGINS_DIR }
 fn is_default_max_total_memory(value: &ByteSize) -> bool { value.as_str() == DEFAULT_PLUGINS_MAX_TOTAL_MEMORY }
 fn is_default_max_memory(value: &ByteSize) -> bool { value.as_str() == DEFAULT_PLUGINS_MAX_MEMORY }
 fn is_default_max_exec(value: &str) -> bool { value == DEFAULT_PLUGINS_MAX_EXEC }

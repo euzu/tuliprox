@@ -60,9 +60,12 @@ fn arc_str_serde_normalizes_json_scientific_notation_numbers() {
 
 #[test]
 fn arc_str_serde_normalizes_yaml_special_float_scalars() {
-    let parsed_inf: ArcStrHolder = serde_saphyr::from_str("value: .inf\n").unwrap();
-    let parsed_neg_inf: ArcStrHolder = serde_saphyr::from_str("value: -.inf\n").unwrap();
-    let parsed_nan: ArcStrHolder = serde_saphyr::from_str("value: .nan\n").unwrap();
+    let opts = serde_saphyr::options! {
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,
+    };
+    let parsed_inf: ArcStrHolder = serde_saphyr::from_str_with_options("value: .inf\n", opts.clone()).unwrap();
+    let parsed_neg_inf: ArcStrHolder = serde_saphyr::from_str_with_options("value: -.inf\n", opts.clone()).unwrap();
+    let parsed_nan: ArcStrHolder = serde_saphyr::from_str_with_options("value: .nan\n", opts).unwrap();
 
     assert_eq!(parsed_inf.value.as_ref(), "infinity");
     assert_eq!(parsed_neg_inf.value.as_ref(), "-infinity");
@@ -71,9 +74,12 @@ fn arc_str_serde_normalizes_yaml_special_float_scalars() {
 
 #[test]
 fn arc_str_option_serde_normalizes_yaml_special_float_scalars() {
-    let parsed_inf: OptArcStrHolder = serde_saphyr::from_str("value: .inf\n").unwrap();
-    let parsed_neg_inf: OptArcStrHolder = serde_saphyr::from_str("value: -.inf\n").unwrap();
-    let parsed_nan: OptArcStrHolder = serde_saphyr::from_str("value: .nan\n").unwrap();
+    let opts = serde_saphyr::options! {
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,
+    };
+    let parsed_inf: OptArcStrHolder = serde_saphyr::from_str_with_options("value: .inf\n", opts.clone()).unwrap();
+    let parsed_neg_inf: OptArcStrHolder = serde_saphyr::from_str_with_options("value: -.inf\n", opts.clone()).unwrap();
+    let parsed_nan: OptArcStrHolder = serde_saphyr::from_str_with_options("value: .nan\n", opts).unwrap();
 
     assert_eq!(parsed_inf.value.as_deref(), Some("infinity"));
     assert_eq!(parsed_neg_inf.value.as_deref(), Some("-infinity"));

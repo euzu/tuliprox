@@ -1,4 +1,4 @@
-use rand::{distr::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, RngExt};
 use shared::error::str_to_io_error;
 use zeroize::Zeroize;
 

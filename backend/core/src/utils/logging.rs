@@ -281,7 +281,7 @@ pub(crate) fn read_log_config(config_file: &str) -> Option<LogConfigDto> {
     File::open(config_file)
         .ok()
         .and_then(|file| {
-            serde_saphyr::from_reader::<_, LogLevelConfig>(config_file_reader(file, true))
+            shared::utils::yaml_from_reader::<_, LogLevelConfig>(config_file_reader(file, true))
                 .map_err(|e| eprintln!("Failed to parse log config file: {e}"))
                 .ok()
         })
@@ -685,7 +685,7 @@ log:
 
         // Same block through the full DTO path must end in the same state.
         let mut parsed: LogConfigDto =
-            serde_saphyr::from_str::<LogLevelConfig>(yaml).expect("full parse").log.expect("log block");
+            shared::utils::yaml_from_str::<LogLevelConfig>(yaml).expect("full parse").log.expect("log block");
         parsed.clean();
         assert_eq!(parsed.syslog, log_dto.syslog);
     }

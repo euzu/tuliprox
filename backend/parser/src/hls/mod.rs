@@ -420,7 +420,7 @@ mod test {
         rewrite_hls_resource_url, rewrite_hls_url, HlsManifestSource, HlsPlaylistKind, HlsResourceKind,
         HlsResourceToken, RewriteHlsProps, TOKEN_SEPARATOR_STR,
     };
-    use rand::RngCore;
+    use rand::Rng;
     use shared::{
         defaults::HLS_PREFIX,
         utils::{seal_hls_resource_url, u32_to_base64},

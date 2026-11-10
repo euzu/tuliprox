@@ -34,6 +34,18 @@
       display: flex;
       flex-direction: column;
       gap: var(--gap-default);
+
+      // Wraps the explorer so a stale target can hide it; it must pass the height on.
+      > .tp__playlist-explorer-view__content {
+        flex: 1 1 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+
+        &[hidden] {
+          display: none;
+        }
+      }
     }
   }
 
@@ -158,6 +170,11 @@
     background: var(--theme-brand-surface);
     display: flex;
     flex-direction: column;
+
+    > .tp__no_content {
+      flex: 1 1 auto;
+      margin: auto 0;
+    }
   }
 
   .bar {
@@ -1330,6 +1347,10 @@
         max-height: none;
         overflow: visible;
         flex: none;
+
+        > .tp__playlist-explorer-view__content {
+          flex: none;
+        }
       }
     }
   }

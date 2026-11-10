@@ -42,7 +42,7 @@ pub fn PlaylistExplorerView() -> Html {
                 <div class={"tp__panel"}>
                     <PlaylistSourceSelector hide_title=true />
                     { stale_target.then(|| html! { <p role="alert">{translate.t("MESSAGES.CONFIG_CHANGED")}</p> }) }
-                    <div hidden={stale_target}>
+                    <div class="tp__playlist-explorer-view__content" hidden={stale_target}>
                         <PlaylistExplorer {stale_target} />
                     </div>
                 </div>

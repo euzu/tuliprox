@@ -77,7 +77,7 @@ pub async fn load_target_bouquet(
         }
     };
 
-    let mut dto: TargetBouquetFileDto = serde_saphyr::from_str(&content).map_err(|err| {
+    let mut dto: TargetBouquetFileDto = shared::utils::yaml_from_str(&content).map_err(|err| {
         TuliproxError::TargetBouquet(format!("Failed to parse target bouquet YAML in {}: {err}", file_path.display()))
     })?;
 
@@ -233,7 +233,7 @@ async fn rewrite_bouquet_with_target(src: &Path, dest: &Path, new_target: &str) 
         TuliproxError::TargetBouquet(format!("Failed to read source bouquet file {}: {err}", src.display()))
     })?;
 
-    let mut dto: TargetBouquetFileDto = serde_saphyr::from_str(&content).map_err(|err| {
+    let mut dto: TargetBouquetFileDto = shared::utils::yaml_from_str(&content).map_err(|err| {
         TuliproxError::TargetBouquet(format!("Failed to parse source bouquet file {}: {err}", src.display()))
     })?;
 
@@ -404,7 +404,7 @@ pub async fn apply_target_bouquet_mutations_locked(
         let content = std::str::from_utf8(content).map_err(|err| {
             TuliproxError::TargetBouquet(format!("Source bouquet file {} is not UTF-8: {err}", old_path.display()))
         })?;
-        let mut dto: TargetBouquetFileDto = serde_saphyr::from_str(content).map_err(|err| {
+        let mut dto: TargetBouquetFileDto = shared::utils::yaml_from_str(content).map_err(|err| {
             TuliproxError::TargetBouquet(format!("Failed to parse source bouquet file {}: {err}", old_path.display()))
         })?;
         if dto.version != TARGET_BOUQUET_VERSION || dto.target != *old_name {
@@ -520,7 +520,7 @@ pub async fn audit_target_bouquets<S: std::hash::BuildHasher>(
             }
         };
 
-        let dto: TargetBouquetFileDto = match serde_saphyr::from_str(&content) {
+        let dto: TargetBouquetFileDto = match shared::utils::yaml_from_str(&content) {
             Ok(d) => d,
             Err(err) => {
                 report.corrupt_files.push((file, format!("YAML parse error: {err}")));

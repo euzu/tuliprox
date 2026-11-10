@@ -1,4 +1,4 @@
-use super::ManagedChannelsEditor;
+use super::{is_managed_channel_available, ManagedChannelsEditor};
 mod common;
 mod library;
 mod m3u;
@@ -27,7 +27,9 @@ use crate::{
         },
         ConfigContext,
     },
-    config_field_child, generate_form_reducer, html_if,
+    config_field_child, generate_form_reducer,
+    hooks::use_service_context,
+    html_if,
     i18n::use_translation,
 };
 use shared::{
@@ -36,8 +38,8 @@ use shared::{
     model::{
         ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, ConfigInputUpdateQualityDto,
         ConfigProviderDto, EpgSmartMatchConfigDto, EpgSourceDto, FlussonicHlsCatchup, InputFetchMethod, InputType,
-        MediaServerInputConfigDto, MediaServerLibrarySelector, OnConnectErrorPolicy, ProviderUrlSelectionPolicy,
-        StagedInputType, StalkerDeviceProfileDto, StalkerInputConfigDto,
+        MediaServerInputConfigDto, MediaServerLibrarySelector, OnConnectErrorPolicy, PluginSummaryDto,
+        ProviderUrlSelectionPolicy, StagedInputType, StalkerDeviceProfileDto, StalkerInputConfigDto,
     },
     utils::{Internable, BATCH_SCHEME_PREFIX},
 };
@@ -50,7 +52,8 @@ use std::{
 };
 use web_sys::MouseEvent;
 use yew::{
-    component, html, use_context, use_effect_with, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle,
+    component, html, platform::spawn_local, use_context, use_effect_with, use_reducer, use_state, Callback, Html,
+    Properties, UseReducerHandle,
 };
 
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -112,6 +115,7 @@ const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 const LABEL_EPG: &str = "LABEL.EPG";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
+const LABEL_MANAGED_CHANNELS: &str = "LABEL.MANAGED_CHANNELS";
 const LABEL_TYPE: &str = "LABEL.TYPE";
 const LABEL_CLUSTER: &str = "LABEL.CLUSTER";
 const LABEL_MEDIA_SERVER: &str = "LABEL.MEDIA_SERVER";
@@ -254,6 +258,7 @@ enum InputFormPage {
     Epg,
     Alias,
     Provider,
+    ManagedChannels,
 }
 
 impl InputFormPage {
@@ -264,6 +269,7 @@ impl InputFormPage {
     const EPG: &str = "Epg";
     const ALIAS: &str = "Alias";
     const PROVIDER: &str = "Provider";
+    const MANAGED_CHANNELS: &str = "ManagedChannels";
 }
 
 impl FromStr for InputFormPage {
@@ -278,6 +284,7 @@ impl FromStr for InputFormPage {
             Self::EPG => Ok(InputFormPage::Epg),
             Self::ALIAS => Ok(InputFormPage::Alias),
             Self::PROVIDER => Ok(InputFormPage::Provider),
+            Self::MANAGED_CHANNELS => Ok(InputFormPage::ManagedChannels),
             _ => Err(TuliproxError::Config(format!("Unknown input form page: {s}"))),
         }
     }
@@ -296,6 +303,7 @@ impl Display for InputFormPage {
                 InputFormPage::Epg => Self::EPG,
                 InputFormPage::Alias => Self::ALIAS,
                 InputFormPage::Provider => Self::PROVIDER,
+                InputFormPage::ManagedChannels => Self::MANAGED_CHANNELS,
             }
         )
     }
@@ -311,6 +319,7 @@ impl Internable for InputFormPage {
             Self::Epg => Self::EPG,
             Self::Alias => Self::ALIAS,
             Self::Provider => Self::PROVIDER,
+            Self::ManagedChannels => Self::MANAGED_CHANNELS,
         }
         .intern()
     }
@@ -332,6 +341,9 @@ fn input_form_pages(input_type: shared::model::InputType) -> Vec<InputFormPage> 
     }
     if !input_type.is_library() && !input_type.is_staged() && !input_type.is_media_server() {
         pages.extend([InputFormPage::Epg, InputFormPage::Provider]);
+    }
+    if !input_type.is_staged() {
+        pages.push(InputFormPage::ManagedChannels);
     }
     pages
 }
@@ -438,6 +450,20 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let config_ctx = use_context::<ConfigContext>();
     let view_visible = use_state(|| InputFormPage::Main);
 
+    let services = use_service_context();
+    let plugins = use_state(Vec::<PluginSummaryDto>::new);
+    {
+        let plugins = plugins.clone();
+        let services = services.clone();
+        use_effect_with((), move |()| {
+            spawn_local(async move {
+                if let Ok(list) = services.plugins.list().await {
+                    plugins.set(list);
+                }
+            });
+        });
+    }
+
     let handle_menu_click = {
         let active_menu = view_visible.clone();
         Callback::from(move |(name, _): (String, _)| {
@@ -451,6 +477,18 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         use_reducer(|| ConfigInputFormState { form: ConfigInputDto::default(), modified: false });
     let input_options_state: UseReducerHandle<ConfigInputOptionsDtoFormState> =
         use_reducer(|| ConfigInputOptionsDtoFormState { form: ConfigInputOptionsDto::default(), modified: false });
+
+    let is_staged = input_form_state.form.input_type == InputType::Staged || input_form_state.form.staged.is_some();
+    let show_managed =
+        !is_staged && is_managed_channel_available(&plugins, !input_form_state.form.managed_channels.is_empty());
+    {
+        let view_visible = view_visible.clone();
+        use_effect_with(show_managed, move |show| {
+            if !*show && *view_visible == InputFormPage::ManagedChannels {
+                view_visible.set(InputFormPage::Main);
+            }
+        });
+    }
 
     // State for EPG sources, Aliases, Headers, and Providers
     let epg_sources_state = use_state(Vec::<EpgSourceDto>::new);
@@ -1358,8 +1396,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={InputFormPage::Main.intern()} active={view_visible.intern()}>
                     {render_main()}
-                    {render_managed()}
-
                 </Panel>
                 { html_if!(stalker_input, {
                     <Panel value={InputFormPage::Device.intern()} active={view_visible.intern()}>
@@ -1393,6 +1429,11 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                   </Panel>
                     </>
                 })}
+                { html_if!(show_managed, {
+                    <Panel value={InputFormPage::ManagedChannels.intern()} active={view_visible.intern()}>
+                    {render_managed()}
+                    </Panel>
+                })}
             </div>
             </div>
         }
@@ -1425,6 +1466,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Provider, if *view_visible == InputFormPage::Provider { " active" } else {""})}  icon="Dns" hint={translate.t(LABEL_PROVIDER)} name={InputFormPage::Provider.to_string()} onclick={&handle_menu_click}></IconButton>
                 </>
              })}
+            { html_if!(show_managed, {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::ManagedChannels, if *view_visible == InputFormPage::ManagedChannels { " active" } else {""})} icon="Plugin" hint={translate.t(LABEL_MANAGED_CHANNELS)} name={InputFormPage::ManagedChannels.to_string()} onclick={&handle_menu_click}></IconButton>
+            })}
           </div>
         }
     };
@@ -1461,6 +1505,14 @@ mod tests {
     fn media_server_libraries_page_round_trips() {
         assert_eq!(InputFormPage::from_str(InputFormPage::LIBRARIES).ok(), Some(InputFormPage::Libraries));
         assert_eq!(InputFormPage::Libraries.to_string(), InputFormPage::LIBRARIES);
+    }
+
+    #[test]
+    fn managed_channels_page_round_trips() {
+        assert_eq!(InputFormPage::from_str(InputFormPage::MANAGED_CHANNELS).ok(), Some(InputFormPage::ManagedChannels));
+        assert_eq!(InputFormPage::ManagedChannels.to_string(), InputFormPage::MANAGED_CHANNELS);
+        assert!(input_form_pages(shared::model::InputType::Xtream).contains(&InputFormPage::ManagedChannels));
+        assert!(!input_form_pages(shared::model::InputType::Staged).contains(&InputFormPage::ManagedChannels));
     }
 
     #[test]

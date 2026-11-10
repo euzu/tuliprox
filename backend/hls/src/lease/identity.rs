@@ -3,7 +3,7 @@ use super::{
     HlsLeasePlaybackMode, HlsMediaLeaseIdentity, HlsTerminalTailGeneration, ProxySessionId, HLS_ACCESS_LEASE_ID_BYTES,
 };
 use base64::{engine::general_purpose, Engine as _};
-use rand::{rngs::OsRng, RngCore, TryRngCore};
+use rand::{rngs::SysRng, Rng, TryRng};
 use std::fmt;
 
 impl fmt::Debug for HlsAccessLeaseId {
@@ -145,7 +145,7 @@ impl HlsAccessLeaseStore {
 
 pub fn new_hls_access_lease_id() -> HlsAccessLeaseId {
     let mut bytes = [0u8; HLS_ACCESS_LEASE_ID_BYTES];
-    if OsRng.try_fill_bytes(&mut bytes).is_err() {
+    if SysRng.try_fill_bytes(&mut bytes).is_err() {
         rand::rng().fill_bytes(&mut bytes);
     }
     HlsAccessLeaseId(general_purpose::URL_SAFE_NO_PAD.encode(bytes))

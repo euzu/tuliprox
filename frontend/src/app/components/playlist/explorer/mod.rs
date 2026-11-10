@@ -306,6 +306,7 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     let menu_open = *popup_is_open && !popup_invalid;
     let copy_to_clipboard = use_clipboard_copy();
     let is_mobile = use_state(is_mobile_viewport);
+    let search_reset_seq = use_state(|| 0u32);
 
     {
         let popup_is_open = popup_is_open.clone();
@@ -519,6 +520,8 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     );
 
     let filtered_items_id = Id::new(filtered_items.clone());
+    let raw_cluster_total = cluster_item_count(context.playlist.as_deref(), *active_cluster);
+    let empty_filtered = is_filtered_empty(raw_cluster_total, filtered_items.len());
 
     // Search options
     let search_fields = use_memo((translate.clone(),), |(translate,)| {
@@ -579,7 +582,13 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                         let filtered = context
                             .playlist
                             .as_ref()
-                            .and_then(|categories| categories.filter(&search_req))
+                            .map(|categories| {
+                                categories.filter(&search_req).unwrap_or(UiPlaylistCategories {
+                                    live: None,
+                                    vod: None,
+                                    series: None,
+                                })
+                            })
                             .map(Rc::new);
                         set_playlist.set(filtered);
                         services.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
@@ -1056,6 +1065,34 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         })
     };
 
+    let handle_reset_filters = {
+        let filter_rating = filter_rating.clone();
+        let filter_without_epg = filter_without_epg.clone();
+        let filter_edited = filter_edited.clone();
+        let selected_group = selected_group.clone();
+        let set_playlist = playlist.clone();
+        let context_playlist = (*context.playlist).clone();
+        let active_cluster = *active_cluster;
+        let search_reset_seq = search_reset_seq.clone();
+        let set_selected_ids = selected_ids.clone();
+        let set_bulk_edit_open = is_bulk_edit_open.clone();
+
+        Callback::from(move |()| {
+            filter_rating.set(false);
+            filter_without_epg.set(false);
+            filter_edited.set(false);
+            set_playlist.set(context_playlist.clone());
+            search_reset_seq.set(search_reset_seq.wrapping_add(1));
+            set_selected_ids.set(HashSet::new());
+            set_bulk_edit_open.set(false);
+
+            let cluster_channels = cluster_items(context_playlist.as_deref(), active_cluster);
+            if !group_has_matches(&selected_group, &cluster_channels) {
+                selected_group.set(SelectedGroup::All);
+            }
+        })
+    };
+
     // Built only on mobile, and only when its inputs change: thousands of groups must not be walked
     // on every click.
     let mobile_group_options = use_memo(
@@ -1366,6 +1403,7 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
 
                 <div class="search">
                     <Search
+                        key={format!("search-{}", *search_reset_seq)}
                         onsearch={handle_search}
                         options={search_fields.clone()}
                         on_fields_change={handle_search_fields_change}
@@ -1628,50 +1666,60 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                                 render_series_episodes_view(series_pli, props.as_ref())
                             }
                             ExplorerLevel::Browser => {
-                                match *active_cluster {
-                                    XtreamCluster::Live => {
-                                        html! {
-                                            <ExplorerLiveView
-                                                items={filtered_items_id.clone()}
-                                                selected_item={Id::from_option((*selected_item).clone())}
-                                                on_select_item={handle_select_item.clone()}
-                                                on_popup_menu={handle_popup_onclick.clone()}
-                                                selected_ids={selected_ids_rc.clone()}
-                                                on_toggle_select={handle_toggle_select.clone()}
-                                                on_select_page={handle_select_page.clone()}
-                                                is_mobile={*is_mobile}
-                                            />
-                                        }
+                                if empty_filtered {
+                                    html! {
+                                        <NoContent
+                                            text={translate.t("MESSAGES.PLAYLIST_EXPLORER.NO_MATCHING_ENTRIES")}
+                                            action_label={translate.t("LABEL.RESET_FILTERS")}
+                                            onaction={handle_reset_filters.clone()}
+                                        />
                                     }
-                                    XtreamCluster::Video => {
-                                        html! {
-                                            <ExplorerPosterGrid
-                                                cluster={XtreamCluster::Video}
-                                                items={filtered_items_id.clone()}
-                                                selected_item={Id::from_option((*selected_item).clone())}
-                                                on_select_item={handle_select_item.clone()}
-                                                on_popup_menu={handle_popup_onclick.clone()}
-                                                is_list_view={*is_vod_list_view}
-                                                selected_ids={selected_ids_rc.clone()}
-                                                on_toggle_select={handle_toggle_select.clone()}
-                                                on_select_page={handle_select_page.clone()}
-                                            />
+                                } else {
+                                    match *active_cluster {
+                                        XtreamCluster::Live => {
+                                            html! {
+                                                <ExplorerLiveView
+                                                    items={filtered_items_id.clone()}
+                                                    selected_item={Id::from_option((*selected_item).clone())}
+                                                    on_select_item={handle_select_item.clone()}
+                                                    on_popup_menu={handle_popup_onclick.clone()}
+                                                    selected_ids={selected_ids_rc.clone()}
+                                                    on_toggle_select={handle_toggle_select.clone()}
+                                                    on_select_page={handle_select_page.clone()}
+                                                    is_mobile={*is_mobile}
+                                                />
+                                            }
                                         }
-                                    }
-                                    XtreamCluster::Series => {
-                                        html! {
-                                            <ExplorerPosterGrid
-                                                cluster={XtreamCluster::Series}
-                                                items={filtered_items_id.clone()}
-                                                selected_item={Id::from_option((*selected_item).clone())}
-                                                on_select_item={handle_select_item.clone()}
-                                                on_popup_menu={handle_popup_onclick.clone()}
-                                                on_open_series={Some(load_series_info.clone())}
-                                                is_list_view={false}
-                                                selected_ids={selected_ids_rc.clone()}
-                                                on_toggle_select={handle_toggle_select.clone()}
-                                                on_select_page={handle_select_page.clone()}
-                                            />
+                                        XtreamCluster::Video => {
+                                            html! {
+                                                <ExplorerPosterGrid
+                                                    cluster={XtreamCluster::Video}
+                                                    items={filtered_items_id.clone()}
+                                                    selected_item={Id::from_option((*selected_item).clone())}
+                                                    on_select_item={handle_select_item.clone()}
+                                                    on_popup_menu={handle_popup_onclick.clone()}
+                                                    is_list_view={*is_vod_list_view}
+                                                    selected_ids={selected_ids_rc.clone()}
+                                                    on_toggle_select={handle_toggle_select.clone()}
+                                                    on_select_page={handle_select_page.clone()}
+                                                />
+                                            }
+                                        }
+                                        XtreamCluster::Series => {
+                                            html! {
+                                                <ExplorerPosterGrid
+                                                    cluster={XtreamCluster::Series}
+                                                    items={filtered_items_id.clone()}
+                                                    selected_item={Id::from_option((*selected_item).clone())}
+                                                    on_select_item={handle_select_item.clone()}
+                                                    on_popup_menu={handle_popup_onclick.clone()}
+                                                    on_open_series={Some(load_series_info.clone())}
+                                                    is_list_view={false}
+                                                    selected_ids={selected_ids_rc.clone()}
+                                                    on_toggle_select={handle_toggle_select.clone()}
+                                                    on_select_page={handle_select_page.clone()}
+                                                />
+                                            }
                                         }
                                     }
                                 }
@@ -1774,7 +1822,7 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                         {
                             <>
                                 <MenuItem
-                                    icon="Group"
+                                    icon="Failover"
                                     name={ExplorerAction::OpenFailoverGroup.to_string()}
                                     label={translate.t("LABEL.FAILOVER_GROUPS_OPEN_FAILOVER_GROUP")}
                                     onclick={&handle_menu_click}
@@ -1871,6 +1919,78 @@ pub fn background_style(url: &str) -> String {
     } else {
         String::new()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+pub enum ExplorerEmptyState {
+    /// Items are present to show.
+    NotEmpty,
+    /// The cluster has items, but active filters leave none.
+    FilteredEmpty,
+    /// The cluster really has no items.
+    ReallyEmpty,
+}
+
+/// Decides whether the explorer view is "filtered empty" vs "really empty" (or "not empty").
+///
+/// - `FilteredEmpty`: The cluster contains items (`cluster_total > 0`), but active filters leave none (`filtered_count == 0`).
+/// - `ReallyEmpty`: The cluster itself has no items (`cluster_total == 0`).
+/// - `NotEmpty`: Filtered items are present (`filtered_count > 0`).
+#[must_use]
+pub fn check_empty_state(cluster_total: usize, filtered_count: usize) -> ExplorerEmptyState {
+    if filtered_count > 0 {
+        ExplorerEmptyState::NotEmpty
+    } else if cluster_total > 0 {
+        ExplorerEmptyState::FilteredEmpty
+    } else {
+        ExplorerEmptyState::ReallyEmpty
+    }
+}
+
+/// Convenience predicate for whether the view should show the "no matching entries" state.
+#[must_use]
+pub fn is_filtered_empty(cluster_total: usize, filtered_count: usize) -> bool {
+    check_empty_state(cluster_total, filtered_count) == ExplorerEmptyState::FilteredEmpty
+}
+
+/// Checks whether the given group has any matching items in the cluster items list.
+#[must_use]
+pub fn group_has_matches(group: &SelectedGroup, items: &[Rc<UiPlaylistItem>]) -> bool {
+    match group {
+        SelectedGroup::All => true,
+        SelectedGroup::WithoutEpg => items.iter().any(|item| is_without_epg(item)),
+        SelectedGroup::Edited => items.iter().any(|item| is_edited(item)),
+        SelectedGroup::Group(title) => items.iter().any(|item| item.group.as_ref() == title.as_ref()),
+    }
+}
+
+/// Returns the total channel count for a cluster from categories.
+#[must_use]
+pub fn cluster_item_count(categories: Option<&UiPlaylistCategories>, cluster: XtreamCluster) -> usize {
+    categories
+        .and_then(|cat| match cluster {
+            XtreamCluster::Live => cat.live.as_ref(),
+            XtreamCluster::Video => cat.vod.as_ref(),
+            XtreamCluster::Series => cat.series.as_ref(),
+        })
+        .map_or(0, |groups| groups.iter().map(|g| g.channels.len()).sum())
+}
+
+/// Returns all channel items for a cluster from categories.
+#[must_use]
+pub fn cluster_items(categories: Option<&UiPlaylistCategories>, cluster: XtreamCluster) -> Vec<Rc<UiPlaylistItem>> {
+    let mut items = Vec::new();
+    if let Some(groups) = categories.and_then(|cat| match cluster {
+        XtreamCluster::Live => cat.live.as_ref(),
+        XtreamCluster::Video => cat.vod.as_ref(),
+        XtreamCluster::Series => cat.series.as_ref(),
+    }) {
+        for group in groups {
+            items.extend(group.channels.iter().cloned());
+        }
+    }
+    items
 }
 
 #[cfg(test)]
@@ -2017,6 +2137,76 @@ mod tests {
         let level = ExplorerLevel::SeriesEpisodes(dummy, None);
         assert_eq!(level_after_search(&level), ExplorerLevel::Browser);
         assert_eq!(level_after_search(&ExplorerLevel::Browser), ExplorerLevel::Browser);
+    }
+
+    #[test]
+    fn empty_state_decision_filtered_empty_vs_really_empty() {
+        // When cluster has items, but active filters leave none -> FilteredEmpty
+        assert_eq!(check_empty_state(5, 0), ExplorerEmptyState::FilteredEmpty);
+        assert_eq!(check_empty_state(1, 0), ExplorerEmptyState::FilteredEmpty);
+        assert!(is_filtered_empty(5, 0));
+        assert!(is_filtered_empty(1, 0));
+
+        // When cluster really has no items -> ReallyEmpty
+        assert_eq!(check_empty_state(0, 0), ExplorerEmptyState::ReallyEmpty);
+        assert!(!is_filtered_empty(0, 0));
+
+        // When items are present after filtering -> NotEmpty
+        assert_eq!(check_empty_state(10, 3), ExplorerEmptyState::NotEmpty);
+        assert_eq!(check_empty_state(1, 1), ExplorerEmptyState::NotEmpty);
+        assert!(!is_filtered_empty(10, 3));
+        assert!(!is_filtered_empty(1, 1));
+    }
+
+    #[test]
+    fn group_has_matches_verifies_group_presence() {
+        let item1 = Rc::new(make_test_item(1, XtreamCluster::Video));
+        let mut item2_raw = make_test_item(2, XtreamCluster::Video);
+        item2_raw.group = std::sync::Arc::from("Action");
+        let item2 = Rc::new(item2_raw);
+        let items = vec![item1, item2];
+
+        assert!(group_has_matches(&SelectedGroup::All, &items));
+        assert!(group_has_matches(&SelectedGroup::Group("Group".into()), &items));
+        assert!(group_has_matches(&SelectedGroup::Group("Action".into()), &items));
+        assert!(!group_has_matches(&SelectedGroup::Group("Comedy".into()), &items));
+    }
+
+    #[test]
+    fn cluster_item_count_and_items_extract_per_cluster() {
+        let live_item = Rc::new(make_test_item(1, XtreamCluster::Live));
+        let vod_item = Rc::new(make_test_item(2, XtreamCluster::Video));
+
+        let live_group = Rc::new(shared::model::UiPlaylistGroup {
+            id: 1,
+            title: "Live Grp".into(),
+            channels: vec![live_item.clone()],
+            xtream_cluster: XtreamCluster::Live,
+        });
+        let vod_group = Rc::new(shared::model::UiPlaylistGroup {
+            id: 2,
+            title: "Vod Grp".into(),
+            channels: vec![vod_item.clone()],
+            xtream_cluster: XtreamCluster::Video,
+        });
+
+        let categories = shared::model::UiPlaylistCategories {
+            live: Some(vec![live_group]),
+            vod: Some(vec![vod_group]),
+            series: None,
+        };
+
+        assert_eq!(cluster_item_count(Some(&categories), XtreamCluster::Live), 1);
+        assert_eq!(cluster_item_count(Some(&categories), XtreamCluster::Video), 1);
+        assert_eq!(cluster_item_count(Some(&categories), XtreamCluster::Series), 0);
+        assert_eq!(cluster_item_count(None, XtreamCluster::Live), 0);
+
+        let live_chans = cluster_items(Some(&categories), XtreamCluster::Live);
+        assert_eq!(live_chans.len(), 1);
+        assert_eq!(live_chans[0].virtual_id, 1);
+
+        let series_chans = cluster_items(Some(&categories), XtreamCluster::Series);
+        assert_eq!(series_chans.len(), 0);
     }
 
     #[test]

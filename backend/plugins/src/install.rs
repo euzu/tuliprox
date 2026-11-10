@@ -214,7 +214,7 @@ fn extract(bytes: &[u8], target: &Path) -> Result<(), String> {
     let mut buffer = vec![0_u8; 64 * 1024];
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|err| format!("cannot read entry {index}: {err}"))?;
-        let raw = entry.name().to_string();
+        let raw = entry.name().map_err(|err| format!("cannot read entry {index} name: {err}"))?.to_string();
         let relative = entry_path(&raw, entry.enclosed_name())?;
         let kind = entry.unix_mode().map_or(0, |mode| mode & S_IFMT);
         if kind == S_IFLNK {
@@ -276,7 +276,7 @@ struct ManifestId {
 
 /// The plugin id of `manifest_text`, if it is a usable one.
 fn manifest_id(manifest_text: &str) -> Result<String, String> {
-    let parsed: ManifestId = serde_saphyr::from_str(manifest_text)
+    let parsed: ManifestId = shared::utils::yaml_from_str(manifest_text)
         .map_err(|err| format!("{MANIFEST_FILE} is not valid YAML: {}", sanitize_text(&err.to_string(), 200)))?;
     let id = parsed.id.ok_or_else(|| format!("{MANIFEST_FILE} has no `id`"))?;
     if !is_valid_plugin_id(&id) {
@@ -307,7 +307,7 @@ struct ManifestVersion {
 /// Whether `manifest_text` declares exactly `expected` (semver equality, so
 /// build metadata or formatting cannot fake a match; text equality otherwise).
 fn manifest_version_matches(manifest_text: &str, expected: &str) -> bool {
-    let Ok(parsed) = serde_saphyr::from_str::<ManifestVersion>(manifest_text) else { return false };
+    let Ok(parsed) = shared::utils::yaml_from_str::<ManifestVersion>(manifest_text) else { return false };
     let Some(found) = parsed.version else { return false };
     match (semver::Version::parse(&found), semver::Version::parse(expected)) {
         (Ok(found), Ok(expected)) => found == expected,

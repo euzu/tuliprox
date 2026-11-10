@@ -42,6 +42,8 @@ pub struct InputProps {
     pub input_type: Option<String>,
     #[prop_or_default]
     pub max_length: Option<u32>,
+    #[prop_or_default]
+    pub readonly: bool,
 }
 
 #[component]
@@ -102,6 +104,7 @@ pub fn Input(props: &InputProps) -> Html {
                 oninput={handle_oninput}
                 placeholder={props.placeholder.clone()}
                 required={props.required}
+                readonly={props.readonly}
                 aria-label={aria_label}
                 aria-required={props.required.then(|| "true".to_string())}
                 aria-invalid={props.error.as_ref().map(|_| "true".to_string())}

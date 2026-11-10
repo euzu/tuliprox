@@ -13,7 +13,7 @@ fn read_template_definition(
     match open_file(template_file) {
         Ok(file) => {
             let maybe_definition: Result<TemplateDefinitionDto, _> =
-                serde_saphyr::from_reader(config_file_reader(file, resolve_var));
+                shared::utils::yaml_from_reader(config_file_reader(file, resolve_var));
             match maybe_definition {
                 Ok(definition) => Ok(Some(definition)),
                 Err(err) => Err(TuliproxError::Config(format!(

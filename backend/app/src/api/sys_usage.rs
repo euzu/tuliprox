@@ -292,7 +292,6 @@ impl NetTracker {
 
 enum SystemUsageSampler {
     Platform(Box<platform::Sampler>),
-    #[cfg(target_os = "linux")]
     Unavailable,
     #[cfg(not(target_os = "linux"))]
     Fallback(Box<FallbackSampler>),
@@ -308,7 +307,7 @@ impl SystemUsageSampler {
         #[cfg(not(target_os = "linux"))]
         {
             platform::Sampler::new().map_or_else(
-                || Self::Fallback(Box::new(FallbackSampler::new())),
+                || FallbackSampler::new().map_or(Self::Unavailable, |sampler| Self::Fallback(Box::new(sampler))),
                 |sampler| Self::Platform(Box::new(sampler)),
             )
         }
@@ -317,7 +316,6 @@ impl SystemUsageSampler {
     fn sample(&mut self) -> Option<SystemInfo> {
         match self {
             Self::Platform(sampler) => sampler.sample(),
-            #[cfg(target_os = "linux")]
             Self::Unavailable => None,
             #[cfg(not(target_os = "linux"))]
             Self::Fallback(sampler) => sampler.sample(),
@@ -335,19 +333,20 @@ struct FallbackSampler {
 
 #[cfg(not(target_os = "linux"))]
 impl FallbackSampler {
-    fn new() -> Self {
+    /// `None` when `sysinfo` cannot read the system on this platform.
+    fn new() -> Option<Self> {
         let refresh_kind = sysinfo::RefreshKind::nothing()
             .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram())
             .with_processes(sysinfo::ProcessRefreshKind::nothing().with_cpu().with_memory());
 
-        let networks = sysinfo::Networks::new_with_refreshed_list();
+        let networks = sysinfo::Networks::new_with_refreshed_list().ok()?;
 
-        Self {
-            inner: sysinfo::System::new_with_specifics(refresh_kind),
+        Some(Self {
+            inner: sysinfo::System::new_with_specifics(refresh_kind).ok()?,
             networks,
             pid: sysinfo::Pid::from_u32(std::process::id()),
             net_tracker: NetTracker::new(),
-        }
+        })
     }
 
     fn sample(&mut self) -> Option<SystemInfo> {
@@ -586,7 +585,7 @@ mod platform {
             let process = ProcessHandle(unsafe { GetCurrentProcess() });
             let memory_total = query_memory_total()?;
             let cpu_time_secs = query_process_cpu_time_secs(process.0)?;
-            let networks = sysinfo::Networks::new_with_refreshed_list();
+            let networks = sysinfo::Networks::new_with_refreshed_list().ok()?;
             Some(Self {
                 process,
                 memory_total,
@@ -714,7 +713,7 @@ mod platform {
         pub(super) fn new() -> Option<Self> {
             let memory_total = query_memory_total()?;
             let cpu_time_secs = query_process_cpu_time_secs()?;
-            let networks = sysinfo::Networks::new_with_refreshed_list();
+            let networks = sysinfo::Networks::new_with_refreshed_list().ok()?;
             Some(Self {
                 memory_total,
                 disk_probe: DiskProbe::for_cwd(),

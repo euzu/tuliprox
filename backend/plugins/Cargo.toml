@@ -21,7 +21,7 @@ wasmtime-wasi-http = { workspace = true, features = ["p2"] }
 arc-swap.workspace = true
 bytes.workspace = true
 http.workspace = true
-matchit = "0.8.4"
+matchit = "0.9.2"
 http-body-util.workspace = true
 log.workspace = true
 # Watches the plugins directory for hot reload (registry). Same version as `app`.
@@ -35,7 +35,7 @@ serde_json.workspace = true
 sha2.workspace = true
 # `.tlpx` packages. `deflate` is pure Rust; zip 2.6.1's
 # `deflate-flate2` alone does not enable its flate2 dependency.
-zip = { version = "2.6.1", default-features = false, features = ["deflate"] }
+zip = { version = "9.5.0", default-features = false, features = ["deflate"] }
 tokio = { workspace = true, features = ["time", "sync", "rt", "process", "io-util", "macros"] }
 
 [target.'cfg(unix)'.dependencies]

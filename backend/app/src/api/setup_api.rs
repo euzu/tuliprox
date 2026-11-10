@@ -16,7 +16,7 @@ use axum::{
 };
 use core::fmt;
 use log::{error, info, warn};
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use shared::{

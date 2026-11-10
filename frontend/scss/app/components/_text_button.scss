@@ -158,10 +158,11 @@
   font-size: var(--font-size-xs);
   line-height: 1.2;
   background: var(--theme-brand-surface-soft);
-  color: var(--theme-brand-text-muted);
+  // The strongest text color: muted or title text on a soft surface is too close to the background.
+  color: var(--theme-brand-text);
 }
 
 .tp__text-button.active .tp__text-button__badge {
   background: var(--theme-brand-primary-active-soft);
-  color: var(--theme-brand-text-title);
+  color: var(--theme-brand-text);
 }
