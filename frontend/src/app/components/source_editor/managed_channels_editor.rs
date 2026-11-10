@@ -7,6 +7,22 @@ use shared::model::{ManagedChannelBinding, ManagedChannelStage, PluginRef, Plugi
 use std::rc::Rc;
 use yew::{component, html, platform::spawn_local, use_effect_with, use_state, Callback, Html, Properties};
 
+pub const MANAGED_CHANNELS_HOOK: &str = "playlist.managed-channels";
+
+/// Returns `true` if the plugin is enabled and declares the `playlist.managed-channels` hook.
+pub fn is_managed_channel_plugin(plugin: &PluginSummaryDto) -> bool {
+    plugin.state == PluginStateDto::Enabled
+        && plugin.enabled
+        && plugin.hooks.iter().any(|hook| hook == MANAGED_CHANNELS_HOOK)
+}
+
+/// Checks whether managed channels should be available for the form:
+/// at least one enabled plugin provides the `playlist.managed-channels` hook OR
+/// the form already has managed-channel bindings.
+pub fn is_managed_channel_available(plugins: &[PluginSummaryDto], has_bindings: bool) -> bool {
+    has_bindings || plugins.iter().any(is_managed_channel_plugin)
+}
+
 #[derive(Properties, Clone, PartialEq)]
 pub struct ManagedChannelsEditorProps {
     pub bindings: Vec<ManagedChannelBinding>,
@@ -39,9 +55,7 @@ pub fn ManagedChannelsEditor(props: &ManagedChannelsEditorProps) -> Html {
         plugins
             .iter()
             .filter(|plugin| {
-                plugin.state == PluginStateDto::Enabled
-                    && plugin.enabled
-                    && plugin.hooks.iter().any(|hook| hook == "playlist.managed-channels")
+                is_managed_channel_plugin(plugin)
                     && !props.bindings.iter().any(|binding| binding.plugin.id() == plugin.id)
             })
             .map(|plugin| DropDownOption::new(&plugin.id, html! {{&plugin.name}}, false))
@@ -86,7 +100,58 @@ pub fn ManagedChannelsEditor(props: &ManagedChannelsEditorProps) -> Html {
                 </div>}
             })}
             {if props.allow_write && !available.is_empty() {html!{<Select name={translate.t("MANAGED_CHANNELS.ADD_PLUGIN")} options={Rc::new({let mut choices=vec![DropDownOption::new("",html!{{translate.t("MANAGED_CHANNELS.ADD_PLUGIN")}},true)];choices.extend(available.iter().cloned());choices})} on_select={add}/>}}else{Html::default()}}
-            {if props.bindings.is_empty() && available.is_empty() {html!{<p>{translate.t("MANAGED_CHANNELS.NO_PLUGINS")}</p>}}else{Html::default()}}
         </Card>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_plugin(id: &str, enabled: bool, state: PluginStateDto, hooks: &[&str]) -> PluginSummaryDto {
+        PluginSummaryDto {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: None,
+            description: None,
+            category: None,
+            state,
+            failure: None,
+            enabled,
+            priority: 0,
+            hooks: hooks.iter().map(|hook| (*hook).to_string()).collect(),
+            capabilities: Vec::new(),
+            abi: String::new(),
+            wasm_sha256: None,
+            settings_review: None,
+            update: None,
+            rollback: None,
+            origin: None,
+            update_policy: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_managed_channel_availability() {
+        // no plugins
+        assert!(!is_managed_channel_available(&[], false));
+
+        // plugin without the hook
+        let no_hook = sample_plugin("plugin-a", true, PluginStateDto::Enabled, &["playlist.other"]);
+        assert!(!is_managed_channel_available(&[no_hook], false));
+
+        // disabled plugin with the hook
+        let disabled_not_enabled = sample_plugin("plugin-b", false, PluginStateDto::Enabled, &[MANAGED_CHANNELS_HOOK]);
+        assert!(!is_managed_channel_available(&[disabled_not_enabled], false));
+
+        let disabled_state = sample_plugin("plugin-c", true, PluginStateDto::Disabled, &[MANAGED_CHANNELS_HOOK]);
+        assert!(!is_managed_channel_available(&[disabled_state], false));
+
+        // enabled plugin with the hook
+        let enabled = sample_plugin("plugin-d", true, PluginStateDto::Enabled, &[MANAGED_CHANNELS_HOOK]);
+        assert!(is_managed_channel_available(&[enabled], false));
+
+        // no plugin but existing bindings
+        assert!(is_managed_channel_available(&[], true));
     }
 }

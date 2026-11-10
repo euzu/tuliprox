@@ -1036,7 +1036,9 @@ mod tests {
         let radio_buttons = include_str!("../../../../scss/app/components/_radio_button_group.scss");
         let cards = include_str!("../../../../scss/app/components/playlist/_playlist_update_view.scss");
         assert!(buttons.split_once(".tp__text-button.active,").unwrap().0.contains("font-weight: bold;"));
-        assert!(!buttons.split_once(".tp__text-button.active,").unwrap().1.contains("font-weight"));
+        let (active_block, _) =
+            buttons.split_once(".tp__text-button.active,").unwrap().1.split_once(".tp__text-button__badge").unwrap();
+        assert!(!active_block.contains("font-weight"));
         assert!(!radio_buttons.contains("font-weight"));
         let target_styles = cards.split_once("&__target-toggle {").unwrap().1.split_once("&__action-area").unwrap().0;
         assert!(!target_styles.contains("font-weight"));

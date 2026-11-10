@@ -58,13 +58,15 @@ pub fn marketplace_allow_http() -> bool {
 }
 
 /// `TULIPROX_PLUGINS_DIRS`, split into directories; `None` when unset or blank.
-fn env_plugin_dirs() -> Option<Vec<String>> {
+#[must_use]
+pub fn env_plugin_dirs() -> Option<Vec<String>> {
     std::env::var_os(ENV_PLUGIN_DIRS).map(|value| split_plugin_dirs(&value)).filter(|dirs| !dirs.is_empty())
 }
 
 /// Split a directory list on the platform's path separator (`:` on Unix, `;` on Windows, so a
 /// drive letter such as `C:\plugins` stays whole) and on `,`.
-fn split_plugin_dirs(value: &std::ffi::OsStr) -> Vec<String> {
+#[must_use]
+pub fn split_plugin_dirs(value: &std::ffi::OsStr) -> Vec<String> {
     std::env::split_paths(value)
         .flat_map(|path| path.to_string_lossy().split(',').map(|part| part.trim().to_string()).collect::<Vec<_>>())
         .filter(|dir| !dir.is_empty())

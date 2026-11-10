@@ -129,6 +129,18 @@ pub struct PluginUpdateSettingsDto {
     pub auto_update_on_boot: bool,
     /// A duration with a unit (`30s`).
     pub boot_update_budget: String,
+    /// Configured raw plugin directory as written in `config.yml` (empty for default).
+    #[serde(default)]
+    pub directory: String,
+    /// Effective resolved install directory.
+    #[serde(default, alias = "resolvedDirectory")]
+    pub effective_directory: String,
+    /// Whether `plugins.directories` or `TULIPROX_PLUGINS_DIRS` overrides `directory`.
+    #[serde(default, alias = "overridden")]
+    pub directory_overridden: bool,
+    /// Effective search directories in scan order (bundled first, custom last).
+    #[serde(default, alias = "searchDirectories")]
+    pub search_directories: Vec<String>,
 }
 
 /// What the boot update run did with one plugin.

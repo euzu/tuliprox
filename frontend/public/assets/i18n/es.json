@@ -258,6 +258,7 @@
   },
   "UNAUTHORIZED": "No autorizado",
   "EXPLANATION": {
+    "PLUGIN_DIRECTORY": "Los plugins que instales o subas se guardan aquí; los plugins incluidos se muestran por separado y no se ven afectados; las rutas relativas se resuelven respecto al directorio de configuración (por defecto: config/plugins).",
     "TABLE_COLUMNS_SHARED": "Usa los interruptores para mostrar u ocultar columnas. Arrastra el tirador para cambiar el orden. Guardar aplica los cambios; Restaurar valores predeterminados restablece el diseño.\n\nEspacio o Intro toma o suelta una columna. Usa Arriba/Abajo para moverla; Escape cancela el movimiento.\n\nEstos ajustes son compartidos por todos los usuarios de esta instalación sin autenticación.",
     "TABLE_COLUMNS": "Usa los interruptores para mostrar u ocultar columnas. Arrastra el tirador para cambiar el orden. Guardar aplica los cambios; Restaurar valores predeterminados restablece el diseño.\n\nEspacio o Intro toma o suelta una columna. Usa Arriba/Abajo para moverla; Escape cancela el movimiento.",
     "API_PROXY_CONFIG": {
@@ -1817,6 +1818,7 @@
     "RESOURCE_REWRITE_DISABLED": "Reescritura de recursos deshabilitada",
     "RESERVE_SLOTS_FOR_USERS": "Reservar espacios para usuarios",
     "RESET": "Restablecer",
+    "RESET_FILTERS": "Restablecer filtros",
     "REST": "Rest",
     "RETRY": "Reintentar",
     "REVERSE": "Inverso",
@@ -2197,6 +2199,7 @@
     "RECORDING_RULE_DELETE_CANCEL": "Eliminar regla y cancelar próximas grabaciones",
     "RECORDING_RULE_ACTION_ENABLE": "Habilitar",
     "RECORDING_RULE_ACTION_DISABLE": "Deshabilitar",
+    "FAILOVER": "Failover",
     "FAILOVER_GROUPS": "Grupos de failover",
     "FAILOVER_GROUPS_MATCH_BY": "Comparar por",
     "FAILOVER_GROUPS_ALLOW_PROVIDER_GRACE": "Permitir gracia del proveedor",
@@ -2450,6 +2453,9 @@
     "PLUGIN_UPDATE_BLOCKER_DOWNGRADE": "La versión del esquema de ajustes baja",
     "PLUGIN_UPDATE_ON_BOOT": "Actualizar plugins al arrancar",
     "PLUGIN_UPDATE_BOOT_BUDGET": "Tiempo máximo de actualización al arrancar",
+    "PLUGIN_DIRECTORY": "Directorio de plugins personalizados",
+    "PLUGIN_EFFECTIVE_DIRECTORY": "Directorio de instalación efectivo",
+    "PLUGIN_SEARCH_DIRECTORIES": "Directorios de búsqueda efectivos",
     "PLUGIN_BOOT_REPORT": "Informe de la última actualización al arrancar",
     "PLUGIN_BOOT_STARTED": "Iniciado",
     "PLUGIN_BOOT_FINISHED": "Finalizado",
@@ -2568,6 +2574,7 @@
     "PLAYLIST_EXPLORER": {
       "SELECT_A_PLAYLIST_TO_VIEW_CONTENT": "Seleccione una lista de reproducción para ver su contenido.",
       "SELECT_A_PLAYLIST_HINT": "Elija una fuente en el selector de arriba para explorar sus canales, películas y series.",
+      "NO_MATCHING_ENTRIES": "Ninguna entrada coincide con los filtros activos",
       "FETCH_FAILED": "Error al cargar la lista de reproducción",
       "FETCH_FAILED_HINT": "Se produjo un error al cargar la lista de reproducción. Compruebe la configuración de origen e inténtelo de nuevo.",
       "SAVE_CONFLICT": "Conflicto de configuración: El archivo de reemplazo se actualizó en el servidor. Recargando estado más reciente...",
@@ -2899,6 +2906,8 @@
     "PLUGIN_UPDATE_SETTINGS_SAVED": "Ajustes de actualización guardados.",
     "PLUGIN_UPDATE_SETTINGS_LOAD_FAILED": "No se pudieron cargar los ajustes de actualización:",
     "PLUGIN_UPDATE_ON_BOOT_HINT": "Al arrancar, los plugins activados con política Automática se actualizan en segundo plano cuando la actualización no requiere aprobación. El tiempo necesita una unidad, por ejemplo 30s.",
+    "PLUGIN_DIRECTORY_HINT": "Los plugins que instales o subas se guardan aquí; los plugins incluidos se muestran por separado y no se ven afectados; las rutas relativas se resuelven respecto al directorio de configuración (por defecto: config/plugins).",
+    "PLUGIN_DIRECTORY_OVERRIDDEN": "Sobrescrito por plugins.directories o TULIPROX_PLUGINS_DIRS.",
     "PLUGIN_UPDATE_VERIFIED_HINT": "Verificada: se comprobó el paquete descargado. Según el catálogo: solo se comparó la entrada del catálogo, así que la comprobación del paquete aún puede bloquearla.",
     "PLUGIN_BOOT_REPORT_NONE": "Aún no se ha ejecutado ninguna actualización al arrancar.",
     "PLUGIN_BOOT_REPORT_EMPTY": "No se consideró ningún plugin.",
@@ -3068,7 +3077,6 @@
     "TARGET_HINT": "Añade canales gestionados por plugins a este destino. El punto seleccionado sigue el orden de procesamiento del destino; las reglas posteriores de mapeo, ordenación y salida se siguen aplicando.",
     "INPUT_HINT": "Añade canales gestionados por plugins a esta entrada antes del procesamiento de destinos. Todos los destinos que usan esta entrada pueden recibirlos.",
     "BEFORE_FILTER": "Antes del filtrado",
-    "AFTER_FILTER": "Después del filtrado",
-    "NO_PLUGINS": "No hay ningún plugin de canales gestionados seleccionado. Activa un plugin que proporcione canales gestionados para añadir uno."
+    "AFTER_FILTER": "Después del filtrado"
   }
 }

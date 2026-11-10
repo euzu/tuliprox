@@ -104,7 +104,7 @@ impl ConfigPage {
             ConfigPage::Mcp => "MCP",
             ConfigPage::Panel => "Settings",
             ConfigPage::Library => "VideoLibrary",
-            ConfigPage::FailoverGroups => "Nodes",
+            ConfigPage::FailoverGroups => "Failover",
         }
     }
 }

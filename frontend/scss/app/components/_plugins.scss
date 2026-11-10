@@ -581,6 +581,14 @@
     padding: 0;
     border: 0;
   }
+
+  &-toolbar,
+  &__toolbar {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: var(--margin-small);
+  }
 }
 
 .tp__plugins__boot-entries {

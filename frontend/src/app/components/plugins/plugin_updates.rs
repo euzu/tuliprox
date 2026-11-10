@@ -337,6 +337,14 @@ pub fn PluginUpdateSettings(props: &PluginUpdateSettingsProps) -> Html {
             }
         })
     };
+    let on_directory = {
+        let settings = settings.clone();
+        Callback::from(move |directory: String| {
+            if let Some(current) = (*settings).clone() {
+                settings.set(Some(PluginUpdateSettingsDto { directory, ..current }));
+            }
+        })
+    };
     let on_save = {
         let settings = settings.clone();
         let saved = saved.clone();
@@ -377,6 +385,15 @@ pub fn PluginUpdateSettings(props: &PluginUpdateSettingsProps) -> Html {
         };
     };
     let changed = saved.as_ref() != Some(&current);
+    let search_dirs = if current.search_directories.is_empty() {
+        if current.effective_directory.is_empty() {
+            String::new()
+        } else {
+            current.effective_directory.clone()
+        }
+    } else {
+        current.search_directories.join(", ")
+    };
     html! {
         <div class="tp__plugins__update-settings">
             <fieldset class="tp__plugins__update-settings-fields" disabled={!props.can_write || *saving}>
@@ -393,11 +410,29 @@ pub fn PluginUpdateSettings(props: &PluginUpdateSettingsProps) -> Html {
                     label={Some(translate.t("LABEL.PLUGIN_UPDATE_BOOT_BUDGET"))}
                     value={current.boot_update_budget.clone()}
                     on_change={Some(on_budget)} />
+                <Input name="plugin_directory"
+                    label={Some(translate.t("LABEL.PLUGIN_DIRECTORY"))}
+                    value={current.directory.clone()}
+                    placeholder={Some("plugins".to_string())}
+                    hint_key={Some("PLUGIN_DIRECTORY".to_string())}
+                    readonly={current.directory_overridden}
+                    on_change={(!current.directory_overridden).then_some(on_directory)} />
             </fieldset>
             <p class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_UPDATE_ON_BOOT_HINT") }</p>
+            <p class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_DIRECTORY_HINT") }</p>
+            if current.directory_overridden {
+                <p class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_DIRECTORY_OVERRIDDEN") }</p>
+            }
+            if !search_dirs.is_empty() {
+                <p class="tp__plugins__muted">
+                    { format!("{}: {search_dirs}", translate.t("LABEL.PLUGIN_SEARCH_DIRECTORIES")) }
+                </p>
+            }
             if props.can_write {
-                <TextButton name="save-update-settings" icon="Save" title={translate.t("LABEL.SAVE")}
-                    disabled={*saving || !changed} onclick={on_save} />
+                <div class="tp__plugins__update-settings__toolbar">
+                    <TextButton name="save-update-settings" class="primary" icon="Save" title={translate.t("LABEL.SAVE")}
+                        disabled={*saving || !changed} onclick={on_save} />
+                </div>
             }
         </div>
     }
@@ -622,5 +657,67 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), outcomes.len());
+    }
+
+    #[test]
+    fn update_settings_dto_serde_defaults_and_backward_compatibility() {
+        let legacy_json = r#"{"autoUpdateOnBoot":true,"bootUpdateBudget":"30s"}"#;
+        let dto: PluginUpdateSettingsDto = serde_json::from_str(legacy_json).unwrap();
+        assert!(dto.auto_update_on_boot);
+        assert_eq!(dto.boot_update_budget, "30s");
+        assert_eq!(dto.directory, "");
+        assert_eq!(dto.effective_directory, "");
+        assert!(!dto.directory_overridden);
+        assert_eq!(dto.search_directories, Vec::<String>::new());
+
+        let extended_json = r#"{
+            "autoUpdateOnBoot": false,
+            "bootUpdateBudget": "45s",
+            "directory": "custom-plugins",
+            "effectiveDirectory": "/var/tuliprox/custom-plugins",
+            "directoryOverridden": true,
+            "searchDirectories": ["/app/plugins", "/var/tuliprox/custom-plugins"]
+        }"#;
+        let dto2: PluginUpdateSettingsDto = serde_json::from_str(extended_json).unwrap();
+        assert_eq!(dto2.directory, "custom-plugins");
+        assert_eq!(dto2.effective_directory, "/var/tuliprox/custom-plugins");
+        assert!(dto2.directory_overridden);
+        assert_eq!(dto2.search_directories, vec!["/app/plugins", "/var/tuliprox/custom-plugins"]);
+
+        let alias_json = r#"{
+            "autoUpdateOnBoot": true,
+            "bootUpdateBudget": "15s",
+            "resolvedDirectory": "/app/plugins",
+            "overridden": true,
+            "searchDirectories": ["/app/plugins"]
+        }"#;
+        let dto_alias: PluginUpdateSettingsDto = serde_json::from_str(alias_json).unwrap();
+        assert_eq!(dto_alias.effective_directory, "/app/plugins");
+        assert!(dto_alias.directory_overridden);
+        assert_eq!(dto_alias.search_directories, vec!["/app/plugins"]);
+    }
+
+    #[test]
+    fn update_settings_change_detection_includes_directory() {
+        let saved = PluginUpdateSettingsDto {
+            auto_update_on_boot: false,
+            boot_update_budget: "30s".to_string(),
+            directory: String::new(),
+            effective_directory: "/app/config/plugins".to_string(),
+            directory_overridden: false,
+            search_directories: vec!["/app/plugins".to_string(), "/app/config/plugins".to_string()],
+        };
+        let mut edited = saved.clone();
+        assert_eq!(saved, edited);
+        edited.directory = "my-plugins".to_string();
+        assert_ne!(saved, edited);
+    }
+
+    #[test]
+    fn update_settings_scss_toolbar_is_right_aligned() {
+        let scss = include_str!("../../../../scss/app/components/_plugins.scss");
+        let (_, toolbar) = scss.split_once(".tp__plugins__update-settings").expect("settings scss");
+        assert!(toolbar.contains("justify-content: flex-end;"));
+        assert!(toolbar.contains("gap: var(--margin-small);"));
     }
 }

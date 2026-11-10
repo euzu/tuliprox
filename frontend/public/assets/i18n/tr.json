@@ -5,8 +5,7 @@
     "TARGET_HINT": "Bu hedefe eklenti tarafından yönetilen kanalları ekler. Seçilen nokta bu hedefin işleme sırasını takip eder; sonraki eşleme, sıralama ve çıktı kuralları geçerliliğini korur.",
     "INPUT_HINT": "Hedef işlemeden önce bu girdiye eklenti tarafından yönetilen kanalları ekler. Bu girdiyi kullanan her hedef bunları alabilir.",
     "BEFORE_FILTER": "Filtrelemeden önce",
-    "AFTER_FILTER": "Filtrelemeden sonra",
-    "NO_PLUGINS": "Yönetilen kanal eklentisi seçilmedi. Bir tane eklemek için yönetilen kanallar sağlayan bir eklentiyi etkinleştirin."
+    "AFTER_FILTER": "Filtrelemeden sonra"
   },
   "HLS_STARTUP_MODE_DESCRIPTION": "Conservative keeps the existing startup behavior. First ready waits for a processed start segment. Progressive delivers raw TS and requires suitable sources; it takes effect for new sessions.",
   "BACKOFF_JITTER_PERCENT_VALIDATION": "Backoff jitter percent must be between 0 and 95.",
@@ -267,6 +266,7 @@
   },
   "UNAUTHORIZED": "Not authorized",
   "EXPLANATION": {
+    "PLUGIN_DIRECTORY": "Yüklediğiniz veya karşıya yüklediğiniz eklentiler burada saklanır; paketle gelen eklentiler ayrı listelenir ve etkilenmez; göreceli yollar yapılandırma dizinine göre çözümlenir (varsayılan: config/plugins).",
     "TABLE_COLUMNS_SHARED": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.\n\nThese settings are shared by everyone using this installation without authentication.",
     "TABLE_COLUMNS": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.",
     "API_PROXY_CONFIG": {
@@ -1822,6 +1822,7 @@
     "RESOURCE_REWRITE_DISABLED": "Resource Rewrite Disabled",
     "RESERVE_SLOTS_FOR_USERS": "Reserve slots for users",
     "RESET": "Reset",
+    "RESET_FILTERS": "Filtreleri sıfırla",
     "REST": "Rest",
     "RETRY": "Retry",
     "REVERSE": "Reverse",
@@ -2201,6 +2202,7 @@
     "RECORDING_RULE_DELETE_CANCEL": "Delete rule and cancel upcoming recordings",
     "RECORDING_RULE_ACTION_ENABLE": "Enable",
     "RECORDING_RULE_ACTION_DISABLE": "Disable",
+    "FAILOVER": "Failover",
     "FAILOVER_GROUPS": "Failover grupları",
     "FAILOVER_GROUPS_MATCH_BY": "Göre eşleştir",
     "FAILOVER_GROUPS_ALLOW_PROVIDER_GRACE": "Sağlayıcı grace bağlantısına izin ver",
@@ -2462,6 +2464,9 @@
     "PLUGIN_UPDATE_BLOCKER_DOWNGRADE": "Ayar şeması sürümü düşüyor",
     "PLUGIN_UPDATE_ON_BOOT": "Başlangıçta eklentileri güncelle",
     "PLUGIN_UPDATE_BOOT_BUDGET": "Başlangıç güncelleme bütçesi",
+    "PLUGIN_DIRECTORY": "Özel eklenti dizini",
+    "PLUGIN_EFFECTIVE_DIRECTORY": "Geçerli yükleme dizini",
+    "PLUGIN_SEARCH_DIRECTORIES": "Geçerli arama dizinleri",
     "PLUGIN_BOOT_REPORT": "Son başlangıç güncelleme raporu",
     "PLUGIN_BOOT_STARTED": "Başlatıldı",
     "PLUGIN_BOOT_FINISHED": "Tamamlandı",
@@ -2577,6 +2582,7 @@
     "PLAYLIST_EXPLORER": {
       "SELECT_A_PLAYLIST_TO_VIEW_CONTENT": "Select a playlist to view its content.",
       "SELECT_A_PLAYLIST_HINT": "Kanallarına, filmlerine ve dizilerine göz atmak için yukarıdaki seçiciden bir kaynak seçin.",
+      "NO_MATCHING_ENTRIES": "Etkin filtrelerle eşleşen kayıt yok",
       "FETCH_FAILED": "Oynatma listesi yüklenemedi",
       "FETCH_FAILED_HINT": "Oynatma listesi yüklenirken bir hata oluştu. Lütfen kaynak yapılandırmanızı kontrol edip tekrar deneyin.",
       "SAVE_CONFLICT": "Yapılandırma çakışması: Geçersiz kılma dosyası sunucuda güncellendi. En son durum yeniden yükleniyor...",
@@ -2908,6 +2914,8 @@
     "PLUGIN_UPDATE_SETTINGS_SAVED": "Güncelleme ayarları kaydedildi.",
     "PLUGIN_UPDATE_SETTINGS_LOAD_FAILED": "Güncelleme ayarları yüklenemedi:",
     "PLUGIN_UPDATE_ON_BOOT_HINT": "Başlangıçta, güncelleme onayı gerektirmediğinde Otomatik politikasına sahip etkin eklentiler arka planda güncellenir. Zaman bütçesi bir birim gerektirir, örneğin 30s.",
+    "PLUGIN_DIRECTORY_HINT": "Yüklediğiniz veya karşıya yüklediğiniz eklentiler burada saklanır; paketle gelen eklentiler ayrı listelenir ve etkilenmez; göreceli yollar yapılandırma dizinine göre çözümlenir (varsayılan: config/plugins).",
+    "PLUGIN_DIRECTORY_OVERRIDDEN": "plugins.directories veya TULIPROX_PLUGINS_DIRS tarafından geçersiz kılındı.",
     "PLUGIN_UPDATE_VERIFIED_HINT": "Doğrulandı: indirilen paket kontrol edildi. Katalogdan: yalnızca katalog girdisi karşılaştırıldı, bu nedenle paket kontrolü bunu yine de engelleyebilir.",
     "PLUGIN_BOOT_REPORT_NONE": "Henüz bir başlangıç güncellemesi çalıştırılmadı.",
     "PLUGIN_BOOT_REPORT_EMPTY": "Hiçbir eklenti işleme alınmadı.",

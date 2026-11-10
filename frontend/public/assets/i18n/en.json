@@ -5,8 +5,7 @@
     "TARGET_HINT": "Add plugin-managed channels to this target. The selected point follows this target's processing order; later mapping, sorting and output rules still apply.",
     "INPUT_HINT": "Add plugin-managed channels to this input before target processing. Every target using this input can receive them.",
     "BEFORE_FILTER": "Before filtering",
-    "AFTER_FILTER": "After filtering",
-    "NO_PLUGINS": "No managed-channel plugin is selected. Enable a plugin that provides managed channels to add one."
+    "AFTER_FILTER": "After filtering"
   },
   "HLS_STARTUP_MODE_DESCRIPTION": "Conservative keeps the existing startup behavior. First ready waits for a processed start segment. Progressive delivers raw TS and requires suitable sources; it takes effect for new sessions.",
   "BACKOFF_JITTER_PERCENT_VALIDATION": "Backoff jitter percent must be between 0 and 95.",
@@ -267,6 +266,7 @@
   },
   "UNAUTHORIZED": "Not authorized",
   "EXPLANATION": {
+    "PLUGIN_DIRECTORY": "Plugins you install or upload are stored here; bundled plugins are listed separately and are not affected; relative paths are resolved against the config directory (default: config/plugins).",
     "TABLE_COLUMNS_SHARED": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.\n\nThese settings are shared by everyone using this installation without authentication.",
     "TABLE_COLUMNS": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.",
     "API_PROXY_CONFIG": {
@@ -1829,6 +1829,7 @@
     "RESOURCE_REWRITE_DISABLED": "Resource Rewrite Disabled",
     "RESERVE_SLOTS_FOR_USERS": "Reserve slots for users",
     "RESET": "Reset",
+    "RESET_FILTERS": "Reset filters",
     "REST": "Rest",
     "RETRY": "Retry",
     "REVERSE": "Reverse",
@@ -2209,6 +2210,7 @@
     "RECORDING_RULE_DELETE_CANCEL": "Delete rule and cancel upcoming recordings",
     "RECORDING_RULE_ACTION_ENABLE": "Enable",
     "RECORDING_RULE_ACTION_DISABLE": "Disable",
+    "FAILOVER": "Failover",
     "FAILOVER_GROUPS": "Failover groups",
     "FAILOVER_GROUPS_MATCH_BY": "Match by",
     "FAILOVER_GROUPS_ALLOW_PROVIDER_GRACE": "Allow provider grace",
@@ -2462,6 +2464,9 @@
     "PLUGIN_UPDATE_BLOCKER_DOWNGRADE": "Settings schema version goes down",
     "PLUGIN_UPDATE_ON_BOOT": "Update plugins at boot",
     "PLUGIN_UPDATE_BOOT_BUDGET": "Boot update budget",
+    "PLUGIN_DIRECTORY": "Custom plugins directory",
+    "PLUGIN_EFFECTIVE_DIRECTORY": "Effective install directory",
+    "PLUGIN_SEARCH_DIRECTORIES": "Effective search directories",
     "PLUGIN_BOOT_REPORT": "Last boot update report",
     "PLUGIN_BOOT_STARTED": "Started",
     "PLUGIN_BOOT_FINISHED": "Finished",
@@ -2577,6 +2582,7 @@
     "PLAYLIST_EXPLORER": {
       "SELECT_A_PLAYLIST_TO_VIEW_CONTENT": "Select a playlist to view its content.",
       "SELECT_A_PLAYLIST_HINT": "Pick a source from the selector above to browse its channels, movies and series.",
+      "NO_MATCHING_ENTRIES": "No entries match the active filters",
       "FETCH_FAILED": "Failed to load playlist",
       "FETCH_FAILED_HINT": "An error occurred while loading the playlist. Please check your source configuration and try again.",
       "SAVE_CONFLICT": "Configuration conflict: The override file was updated on the server. Reloading latest state...",
@@ -2908,6 +2914,8 @@
     "PLUGIN_UPDATE_SETTINGS_SAVED": "Update settings saved.",
     "PLUGIN_UPDATE_SETTINGS_LOAD_FAILED": "Could not load the update settings:",
     "PLUGIN_UPDATE_ON_BOOT_HINT": "At boot, enabled plugins with policy Auto are updated in the background when the update needs no approval. The budget needs a unit, for example 30s.",
+    "PLUGIN_DIRECTORY_HINT": "Plugins you install or upload are stored here; bundled plugins are listed separately and are not affected; relative paths are resolved against the config directory (default: config/plugins).",
+    "PLUGIN_DIRECTORY_OVERRIDDEN": "Overridden by plugins.directories or TULIPROX_PLUGINS_DIRS.",
     "PLUGIN_UPDATE_VERIFIED_HINT": "Verified: the downloaded package was checked. From catalog: only the catalog entry was compared, so the package check can still block it.",
     "PLUGIN_BOOT_REPORT_NONE": "No boot update has run yet.",
     "PLUGIN_BOOT_REPORT_EMPTY": "No plugins were considered.",

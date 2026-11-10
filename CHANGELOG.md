@@ -1469,6 +1469,21 @@
 
 ## 🐛 Fixes
 
+- **The playlist explorer lists channels again.** Since the stale-target notice wrapped the explorer, its group and
+  channel area had no height and stayed empty for every target. When filters hide every entry, the explorer now
+  says so and offers "Reset filters". The Live/VOD/Series counts use the strongest text color of the theme.
+
+- **Plugins page: custom plugins directory and save button.** The "Updates" card edits `plugins.directory`, labelled
+  as the directory for your own installed and uploaded plugins, shows the effective search directories (bundled
+  first, custom last) and becomes read-only when `plugins.directories` or `TULIPROX_PLUGINS_DIRS` override it. A
+  changed directory reloads the plugins without a restart. The save button is a normal button on the right,
+  highlighted while there are unsaved changes.
+
+- **Source editor: managed channels get their own page.** The section is shown only when an enabled plugin
+  provides managed channels or the target/input already has managed channels, instead of a permanent hint on the
+  main page. The failover page of a target has a "Failover" heading, and failover entries use the new Failover
+  icon.
+
 - **Active Streams shows the active failover member from the start.** A plain TS stream of a failover group has no
   session, so the chosen member was only shown after a manual switch. The binding now waits for the stream and the
   card shows "Active source" and the check mark at once.

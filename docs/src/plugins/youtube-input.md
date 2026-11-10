@@ -144,10 +144,26 @@ When `resolver` is set to `yt-dlp`, the plugin resolves streams with a user-prov
 querying an Invidious instance. It resolves uploads to progressive MP4 URLs (`best[ext=mp4][protocol^=http]/best`) and
 live broadcasts to HLS manifest URLs.
 
-* **Docker:** Mount the `yt-dlp` binary into the container:
-  `-v /host/yt-dlp:/app/bin/yt-dlp:ro`.
+* **Docker:** Mount the `yt-dlp` binary into the container at `/app/bin/yt-dlp`.
   **Only the `alpine` image works**, and it requires the **musl build** of `yt-dlp`. The minimal `scratch` image
-  contains no libc, so an external binary cannot run there.
+  contains no libc, so an external binary cannot run there. Download the musl build, make it executable and mount
+  it:
+
+  ```bash
+  curl -L -o ./yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_musllinux
+  chmod +x ./yt-dlp
+  ```
+
+  ```yaml
+  services:
+    tuliprox:
+      image: ghcr.io/euzu/tuliprox-alpine:latest
+      volumes:
+        - ./yt-dlp:/app/bin/yt-dlp:ro
+  ```
+
+  With `docker run`, use `-v "$PWD/yt-dlp:/app/bin/yt-dlp:ro"`. To update `yt-dlp`, download the file again and
+  restart the container.
 * **Bare metal:** Place `yt-dlp` at `/app/bin/yt-dlp`, put it on the host's `PATH`, or specify its location in the
   input's `ytdlp_path` field.
 * **JavaScript runtime:** YouTube frequently updates player protections. `yt-dlp` may need a JavaScript runtime

@@ -5,8 +5,7 @@
     "TARGET_HINT": "Fügt diesem Target durch Plugins verwaltete Kanäle hinzu. Der gewählte Punkt folgt der Verarbeitungsreihenfolge dieses Targets; spätere Zuordnungs-, Sortier- und Ausgaberegeln gelten weiterhin.",
     "INPUT_HINT": "Fügt diesem Input vor der Target-Verarbeitung durch Plugins verwaltete Kanäle hinzu. Jedes Target, das diesen Input verwendet, kann sie empfangen.",
     "BEFORE_FILTER": "Vor dem Filtern",
-    "AFTER_FILTER": "Nach dem Filtern",
-    "NO_PLUGINS": "Kein Plugin für verwaltete Kanäle ausgewählt. Aktiviere ein Plugin, das verwaltete Kanäle bereitstellt, um eines hinzuzufügen."
+    "AFTER_FILTER": "Nach dem Filtern"
   },
   "HLS_STARTUP_MODE_DESCRIPTION": "Conservative keeps the existing startup behavior. First ready waits for a processed start segment. Progressive delivers raw TS and requires suitable sources; it takes effect for new sessions.",
   "BACKOFF_JITTER_PERCENT_VALIDATION": "Backoff jitter percent must be between 0 and 95.",
@@ -267,6 +266,7 @@
   },
   "UNAUTHORIZED": "Not authorized",
   "EXPLANATION": {
+    "PLUGIN_DIRECTORY": "Hier werden installierte oder hochgeladene Plugins gespeichert; mitgelieferte Plugins werden separat aufgeführt und bleiben unberührt; relative Pfade werden relativ zum Konfigurationsverzeichnis aufgelöst (Standard: config/plugins).",
     "TABLE_COLUMNS_SHARED": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.\n\nThese settings are shared by everyone using this installation without authentication.",
     "TABLE_COLUMNS": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.",
     "API_PROXY_CONFIG": {
@@ -1822,6 +1822,7 @@
     "RESOURCE_REWRITE_DISABLED": "Resource Rewrite Disabled",
     "RESERVE_SLOTS_FOR_USERS": "Reserve slots for users",
     "RESET": "Reset",
+    "RESET_FILTERS": "Filter zurücksetzen",
     "REST": "Rest",
     "RETRY": "Retry",
     "REVERSE": "Reverse",
@@ -2201,6 +2202,7 @@
     "RECORDING_RULE_DELETE_CANCEL": "Delete rule and cancel upcoming recordings",
     "RECORDING_RULE_ACTION_ENABLE": "Enable",
     "RECORDING_RULE_ACTION_DISABLE": "Disable",
+    "FAILOVER": "Failover",
     "FAILOVER_GROUPS": "Failover-Gruppen",
     "FAILOVER_GROUPS_MATCH_BY": "Vergleichen nach",
     "FAILOVER_GROUPS_ALLOW_PROVIDER_GRACE": "Provider-Kulanz erlauben",
@@ -2462,6 +2464,9 @@
     "PLUGIN_UPDATE_BLOCKER_DOWNGRADE": "Version des Einstellungsschemas sinkt",
     "PLUGIN_UPDATE_ON_BOOT": "Plugins beim Start aktualisieren",
     "PLUGIN_UPDATE_BOOT_BUDGET": "Zeitbudget für Start-Updates",
+    "PLUGIN_DIRECTORY": "Verzeichnis für eigene Plugins",
+    "PLUGIN_EFFECTIVE_DIRECTORY": "Effektives Installationsverzeichnis",
+    "PLUGIN_SEARCH_DIRECTORIES": "Effektive Suchverzeichnisse",
     "PLUGIN_BOOT_REPORT": "Bericht des letzten Start-Updates",
     "PLUGIN_BOOT_STARTED": "Gestartet",
     "PLUGIN_BOOT_FINISHED": "Abgeschlossen",
@@ -2577,6 +2582,7 @@
     "PLAYLIST_EXPLORER": {
       "SELECT_A_PLAYLIST_TO_VIEW_CONTENT": "Select a playlist to view its content.",
       "SELECT_A_PLAYLIST_HINT": "Wähle oben eine Quelle aus, um ihre Kanäle, Filme und Serien zu durchsuchen.",
+      "NO_MATCHING_ENTRIES": "Keine Einträge entsprechen den aktiven Filtern",
       "FETCH_FAILED": "Fehler beim Laden der Playlist",
       "FETCH_FAILED_HINT": "Beim Laden der Playlist ist ein Fehler aufgetreten. Bitte überprüfen Sie Ihre Quellkonfiguration und versuchen Sie es erneut.",
       "SAVE_CONFLICT": "Konfigurationskonflikt: Die Überschreibungsdatei wurde auf dem Server aktualisiert. Neuster Status wird geladen...",
@@ -2908,6 +2914,8 @@
     "PLUGIN_UPDATE_SETTINGS_SAVED": "Update-Einstellungen gespeichert.",
     "PLUGIN_UPDATE_SETTINGS_LOAD_FAILED": "Update-Einstellungen konnten nicht geladen werden:",
     "PLUGIN_UPDATE_ON_BOOT_HINT": "Beim Start werden aktivierte Plugins mit der Richtlinie Auto im Hintergrund aktualisiert, wenn das Update keine Genehmigung erfordert. Das Zeitbudget benötigt eine Einheit, z. B. 30s.",
+    "PLUGIN_DIRECTORY_HINT": "Hier werden installierte oder hochgeladene Plugins gespeichert; mitgelieferte Plugins werden separat aufgeführt und bleiben unberührt; relative Pfade werden relativ zum Konfigurationsverzeichnis aufgelöst (Standard: config/plugins).",
+    "PLUGIN_DIRECTORY_OVERRIDDEN": "Wird durch plugins.directories oder TULIPROX_PLUGINS_DIRS überschrieben.",
     "PLUGIN_UPDATE_VERIFIED_HINT": "Verifiziert: Das heruntergeladene Paket wurde überprüft. Aus Katalog: Nur der Katalogeintrag wurde verglichen, daher kann die Paketprüfung es noch blockieren.",
     "PLUGIN_BOOT_REPORT_NONE": "Bisher wurde keine Start-Aktualisierung ausgeführt.",
     "PLUGIN_BOOT_REPORT_EMPTY": "Es wurden keine Plugins berücksichtigt.",
