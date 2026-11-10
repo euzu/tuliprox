@@ -451,7 +451,7 @@ pub async fn exec_processing<
         user_targets: targets.clone(),
         events: events.clone(),
         playlist_state: playlist_state.clone(),
-        processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+        processed_inputs: Arc::default(),
         input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         disabled_headers,

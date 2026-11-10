@@ -232,7 +232,7 @@ fn processing_context_with_events<E: EventSink>(storage_dir: &Path, events: E) -
         events,
         playlist_state: None,
         disabled_headers: None,
-        processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+        processed_inputs: Arc::default(),
         input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         provider_manager: None,
@@ -564,6 +564,139 @@ fn assert_requested_actions(mut actual: Vec<String>, expected: &[&str]) {
     let mut expected: Vec<_> = expected.iter().map(ToString::to_string).collect();
     expected.sort();
     assert_eq!(actual, expected);
+}
+
+/// `aliases` are `(url, username)`; the root account is `user` with password `password`.
+fn input_with_aliases(root_url: &str, aliases: &[(&str, &str)]) -> Arc<ConfigInput> {
+    let mut input = Arc::unwrap_or_clone(test_input(root_url, ConfigInputUpdateQualityDto::default(), 0, &[]));
+    input.aliases = Some(
+        (2_u16..)
+            .zip(aliases)
+            .map(|(id, (url, username))| ConfigInputAlias {
+                id,
+                name: format!("quality-provider-alias-{id}").intern(),
+                url: (*url).to_string(),
+                username: Some((*username).to_string()),
+                password: Some("password".to_string()),
+                priority: 0,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+                stalker: None,
+            })
+            .collect(),
+    );
+    Arc::new(input)
+}
+
+fn input_with_alias(root_url: &str, alias_url: &str) -> Arc<ConfigInput> {
+    input_with_aliases(root_url, &[(alias_url, "alias-user")])
+}
+
+fn login_response(user_info: &serde_json::Value) -> HashMap<String, String> {
+    HashMap::from([("login".to_string(), serde_json::json!({ "user_info": user_info }).to_string())])
+}
+
+const ALL_CLUSTER_ACTIONS: [&str; 7] = [
+    "login",
+    "get_live_categories",
+    "get_live_streams",
+    "get_vod_categories",
+    "get_vod_streams",
+    "get_series_categories",
+    "get_series",
+];
+
+#[tokio::test]
+async fn an_expired_account_hands_the_download_to_the_next_usable_alias_in_the_same_run() {
+    let temp = tempfile::tempdir().expect("temporary storage");
+    let root = TestXtreamServer::start_with_responses(login_response(
+        &serde_json::json!({"status": "Active", "exp_date": 1_000}),
+    ));
+    let alias = TestXtreamServer::start([2, 2, 2]);
+    let ctx = processing_context(temp.path());
+    let input = input_with_alias(&root.base_url, &alias.base_url);
+
+    let result = process_input_job_inner(0, &ctx, &input).await;
+
+    assert_requested_actions(root.finish(), &["login"]);
+    assert_requested_actions(alias.finish(), &ALL_CLUSTER_ACTIONS);
+    assert_eq!(result.state, InputJobState::Ready);
+}
+
+#[tokio::test]
+async fn when_every_account_is_blocked_each_distinct_account_logs_in_once() {
+    let temp = tempfile::tempdir().expect("temporary storage");
+    let banned = serde_json::json!({"status": "Banned"});
+    let root = TestXtreamServer::start_with_responses(login_response(&banned));
+    let other = TestXtreamServer::start_with_responses(login_response(&banned));
+    let ctx = processing_context(temp.path());
+    // The first alias repeats the root's credentials and must not log in a second time.
+    let input = input_with_aliases(&root.base_url, &[(&root.base_url, "user"), (&other.base_url, "other-user")]);
+
+    let result = process_input_job_inner(0, &ctx, &input).await;
+
+    assert_requested_actions(root.finish(), &["login"]);
+    assert_requested_actions(other.finish(), &["login"]);
+    assert_eq!(result.state, InputJobState::Failed);
+    assert!(result.errors.iter().any(|err| err.to_string().contains("is blocked or expired")), "{:?}", result.errors);
+}
+
+#[tokio::test]
+async fn a_blocked_account_hands_the_download_to_the_next_usable_alias_in_the_same_run() {
+    let temp = tempfile::tempdir().expect("temporary storage");
+    let root = TestXtreamServer::start_with_responses(login_response(&serde_json::json!({"status": "Banned"})));
+    let alias = TestXtreamServer::start([2, 2, 2]);
+    let ctx = processing_context(temp.path());
+    let input = input_with_alias(&root.base_url, &alias.base_url);
+
+    let mut result = process_input_job_inner(0, &ctx, &input).await;
+
+    assert_requested_actions(root.finish(), &["login"]);
+    assert_requested_actions(alias.finish(), &ALL_CLUSTER_ACTIONS);
+    assert_eq!(result.state, InputJobState::Ready);
+    assert!(result.errors.is_empty(), "the alias download succeeded: {:?}", result.errors);
+    assert_eq!(result.source.take().expect("ready input source").take_groups().len(), 3);
+}
+
+/// A root server that answers both login requests with `status`.
+fn login_status_server(status: reqwest::StatusCode) -> TestXtreamServer {
+    let responses =
+        HashMap::from([("login".to_string(), "{}".to_string()), ("get_account_info".to_string(), "{}".to_string())]);
+    let statuses = HashMap::from([("login".to_string(), status), ("get_account_info".to_string(), status)]);
+    TestXtreamServer::start_with_statuses(responses, statuses)
+}
+
+#[tokio::test]
+async fn a_refused_login_hands_the_download_to_the_next_alias() {
+    for status in [reqwest::StatusCode::UNAUTHORIZED, reqwest::StatusCode::FORBIDDEN] {
+        let temp = tempfile::tempdir().expect("temporary storage");
+        let root = login_status_server(status);
+        let alias = TestXtreamServer::start([2, 2, 2]);
+        let ctx = processing_context(temp.path());
+        let input = input_with_alias(&root.base_url, &alias.base_url);
+
+        let result = process_input_job_inner(0, &ctx, &input).await;
+
+        assert_requested_actions(root.finish(), &["login", "get_account_info"]);
+        assert_requested_actions(alias.finish(), &ALL_CLUSTER_ACTIONS);
+        assert_eq!(result.state, InputJobState::Ready, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a_login_error_other_than_a_refusal_does_not_switch_to_an_alias() {
+    let temp = tempfile::tempdir().expect("temporary storage");
+    let root = login_status_server(reqwest::StatusCode::NOT_FOUND);
+    let alias = TestXtreamServer::start([2, 2, 2]);
+    let ctx = processing_context(temp.path());
+    let input = input_with_alias(&root.base_url, &alias.base_url);
+
+    let result = process_input_job_inner(0, &ctx, &input).await;
+
+    assert_requested_actions(root.finish(), &["login", "get_account_info"]);
+    assert_requested_actions(alias.finish(), &[]);
+    assert_eq!(result.state, InputJobState::Failed);
 }
 
 #[tokio::test]

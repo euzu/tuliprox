@@ -1,6 +1,7 @@
 use super::{
     acquisition::InputAcquisition, download_input, is_input_enabled, is_target_enabled, join_arc_strs, process_targets,
-    target_waiting_message, with_sequential_group, InputCompletionFacts, PlaylistProcessingContext, XmltvEpgProvider,
+    target_waiting_message, with_sequential_group, InputCompletionFacts, InputRunOutcome, PlaylistProcessingContext,
+    XmltvEpgProvider,
 };
 use crate::{fetched_playlist::FetchedPlaylist, metadata_sink::MetadataUpdateSink, parser::xmltv::TVGuide};
 use futures::{FutureExt, StreamExt};
@@ -30,7 +31,7 @@ use tuliprox_core::{
     utils::{debug_if_enabled, log_memory_snapshot, StepMeasureCallback},
 };
 use tuliprox_iptv::epg::{CountingEpgSink, EpgFetchRequest, EpgProvider};
-use tuliprox_repository::PlaylistSource;
+use tuliprox_repository::{MemoryPlaylistSource, PlaylistSource};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputJobState {
@@ -55,6 +56,22 @@ pub(crate) struct InputDownloadResult {
 }
 
 impl InputDownloadResult {
+    /// An input that contributes nothing to this source: a staged input outside its parent, or one that
+    /// already failed in this run.
+    pub(super) fn empty(errors: Vec<TuliproxError>) -> Self {
+        Self {
+            authoritative_library: false,
+            errors,
+            source: MemoryPlaylistSource::default().into_source(),
+            storage_error: None,
+            partial: false,
+            quality_rejections: Vec::new(),
+            accepted_empty_clusters: ClusterFlags::empty(),
+            input_telemetry: None,
+            plugins: PluginRunReport::default(),
+        }
+    }
+
     pub(in crate::processor::playlist) fn update_state(&mut self) -> PlaylistUpdateState {
         InputCompletionFacts {
             job_state: self.job_state(),
@@ -528,11 +545,22 @@ impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost> Playl
 
     pub async fn is_input_downloaded(&self, input_name: &str) -> bool {
         let processed = self.processed_inputs.lock().await;
-        processed.contains(input_name)
+        matches!(processed.get(input_name), Some(InputRunOutcome::Ready))
     }
     pub async fn mark_input_downloaded(&self, input_name: Arc<str>) -> bool {
         let mut processed = self.processed_inputs.lock().await;
-        processed.insert(input_name)
+        !matches!(processed.insert(input_name, InputRunOutcome::Ready), Some(InputRunOutcome::Ready))
+    }
+
+    /// What acquiring the input left in this run, `None` while it was not acquired.
+    pub(super) async fn input_outcome(&self, input_name: &str) -> Option<InputRunOutcome> {
+        self.processed_inputs.lock().await.get(input_name).cloned()
+    }
+
+    /// Records a failed acquisition; a ready input stays ready.
+    pub(super) async fn mark_input_failed(&self, input_name: Arc<str>, error: Option<TuliproxError>) {
+        let mut processed = self.processed_inputs.lock().await;
+        processed.entry(input_name).or_insert(InputRunOutcome::Failed(error));
     }
 
     pub async fn get_input_lock(&self, input_name: &Arc<str>) -> OwnedRwLockWriteGuard<()> {

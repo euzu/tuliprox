@@ -943,6 +943,18 @@ from the parent input; the alias fields below override the concrete account/conn
 | `exp_date`            | Mixed  |    No    |         | Account expiration. Supports `"YYYY-MM-DD HH:MM:SS"` interpreted as UTC or Unix timestamps in seconds. Xtream dates participate in the automatic refresh described below.                                                                          |
 | `enabled`             | Bool   |    No    | `true`  | If `false`, this alias is ignored when Tuliprox builds the usable connection pool.                                                                                                                                                                 |
 
+#### Playlist Account Selection
+
+A playlist update downloads with the input's own account. Tuliprox skips it when it is disabled or its `exp_date` has
+passed, and uses the first enabled alias that has not expired instead.
+
+For Xtream inputs, the update logs in before the download. When the provider refuses the account, the same update
+continues with the next usable alias. The provider refuses an account when it reports it as blocked (for example
+banned or disabled) or expired, or when it answers the login with HTTP 401 or 403. Each account is logged in at most
+once per update, and only after the account before it was refused. An alias with the same URL, username and password
+as a refused account is skipped. An unreachable provider, a server error or any other HTTP status does not switch to
+an alias: every account of that provider would fail the same way.
+
 #### Automatic Xtream Expiration Refresh
 
 In server mode, Tuliprox runs an autonomous task that refreshes expiration dates for enabled Xtream inputs and aliases.

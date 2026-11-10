@@ -5,6 +5,15 @@ use super::{
     *,
 };
 
+/// What acquiring an input left in the current run.
+#[derive(Debug, Clone)]
+pub enum InputRunOutcome {
+    /// Persisted and usable; later sources load it from disk.
+    Ready,
+    /// Failed; later sources get this error (if any) instead of a new fetch.
+    Failed(Option<TuliproxError>),
+}
+
 pub(crate) struct PlaylistDownloadResult {
     pub downloaded_playlist: Vec<PlaylistGroup>,
     pub download_err: Vec<TuliproxError>,
@@ -106,7 +115,9 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     pub disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
 
     // Coordination
-    pub processed_inputs: Arc<Mutex<HashSet<Arc<str>>>>,
+    /// Inputs acquired in this run, with their outcome. A failed input is not fetched again by a later
+    /// source of the same run: it would only ask the failing provider once more.
+    pub processed_inputs: Arc<Mutex<HashMap<Arc<str>, InputRunOutcome>>>,
     /// Completion precedence for this context's `run_id`, keyed by stable input ID.
     /// Fresh for every `exec_processing`; clones for parallel sources share it.
     pub(super) input_completions: Arc<Mutex<HashMap<u16, PlaylistUpdateState>>>,

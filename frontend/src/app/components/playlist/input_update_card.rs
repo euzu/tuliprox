@@ -474,13 +474,7 @@ fn status_dot() -> Html {
 }
 
 fn card_status_badge(view: &InputUpdateRunView, translate: impl Fn(&str) -> String) -> Html {
-    // A persisted input result does not imply a completed target publication.
-    // Only a correlated run supplies the current action status.
-    let status = if view.run_id.is_none() && view.input_state != InputUpdateCardStatus::Ready {
-        view.input_state
-    } else {
-        view.overall_state
-    };
+    let status = view.card_status();
     html! {
         <span
             class={classes!("tp__playlist-update-view__pipeline-status", status.modifier())}

@@ -38,6 +38,17 @@ pub struct InputUpdateRunView {
 }
 
 impl InputUpdateRunView {
+    /// The card badge: the run while it is queued or updating, afterwards this input's own result. A target
+    /// that failed for another input does not mark this input as failed.
+    #[must_use]
+    pub const fn card_status(&self) -> InputUpdateCardStatus {
+        match (self.overall_state, self.input_state) {
+            (InputUpdateCardStatus::Queued | InputUpdateCardStatus::Updating, _)
+            | (_, InputUpdateCardStatus::Ready) => self.overall_state,
+            (_, input_state) => input_state,
+        }
+    }
+
     /// Content proven by the canonical catalog, not a fabricated per-cluster run outcome.
     #[must_use]
     pub fn catalog_content_clusters(&self) -> Vec<XtreamCluster> {
@@ -709,6 +720,13 @@ mod tests {
             let view = build_input_update_run_views(&sources, &cards, &state, &persisted).remove(0);
             assert_eq!(view.input_state, InputUpdateCardStatus::Success);
             assert_eq!(view.overall_state, InputUpdateCardStatus::Failed);
+            assert_eq!(view.card_status(), InputUpdateCardStatus::Success, "the card shows its own input");
+            for running in [InputUpdateCardStatus::Queued, InputUpdateCardStatus::Updating] {
+                let busy = InputUpdateRunView { overall_state: running, ..view.clone() };
+                assert_eq!(busy.card_status(), running, "a running update shows the run");
+            }
+            let unreported = InputUpdateRunView { input_state: InputUpdateCardStatus::Ready, ..view.clone() };
+            assert_eq!(unreported.card_status(), InputUpdateCardStatus::Failed, "no input result shows the run");
             persisted.inputs[0].last_input_update =
                 Some(PersistedPlaylistUpdateInputResult { state: PlaylistUpdateState::Success, timestamp: 456 });
             let reloaded = state

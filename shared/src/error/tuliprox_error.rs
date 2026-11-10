@@ -170,7 +170,7 @@ impl ErrorKind {
 /// list in `is_notify()` that had to be kept in sync by hand. Splitting the two
 /// makes the category `Copy` and comparable, moves classification onto
 /// [`ErrorKind`], and leaves one field access where the match used to be.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TuliproxError {
     kind: ErrorKind,
     message: Box<str>,

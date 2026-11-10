@@ -10,9 +10,9 @@ use super::{
     telemetry::{
         finalize_input_telemetry, input_telemetry_for_fetch, is_cluster_input, persist_finalized_cluster_snapshots,
     },
-    CacheStatusScope, InputDownloadResult, LibraryProvider, MediaServerProvider, PendingInputStatusUpdate,
-    PlaylistDownloadResult, PlaylistProcessingContext, PlaylistUpdateExecutionRef, StalkerProvider,
-    PIPELINE_TRANSPARENCY_CLUSTERS,
+    CacheStatusScope, InputDownloadResult, InputRunOutcome, LibraryProvider, MediaServerProvider,
+    PendingInputStatusUpdate, PlaylistDownloadResult, PlaylistProcessingContext, PlaylistUpdateExecutionRef,
+    StalkerProvider, PIPELINE_TRANSPARENCY_CLUSTERS,
 };
 use crate::{input_cache, metadata_sink::MetadataUpdateSink, processor::StalkerRefreshMode};
 use log::{debug, warn};
@@ -301,6 +301,12 @@ pub(crate) async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M
     }
 }
 
+/// The result of an input that another source of this run already fetched without success.
+fn failed_earlier_in_run(input: &ConfigInput, failure: Option<TuliproxError>) -> InputDownloadResult {
+    debug!("Input '{}' failed earlier in this run; not fetched again", input.name);
+    InputDownloadResult::empty(failure.into_iter().collect())
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     ctx: &PlaylistProcessingContext<E, M, P>,
@@ -308,17 +314,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     allow_staged_input: bool,
 ) -> InputDownloadResult {
     if input.staged.is_some() && !allow_staged_input {
-        return InputDownloadResult {
-            authoritative_library: false,
-            errors: Vec::new(),
-            source: MemoryPlaylistSource::default().into_source(),
-            storage_error: None,
-            partial: false,
-            quality_rejections: Vec::new(),
-            accepted_empty_clusters: ClusterFlags::empty(),
-            input_telemetry: None,
-            plugins: PluginRunReport::default(),
-        };
+        return InputDownloadResult::empty(Vec::new());
     }
 
     let staged_overlay = if input.staged.is_none() {
@@ -328,8 +324,14 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         None
     };
 
-    // Coordination Logic
-    let need_download = !ctx.is_input_downloaded(&input.name).await;
+    // Coordination Logic. An input that already failed in this run returns its failure at once, without
+    // waiting for the input lock: asking the provider again would only repeat the request, and could give each
+    // source a different playlist.
+    let outcome = ctx.input_outcome(&input.name).await;
+    if let Some(InputRunOutcome::Failed(failure)) = outcome {
+        return failed_earlier_in_run(input, failure);
+    }
+    let need_download = outcome.is_none();
     // Keep this lock for the whole critical section (download + persist/load + mark processed)
     // so parallel sources sharing the same input cannot observe a half-written state.
     let mut input_lock = if need_download { Some(ctx.get_input_lock(&input.name).await) } else { None };
@@ -337,10 +339,13 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     let refresh_policy = ctx.refresh_policy(input.id);
 
     let mut playlist_download_result = if need_download {
-        // Check again after lock
-        let already_processed = ctx.is_input_downloaded(&input.name).await;
+        // Check again after lock: a parallel source may have finished the input meanwhile.
+        let locked_outcome = ctx.input_outcome(&input.name).await;
+        if let Some(InputRunOutcome::Failed(failure)) = locked_outcome {
+            return failed_earlier_in_run(input, failure);
+        }
 
-        if already_processed {
+        if locked_outcome.is_some() {
             // Use empty results, will load from disk below
             in_run_reuse_playlist_download_result()
         } else if ctx.is_input_in_maintenance(&input.name) {
@@ -543,6 +548,10 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     {
         // Mark after persist/load so other workers only see this input as ready when data is usable.
         ctx.mark_input_downloaded(input.name.clone()).await;
+    } else if mark_as_processed && !playlist_download_result.partial {
+        // A partial (resumable) input may continue in a later source; a failed one is not fetched again.
+        let failure = playlist_download_result.download_err.first().or(error.as_ref()).cloned();
+        ctx.mark_input_failed(input.name.clone(), failure).await;
     }
 
     if !playlist_download_result.persisted && error.is_none() {

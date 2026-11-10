@@ -575,7 +575,10 @@ fn input_update_card_header_colors_reload_result_without_claiming_target_success
     let active = visible_text(&card_status_badge(&view, str::to_string), true);
     assert!(active.contains("UPDATE_STATUS_UPDATING"));
     assert!(!active.contains("UPDATE_STATUS_SUCCESS") && !active.contains("LABEL.INPUT:"));
+    // A finished run shows this input's own result, not a target failure caused by another input.
     view.overall_state = InputUpdateCardStatus::Failed;
+    assert!(visible_text(&card_status_badge(&view, str::to_string), true).contains("UPDATE_STATUS_SUCCESS"));
+    view.input_state = InputUpdateCardStatus::Failed;
     assert!(visible_text(&card_status_badge(&view, str::to_string), true).contains("UPDATE_STATUS_FAILED"));
 }
 
@@ -712,7 +715,7 @@ fn cluster_success_survives_a_later_target_failure_in_the_same_run() {
         .cluster_results
         .iter()
         .all(|cluster| cluster_summary_status(cluster) == ClusterSummaryStatus::Accepted));
-    assert!(visible_text(&card_status_badge(&view, str::to_string), true).contains("UPDATE_STATUS_FAILED"));
+    assert!(visible_text(&card_status_badge(&view, str::to_string), true).contains("UPDATE_STATUS_SUCCESS"));
 }
 
 #[test]

@@ -73,7 +73,7 @@ fn test_processing_context(
         events: shared::model::NoopSink,
         playlist_state: None,
         disabled_headers: None,
-        processed_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+        processed_inputs: Arc::default(),
         input_completions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         input_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         provider_manager: None,

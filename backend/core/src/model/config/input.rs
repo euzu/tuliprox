@@ -1062,15 +1062,19 @@ impl ConfigInput {
 
     /// Account used for playlist downloads: the root, or the first usable alias
     /// when the root is excluded or expired.
-    pub fn playlist_account(&self) -> Option<Cow<'_, ConfigInput>> {
-        if !self.account_disabled && !is_input_expired(self.exp_date) {
-            return Some(Cow::Borrowed(self));
-        }
-        self.aliases
+    pub fn playlist_account(&self) -> Option<Cow<'_, ConfigInput>> { self.playlist_accounts().next() }
+
+    /// Accounts usable for playlist downloads, in the order they are tried: the root unless it is excluded or
+    /// expired, then every enabled alias that has not expired.
+    pub fn playlist_accounts(&self) -> impl Iterator<Item = Cow<'_, ConfigInput>> {
+        let root = (!self.account_disabled && !is_input_expired(self.exp_date)).then_some(Cow::Borrowed(self));
+        let aliases = self
+            .aliases
             .iter()
             .flatten()
-            .find(|alias| alias.enabled && !is_input_expired(alias.exp_date))
-            .map(|alias| Cow::Owned(self.as_input(alias)))
+            .filter(|alias| alias.enabled && !is_input_expired(alias.exp_date))
+            .map(|alias| Cow::Owned(self.as_input(alias)));
+        root.into_iter().chain(aliases)
     }
 
     /// The alias with the given name, enabled or not.
@@ -1928,6 +1932,43 @@ mod tests {
         input.account_disabled = true;
         input.aliases = Some(vec![alias(1, "disabled", false)]);
         assert!(input.playlist_account().is_none());
+    }
+
+    #[test]
+    fn playlist_accounts_list_the_root_then_every_usable_alias_in_order() {
+        let alias = |id, name: &str, enabled, exp_date| ConfigInputAlias {
+            id,
+            name: name.into(),
+            url: format!("http://{name}.example.com"),
+            username: None,
+            password: None,
+            priority: 0,
+            max_connections: 0,
+            exp_date,
+            enabled,
+            stalker: None,
+        };
+        let mut input = ConfigInput {
+            name: "root".into(),
+            input_type: InputType::Xtream,
+            url: "http://example.com".to_string(),
+            enabled: true,
+            aliases: Some(vec![
+                alias(1, "first", true, None),
+                alias(2, "disabled", false, None),
+                alias(3, "expired", true, Some(1)),
+                alias(4, "second", true, None),
+            ]),
+            ..Default::default()
+        };
+        let names =
+            |input: &ConfigInput| input.playlist_accounts().map(|account| account.name.to_string()).collect::<Vec<_>>();
+        assert_eq!(names(&input), ["root", "first", "second"]);
+        input.account_disabled = true;
+        assert_eq!(names(&input), ["first", "second"]);
+        input.account_disabled = false;
+        input.exp_date = Some(1);
+        assert_eq!(names(&input), ["first", "second"]);
     }
 
     #[test]

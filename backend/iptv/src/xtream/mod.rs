@@ -696,22 +696,48 @@ where
     Ok(())
 }
 
+/// Why an Xtream account cannot download the playlist.
+enum AccountRejection {
+    /// The provider refused these credentials: it reported the account as blocked (banned, disabled, ...) or
+    /// expired, or answered the login with HTTP 401 or 403. Another account of the same input may still work.
+    Rejected(TuliproxError),
+    /// The provider could not be asked (unreachable, server error, other HTTP status). Every account of the
+    /// provider would fail the same way, so no other account is tried.
+    LoginFailed(TuliproxError),
+}
+
+/// Whether a failed login is the provider refusing the credentials (HTTP 401 or 403).
+fn is_refused_login(error: &TuliproxError) -> bool {
+    request::request_failed_status(error.message())
+        .is_some_and(|status| matches!(status, reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN))
+}
+
 async fn verify_xtream_playlist_account<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     events: &E,
     source: &InputSource,
     username: &str,
-) -> Result<(), TuliproxError> {
-    let info = xtream_login(app_config, client, events, source, username).await?;
+) -> Result<(), AccountRejection> {
+    let info = match xtream_login(app_config, client, events, source, username).await {
+        Ok(info) => info,
+        Err(err) if is_refused_login(&err) => return Err(AccountRejection::Rejected(err)),
+        Err(err) => return Err(AccountRejection::LoginFailed(err)),
+    };
     if info.is_some_and(|info| info.status.is_some_and(|status| !status.is_usable()) || is_input_expired(info.exp_date))
     {
-        return Err(TuliproxError::ConfigInput(format!("Provider account {} is blocked or expired", source.name)));
+        return Err(AccountRejection::Rejected(TuliproxError::ConfigInput(format!(
+            "Provider account {} is blocked or expired",
+            source.name
+        ))));
     }
     Ok(())
 }
 
-/// Downloads xtream clusters from a single source (either main input or staged input).
+/// Downloads xtream clusters from a single account of `input`.
+///
+/// `Err` means the provider refused this account (blocked, expired, HTTP 401/403), so the caller may try another
+/// account; every other failure is part of the returned fetch.
 async fn download_xtream_from_source<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -720,7 +746,7 @@ async fn download_xtream_from_source<E: EventSink>(
     input_source: &InputSource,
     clusters: &[XtreamCluster],
     context: XtreamDownloadContext,
-) -> PlaylistFetch {
+) -> Result<PlaylistFetch, TuliproxError> {
     let (username, password) =
         (input_source.username.as_deref().unwrap_or(""), input_source.password.as_deref().unwrap_or(""));
 
@@ -730,16 +756,20 @@ async fn download_xtream_from_source<E: EventSink>(
     } else {
         match input.resolve_url(&input_source.url) {
             Ok(url) => url.into_owned(),
-            Err(err) => return PlaylistFetch { failed_clusters: clusters.to_vec(), ..PlaylistFetch::failed(err) },
+            Err(err) => return Ok(PlaylistFetch { failed_clusters: clusters.to_vec(), ..PlaylistFetch::failed(err) }),
         }
     };
 
     let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
     let input_source_login = input_source.with_url(base_url.clone());
 
-    if let Err(err) = verify_xtream_playlist_account(app_config, client, events, &input_source_login, username).await {
-        error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
-        return PlaylistFetch { failed_clusters: clusters.to_vec(), ..PlaylistFetch::failed(err) };
+    match verify_xtream_playlist_account(app_config, client, events, &input_source_login, username).await {
+        Ok(()) => {}
+        Err(AccountRejection::Rejected(err)) => return Err(err),
+        Err(AccountRejection::LoginFailed(err)) => {
+            error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
+            return Ok(PlaylistFetch { failed_clusters: clusters.to_vec(), ..PlaylistFetch::failed(err) });
+        }
     }
 
     let cfg = app_config.config.load();
@@ -821,7 +851,7 @@ async fn download_xtream_from_source<E: EventSink>(
         apply_disk_cluster_publish_result(&mut fetch, result);
     }
 
-    fetch
+    Ok(fetch)
 }
 
 async fn download_xtream_playlist_with_scope<E: EventSink>(
@@ -839,7 +869,8 @@ async fn download_xtream_playlist_with_scope<E: EventSink>(
 
     if !main_clusters.is_empty() {
         check_alias_user_state(events, input);
-        let Some(account) = input.playlist_account() else {
+        let mut accounts = input.playlist_accounts();
+        let Some(mut account) = accounts.next() else {
             return PlaylistFetch {
                 failed_clusters: main_clusters,
                 ..PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
@@ -848,17 +879,35 @@ async fn download_xtream_playlist_with_scope<E: EventSink>(
                 )))
             };
         };
-        let source: InputSource = account.as_ref().into();
-        let mut source_fetch = download_xtream_from_source(
-            app_config,
-            client,
-            events,
-            input,
-            &source,
-            &main_clusters,
-            XtreamDownloadContext { source_input_type: input.input_type, scope },
-        )
-        .await;
+        // A refused account (blocked, expired, HTTP 401/403) hands over to the next usable account in the same run. Each account is
+        // logged in at most once, and only when the one before it was rejected; an alias with the credentials of a
+        // rejected account is skipped.
+        let mut rejected = Vec::new();
+        let mut source_fetch = loop {
+            let source: InputSource = account.as_ref().into();
+            match download_xtream_from_source(
+                app_config,
+                client,
+                events,
+                input,
+                &source,
+                &main_clusters,
+                XtreamDownloadContext { source_input_type: input.input_type, scope },
+            )
+            .await
+            {
+                Ok(source_fetch) => break source_fetch,
+                Err(err) => {
+                    rejected.push(account.account_identity());
+                    let Some(next) = accounts.find(|next| !rejected.contains(&next.account_identity())) else {
+                        error!("{err}; input '{}' has no other usable account", input.name);
+                        break PlaylistFetch { failed_clusters: main_clusters.clone(), ..PlaylistFetch::failed(err) };
+                    };
+                    warn!("{err}; input '{}' continues with account '{}'", input.name, next.name);
+                    account = next;
+                }
+            }
+        };
         fetch.groups.append(&mut source_fetch.groups);
         fetch.errors.append(&mut source_fetch.errors);
         fetch.failed_clusters.append(&mut source_fetch.failed_clusters);

@@ -68,7 +68,7 @@ pub(super) fn processing_context(
         events: NoopSink,
         playlist_state,
         disabled_headers: None,
-        processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+        processed_inputs: Arc::default(),
         input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         provider_manager: None,

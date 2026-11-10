@@ -1469,6 +1469,20 @@
 
 ## 🐛 Fixes
 
+- **A failed input is fetched once per update run.** When several sources share an input and its fetch failed, every
+  further source asked the provider again in the same run. Each source could then see a different playlist, and a
+  plugin input such as youtube-input repeated its YouTube requests. Later sources now get the first failure without a
+  new request. The same applies to M3U aliases; the next update run fetches them again.
+
+- **A refused Xtream account hands the playlist download to an alias in the same update.** When the login reported the
+  account as banned, disabled or expired, the update failed and only the next update used an alias. The update now
+  continues with the next usable alias, also when the login answers HTTP 401 or 403. An unreachable provider or a
+  server error does not switch accounts.
+
+- **An update card shows the result of its own input.** After an update run, every input card showed the result of the
+  whole run, so an input that loaded without errors showed "Failed" when another input of a shared target failed. The
+  card now shows "Queued" and "Updating" for the run and afterwards the result of its own input.
+
 - **The playlist update card says why an input failed.** "Run details" showed only "Input update failed." (once per
   affected target). The card now shows each detail once and adds the reason of the first error, with credentials
   masked, for a failed or partial input. The progress event carries it as `failure_reason`.
