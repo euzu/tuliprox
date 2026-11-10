@@ -73,16 +73,33 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
         } else {
             let playlist_explorer_ctx_clone =
                 playlist_explorer_ctx.expect("PlaylistExplorer context not found").clone();
+            let sources = playlist_ctx.sources.clone();
+            let revision = playlist_ctx.revision.clone();
             Callback::from(move |request: PlaylistRequest| {
+                if matches!(request, PlaylistRequest::Target(_)) && revision.is_none() {
+                    return;
+                }
                 if !*set_loading {
+                    let revision = revision.clone();
                     let services = services.clone();
                     let playlist_explorer_ctx_clone = playlist_explorer_ctx_clone.clone();
                     set_loading.set(true);
                     services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
                     let set_loading = set_loading.clone();
                     let req = request;
+                    let target_name = match &req {
+                        PlaylistRequest::Target(id) => sources.as_ref().as_ref().and_then(|rows| {
+                            rows.iter()
+                                .flat_map(|(_, targets)| targets)
+                                .find(|target| target.id == *id)
+                                .map(|target| target.name.clone())
+                        }),
+                        _ => None,
+                    };
                     spawn_local(async move {
-                        let playlist = services.playlist.get_playlist_categories_for_explorer(&req).await;
+                        let playlist =
+                            services.playlist.get_playlist_categories_for_explorer(&req, revision.as_deref()).await;
+                        playlist_explorer_ctx_clone.target_name.set(target_name);
                         playlist_explorer_ctx_clone.playlist.set(playlist);
                         playlist_explorer_ctx_clone.playlist_request.set(Some(req));
                         set_loading.set(false);

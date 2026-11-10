@@ -2,7 +2,10 @@ use crate::{
     app::{map_sources_to_playlist_rows, InputRow},
     model::{InputUpdateCapabilities, InputUpdateCapabilitiesExt},
 };
-use shared::model::{InputRefreshPolicy, InputType, PlaylistUpdateStatusDto, SourcesConfigDto};
+use shared::model::{
+    ConfigInputDto, ConfigSourceDto, ConfigTargetDto, InputRefreshPolicy, InputType, PlaylistUpdateScopeDto,
+    PlaylistUpdateStatusDto, SourcesConfigDto,
+};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -27,9 +30,62 @@ pub struct InputUpdateCardModel {
 }
 
 impl InputUpdateCardModel {
+    /// Enabled CSV batches use a target rebuild without a manual input action.
+    #[must_use]
+    pub fn updates_targets_only(&self) -> bool {
+        self.capabilities == InputUpdateCapabilities::BulkOnly && self.input_type.is_batch()
+    }
+
     /// Builds the deterministic last-update presentation for a supplied clock value.
     #[must_use]
     pub fn last_update(&self, now: u64) -> LastUpdateViewModel { last_update_view_model(self.last_update_at, now) }
+}
+
+/// Build the card view from the loaded sources. File-backed settings can
+/// enrich pipeline details, but never supply identities or membership.
+pub fn playlist_update_sources(configured: &SourcesConfigDto, scope: &PlaylistUpdateScopeDto) -> SourcesConfigDto {
+    let input_options: HashMap<_, _> =
+        configured.inputs.iter().map(|input| (input.name.as_ref(), &input.options)).collect();
+    let target_details: HashMap<_, _> = configured
+        .sources
+        .iter()
+        .flat_map(|source| &source.targets)
+        .map(|target| (target.name.as_str(), target))
+        .collect();
+    SourcesConfigDto {
+        inputs: scope
+            .inputs
+            .iter()
+            .map(|input| ConfigInputDto {
+                id: input.id,
+                name: Arc::from(input.name.as_str()),
+                input_type: input.input_type,
+                enabled: input.enabled,
+                options: input_options.get(input.name.as_str()).and_then(|options| (*options).clone()),
+                ..Default::default()
+            })
+            .collect(),
+        sources: scope
+            .sources
+            .iter()
+            .map(|source| ConfigSourceDto {
+                inputs: source.inputs.iter().map(|name| Arc::from(name.as_str())).collect(),
+                targets: source
+                    .targets
+                    .iter()
+                    .map(|target| ConfigTargetDto {
+                        id: target.id,
+                        name: target.name.clone(),
+                        enabled: target.enabled,
+                        ..target_details
+                            .get(target.name.as_str())
+                            .map_or_else(ConfigTargetDto::default, |details| (*details).clone())
+                    })
+                    .collect(),
+            })
+            .collect(),
+        ..Default::default()
+    }
 }
 
 /// Local, non-persisted controls for one input card.
@@ -124,13 +180,14 @@ pub fn build_input_update_card_models(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_input_update_card_models, last_update_view_model, InputUpdateCapabilities, InputUpdateCapabilitiesExt,
-        InputUpdateCardModel, LastUpdateRelative,
+        build_input_update_card_models, last_update_view_model, playlist_update_sources, InputUpdateCapabilities,
+        InputUpdateCapabilitiesExt, InputUpdateCardModel, LastUpdateRelative,
     };
     use shared::{
         model::{
             ConfigInputAliasDto, ConfigInputDto, ConfigSourceDto, ConfigTargetDto, InputPlaylistUpdateStatusDto,
-            InputRefreshPolicy, InputType, PlaylistUpdateStatusDto, SourcesConfigDto,
+            InputRefreshPolicy, InputType, PlaylistUpdateInputDto, PlaylistUpdateScopeDto, PlaylistUpdateSourceDto,
+            PlaylistUpdateStatusDto, PlaylistUpdateTargetDto, SourcesConfigDto,
         },
         utils::Internable,
     };
@@ -142,6 +199,34 @@ mod tests {
 
     fn target(id: u16, name: &str) -> ConfigTargetDto {
         ConfigTargetDto { id, name: name.to_string(), ..ConfigTargetDto::default() }
+    }
+
+    #[test]
+    fn input_update_card_model_uses_runtime_ids_and_membership_when_the_file_differs() {
+        let file = SourcesConfigDto {
+            inputs: vec![input(9, "batch", InputType::M3uBatch)],
+            sources: vec![ConfigSourceDto { inputs: vec!["batch".intern()], targets: vec![target(3, "other")] }],
+            ..Default::default()
+        };
+        let scope = PlaylistUpdateScopeDto {
+            inputs: vec![PlaylistUpdateInputDto {
+                id: 2,
+                name: "batch".into(),
+                input_type: InputType::M3uBatch,
+                enabled: true,
+            }],
+            sources: vec![PlaylistUpdateSourceDto {
+                inputs: vec!["batch".into()],
+                targets: vec![PlaylistUpdateTargetDto { id: 3, name: "selected".into(), enabled: true }],
+            }],
+        };
+        let sources = playlist_update_sources(&file, &scope);
+        let cards = build_input_update_card_models(&sources, &PlaylistUpdateStatusDto::default());
+        assert_eq!(cards[0].input_id, 2);
+        assert!(cards[0].updates_targets_only());
+        assert_eq!(cards[0].targets, [super::InputUpdateCardTarget { id: 3, name: "selected".into() }]);
+        assert_eq!(file.inputs[0].id, 9);
+        assert_eq!(file.sources[0].targets[0].name, "other");
     }
 
     fn card_fixture() -> (SourcesConfigDto, PlaylistUpdateStatusDto) {

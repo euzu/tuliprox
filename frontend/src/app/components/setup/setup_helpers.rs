@@ -159,7 +159,7 @@ pub fn build_setup_app_config(
     for form in modified_forms {
         match form {
             ConfigForm::ApiProxy(_, api_proxy) => app_config.api_proxy = Some(api_proxy),
-            ConfigForm::Panel(_, _) => {}
+            ConfigForm::Panel(..) => {}
             other => modified_main_forms.push(other),
         }
     }
@@ -199,7 +199,7 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
             ConfigForm::IpCheck(_, ipcheck_cfg) => config.ipcheck = Some(ipcheck_cfg),
             ConfigForm::Mcp(_, mcp_cfg) => update_mcp_field(config, mcp_cfg),
             ConfigForm::Library(_, library_cfg) => apply_setup_library_form(config, library_cfg),
-            ConfigForm::Panel(_, _) => {}
+            ConfigForm::Panel(..) => {}
             ConfigForm::ApiProxy(_, _) => {}
         }
     }

@@ -27,6 +27,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn manual_update_request(
             input_id,
             action: shared::model::InputUpdateAction::Provider(policy),
         }),
+        expected_scope: None,
     }
 }
 
@@ -60,6 +61,7 @@ async fn manual_update_target_ids_keep_conflict_instead_of_accepting_a_dropped_f
         let response = super::super::playlist_update(
             State(app_state),
             None,
+            axum::http::HeaderMap::new(),
             Json(PlaylistUpdateRequestPayload::Current(PlaylistUpdateRequestDto {
                 targets: Vec::new(),
                 target_ids: Some(vec![1]),

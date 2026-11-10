@@ -284,8 +284,8 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         // Yew 0.22 compares UseStateHandle by identity, not value, so use_memo
         // would never detect value changes if we passed the handle directly.
         use_memo(
-            ((*user_list).clone(), current_page, page_size_value, (*templates).clone()),
-            move |(targets, current_page, page_size, _templates)| {
+            ((*user_list).clone(), current_page, page_size_value, templates.clone(), target_names.clone()),
+            move |(targets, current_page, page_size, _, _)| {
                 let items = if targets.as_ref().is_none_or(|l| l.is_empty()) {
                     None
                 } else {

@@ -4,8 +4,9 @@ use parking_lot::RwLock;
 use shared::{
     error::TuliproxError,
     model::{
-        provider_saturation::build_group_lookup, ConfigProviderDto, ConfigSourceDto, DnsPrefer, DnsScheme,
-        OnConnectErrorPolicy, OnResolveErrorPolicy, PatternTemplate, ProviderUrlSelectionPolicy, SourcesConfigDto,
+        provider_saturation::build_group_lookup, ConfigProviderDto, ConfigSourceDto, DnsPrefer, DnsScheme, InputType,
+        OnConnectErrorPolicy, OnResolveErrorPolicy, PatternTemplate, PlaylistUpdateInputDto, PlaylistUpdateScopeDto,
+        PlaylistUpdateSourceDto, PlaylistUpdateTargetDto, ProviderUrlSelectionPolicy, SourcesConfigDto,
     },
 };
 use std::{
@@ -502,6 +503,47 @@ fn check_unique_member_names(inputs: &[ConfigInput]) -> Result<(), TuliproxError
 }
 
 impl SourcesConfig {
+    /// Identity used to resolve an ID-scoped update against the loaded sources.
+    #[must_use]
+    pub fn playlist_update_scope(&self) -> PlaylistUpdateScopeDto {
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|input| {
+                let input_type = match (input.input_type, input.t_batch_url.is_some()) {
+                    (_, _) if input.staged.is_some() => InputType::Staged,
+                    (InputType::M3u, true) => InputType::M3uBatch,
+                    (InputType::Xtream, true) => InputType::XtreamBatch,
+                    (InputType::Stalker, true) => InputType::StalkerBatch,
+                    (kind, _) => kind,
+                };
+                PlaylistUpdateInputDto {
+                    id: input.id,
+                    name: input.name.to_string(),
+                    input_type,
+                    enabled: input.enabled,
+                }
+            })
+            .collect();
+        let sources = self
+            .sources
+            .iter()
+            .map(|source| PlaylistUpdateSourceDto {
+                inputs: source.inputs.iter().map(ToString::to_string).collect(),
+                targets: source
+                    .targets
+                    .iter()
+                    .map(|target| PlaylistUpdateTargetDto {
+                        id: target.id,
+                        name: target.name.clone(),
+                        enabled: target.enabled,
+                    })
+                    .collect(),
+            })
+            .collect();
+        PlaylistUpdateScopeDto { inputs, sources }
+    }
+
     pub fn get_source_at(&self, idx: usize) -> Option<&ConfigSource> { self.sources.get(idx) }
 
     pub fn get_staged_input_for_provider(&self, provider_name: &Arc<str>) -> Option<&Arc<ConfigInput>> {

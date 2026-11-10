@@ -1,7 +1,10 @@
 use crate::{
     app::{
-        components::{playlist::playlist_explorer::PlaylistExplorer, Breadcrumbs, PlaylistSourceSelector},
-        context::PlaylistExplorerContext,
+        components::{
+            playlist::playlist_explorer::PlaylistExplorer, recording::target_name_for_id, Breadcrumbs,
+            PlaylistSourceSelector,
+        },
+        context::{ConfigContext, PlaylistExplorerContext},
     },
     i18n::use_translation,
 };
@@ -16,7 +19,16 @@ pub fn PlaylistExplorerView() -> Html {
     let playlist = use_state(|| None::<Rc<UiPlaylistCategories>>);
     let playlist_req = use_state(|| None::<PlaylistRequest>);
 
-    let context = PlaylistExplorerContext { playlist: playlist.clone(), playlist_request: playlist_req.clone() };
+    let config = use_context::<ConfigContext>().and_then(|ctx| ctx.config);
+    let target_name = use_state(|| None::<String>);
+    let stale_target = match playlist_req.as_ref() {
+        Some(PlaylistRequest::Target(id)) => {
+            let current = config.as_ref().and_then(|cfg| target_name_for_id(&cfg.sources, *id, None));
+            target_name.is_none() || current != *target_name
+        }
+        _ => false,
+    };
+    let context = PlaylistExplorerContext { playlist, playlist_request: playlist_req, target_name };
 
     html! {
         <ContextProvider<PlaylistExplorerContext> context={context}>
@@ -28,7 +40,10 @@ pub fn PlaylistExplorerView() -> Html {
             <div class="tp__playlist-explorer-view__body tp__list-view__body">
                 <div class={"tp__panel"}>
                     <PlaylistSourceSelector hide_title=true />
-                    <PlaylistExplorer />
+                    { stale_target.then(|| html! { <p role="alert">{translate.t("MESSAGES.CONFIG_CHANGED")}</p> }) }
+                    <div hidden={stale_target}>
+                        <PlaylistExplorer {stale_target} />
+                    </div>
                 </div>
             </div>
         </div>

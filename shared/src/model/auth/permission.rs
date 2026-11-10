@@ -27,6 +27,17 @@ create_bitset!(
 
 pub const PERM_ALL: PermissionSet = PermissionSet::ALL;
 
+/// Permissions for views that need an invalidation when sources change.
+#[must_use]
+pub fn source_view_permissions() -> PermissionSet {
+    Permission::SourceRead
+        | Permission::PlaylistRead
+        | Permission::PlaylistWrite
+        | Permission::UserRead
+        | Permission::UserWrite
+        | Permission::MaintenanceRead
+}
+
 pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("config.read", Permission::ConfigRead),
     ("config.write", Permission::ConfigWrite),

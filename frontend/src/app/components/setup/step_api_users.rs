@@ -43,7 +43,7 @@ pub fn ApiUsersStep() -> Html {
         config: Some(Rc::new((*local_app_config).clone())),
         api_proxy: local_app_config.api_proxy.as_ref().map(|api_proxy| Rc::new(api_proxy.clone())),
     };
-    let local_playlist_context = PlaylistContext { sources: sources.clone() };
+    let local_playlist_context = PlaylistContext { sources: sources.clone(), revision: None };
 
     let handle_users_change = {
         let setup_ctx = setup_ctx.clone();

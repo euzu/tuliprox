@@ -17,6 +17,7 @@ pub const HEADER_IF_MATCH: &str = "If-Match";
 pub const HEADER_CONFIG_MAIN_REVISION: &str = "X-Tuliprox-Main-Revision";
 pub const HEADER_CONFIG_SOURCES_REVISION: &str = "X-Tuliprox-Sources-Revision";
 pub const HEADER_CONFIG_API_PROXY_REVISION: &str = "X-Tuliprox-ApiProxy-Revision";
+pub const HEADER_PLAYLIST_SCOPE_REVISION: &str = "X-Tuliprox-Playlist-Scope-Revision";
 
 pub fn set_sanitize_sensitive_info(value: bool) { CONSTANTS.sanitize.store(value, Ordering::Relaxed); }
 pub fn is_sanitize_sensitive_info_enabled() -> bool { CONSTANTS.sanitize.load(Ordering::Relaxed) }

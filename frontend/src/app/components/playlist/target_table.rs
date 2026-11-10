@@ -209,8 +209,9 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                             for source in &mut sources.sources {
                                 source.targets.retain(|t| t.name != target_name);
                             }
-                            match services_ctx.config.save_sources(sources).await {
-                                Ok(()) => {
+                            let revision = services_ctx.config.sources_revision_for(app_config);
+                            match services_ctx.config.save_sources(sources, revision).await {
+                                Ok(_) => {
                                     services_ctx.toastr.success(translator.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS"));
                                     let _ = services_ctx.config.get_server_config().await;
                                 }

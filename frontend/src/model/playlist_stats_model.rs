@@ -62,18 +62,16 @@ impl From<TargetAnalyticsEntryDto> for UiTargetAnalyticsEntry {
 }
 
 /// Derives the effective selected target from user choice and the targets list:
-/// 1. User choice if it exists in the list
-/// 2. Else first target with analytics
-/// 3. Else first target in the list
+/// Keep an explicit choice by its unambiguous name. An invalidated choice requires reselection.
+/// With no explicit choice, prefer the first target with analytics.
 #[must_use]
-pub fn derive_effective_target(
-    user_choice: Option<u16>,
-    targets: &[Rc<UiTargetAnalyticsEntry>],
-) -> Option<&Rc<UiTargetAnalyticsEntry>> {
-    if let Some(chosen_id) = user_choice {
-        if let Some(target) = targets.iter().find(|t| t.target_id == chosen_id) {
-            return Some(target);
-        }
+pub fn derive_effective_target<'a>(
+    user_choice: Option<&str>,
+    targets: &'a [Rc<UiTargetAnalyticsEntry>],
+) -> Option<&'a Rc<UiTargetAnalyticsEntry>> {
+    if let Some(name) = user_choice {
+        let mut matches = targets.iter().filter(|target| target.name == name);
+        return matches.next().filter(|_| matches.next().is_none());
     }
     targets.iter().find(|t| t.analytics.is_some()).or_else(|| targets.first())
 }
@@ -462,11 +460,11 @@ mod tests {
         let list = vec![t1.clone(), t2.clone(), t3.clone()];
 
         // 1. User choice exists in list -> returns user choice
-        assert_eq!(derive_effective_target(Some(3), &list).map(|t| t.target_id), Some(3));
-        assert_eq!(derive_effective_target(Some(1), &list).map(|t| t.target_id), Some(1));
+        assert_eq!(derive_effective_target(Some("Target 3 (Has Analytics)"), &list).map(|t| t.target_id), Some(3));
+        assert_eq!(derive_effective_target(Some("Target 1 (No Analytics)"), &list).map(|t| t.target_id), Some(1));
 
-        // 2. User choice not in list -> returns first target with analytics (t2)
-        assert_eq!(derive_effective_target(Some(99), &list).map(|t| t.target_id), Some(2));
+        // An explicitly selected target that was removed requires a new choice.
+        assert_eq!(derive_effective_target(Some("removed"), &list).map(|t| t.target_id), None);
 
         // 3. User choice is None -> returns first target with analytics (t2)
         assert_eq!(derive_effective_target(None, &list).map(|t| t.target_id), Some(2));
@@ -478,7 +476,7 @@ mod tests {
         // 5. Empty list -> returns None
         let empty: &[Rc<UiTargetAnalyticsEntry>] = &[];
         assert_eq!(derive_effective_target(None, empty).map(|t| t.target_id), None);
-        assert_eq!(derive_effective_target(Some(1), empty).map(|t| t.target_id), None);
+        assert_eq!(derive_effective_target(Some("Target 1 (No Analytics)"), empty).map(|t| t.target_id), None);
     }
 
     #[test]

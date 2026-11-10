@@ -3,8 +3,8 @@ use super::{
     playlist_content_live, playlist_content_series, playlist_content_vod, playlist_epg, playlist_epg_search,
     playlist_episode_item, playlist_filter_preview, playlist_override_item, playlist_overrides_discard,
     playlist_overrides_get, playlist_overrides_orphans, playlist_overrides_save, playlist_recording_stream,
-    playlist_resolve_url, playlist_resource, playlist_series_info, playlist_update, playlist_update_status,
-    playlist_webplayer_stream, query_playlist_items, query_target_epg_channels,
+    playlist_resolve_url, playlist_resource, playlist_series_info, playlist_update, playlist_update_status_protected,
+    playlist_update_status_response, playlist_webplayer_stream, query_playlist_items, query_target_epg_channels,
 };
 use crate::api::{
     auth_middleware::permission_layer,
@@ -19,7 +19,7 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
     router
         .route("/playlist/resolve_url", axum::routing::post(playlist_resolve_url))
         .route("/playlist/update", axum::routing::post(playlist_update))
-        .route("/playlist/update/status", axum::routing::get(playlist_update_status))
+        .route("/playlist/update/status", axum::routing::get(playlist_update_status_response))
         .route("/playlist/analytics", axum::routing::get(playlist_analytics))
         .route("/playlist/analytics/{target_id}/unmapped.csv", axum::routing::get(playlist_analytics_unmapped_csv))
         .route("/playlist/epg", axum::routing::post(playlist_epg))
@@ -60,7 +60,6 @@ pub fn v1_api_playlist_register_with_permissions(
     app_state: &Arc<AppState>,
 ) -> axum::Router<Arc<AppState>> {
     let read_routes = Router::new()
-        .route("/update/status", axum::routing::get(playlist_update_status))
         .route("/analytics", axum::routing::get(playlist_analytics))
         .route("/analytics/{target_id}/unmapped.csv", axum::routing::get(playlist_analytics_unmapped_csv))
         .route("/sources", axum::routing::get(list_playlist_sources))
@@ -93,5 +92,11 @@ pub fn v1_api_playlist_register_with_permissions(
         .route("/epg/grid", axum::routing::post(epg_grid_api::playlist_epg_grid))
         .layer(permission_layer!(app_state, Permission::EpgRead));
 
-    router.nest("/playlist", read_routes.merge(write_routes).merge(epg_routes))
+    router.nest(
+        "/playlist",
+        read_routes
+            .merge(write_routes)
+            .merge(epg_routes)
+            .route("/update/status", axum::routing::get(playlist_update_status_protected)),
+    )
 }

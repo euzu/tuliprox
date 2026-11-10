@@ -195,6 +195,7 @@ pub struct PlaylistUpdateAcceptedScope {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaylistUpdateCardStatuses {
     connection_context: WebSocketConnectionContext,
+    scope_revision: Option<Rc<str>>,
     runs: IndexMap<PlaylistUpdateRunId, PlaylistUpdateRunRuntime>,
     terminal_by_input_id: IndexMap<u16, InputTerminalState>,
     details_by_input_id: IndexMap<u16, InputDetails>,
@@ -209,6 +210,7 @@ impl PlaylistUpdateCardStatuses {
     pub fn for_connection(connection_context: WebSocketConnectionContext) -> Self {
         Self {
             connection_context,
+            scope_revision: None,
             runs: IndexMap::new(),
             terminal_by_input_id: IndexMap::new(),
             details_by_input_id: IndexMap::new(),
@@ -331,6 +333,10 @@ impl PlaylistUpdateCardStatuses {
 
     fn is_current_live_connection(&self, connection_context: WebSocketConnectionContext) -> bool {
         self.connection_context.is_same_live_connection(connection_context)
+    }
+
+    fn matches_scope(&self, revision: Option<&str>) -> bool {
+        revision.is_none_or(|revision| self.scope_revision.as_deref() == Some(revision))
     }
 
     fn prune_runs(&mut self) {
@@ -479,7 +485,9 @@ impl PlaylistUpdateCardStatuses {
     }
 
     fn progress(&mut self, connection_context: WebSocketConnectionContext, progress: PlaylistUpdateProgressEvent) {
-        if !self.is_current_live_connection(connection_context) {
+        if !self.is_current_live_connection(connection_context)
+            || !self.matches_scope(progress.scope_revision.as_deref())
+        {
             return;
         }
         let PlaylistUpdateProgressEvent {
@@ -542,7 +550,9 @@ impl PlaylistUpdateCardStatuses {
     }
 
     fn complete(&mut self, connection_context: WebSocketConnectionContext, completed: PlaylistUpdateRunStateEvent) {
-        if !self.is_current_live_connection(connection_context) {
+        if !self.is_current_live_connection(connection_context)
+            || !self.matches_scope(completed.scope_revision.as_deref())
+        {
             return;
         }
         let Some(run_id) = completed.run_id else {
@@ -590,6 +600,12 @@ impl PlaylistUpdateCardStatuses {
             PlaylistUpdateCardStatusAction::ConnectionChanged(connection_context) => {
                 self.connection_changed(connection_context);
             }
+            PlaylistUpdateCardStatusAction::ResetScope { connection_context, revision } => {
+                if self.connection_context == connection_context {
+                    self = Self::for_connection(connection_context);
+                    self.scope_revision = Some(revision);
+                }
+            }
             PlaylistUpdateCardStatusAction::Accepted(accepted) => self.accept(accepted),
             PlaylistUpdateCardStatusAction::Progress { connection_context, progress } => {
                 self.progress(connection_context, progress);
@@ -623,6 +639,7 @@ pub(super) const fn status_from_state(state: PlaylistUpdateState) -> InputUpdate
 
 pub enum PlaylistUpdateCardStatusAction {
     ConnectionChanged(WebSocketConnectionContext),
+    ResetScope { connection_context: WebSocketConnectionContext, revision: Rc<str> },
     Accepted(PlaylistUpdateAcceptedScope),
     Progress { connection_context: WebSocketConnectionContext, progress: PlaylistUpdateProgressEvent },
     RestoreActive { connection_context: WebSocketConnectionContext, progress: Vec<PlaylistUpdateProgressEvent> },
@@ -705,6 +722,57 @@ mod tests {
     }
 
     fn statuses() -> PlaylistUpdateCardStatuses { PlaylistUpdateCardStatuses::for_connection(connection(1)) }
+
+    #[test]
+    fn playlist_update_status_scope_change_rejects_late_live_and_restored_events_for_reused_ids() {
+        let set_scope = |revision| PlaylistUpdateCardStatusAction::ResetScope {
+            connection_context: connection(1),
+            revision: Rc::from(revision),
+        };
+        let old = reduce(statuses(), set_scope("old"));
+        let mut progress = PlaylistUpdateProgressEvent::for_run_input(
+            run_id("old-run"),
+            execution_order(1),
+            2,
+            "Download",
+            "old input",
+        );
+        progress.scope_revision = Some("old".into());
+        let receive =
+            |progress| PlaylistUpdateCardStatusAction::Progress { connection_context: connection(1), progress };
+        let old = reduce(old, receive(progress.clone()));
+        assert_eq!(old.for_input(2).status(), InputUpdateCardStatus::Updating);
+        let replacement = reduce(old, set_scope("new"));
+        let replacement = reduce(
+            replacement,
+            PlaylistUpdateCardStatusAction::RestoreActive {
+                connection_context: connection(1),
+                progress: vec![progress.clone()],
+            },
+        );
+        let replacement = reduce(replacement, receive(progress));
+        let mut complete = PlaylistUpdateRunStateEvent::correlated(
+            run_id("old-run"),
+            execution_order(1),
+            PlaylistUpdateState::Success,
+        );
+        complete.scope_revision = Some("old".into());
+        let replacement = reduce(
+            replacement,
+            PlaylistUpdateCardStatusAction::Completed { connection_context: connection(1), completed: complete },
+        );
+        assert_eq!(replacement.for_input(2).status(), InputUpdateCardStatus::Ready);
+        let mut new_event = PlaylistUpdateProgressEvent::for_run_input(
+            run_id("new-run"),
+            execution_order(2),
+            2,
+            "Download",
+            "new input",
+        );
+        new_event.scope_revision = Some("new".into());
+        let replacement = reduce(replacement, receive(new_event));
+        assert_eq!(replacement.for_input(2).run_id(), Some(&run_id("new-run")));
+    }
 
     const fn connection_changed(connection_context: WebSocketConnectionContext) -> PlaylistUpdateCardStatusAction {
         PlaylistUpdateCardStatusAction::ConnectionChanged(connection_context)
@@ -1567,6 +1635,7 @@ mod tests {
                 completed: PlaylistUpdateRunStateEvent {
                     run_id: Some(run_id("r1")),
                     execution_order: None,
+                    scope_revision: None,
                     state: PlaylistUpdateState::Success,
                 },
             },

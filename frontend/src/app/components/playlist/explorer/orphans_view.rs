@@ -85,7 +85,9 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
     let current_input =
         use_state(|| props.input.clone().or_else(|| inputs.first().map(ToString::to_string)).unwrap_or_default());
 
-    let orphans_data = use_state(|| None::<OverrideOrphansDto>);
+    let valid_input = inputs.iter().any(|input| input.as_ref() == current_input.as_str());
+    let request_generation = use_mut_ref(|| 0u64);
+    let orphans_data = use_state(|| None::<(String, OverrideOrphansDto)>);
     let is_loading = use_state(|| false);
     let selected_keys = use_state(HashSet::<String>::new);
     let page = use_state(|| 1u32);
@@ -100,6 +102,17 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
         let current_input = (*current_input).clone();
 
         Callback::from(move |()| {
+            let request_generation = request_generation.clone();
+            let generation = {
+                let mut current = request_generation.borrow_mut();
+                *current += 1;
+                *current
+            };
+            if !valid_input {
+                orphans_data.set(None);
+                is_loading.set(false);
+                return;
+            }
             let services = services.clone();
             let translate = translate.clone();
             let orphans_data = orphans_data.clone();
@@ -109,7 +122,11 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
 
             is_loading.set(true);
             spawn_local(async move {
-                match services.playlist.get_orphans(Some(&inp)).await {
+                let result = services.playlist.get_orphans(Some(&inp)).await;
+                if generation != *request_generation.borrow() {
+                    return;
+                }
+                match result {
                     Ok(Some(data)) => {
                         // Default selection: select only orphaned entries
                         let mut initial_selected = HashSet::new();
@@ -119,7 +136,7 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
                             }
                         }
                         selected_keys.set(initial_selected);
-                        orphans_data.set(Some(data));
+                        orphans_data.set(Some((inp, data)));
                     }
                     Ok(None) => orphans_data.set(None),
                     Err(err) => {
@@ -140,17 +157,19 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
     {
         let load_orphans = load_orphans.clone();
         let inp = (*current_input).clone();
-        use_effect_with(inp, move |_| {
+        use_effect_with((inp, valid_input), move |_| {
             load_orphans.emit(());
             || ()
         });
     }
 
+    let selected_data =
+        orphans_data.as_ref().filter(|(name, _)| valid_input && name == current_input.as_str()).map(|(_, data)| data);
     let entries: Vec<Rc<OverrideOrphanEntryDto>> =
-        orphans_data.as_ref().map(|d| d.entries.iter().cloned().map(Rc::new).collect()).unwrap_or_default();
+        selected_data.map(|d| d.entries.iter().cloned().map(Rc::new).collect()).unwrap_or_default();
 
     let orphaned_files: Vec<OrphanedOverrideFileDto> =
-        orphans_data.as_ref().map(|d| d.orphaned_files.clone()).unwrap_or_default();
+        selected_data.map(|d| d.orphaned_files.clone()).unwrap_or_default();
 
     let single_discard = {
         let services = services.clone();

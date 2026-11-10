@@ -173,7 +173,7 @@ pub enum ConfigForm {
     Proxy(bool, ProxyConfigDto),
     IpCheck(bool, IpCheckConfigDto),
     Mcp(bool, McpConfigDto),
-    Panel(bool, SourcesConfigDto),
+    Panel(bool, SourcesConfigDto, Option<String>),
     Library(bool, LibraryConfigDto),
 }
 
@@ -216,7 +216,7 @@ impl ConfigForm {
                 | ConfigForm::Proxy(true, _)
                 | ConfigForm::IpCheck(true, _)
                 | ConfigForm::Mcp(true, _)
-                | ConfigForm::Panel(true, _)
+                | ConfigForm::Panel(true, ..)
                 | ConfigForm::Library(true, _)
         )
     }
@@ -261,7 +261,7 @@ impl ConfigFormSlots {
             ConfigForm::Proxy(_, _) => Self::set_form_slot(&mut self.proxy, form),
             ConfigForm::IpCheck(_, _) => Self::set_form_slot(&mut self.ipcheck, form),
             ConfigForm::Mcp(_, _) => Self::set_form_slot(&mut self.mcp, form),
-            ConfigForm::Panel(_, _) => Self::set_form_slot(&mut self.panel, form),
+            ConfigForm::Panel(..) => Self::set_form_slot(&mut self.panel, form),
             ConfigForm::Library(_, _) => Self::set_form_slot(&mut self.library, form),
         }
     }

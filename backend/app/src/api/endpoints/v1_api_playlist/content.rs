@@ -26,21 +26,28 @@ use url::Url;
 pub(super) async fn playlist_content(
     accept: Option<String>,
     app_state: &Arc<AppState>,
+    headers: &axum::http::HeaderMap,
     playlist_req: &PlaylistRequest,
     cluster: XtreamCluster,
     explorer: bool,
 ) -> impl IntoResponse + Send {
     let client = app_state.http_clients.default.load();
     match playlist_req {
-        PlaylistRequest::Target(target_id) => get_playlist_for_target(
-            app_state.app_config.get_target_by_id(*target_id).as_deref(),
-            app_state,
-            cluster,
-            accept.as_deref(),
-            explorer,
-        )
-        .await
-        .into_response(),
+        PlaylistRequest::Target(target_id) => {
+            let sources = match app_state.playlist_sources_for_request(headers) {
+                Ok(sources) => sources,
+                Err(status) => return status.into_response(),
+            };
+            get_playlist_for_target(
+                sources.get_target_by_id(*target_id).as_deref(),
+                app_state,
+                cluster,
+                accept.as_deref(),
+                explorer,
+            )
+            .await
+            .into_response()
+        }
         PlaylistRequest::Input(input_name) => get_playlist_for_input(
             app_state.app_config.get_input_by_name(&input_name.intern()).as_ref(),
             app_state,
@@ -82,13 +89,18 @@ pub(super) async fn playlist_content(
 pub(super) async fn playlist_series_info(
     axum::extract::Path((virtual_id, provider_id)): axum::extract::Path<(String, String)>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
 ) -> impl IntoResponse + Send {
     let provider_id = provider_id.trim().parse::<u32>().ok();
 
     match playlist_req {
         PlaylistRequest::Target(target_id) => {
-            if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
+            let sources = match app_state.playlist_sources_for_request(&headers) {
+                Ok(sources) => sources,
+                Err(status) => return status.into_response(),
+            };
+            if let Some(target) = sources.get_target_by_id(target_id) {
                 if target.has_output(TargetType::Xtream) {
                     let mut user = create_api_proxy_user(&app_state);
                     user.proxy = ProxyType::Redirect;
@@ -169,10 +181,15 @@ pub(super) async fn playlist_series_info(
 pub(super) async fn playlist_episode_item(
     axum::extract::Path(virtual_id): axum::extract::Path<String>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
 ) -> impl IntoResponse + Send {
     if let PlaylistRequest::Target(target_id) = playlist_req {
-        if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
+        let sources = match app_state.playlist_sources_for_request(&headers) {
+            Ok(sources) => sources,
+            Err(status) => return status.into_response(),
+        };
+        if let Some(target) = sources.get_target_by_id(target_id) {
             if target.has_output(TargetType::Xtream) {
                 if let Ok(vid) = virtual_id.parse::<u32>() {
                     if let Ok(pli) = xtream_get_item_for_stream_id(

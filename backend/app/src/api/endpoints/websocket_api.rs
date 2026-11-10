@@ -13,9 +13,9 @@ use log::{error, trace};
 use shared::{
     defaults::default_kick_secs,
     model::{
-        Claims, Permission, PlaylistUpdateRunStateEvent, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage,
-        RoleSet, UserCommand, UserId, UserRole, WsCloseCode, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL,
-        PROTOCOL_VERSION, TOKEN_NO_AUTH,
+        permission::source_view_permissions, Claims, ConfigType, Permission, PlaylistUpdateRunStateEvent,
+        ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, RoleSet, UserCommand, UserId, UserRole, WsCloseCode,
+        CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
     },
     utils::concat_path_leading_slash,
 };
@@ -125,12 +125,14 @@ fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemo
     !auth_required || mem.permissions.contains(Permission::SystemRead)
 }
 
-/// Which permission an event needs is a fact about the event, not about the
-/// websocket: it does not change with the transport carrying it. The table
-/// lives on `EventKind`, so a new variant cannot reach a session that should
-/// not see it just because this file was not updated.
 fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &EventMessage) -> bool {
-    mem.permissions.contains(event.required_permission())
+    if mem.permissions.contains(event.required_permission()) {
+        return true;
+    }
+    // Source changes carry only an invalidation signal. The existing HTTP configuration
+    // permissions still control which identities or source settings each consumer sees.
+    matches!(event, EventMessage::ConfigChange(ConfigType::Sources))
+        && mem.permissions.contains_any(&source_view_permissions())
 }
 
 /// The payload itself, cloned only if this session is not the last holder.
@@ -480,6 +482,7 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
                 ProtocolMessage::PlaylistUpdateResponse(PlaylistUpdateRunStateEvent {
                     run_id: summary.run_id,
                     execution_order: summary.execution_order,
+                    scope_revision: summary.scope_revision,
                     state: summary.state,
                 }),
                 "Playlist update event",
@@ -1114,6 +1117,19 @@ mod tests {
         let mem = ProtocolHandlerMemory { role: UserRole::User, ..ProtocolHandlerMemory::default() };
 
         assert!(!websocket_can_receive_runtime_events(&mem, &EventMessage::ServerError("err".to_string())));
+    }
+
+    #[test]
+    fn source_invalidation_reaches_playlist_reader_without_system_access() {
+        use shared::model::ConfigType;
+        let mem =
+            ProtocolHandlerMemory { permissions: Permission::PlaylistRead.into(), ..ProtocolHandlerMemory::default() };
+        assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::ConfigChange(ConfigType::Sources)));
+        assert!(!websocket_can_receive_runtime_events(&mem, &EventMessage::ConfigChange(ConfigType::Config)));
+        assert!(!websocket_can_receive_runtime_events(
+            &ProtocolHandlerMemory::default(),
+            &EventMessage::ConfigChange(ConfigType::Sources)
+        ));
     }
 
     #[test]

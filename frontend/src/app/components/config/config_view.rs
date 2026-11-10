@@ -250,7 +250,7 @@ pub fn ConfigView() -> Html {
                 let mut modified_main_forms = Vec::new();
                 for form in modified_forms {
                     match form {
-                        ConfigForm::Panel(_, sources) => app_config.sources = sources,
+                        ConfigForm::Panel(_, sources, _) => app_config.sources = sources,
                         ConfigForm::ApiProxy(_, api_proxy) => app_config.api_proxy = Some(api_proxy),
                         other => modified_main_forms.push(other),
                     }
@@ -309,11 +309,11 @@ pub fn ConfigView() -> Html {
             }
 
             let mut modified_main_forms = Vec::new();
-            let mut modified_sources: Option<SourcesConfigDto> = None;
+            let mut modified_sources: Option<(SourcesConfigDto, Option<String>)> = None;
             let mut modified_api_proxy: Option<ApiProxyConfigDto> = None;
             for form in modified_forms {
                 match form {
-                    ConfigForm::Panel(_, sources) => modified_sources = Some(sources),
+                    ConfigForm::Panel(_, sources, revision) => modified_sources = Some((sources, revision)),
                     ConfigForm::ApiProxy(_, api_proxy) => modified_api_proxy = Some(api_proxy),
                     other => modified_main_forms.push(other),
                 }
@@ -337,7 +337,7 @@ pub fn ConfigView() -> Html {
                 }
             }
 
-            if let Some(sources) = modified_sources.as_mut() {
+            if let Some((sources, _)) = modified_sources.as_mut() {
                 let global_templates = config_ctx
                     .config
                     .as_ref()
@@ -383,9 +383,9 @@ pub fn ConfigView() -> Html {
                     }
                 }
 
-                if let Some(sources_dto) = modified_sources {
-                    match services.config.save_sources(sources_dto).await {
-                        Ok(()) => {
+                if let Some((sources_dto, revision)) = modified_sources {
+                    match services.config.save_sources(sources_dto, revision).await {
+                        Ok(_) => {
                             services.toastr.success(translate.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS"));
                         }
                         Err(err) => {

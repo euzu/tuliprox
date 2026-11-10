@@ -3,7 +3,7 @@ use crate::model::{Config, ConfigInput, ConfigSource, SourcesConfig};
 use axum::{
     body::Body,
     extract::State,
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     response::IntoResponse,
     Json, Router,
 };
@@ -14,7 +14,7 @@ use shared::{
         PersistedPlaylistUpdateClusterSnapshot, PersistedPlaylistUpdateClusterState,
         PersistedPlaylistUpdateQualityDecision, PersistedPlaylistUpdateQualitySnapshot,
         PersistedPlaylistUpdateTechnicalState, PlaylistUpdateDataSource, PlaylistUpdateRequestDto,
-        PlaylistUpdateRequestPayload, PlaylistUpdateStatusDto, XtreamCluster,
+        PlaylistUpdateRequestPayload, PlaylistUpdateStatusDto, PlaylistUpdateViewSnapshotDto, XtreamCluster,
     },
     utils::Internable,
 };
@@ -22,6 +22,69 @@ use std::{collections::HashMap, sync::Arc};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn manual_update_scope_rejects_reused_target_ids_before_queueing() {
+    let input = Arc::new(ConfigInput {
+        id: 2,
+        name: "batch".intern(),
+        t_batch_url: Some("batch://local.csv".to_owned()),
+        enabled: true,
+        ..Default::default()
+    });
+    let config = Arc::new(test_app_config(
+        input,
+        ConfigSource { inputs: vec!["batch".intern()], targets: vec![playlist_update_target(1, "selected")] },
+    ));
+    let mut sources = (*config.sources.load_full()).clone();
+    sources.inputs.push(Arc::new(ConfigInput {
+        id: 3,
+        name: "companion".intern(),
+        enabled: true,
+        ..Default::default()
+    }));
+    sources.sources[0].inputs.push("companion".intern());
+    config.sources.store(Arc::new(sources));
+    let (sender, mut queue) = mpsc::channel(1);
+    let app_state = test_app_state_with_manual_update_sender(config.clone(), sender);
+    let routes = Router::new()
+        .route("/status", axum::routing::get(super::super::playlist_update_status_response))
+        .route("/update", axum::routing::post(super::super::playlist_update))
+        .with_state(app_state);
+    let response =
+        routes.clone().oneshot(Request::get("/status?include_scope=true").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let snapshot: PlaylistUpdateViewSnapshotDto = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot.scope.inputs[0].input_type, InputType::M3uBatch);
+    assert_eq!(snapshot.scope.sources[0].targets[0].name, "selected");
+
+    let request = |body| {
+        Request::post("/update")
+            .header("content-type", "application/json")
+            .header("if-match", &snapshot.revision)
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let bodies = [
+        r#"{"targets":[],"target_ids":[1]}"#,
+        r#"{"targets":[],"target_ids":[1],"input_refresh":{"input_id":3,"policy":{"cache":"respect","quality":"enforce"}}}"#,
+    ];
+    for body in bodies {
+        assert_eq!(routes.clone().oneshot(request(body)).await.unwrap().status(), StatusCode::ACCEPTED);
+        let accepted = queue.try_recv().unwrap();
+        assert_eq!(accepted.targets.target_names, ["selected"]);
+        assert_eq!(accepted.expected_scope.as_ref(), Some(&snapshot.scope));
+    }
+
+    let mut sources = (*config.sources.load_full()).clone();
+    sources.sources[0].targets = vec![playlist_update_target(1, "other"), playlist_update_target(2, "selected")];
+    config.sources.store(Arc::new(sources));
+    for body in bodies {
+        assert_eq!(routes.clone().oneshot(request(body)).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+        assert!(queue.try_recv().is_err());
+    }
+}
 
 #[test]
 fn manual_update_capabilities_reject_unsupported_actions_and_keep_all_required_inputs() {
@@ -136,6 +199,7 @@ async fn manual_update_library_rescan_uses_same_queue_and_requires_library_permi
     let rejected = super::super::playlist_update(
         State(app_state.clone()),
         Some(axum::Extension(crate::api::auth_middleware::VerifiedClaims(claims.clone()))),
+        HeaderMap::new(),
         Json(PlaylistUpdateRequestPayload::Current(request.clone())),
     )
     .await
@@ -145,6 +209,7 @@ async fn manual_update_library_rescan_uses_same_queue_and_requires_library_permi
     let unauthenticated = super::super::playlist_update(
         State(app_state.clone()),
         None,
+        HeaderMap::new(),
         Json(PlaylistUpdateRequestPayload::Current(request.clone())),
     )
     .await
@@ -169,6 +234,7 @@ async fn manual_update_library_rescan_uses_same_queue_and_requires_library_permi
         let rejected = super::super::playlist_update(
             State(app_state.clone()),
             Some(axum::Extension(crate::api::auth_middleware::VerifiedClaims(claims.clone()))),
+            HeaderMap::new(),
             Json(PlaylistUpdateRequestPayload::Current(invalid)),
         )
         .await
@@ -179,6 +245,7 @@ async fn manual_update_library_rescan_uses_same_queue_and_requires_library_permi
     let accepted = super::super::playlist_update(
         State(app_state),
         Some(axum::Extension(crate::api::auth_middleware::VerifiedClaims(claims))),
+        HeaderMap::new(),
         Json(PlaylistUpdateRequestPayload::Current(request)),
     )
     .await
@@ -212,6 +279,7 @@ async fn manual_update_run_target_ids_and_refresh_override_keep_the_accepted_que
     let response = super::super::playlist_update(
         State(app_state),
         None,
+        HeaderMap::new(),
         Json(PlaylistUpdateRequestPayload::Current(PlaylistUpdateRequestDto {
             targets: Vec::new(),
             target_ids: Some(vec![4, 1]),
@@ -287,6 +355,7 @@ async fn manual_update_target_ids_reject_unknown_empty_and_ambiguous_selections(
         let response = super::super::playlist_update(
             State(Arc::clone(&app_state)),
             None,
+            HeaderMap::new(),
             Json(PlaylistUpdateRequestPayload::Current(request)),
         )
         .await
@@ -333,7 +402,9 @@ async fn manual_update_target_ids_preserve_named_legacy_and_empty_bulk_requests(
 
     for (index, request) in requests.into_iter().enumerate() {
         let response =
-            super::super::playlist_update(State(Arc::clone(&app_state)), None, Json(request)).await.into_response();
+            super::super::playlist_update(State(Arc::clone(&app_state)), None, HeaderMap::new(), Json(request))
+                .await
+                .into_response();
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let queued = receiver.recv().await.expect("accepted legacy request");
@@ -377,9 +448,12 @@ async fn manual_update_m3u_force_is_queued_by_stable_ids_and_preserves_conflict(
         ..PlaylistUpdateRequestDto::default()
     });
     let accepted =
-        super::super::playlist_update(State(app_state.clone()), None, Json(request.clone())).await.into_response();
+        super::super::playlist_update(State(app_state.clone()), None, HeaderMap::new(), Json(request.clone()))
+            .await
+            .into_response();
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
-    let conflict = super::super::playlist_update(State(app_state), None, Json(request)).await.into_response();
+    let conflict =
+        super::super::playlist_update(State(app_state), None, HeaderMap::new(), Json(request)).await.into_response();
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
     let queued = receiver.try_recv().unwrap();
     assert_eq!(queued.input_action, Some(action));
@@ -415,14 +489,17 @@ async fn manual_update_legacy_input_refresh_preserves_named_and_all_scope_policy
                 "input_refresh": {"input_id": input.id, "policy": policy}
             }))
             .unwrap();
-            let response = super::super::playlist_update(State(app_state.clone()), None, Json(request.clone()))
-                .await
-                .into_response();
+            let response =
+                super::super::playlist_update(State(app_state.clone()), None, HeaderMap::new(), Json(request.clone()))
+                    .await
+                    .into_response();
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
             let accepted: OperationRunAccepted = serde_json::from_slice(&body).unwrap();
             let conflict =
-                super::super::playlist_update(State(app_state.clone()), None, Json(request)).await.into_response();
+                super::super::playlist_update(State(app_state.clone()), None, HeaderMap::new(), Json(request))
+                    .await
+                    .into_response();
             assert_eq!(conflict.status(), StatusCode::CONFLICT);
             let queued = receiver.try_recv().unwrap();
             assert_eq!(accepted.run_id.as_ref(), Some(&queued.run_id));

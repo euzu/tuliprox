@@ -1,6 +1,6 @@
 use crate::{api::model::UpdateGuard, model::ProcessTargets};
 use arc_swap::ArcSwap;
-use shared::model::PlaylistUpdateRunId;
+use shared::model::{PlaylistUpdateRunId, PlaylistUpdateScopeDto};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -9,6 +9,7 @@ pub struct ManualPlaylistUpdateRequest {
     pub run_id: PlaylistUpdateRunId,
     pub targets: Arc<ProcessTargets>,
     pub input_action: Option<shared::model::InputUpdateRequest>,
+    pub expected_scope: Option<PlaylistUpdateScopeDto>,
 }
 
 /// What starts, serializes and narrows playlist updates.

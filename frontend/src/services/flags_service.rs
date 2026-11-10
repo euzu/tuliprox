@@ -59,7 +59,7 @@ impl FlagsService {
             return Ok(FlagsLoadState::InProgress);
         }
 
-        let bytes = match request_get_binary("assets/flags.dat").await {
+        let bytes = match request_get_binary("assets/flags.dat", None).await {
             Ok(bytes) => bytes,
             Err(err) => {
                 self.loading_started.set(false);

@@ -27,9 +27,12 @@ macro_rules! create_player_api_for_cluster {
             ExtractAcceptHeader(accept): ExtractAcceptHeader,
             axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
             axum::extract::Query(query): axum::extract::Query<shared::model::PlaylistContentQuery>,
+            headers: axum::http::HeaderMap,
             axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
         ) -> impl IntoResponse + Send {
-            playlist_content(accept.clone(), &app_state, &playlist_req, $cluster, query.explorer).await.into_response()
+            playlist_content(accept, &app_state, &headers, &playlist_req, $cluster, query.explorer)
+                .await
+                .into_response()
         }
     };
 }
@@ -107,6 +110,8 @@ use self::{
         create_config_input_for_m3u, create_config_input_for_xtream, playlist_resolve_url, playlist_resource,
         resolve_provider_url_with_input,
     },
-    update::{playlist_update, playlist_update_status},
+    update::{playlist_update, playlist_update_status_protected, playlist_update_status_response},
     webplayer::{build_playlist_webplayer_url, playlist_webplayer, playlist_webplayer_stream},
 };
+#[cfg(test)]
+use update::playlist_update_status;
