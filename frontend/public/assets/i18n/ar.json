@@ -2699,6 +2699,8 @@
       "DETAIL_INPUT_COMPLETED_SUCCESSFULLY": "اكتمل تحديث الإدخال بنجاح.",
       "DETAIL_INPUT_FAILED": "فشل تحديث الإدخال.",
       "DETAIL_FAILURE_REASON": "السبب: {reason}",
+      "DETAIL_PUBLISHED_TARGETS": "الأهداف الناجحة: {targets}",
+      "DETAIL_RUN_RESULT": "نتيجة التشغيل: {status}",
       "DETAIL_LIBRARY_RESCAN_COMPLETED": "اكتملت إعادة فحص المكتبة؛ تجري إعادة بناء الأهداف المحددة.",
       "DETAIL_LIBRARY_RESCAN_FAILED": "فشلت إعادة فحص المكتبة؛ لم تُعَد بناء الأهداف المحددة.",
       "DETAIL_LIBRARY_RESCAN_STARTED": "بدأت إعادة فحص المكتبة؛ إعادة بناء الأهداف المحددة قيد الانتظار.",

@@ -155,6 +155,7 @@ struct PlaylistUpdateRunRuntime {
     observed_input_ids: IndexSet<u16>,
     input_states: IndexMap<u16, PlaylistUpdateState>,
     terminal: Option<PlaylistUpdateState>,
+    published_targets: Vec<String>,
     refresh_policy_by_input_id: IndexMap<u16, InputRefreshPolicy>,
 }
 
@@ -167,6 +168,7 @@ impl PlaylistUpdateRunRuntime {
             observed_input_ids: IndexSet::new(),
             input_states: IndexMap::new(),
             terminal: None,
+            published_targets: Vec::new(),
             refresh_policy_by_input_id: IndexMap::new(),
         }
     }
@@ -263,6 +265,10 @@ impl PlaylistUpdateCardStatuses {
             refresh_policy,
             input_telemetry: details.and_then(|details| details.input_telemetry.clone()),
         }
+    }
+
+    pub(super) fn published_targets(&self, run_id: &PlaylistUpdateRunId) -> &[String] {
+        self.runs.get(run_id).map_or(&[], |run| run.published_targets.as_slice())
     }
 
     fn effective_run_for_input(&self, input_id: u16) -> Option<EffectiveInputRun<'_>> {
@@ -589,6 +595,7 @@ impl PlaylistUpdateCardStatuses {
             let was_known = run.accepted || !run.observed_input_ids.is_empty();
             if run.terminal.is_none() {
                 run.terminal = Some(completed.state);
+                run.published_targets = completed.targets;
             }
             (
                 run.execution_order,

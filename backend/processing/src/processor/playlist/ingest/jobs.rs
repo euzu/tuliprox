@@ -1,5 +1,5 @@
 use super::{
-    super::target::report_target_replacement_failure, acquisition::InputAcquisition, download_input, is_input_enabled,
+    super::target::record_target_replacement_failure, acquisition::InputAcquisition, download_input, is_input_enabled,
     is_target_enabled, join_arc_strs, process_targets, target_waiting_message, with_sequential_group,
     InputCompletionFacts, InputRunOutcome, PlaylistProcessingContext, XmltvEpgProvider,
 };
@@ -387,7 +387,7 @@ pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUp
             for target in source.targets.iter().filter(|target| is_target_enabled(target, &ctx.user_targets)) {
                 errors.insert(
                     0,
-                    report_target_replacement_failure(
+                    record_target_replacement_failure(
                         &ctx,
                         &target.name,
                         enabled_inputs.iter().map(|(_, input)| input.id),

@@ -13,6 +13,7 @@ use crate::{
 };
 use shared::{error::TuliproxError, model::PlaylistGroup};
 use std::{
+    collections::BTreeMap,
     io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
@@ -32,7 +33,8 @@ struct PublicationState {
     closed: bool,
     active: usize,
     published: Vec<String>,
-    reported_failures: Vec<String>,
+    target_failures: BTreeMap<String, String>,
+    failed_publications: Vec<(String, String)>,
 }
 
 /// Coordinates the processing deadline with the irreversible part of each target publication.
@@ -50,9 +52,19 @@ impl TargetReplacementDeadline {
         self.publication.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub fn record_reported_failure(&self, target: &str) { self.state().reported_failures.push(target.to_owned()); }
+    pub fn record_target_failure(&self, target: &str, reason: &str) {
+        self.state().target_failures.entry(target.to_owned()).or_insert_with(|| reason.to_owned());
+    }
 
-    pub fn reported_failures(&self) -> Vec<String> { self.state().reported_failures.clone() }
+    /// Take failure details for terminal reporting, including commit failures that outlived processing.
+    pub fn take_target_failures(&self) -> BTreeMap<String, String> {
+        let mut state = self.state();
+        let mut failures = std::mem::take(&mut state.target_failures);
+        for (target, reason) in std::mem::take(&mut state.failed_publications) {
+            failures.entry(target).or_insert(reason);
+        }
+        failures
+    }
 
     fn try_begin(&self) -> io::Result<ActivePublication<'_>> {
         let mut state = self.state();
@@ -60,7 +72,7 @@ impl TargetReplacementDeadline {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "playlist update deadline expired before publication"));
         }
         state.active += 1;
-        Ok(ActivePublication { deadline: self, published: None })
+        Ok(ActivePublication { deadline: self, result: None })
     }
 
     async fn close_and_drain(&self) -> Vec<String> {
@@ -90,14 +102,16 @@ impl TargetReplacementDeadline {
 
 struct ActivePublication<'a> {
     deadline: &'a TargetReplacementDeadline,
-    published: Option<String>,
+    result: Option<(String, Result<(), String>)>,
 }
 
 impl Drop for ActivePublication<'_> {
     fn drop(&mut self) {
         let mut state = self.deadline.state();
-        if let Some(target) = self.published.take() {
-            state.published.push(target);
+        match self.result.take() {
+            Some((target, Ok(()))) => state.published.push(target),
+            Some((target, Err(reason))) => state.failed_publications.push((target, reason)),
+            None => {}
         }
         state.active -= 1;
         if state.closed && state.active == 0 {
@@ -225,7 +239,7 @@ impl TargetReplacement {
         // The same task owns every guard until both disk publication and cache swap are complete.
         tokio::task::spawn_blocking(move || {
             let mut publication = deadline.as_deref().map(TargetReplacementDeadline::try_begin).transpose()?;
-            {
+            let result = (|| {
                 let _guards = (mapping_lock, category_view, locks, groups);
                 let mut replacement = replacement;
                 let cache = new_cache;
@@ -236,11 +250,12 @@ impl TargetReplacement {
                 if let Some(state) = state {
                     state.bump_failover_group_generation(&target_name);
                 }
-            }
+                Ok::<_, io::Error>(())
+            })();
             if let Some(publication) = publication.as_mut() {
-                publication.published = Some(target_name);
+                publication.result = Some((target_name, result.as_ref().copied().map_err(ToString::to_string)));
             }
-            Ok::<_, io::Error>(())
+            result
         })
         .await
         .map_err(|err| error(&err))?

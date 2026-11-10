@@ -998,13 +998,25 @@ fn input_content(
                             )
                         })}
                     }
-                    if !view.localized_progress_details.is_empty() || !view.failure_reasons.is_empty() {
+                    if !view.localized_progress_details.is_empty() || !view.failure_reasons.is_empty()
+                        || !view.published_targets.is_empty() {
                         <section class="tp__playlist-update-view__progress-details">
                             <h4>{translate("MESSAGES.PLAYLIST_UPDATE.RUN_DETAILS")}</h4>
                             <ul>
+                                if !view.failure_reasons.is_empty() && matches!(view.overall_state,
+                                    InputUpdateCardStatus::Partial | InputUpdateCardStatus::Failed) {
+                                    <li>{translate("MESSAGES.PLAYLIST_UPDATE.DETAIL_RUN_RESULT")
+                                        .replace("{status}", &translate(view.overall_state.label_key()))}</li>
+                                }
                                 {for view.localized_progress_details.iter().map(|detail| {
                                     html! { <li>{translate(progress_detail_label_key(*detail))}</li> }
                                 })}
+                                if !view.published_targets.is_empty() {
+                                    <li>
+                                        {translate("MESSAGES.PLAYLIST_UPDATE.DETAIL_PUBLISHED_TARGETS")
+                                            .replace("{targets}", &view.published_targets.join(", "))}
+                                    </li>
+                                }
                                 {for view.failure_reasons.iter().map(|reason| html! {
                                     <li class="tp__playlist-update-view__failure-reason">
                                         {translate("MESSAGES.PLAYLIST_UPDATE.DETAIL_FAILURE_REASON").replace("{reason}", reason)}
@@ -2622,6 +2634,8 @@ mod tests {
             "/MESSAGES/PLAYLIST_UPDATE/DETAIL_LIBRARY_RESCAN_FAILED",
             "/MESSAGES/PLAYLIST_UPDATE/DETAIL_LIBRARY_RESCAN_STARTED",
             "/MESSAGES/PLAYLIST_UPDATE/DETAIL_LIBRARY_SCAN_RESULT",
+            "/MESSAGES/PLAYLIST_UPDATE/DETAIL_PUBLISHED_TARGETS",
+            "/MESSAGES/PLAYLIST_UPDATE/DETAIL_RUN_RESULT",
             "/MESSAGES/PLAYLIST_UPDATE/IDENTICAL_POPULATION",
             "/MESSAGES/PLAYLIST_UPDATE/MODE",
             "/MESSAGES/PLAYLIST_UPDATE/QUALITY_ACHIEVED",

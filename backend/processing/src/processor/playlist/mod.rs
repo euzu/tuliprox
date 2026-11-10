@@ -560,6 +560,9 @@ pub async fn exec_processing<
         Some(deadline) => deadline.run(operation).await,
         None => tokio::time::timeout_at(deadline, operation).await.map_err(|_| Vec::new()),
     };
+    if process_result.is_ok() {
+        target::report_target_replacement_details(&ctx, None);
+    }
     let (stats, errors) = match process_result {
         Ok(Ok((stats, errors))) => (stats, errors),
         Ok(Err(_)) => {
@@ -577,16 +580,12 @@ pub async fn exec_processing<
             let state =
                 if published_targets.is_empty() { PlaylistUpdateState::Failure } else { PlaylistUpdateState::Partial };
             let mut summary = PlaylistUpdateSummary::for_run(run_id, execution_order, state);
-            if let Some(deadline) = &ctx.replacement_deadline {
-                target::report_target_replacement_timeout(
-                    &ctx,
-                    &published_targets,
-                    &deadline.reported_failures(),
-                    &reason,
-                );
+            if ctx.replacement_deadline.is_some() {
+                target::report_target_replacement_details(&ctx, Some((&published_targets, &reason)));
                 summary.error = Some(reason);
                 summary.stats = published_targets_by_source(&app_config, &published_targets);
             }
+            drop(playlist_guard);
             events.emit(EventMessage::PlaylistUpdate(summary));
             return;
         }

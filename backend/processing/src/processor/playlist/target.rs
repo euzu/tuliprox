@@ -205,25 +205,33 @@ pub(crate) async fn wait_for_target_finalizer_slot(
     }
 }
 
-pub(super) fn report_target_replacement_failure<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
+pub(super) fn record_target_replacement_failure<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
     ctx: &PlaylistProcessingContext<E, M, P>,
     target_name: &str,
     inputs: impl Iterator<Item = u16>,
     reason: &str,
 ) -> TuliproxError {
+    let message = replacement_failure_message(target_name, reason);
     if let Some(deadline) = &ctx.replacement_deadline {
-        deadline.record_reported_failure(target_name);
+        // The run coordinator sends these details before its terminal frame.
+        // Finalizers can be cancelled independently of that event.
+        deadline.record_target_failure(target_name, reason);
+    } else {
+        emit_replacement_failure(ctx, target_name, inputs, &message);
     }
-    emit_replacement_failure(ctx, target_name, inputs, &format!("Target '{target_name}' replacement failed: {reason}"))
+    TuliproxError::RepositoryPlaylist(message)
+}
+
+fn replacement_failure_message(target: &str, reason: &str) -> String {
+    sanitize_sensitive_info(&format!("Target '{target}' replacement failed: {reason}")).into_owned()
 }
 
 fn emit_replacement_failure<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
     ctx: &PlaylistProcessingContext<E, M, P>,
     target: &str,
     inputs: impl Iterator<Item = u16>,
-    reason: &str,
-) -> TuliproxError {
-    let message = sanitize_sensitive_info(reason).into_owned();
+    message: &str,
+) {
     for input_id in inputs {
         ctx.events.emit(EventMessage::PlaylistUpdateProgress(
             PlaylistUpdateProgressEvent::for_run_input(
@@ -231,46 +239,58 @@ fn emit_replacement_failure<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
                 ctx.execution_order,
                 input_id,
                 target,
-                message.clone(),
+                message,
             )
-            .with_failure_reason(Some(message.clone())),
+            .with_failure_reason(Some(message.to_owned())),
         ));
     }
-    TuliproxError::RepositoryPlaylist(message)
 }
 
-pub(super) fn report_target_replacement_timeout<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
+pub(super) fn report_target_replacement_details<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
     ctx: &PlaylistProcessingContext<E, M, P>,
-    published: &[String],
-    reported_failures: &[String],
-    reason: &str,
+    timeout: Option<(&[String], &str)>,
 ) {
+    let Some(deadline) = &ctx.replacement_deadline else { return };
+    let failures = deadline.take_target_failures();
+    if failures.is_empty() && timeout.is_none() {
+        return;
+    }
     let sources = ctx.config.sources.load();
     let mut targets_by_input = std::collections::BTreeMap::<u16, Vec<&str>>::new();
     for source in &sources.sources {
-        let unfinished: Vec<_> = source
-            .targets
-            .iter()
-            .filter(|target| {
-                is_target_enabled(target, &ctx.user_targets)
-                    && !published.contains(&target.name)
-                    && !reported_failures.contains(&target.name)
-            })
-            .map(|target| target.name.as_str())
-            .collect();
-        if unfinished.is_empty() {
-            continue;
-        }
-        for input in source.inputs.iter().filter_map(|name| sources.get_input_by_name(name)) {
-            if is_input_enabled(input, &ctx.user_targets) {
-                targets_by_input.entry(input.id).or_default().extend(unfinished.iter().copied());
+        let inputs = || {
+            source
+                .inputs
+                .iter()
+                .filter_map(|name| sources.get_input_by_name(name))
+                .filter(|input| is_input_enabled(input, &ctx.user_targets))
+                .map(|input| input.id)
+        };
+        for target in source.targets.iter().filter(|target| {
+            is_target_enabled(target, &ctx.user_targets)
+                && timeout.is_none_or(|(published, _)| !published.contains(&target.name))
+        }) {
+            if let Some(reason) = failures.get(&target.name) {
+                emit_replacement_failure(
+                    ctx,
+                    &target.name,
+                    inputs(),
+                    &replacement_failure_message(&target.name, reason),
+                );
+            } else if timeout.is_some() {
+                for input_id in inputs() {
+                    targets_by_input.entry(input_id).or_default().push(&target.name);
+                }
             }
         }
     }
-    for (input_id, targets) in targets_by_input {
-        let description = format!("'{}'", targets.join("', '"));
-        let message = format!("Target replacement did not finish for {description}: {reason}");
-        emit_replacement_failure(ctx, &targets.join(", "), std::iter::once(input_id), &message);
+    if let Some((_, reason)) = timeout {
+        for (input_id, targets) in targets_by_input {
+            let description = format!("'{}'", targets.join("', '"));
+            let message = format!("Target replacement did not finish for {description}: {reason}");
+            let message = sanitize_sensitive_info(&message);
+            emit_replacement_failure(ctx, &targets.join(", "), std::iter::once(input_id), &message);
+        }
     }
 }
 
@@ -340,6 +360,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                     }
                 }
                 Err(target_errors) => {
+                    record_target_job_errors(ctx, &target.name, playlists, errors, target_errors);
                     record_failed_target_analytics(
                         &ctx.config.config.load_full(),
                         &target.name,
@@ -348,7 +369,6 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                     )
                     .await;
                     target_stats.push(TargetStats::failure(&target.name));
-                    record_target_job_errors(ctx, &target.name, playlists, errors, target_errors);
                 }
             }
         }
@@ -362,6 +382,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
     let mut completion_receivers: Vec<watch::Receiver<bool>> = Vec::with_capacity(targets.len());
     let mut tasks = JoinSet::new();
     let mut results = Vec::with_capacity(targets.len());
+    let input_ids: Arc<[u16]> = playlists.iter().map(|playlist| playlist.input.id).collect();
 
     for (index, target) in targets.iter().enumerate() {
         wait_for_target_finalizer_slot(&mut tasks, &mut results, errors).await;
@@ -394,6 +415,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                 let overrides = Arc::clone(&prepared.overrides);
                 let task_ctx = Arc::clone(ctx);
                 let target_name = target.name.clone();
+                let input_ids = Arc::clone(&input_ids);
                 tasks.spawn(async move {
                     for mut predecessor in predecessors {
                         if !*predecessor.borrow() {
@@ -401,35 +423,29 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                         }
                     }
                     let finalized =
-                        std::panic::AssertUnwindSafe(finalize_prepared_target(task_ctx, prepared)).catch_unwind().await;
-                    completion.send_replace(true);
-                    match finalized {
-                        Ok((result, errors, finalize_report)) => {
-                            let mut processing = processing;
-                            processing.plugins.merge(finalize_report);
-                            TargetJobResult {
-                                index,
-                                name: target_name,
-                                result,
-                                errors,
-                                processing,
-                                overrides: Some(overrides),
-                            }
-                        }
-                        Err(_) => TargetJobResult {
-                            index,
-                            name: target_name.clone(),
-                            result: Err(vec![TuliproxError::RepositoryPlaylist(format!(
+                        std::panic::AssertUnwindSafe(finalize_prepared_target(Arc::clone(&task_ctx), prepared))
+                            .catch_unwind()
+                            .await;
+                    let (result, errors, finalize_report) = finalized.unwrap_or_else(|_| {
+                        (
+                            Err(vec![TuliproxError::RepositoryPlaylist(format!(
                                 "Target '{target_name}' finalization panicked"
                             ))]),
-                            errors: Vec::new(),
-                            processing,
-                            overrides: Some(overrides),
-                        },
-                    }
+                            Vec::new(),
+                            PluginRunReport::default(),
+                        )
+                    });
+                    let result = result.map_err(|errors| {
+                        target_job_errors(&task_ctx, &target_name, input_ids.iter().copied(), errors)
+                    });
+                    let mut processing = processing;
+                    processing.plugins.merge(finalize_report);
+                    completion.send_replace(true);
+                    TargetJobResult { index, name: target_name, result, errors, processing, overrides: Some(overrides) }
                 });
             }
             Err(target_errors) => {
+                let target_errors = target_job_errors(ctx, &target.name, input_ids.iter().copied(), target_errors);
                 completion.send_replace(true);
                 record_failed_target_analytics(
                     &ctx.config.config.load_full(),
@@ -465,7 +481,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
             }
             Err(target_errors) => {
                 target_stats.push(TargetStats::failure_with_processing(&target_result.name, target_result.processing));
-                record_target_job_errors(ctx, &target_result.name, playlists, errors, target_errors);
+                errors.extend(target_errors);
             }
         }
     }
@@ -479,16 +495,25 @@ fn record_target_job_errors<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
     errors: &mut Vec<TuliproxError>,
     target_errors: Vec<TuliproxError>,
 ) {
+    errors.extend(target_job_errors(
+        ctx,
+        target_name,
+        playlists.iter().map(|playlist| playlist.input.id),
+        target_errors,
+    ));
+}
+
+fn target_job_errors<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
+    target_name: &str,
+    inputs: impl Iterator<Item = u16>,
+    target_errors: Vec<TuliproxError>,
+) -> Vec<TuliproxError> {
     if ctx.replace_target_contents {
         let reason = target_errors.iter().map(TuliproxError::message).collect::<Vec<_>>().join(", ");
-        errors.push(report_target_replacement_failure(
-            ctx,
-            target_name,
-            playlists.iter().map(|playlist| playlist.input.id),
-            &reason,
-        ));
+        vec![record_target_replacement_failure(ctx, target_name, inputs, &reason)]
     } else {
-        errors.extend(target_errors);
+        target_errors
     }
 }
 
