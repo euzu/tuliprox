@@ -456,10 +456,22 @@ pub(crate) async fn stage_complete_xtream_playlist(
         })?;
         let items =
             streams.remove(&cluster).unwrap_or_default().into_iter().map(XtreamPlaylistItem::from).collect::<Vec<_>>();
+        #[cfg(any(test, feature = "test-support"))]
+        let mut probe = super::publication_fixture::TargetStagingProbe::take(storage_path, cluster);
+        // The probe's cleanup signal drops after the file owners.
+        #[cfg(any(test, feature = "test-support"))]
+        let staged_files = (staged_files, probe.as_mut().and_then(|probe| probe.cleanup.take()));
         let (staged_files, prepared) = write_target_staging(staged_files, move || {
             std::fs::write(&paths.staging_categories, data).map_err(|error| {
                 TuliproxError::RepositoryXtream(format!("Failed to stage {cluster} categories: {error}"))
             })?;
+            #[cfg(any(test, feature = "test-support"))]
+            let files = probe
+                .as_mut()
+                .map(|probe| {
+                    probe.before_database(&paths.staging_database, &paths.staging_index, &paths.staging_categories)
+                })
+                .transpose()?;
             let mut tree = BPlusTree::<u32, XtreamPlaylistItem>::new();
             for item in items {
                 tree.insert(item.virtual_id.get(), item);
@@ -467,6 +479,10 @@ pub(crate) async fn stage_complete_xtream_playlist(
             tree.store_with_index(&paths.staging_database, |item| item.source_ordinal).map_err(|error| {
                 TuliproxError::RepositoryXtream(format!("Failed to stage {cluster} streams: {error}"))
             })?;
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some((probe, files)) = probe.zip(files) {
+                probe.after_database(&files)?;
+            }
             let cache = use_memory_cache.then(|| {
                 let order = crate::PlaylistXtreamStorage::build_cluster_order(cluster, &tree);
                 (tree, order)
@@ -474,6 +490,8 @@ pub(crate) async fn stage_complete_xtream_playlist(
             Ok(cache)
         })
         .await?;
+        #[cfg(any(test, feature = "test-support"))]
+        let (staged_files, _cleanup) = staged_files;
         replacements.extend(staged_files);
         cached.extend(prepared);
     }

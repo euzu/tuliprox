@@ -1767,6 +1767,7 @@ mod m3u_update_quality;
 mod manual_update_integration;
 mod persisted_input_status;
 mod staged_completion;
+mod target_staging;
 
 struct FixedGate(&'static str);
 

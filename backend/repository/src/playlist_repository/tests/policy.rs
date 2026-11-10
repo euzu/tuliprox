@@ -614,6 +614,84 @@ async fn replace_target_contents_deadline_waits_for_started_publication() {
     let config = app.config.load();
     let storage = xtream_get_storage_path(&config, &target.name).unwrap();
     assert_eq!(std::fs::read_to_string(get_vod_cat_collection_path(&storage)).unwrap(), "[]");
+    assert!(std::fs::read_dir(&storage)
+        .unwrap()
+        .all(|entry| { !entry.unwrap().file_name().to_string_lossy().contains("force-empty") }));
+    eprintln!("AP11 S04 countercheck completed-publication={published:?} disk=[1, 0, 0] cache=new-live VOD-categories=[] remaining=[]");
+}
+
+#[tokio::test]
+async fn ap11_s02_partial_xtream_staging_failure_cleans_owned_files() {
+    use crate::publication_fixture::{pause_target_staging, TargetStagingPause};
+    use std::{collections::BTreeMap, fs};
+
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let state = Arc::new(PlaylistStorageState::new());
+    let target = xtream_target("staging-failure", true);
+    seed_memory_cached_xtream_target(&app, &state, &target).await;
+    let cache_before = cached_target_signature(&state, &target.name).await;
+    let storage = xtream_get_storage_path(&app.config.load(), &target.name).unwrap();
+    let on_disk = || {
+        fs::read_dir(&storage)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let original = on_disk();
+    let TargetStagingPause { entered, resume, written, cleaned } =
+        pause_target_staging(&storage, XtreamCluster::Video, true);
+    let mut writer = tokio::spawn({
+        let (app, state, target) = (app.clone(), state.clone(), target.clone());
+        async move {
+            let mut candidate = [
+                target_group(XtreamCluster::Live, 102, "new-live"),
+                target_group(XtreamCluster::Video, 202, "new-vod"),
+            ];
+            persist_playlist_with_mode(
+                &app,
+                &mut candidate,
+                None,
+                &target,
+                Some(&state),
+                TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() },
+                TargetPersistenceMode::Persist,
+            )
+            .await
+        }
+    });
+    let files = tokio::select! {
+        files = entered => files.unwrap(),
+        result = &mut writer => panic!("replacement finished before the Xtream writer paused: {result:?}"),
+    };
+    assert_eq!(files.existing(), std::slice::from_ref(&files.categories));
+    let partial =
+        on_disk().into_keys().filter(|name| name.to_string_lossy().contains("force-empty")).collect::<Vec<_>>();
+    assert!(partial.iter().any(|name| name.to_string_lossy().starts_with(".live.force-empty-")));
+    assert!(!partial.iter().any(|name| name.to_string_lossy().starts_with(".series.force-empty-")));
+    resume.send(()).unwrap();
+    let written = written.await.unwrap();
+    assert_eq!(
+        written,
+        [&files.database, &files.index, &files.categories]
+            .into_iter()
+            .chain(&files.sidecars)
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    cleaned.await.unwrap();
+    let errors = writer.await.unwrap().unwrap_err();
+    assert!(errors[0].message().contains("injected target staging failure"));
+    assert_eq!(files.existing(), Vec::<std::path::PathBuf>::new());
+    assert_eq!(on_disk(), original);
+    let stored = load_xtream_target_storage(&app, &target).await.unwrap();
+    assert_eq!([stored.live.len(), stored.vod.len(), stored.series.len()], [1, 1, 1]);
+    assert_eq!(cached_target_signature(&state, &target.name).await, cache_before);
+    let written: Vec<_> = written.iter().map(|path| path.file_name().unwrap()).collect();
+    eprintln!("AP11 S02 partial={partial:?} written={written:?} remaining=[] disk=[1, 1, 1] cache-and-published-files=unchanged published_files={:?}", original.keys().collect::<Vec<_>>());
 }
 
 #[tokio::test(start_paused = true)]
