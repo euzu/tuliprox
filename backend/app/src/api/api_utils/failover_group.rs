@@ -16,7 +16,10 @@ use shared::model::{
 };
 use std::{collections::VecDeque, future::Future, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::Notify;
-use tuliprox_repository::failover_group_repository::{FailoverGroupRecord, GroupMember};
+use tuliprox_repository::{
+    failover_group_repository::{FailoverGroupRecord, GroupMember},
+    target_stream_item::ResolvedStreamTarget,
+};
 pub(crate) use tuliprox_session::failover_group::{member_key, CircuitAdmission, CircuitView, SelectionMode};
 use tuliprox_session::{
     active_provider_manager::{CapacityTier, ConnectionKind, ManagedProviderHandle, PlaybackLeaseRef},
@@ -28,6 +31,46 @@ use tuliprox_session::{
 pub(crate) enum PlaybackSource<'a> {
     Single { input: &'a Arc<ConfigInput>, stream_url: &'a str },
     Group { group: Arc<FailoverGroupRecord>, mode: SelectionMode, prefer: Option<usize> },
+}
+
+pub(crate) fn resolve_playback_source<'a>(
+    resolved_target: &ResolvedStreamTarget,
+    is_live: bool,
+    input: &'a Arc<ConfigInput>,
+    stream_url: &'a str,
+    bound_prefer: Option<usize>,
+) -> PlaybackSource<'a> {
+    if !is_live {
+        return PlaybackSource::Single { input, stream_url };
+    }
+    match resolved_target {
+        ResolvedStreamTarget::Group(group) => {
+            PlaybackSource::Group { group: Arc::clone(group), mode: SelectionMode::Live, prefer: bound_prefer }
+        }
+        ResolvedStreamTarget::Member { group, index } => {
+            PlaybackSource::Group { group: Arc::clone(group), mode: SelectionMode::Live, prefer: Some(*index) }
+        }
+        ResolvedStreamTarget::Item => PlaybackSource::Single { input, stream_url },
+    }
+}
+
+pub(crate) async fn handle_stream_failure_for_group(
+    app_state: &AppState,
+    username: &str,
+    session_key: &str,
+    failure_class: Option<FailureClass>,
+    group: Option<&FailoverGroupRecord>,
+    member_vid: VirtualId,
+) {
+    let failure_class = failure_class.unwrap_or(FailureClass::Stream);
+    app_state.active_users.terminate_session(username, session_key).await;
+    app_state.active_provider.clear_provider_reservation(session_key);
+
+    if let Some(group) = group {
+        if let Some(member) = group.members.iter().find(|m| m.member_vid == member_vid) {
+            record_member_failure(&app_state.member_health, member, None, failure_class);
+        }
+    }
 }
 
 #[allow(dead_code)]

@@ -1124,6 +1124,20 @@ pub fn PlaylistExplorer() -> Html {
     };
 
     if playlist.is_none() {
+        if let Some(err) = context.error.as_ref() {
+            return html! {
+                <div class="tp__playlist-explorer">
+                    <NoContent
+                        text={translate.t("MESSAGES.PLAYLIST_EXPLORER.FETCH_FAILED")}
+                        hint={if err.is_empty() {
+                            translate.t("MESSAGES.PLAYLIST_EXPLORER.FETCH_FAILED_HINT")
+                        } else {
+                            err.clone()
+                        }}
+                    />
+                </div>
+            };
+        }
         return html! {
             <div class="tp__playlist-explorer">
                 <NoContent

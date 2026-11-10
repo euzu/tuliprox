@@ -682,6 +682,7 @@ impl ActiveUserManager {
     pub async fn terminate_session(&self, username: &str, session_token: &str) -> bool {
         let (connection_changed, removed_streams, promotions) = {
             let mut user_connections = self.write_connections().await;
+            user_connections.pending_member_bindings.remove(session_token);
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return false;
             };

@@ -1469,6 +1469,25 @@
 
 ## 🐛 Fixes
 
+- **Active Streams shows the active failover member from the start.** A plain TS stream of a failover group has no
+  session, so the chosen member was only shown after a manual switch. The binding now waits for the stream and the
+  card shows "Active source" and the check mark at once.
+
+- **The internal stream endpoint uses failover groups.** A group channel opened with "Copy Webplayer Url" played only
+  its first member, without failover or manual switch. It now uses the group runtime like the Xtream and M3U client
+  routes. Recordings that hold a pre-acquired provider connection keep their single input.
+
+- **Videos with an HLS URL stay videos.** An item without a numeric provider id and with an `.m3u8` URL became a
+  live HLS channel, also when it was a video. YouTube uploads resolved by yt-dlp were listed as live channels. Only
+  live items are refined to HLS, DASH or unknown live.
+
+- **The provider explorer lists plugin inputs.** It answered "Invalid Arguments" for plugin inputs and the Web UI
+  showed "Select a playlist". Plugin inputs are read like M3U inputs, and a failed request shows an error.
+
+- **Table action and selection columns have no header, but a name in the column settings.** The column settings
+  listed the selection column of the explorer without a name. Every column now needs a label, checked at compile
+  time. The empty Streams list shows a text, and the youtube-input cache TTL label is no longer cut off.
+
 - **A failed input is fetched once per update run.** When several sources share an input and its fetch failed, every
   further source asked the provider again in the same run. Each source could then see a different playlist, and a
   plugin input such as youtube-input repeated its YouTube requests. Later sources now get the first failure without a

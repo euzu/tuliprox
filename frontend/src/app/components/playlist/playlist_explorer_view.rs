@@ -15,8 +15,13 @@ pub fn PlaylistExplorerView() -> Html {
     let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.EXPLORER")]));
     let playlist = use_state(|| None::<Rc<UiPlaylistCategories>>);
     let playlist_req = use_state(|| None::<PlaylistRequest>);
+    let error = use_state(|| None::<String>);
 
-    let context = PlaylistExplorerContext { playlist: playlist.clone(), playlist_request: playlist_req.clone() };
+    let context = PlaylistExplorerContext {
+        playlist: playlist.clone(),
+        playlist_request: playlist_req.clone(),
+        error: error.clone(),
+    };
 
     html! {
         <ContextProvider<PlaylistExplorerContext> context={context}>

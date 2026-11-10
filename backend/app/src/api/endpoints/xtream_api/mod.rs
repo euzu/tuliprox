@@ -7,14 +7,14 @@ use crate::{
             admission_failure_response, blocks_new_playback, coalesce_byte_stream, create_api_proxy_user,
             create_catchup_session_key, create_m3u_catchup_session_key, create_playback_session_fingerprint,
             create_session_fingerprint, empty_json_response_as_array, empty_json_response_as_object,
-            failover_group::archive_member_order, force_provider_stream_response, get_session_reservation_ttl_secs,
-            get_user_target, get_user_target_by_credentials, internal_server_error, is_running_playback,
-            is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
-            maintenance_rejection_response, redirect, redirect_response, reentry_suppressed_response,
-            resolve_initial_stalker_playback_url, resource_proxy_response, resource_redirect_or_proxy,
-            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
-            stream_response_with_provider_handle, try_option_bad_request, try_result_bad_request, try_unwrap_body,
-            PlaybackSource, RedirectParams,
+            failover_group::{archive_member_order, handle_stream_failure_for_group, resolve_playback_source},
+            force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
+            get_user_target_by_credentials, internal_server_error, is_running_playback, is_seekable_media_request,
+            is_session_based_playback, is_stream_share_enabled, local_stream_response, maintenance_rejection_response,
+            redirect, redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
+            resource_proxy_response, resource_redirect_or_proxy, separate_number_and_remainder,
+            should_allow_exhausted_shared_reconnect, stream_response, stream_response_with_provider_handle,
+            try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::{
@@ -830,36 +830,13 @@ async fn xtream_player_api_stream(
         let pinned_provider =
             user_session.as_ref().filter(|_| item_type.requires_provider_affinity()).map(|session| &session.provider);
 
-        let source = match &resolved_target {
-            ResolvedStreamTarget::Group(group) => {
-                if stream_req.context == ApiStreamContext::Timeshift || pli.item_type == PlaylistItemType::Catchup {
-                    PlaybackSource::Single { input: &input, stream_url: &stream_url }
-                } else {
-                    let bound_prefer = user_session
-                        .as_ref()
-                        .and_then(|session| session.member_binding.as_ref())
-                        .filter(|b| b.group_vid == group.group_vid.get())
-                        .map(|b| b.member_index);
-                    PlaybackSource::Group {
-                        group: Arc::clone(group),
-                        mode: tuliprox_session::failover_group::SelectionMode::Live,
-                        prefer: bound_prefer,
-                    }
-                }
-            }
-            ResolvedStreamTarget::Member { group, index } => {
-                if stream_req.context == ApiStreamContext::Timeshift || pli.item_type == PlaylistItemType::Catchup {
-                    PlaybackSource::Single { input: &input, stream_url: &stream_url }
-                } else {
-                    PlaybackSource::Group {
-                        group: Arc::clone(group),
-                        mode: tuliprox_session::failover_group::SelectionMode::Live,
-                        prefer: Some(*index),
-                    }
-                }
-            }
-            ResolvedStreamTarget::Item => PlaybackSource::Single { input: &input, stream_url: &stream_url },
-        };
+        let is_live = stream_req.context != ApiStreamContext::Timeshift && pli.item_type != PlaylistItemType::Catchup;
+        let bound_prefer = user_session
+            .as_ref()
+            .and_then(|session| session.member_binding.as_ref())
+            .filter(|b| resolved_target.group().is_some_and(|g| b.group_vid == g.group_vid.get()))
+            .map(|b| b.member_index);
+        let source = resolve_playback_source(&resolved_target, is_live, &input, &stream_url, bound_prefer);
 
         let outcome = stream_response(
             fingerprint,
@@ -883,20 +860,15 @@ async fn xtream_player_api_stream(
             return outcome.into_response();
         }
 
-        let failure_class = outcome.failure_class.unwrap_or(tuliprox_session::failover_group::FailureClass::Stream);
-        app_state.active_users.terminate_session(&user.username, session_key.as_str()).await;
-        app_state.active_provider.clear_provider_reservation(session_key.as_str());
-
-        if let Some(group) = resolved_target.group() {
-            if let Some(member) = group.members.iter().find(|m| m.member_vid == pli.virtual_id) {
-                crate::api::api_utils::failover_group::record_member_failure(
-                    &app_state.member_health,
-                    member,
-                    None,
-                    failure_class,
-                );
-            }
-        }
+        handle_stream_failure_for_group(
+            app_state,
+            &user.username,
+            session_key.as_str(),
+            outcome.failure_class,
+            resolved_target.group().map(|g| &**g),
+            pli.virtual_id,
+        )
+        .await;
         last_response = Some(outcome.into_response());
     }
 
@@ -1124,18 +1096,30 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
         }
         let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
         let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-        let mut pli = try_result_bad_request!(
-            xtream_get_item_for_stream_id(
-                req_virtual_id,
-                &app_state.app_config,
-                &app_state.playlists,
-                &target,
-                Some(stream_req.context.cluster())
-            )
-            .await,
-            true,
-            format!("Failed to read xtream item for stream id {req_virtual_id}")
-        );
+        let resolved_target =
+            classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, VirtualId::new(req_virtual_id))
+                .await;
+        let is_group = resolved_target.group().is_some();
+
+        let pli_res = xtream_get_item_for_stream_id(
+            req_virtual_id,
+            &app_state.app_config,
+            &app_state.playlists,
+            &target,
+            Some(stream_req.context.cluster()),
+        )
+        .await;
+        let mut pli = match pli_res {
+            Ok(pli) => pli,
+            Err(err) => match &resolved_target {
+                ResolvedStreamTarget::Group(group) => member_to_xtream_item(group, 0),
+                ResolvedStreamTarget::Member { group, index } => member_to_xtream_item(group, *index),
+                ResolvedStreamTarget::Item => {
+                    debug!("Failed to read xtream item for stream id {req_virtual_id}: {err}");
+                    return axum::http::StatusCode::BAD_REQUEST.into_response();
+                }
+            },
+        };
         let virtual_id = pli.virtual_id;
         let (is_recording, expected_input) = match source {
             InternalPlaybackSource::WebUi => (false, None),
@@ -1188,25 +1172,33 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             .into_response();
         }
 
-        let resolution_item_type =
-            if stream_req.context == ApiStreamContext::Timeshift { PlaylistItemType::Catchup } else { pli.item_type };
-        pli.url = match resolve_initial_stalker_playback_url(
-            app_state,
-            &input,
-            &user,
-            pli.provider_id,
-            pli.xtream_cluster,
-            resolution_item_type,
-            &pli.url,
-        )
-        .await
-        {
-            Ok(url) => url,
-            Err(err) => {
-                error!("Failed to resolve initial Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
-                return axum::http::StatusCode::BAD_GATEWAY.into_response();
-            }
-        };
+        if !is_group {
+            let resolution_item_type = if stream_req.context == ApiStreamContext::Timeshift {
+                PlaylistItemType::Catchup
+            } else {
+                pli.item_type
+            };
+            pli.url = match resolve_initial_stalker_playback_url(
+                app_state,
+                &input,
+                &user,
+                pli.provider_id,
+                pli.xtream_cluster,
+                resolution_item_type,
+                &pli.url,
+            )
+            .await
+            {
+                Ok(url) => url,
+                Err(err) => {
+                    error!(
+                        "Failed to resolve initial Stalker playback URL: {}",
+                        sanitize_sensitive_info(&err.to_string())
+                    );
+                    return axum::http::StatusCode::BAD_GATEWAY.into_response();
+                }
+            };
+        }
 
         let requested_extension = resolve_xtream_playback_extension(stream_ext, &pli);
 
@@ -1216,8 +1208,9 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             if playback_ext.is_empty() { requested_extension.as_deref() } else { Some(&*playback_ext) };
 
         let is_session_request = is_session_based_playback(pli.item_type, playback_ext);
+        let session_vid = if is_group { req_virtual_id } else { virtual_id.get() };
         let session_key =
-            create_playback_session_fingerprint(fingerprint, "webui", virtual_id.get(), pli.item_type, playback_ext);
+            create_playback_session_fingerprint(fingerprint, "webui", session_vid, pli.item_type, playback_ext);
 
         // TODO how should we use fixed provider for hls in multi provider config?
 
@@ -1270,13 +1263,22 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
         } else {
             None
         };
-        stream_response_with_provider_handle(
+        let mut stream_channel = pli.to_stream_channel(target.id);
+        if let Some(group) = resolved_target.group() {
+            stream_channel.group_virtual_id = Some(group.group_vid.get());
+        }
+        let is_live = preacquired_provider_handle.is_none()
+            && stream_req.context != ApiStreamContext::Timeshift
+            && pli.item_type != PlaylistItemType::Catchup;
+        let source = resolve_playback_source(&resolved_target, is_live, &input, &stream_url, None);
+
+        let outcome = stream_response_with_provider_handle(
             fingerprint,
             app_state,
             session_key.as_str(),
             None,
-            pli.to_stream_channel(target.id),
-            PlaybackSource::Single { input: &input, stream_url: &stream_url },
+            stream_channel,
+            source,
             None,
             req_headers,
             &target,
@@ -1287,8 +1289,21 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             None,
             preacquired_provider_handle,
         )
-        .await
-        .into_response()
+        .await;
+
+        if !outcome.is_success() {
+            handle_stream_failure_for_group(
+                app_state,
+                &user.username,
+                session_key.as_str(),
+                outcome.failure_class,
+                resolved_target.group().map(|g| &**g),
+                pli.virtual_id,
+            )
+            .await;
+        }
+
+        outcome.into_response()
     }
 }
 

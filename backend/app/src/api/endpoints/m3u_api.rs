@@ -3,6 +3,7 @@ use crate::{
         api_utils::{
             admission_failure_response, archive_member_order, blocks_new_playback, coalesce_byte_stream,
             create_m3u_catchup_session_key, create_playback_session_fingerprint, create_session_fingerprint,
+            failover_group::{handle_stream_failure_for_group, resolve_playback_source},
             force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
             get_user_target_by_credentials, is_running_playback, is_seekable_media_request, is_session_based_playback,
             is_stream_share_enabled, local_stream_response, maintenance_rejection_response, redirect_response,
@@ -142,6 +143,23 @@ fn effective_playback_extension<'a>(
         upstream_extension.or(requested_extension)
     } else {
         requested_extension.or(upstream_extension)
+    }
+}
+
+pub(crate) fn m3u_stream_session_key(
+    fingerprint: &Fingerprint,
+    username: &str,
+    session_vid: u32,
+    pli: &shared::model::M3uPlaylistItem,
+    stream_ext: Option<&str>,
+    archive_discriminator: Option<&str>,
+) -> String {
+    let effective_stream_ext = effective_playback_extension(pli.item_type, &pli.url, stream_ext);
+    let extension = effective_stream_ext.unwrap_or_default();
+    if pli.item_type == PlaylistItemType::Catchup {
+        create_m3u_catchup_session_key(fingerprint, username, session_vid, archive_discriminator.unwrap_or("live"))
+    } else {
+        create_playback_session_fingerprint(fingerprint, username, session_vid, pli.item_type, Some(extension))
     }
 }
 
@@ -322,16 +340,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     let effective_stream_ext = effective_playback_extension(pli.item_type, &pli.url, stream_ext);
     let extension = effective_stream_ext.unwrap_or_default();
     let session_vid = resolved_target.group().map_or(virtual_id.get(), |g| g.group_vid.get());
-    let session_key = if pli.item_type == PlaylistItemType::Catchup {
-        create_m3u_catchup_session_key(
-            fingerprint,
-            &user.username,
-            session_vid,
-            archive_discriminator.unwrap_or("live"),
-        )
-    } else {
-        create_playback_session_fingerprint(fingerprint, &user.username, session_vid, pli.item_type, Some(extension))
-    };
+    let session_key =
+        m3u_stream_session_key(fingerprint, &user.username, session_vid, &pli, stream_ext, archive_discriminator);
     let eviction_reentry_guard = if pli.item_type == PlaylistItemType::Catchup
         || !crate::api::api_utils::is_socket_bound_playback_session(pli.item_type, Some(extension))
     {
@@ -604,27 +614,11 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         .map(|b| (b.group_vid, b.member_index));
 
     let is_catchup = archive_discriminator.is_some() || pli.item_type == PlaylistItemType::Catchup;
-    let mut source = source.unwrap_or_else(|| {
-        if is_catchup {
-            return PlaybackSource::Single { input: &input, stream_url: &session_url };
-        }
-        match &resolved_target {
-            ResolvedStreamTarget::Group(group) => {
-                let prefer = bound_prefer.filter(|(gvid, _)| *gvid == group.group_vid.get()).map(|(_, idx)| idx);
-                PlaybackSource::Group {
-                    group: Arc::clone(group),
-                    mode: tuliprox_session::failover_group::SelectionMode::Live,
-                    prefer,
-                }
-            }
-            ResolvedStreamTarget::Member { group, index } => PlaybackSource::Group {
-                group: Arc::clone(group),
-                mode: tuliprox_session::failover_group::SelectionMode::Live,
-                prefer: Some(*index),
-            },
-            ResolvedStreamTarget::Item => PlaybackSource::Single { input: &input, stream_url: &session_url },
-        }
-    });
+    let is_live = !is_catchup && provider_allocation_id.is_none();
+    let bound_prefer_idx =
+        bound_prefer.and_then(|(gvid, idx)| resolved_target.group().filter(|g| g.group_vid.get() == gvid).map(|_| idx));
+    let mut source = source
+        .unwrap_or_else(|| resolve_playback_source(&resolved_target, is_live, &input, &session_url, bound_prefer_idx));
 
     if let PlaybackSource::Group { group, prefer, .. } = &mut source {
         if prefer.is_none() {
@@ -1131,23 +1125,18 @@ async fn m3u_api_catchup(
             return outcome.into_response();
         }
 
-        let failure_class = outcome.failure_class.unwrap_or(tuliprox_session::failover_group::FailureClass::Stream);
         let session_vid = classified.group().map_or(cand_pli.virtual_id.get(), |g| g.group_vid.get());
         let session_key =
             create_m3u_catchup_session_key(&fingerprint, &user.username, session_vid, &archive_discriminator);
-        app_state.active_users.terminate_session(&user.username, session_key.as_str()).await;
-        app_state.active_provider.clear_provider_reservation(session_key.as_str());
-
-        if let Some(group) = classified.group() {
-            if let Some(member) = group.members.iter().find(|m| m.member_vid == cand_pli.virtual_id) {
-                crate::api::api_utils::failover_group::record_member_failure(
-                    &app_state.member_health,
-                    member,
-                    None,
-                    failure_class,
-                );
-            }
-        }
+        handle_stream_failure_for_group(
+            &app_state,
+            &user.username,
+            session_key.as_str(),
+            outcome.failure_class,
+            classified.group().map(|g| &**g),
+            cand_pli.virtual_id,
+        )
+        .await;
         last_response = Some(outcome.into_response());
     }
 

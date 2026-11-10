@@ -73,17 +73,30 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
         } else {
             let playlist_explorer_ctx_clone =
                 playlist_explorer_ctx.expect("PlaylistExplorer context not found").clone();
+            let translate = translate.clone();
             Callback::from(move |request: PlaylistRequest| {
                 if !*set_loading {
                     let services = services.clone();
                     let playlist_explorer_ctx_clone = playlist_explorer_ctx_clone.clone();
+                    let translate = translate.clone();
                     set_loading.set(true);
+                    playlist_explorer_ctx_clone.error.set(None);
                     services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
                     let set_loading = set_loading.clone();
                     let req = request;
                     spawn_local(async move {
-                        let playlist = services.playlist.get_playlist_categories_for_explorer(&req).await;
-                        playlist_explorer_ctx_clone.playlist.set(playlist);
+                        let res = services.playlist.get_playlist_categories_for_explorer(&req).await;
+                        match res {
+                            Ok(playlist) => {
+                                playlist_explorer_ctx_clone.playlist.set(playlist);
+                                playlist_explorer_ctx_clone.error.set(None);
+                            }
+                            Err(err) => {
+                                playlist_explorer_ctx_clone.playlist.set(None);
+                                playlist_explorer_ctx_clone.error.set(Some(err.to_string()));
+                                services.toastr.error(translate.t("MESSAGES.PLAYLIST_EXPLORER.FETCH_FAILED"));
+                            }
+                        }
                         playlist_explorer_ctx_clone.playlist_request.set(Some(req));
                         set_loading.set(false);
                         services.event.broadcast(EventMessage::Busy(BusyStatus::Hide));

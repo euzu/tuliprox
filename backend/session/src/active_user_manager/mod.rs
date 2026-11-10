@@ -5,7 +5,7 @@ use crate::{
 };
 use arc_swap::ArcSwapOption;
 use lru::LruCache;
-use shared::model::{StreamChannel, StreamInfo, UserConnectionPermission};
+use shared::model::{StreamChannel, StreamInfo, StreamMemberInfo, UserConnectionPermission};
 use std::{
     borrow::Cow,
     cmp::Reverse,
@@ -119,6 +119,17 @@ pub struct MemberBinding {
     pub input_name: Arc<str>,
     pub member_title: Arc<str>,
     pub provider: Arc<str>,
+}
+
+impl MemberBinding {
+    pub fn to_stream_member_info(&self) -> StreamMemberInfo {
+        StreamMemberInfo {
+            title: Arc::clone(&self.member_title),
+            input_name: Arc::clone(&self.input_name),
+            provider: Arc::clone(&self.provider),
+            member_vid: Some(self.member_vid),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

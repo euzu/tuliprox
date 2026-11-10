@@ -390,3 +390,21 @@ async fn xtream_catchup_table_virtual_id_resolves_group_and_plays() {
     let last_request = env.last_request_path("solis");
     assert!(last_request.contains("/timeshift/"), "Upstream must receive timeshift request, got: {last_request}");
 }
+
+#[tokio::test]
+async fn failed_m3u_client_group_stream_records_one_member_failure() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .without_plain_channel()
+        .m3u("solis")
+        .m3u("korath")
+        .with_member_archives(&[Some(7), Some(7)])
+        .origin_status("solis", 503)
+        .build()
+        .await;
+
+    let utc = (chrono::Utc::now() - chrono::Duration::hours(2)).timestamp();
+    let res = env.get_m3u_catchup(env.group_vid, utc, 3600).await;
+    assert_eq!(res.status(), 200);
+
+    assert_eq!(env.circuit("solis"), CircuitView::Counting(1));
+}

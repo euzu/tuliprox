@@ -577,6 +577,7 @@ impl ActiveUserManager {
     ) {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
             let mut user_connections = self.write_connections().await;
+            user_connections.pending_member_bindings.remove(session_token);
             let (connection_changed, user_removed, promotions, divergence_snapshot) = {
                 let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                     return;

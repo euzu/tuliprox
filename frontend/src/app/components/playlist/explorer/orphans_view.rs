@@ -33,9 +33,9 @@ fn portal_to_body(content: Html) -> Html {
 
 define_table_columns! {
     enum OrphanTableColumn {
-        // Row actions come first with an empty header (project rule).
-        Actions => ("actions", "") { can_hide: false },
-        Select => ("select", "") { can_hide: false },
+        // Structural columns (actions and selection) hide the header centrally via content: false.
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") { can_hide: false, content: false },
+        Select => ("select", "TABLE_COLUMNS.SELECT") { can_hide: false, content: false },
         Scope => ("scope", "LABEL.SCOPE"),
         File => ("file", "LABEL.FILE"),
         Kind => ("kind", "LABEL.TYPE"),

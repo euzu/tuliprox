@@ -16,8 +16,8 @@ use yew::prelude::*;
 
 crate::app::components::define_table_columns! {
     enum LiveTableColumn {
-        Actions => ("actions", "") { can_hide: false, content: false },
-        Select => ("select", "") { can_hide: false, content: false },
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") { can_hide: false, content: false },
+        Select => ("select", "TABLE_COLUMNS.SELECT") { can_hide: false, content: false },
         ChNo => ("chno", "LABEL.EXPLORER_SORT_CHANNEL_NO") { header_label: Some("LABEL.EXPLORER_CHNO_SHORT") },
         Logo => ("logo", "LABEL.LOGO"),
         Name => ("name", "LABEL.NAME") { can_hide: false },

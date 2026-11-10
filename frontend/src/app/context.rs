@@ -21,6 +21,7 @@ pub struct PlaylistContext {
 pub struct PlaylistExplorerContext {
     pub playlist: UseStateHandle<Option<Rc<UiPlaylistCategories>>>,
     pub playlist_request: UseStateHandle<Option<PlaylistRequest>>,
+    pub error: UseStateHandle<Option<String>>,
 }
 
 // Yew 0.22 changed UseStateHandle::PartialEq to compare by handle identity instead of value.

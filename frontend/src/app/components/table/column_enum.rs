@@ -43,6 +43,9 @@ macro_rules! define_table_columns {
         #[repr(usize)]
         enum $name { $($variant),+ }
 
+        // Every column needs a label: the column panel lists columns by it, also the ones without a header.
+        $(const _: () = assert!(!$label.is_empty(), concat!("table column `", $id, "` has an empty label"));)+
+
         impl $name {
             const ALL: &'static [Self] = &[$(Self::$variant),+];
 

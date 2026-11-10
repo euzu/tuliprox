@@ -21,7 +21,7 @@
   "form.mode.live_only": "Только трансляции",
   "form.max_uploads.title": "Максимум загрузок",
   "form.max_uploads.description": "Сколько последних загрузок брать на канал (1–15).",
-  "form.cache_ttl_minutes.title": "TTL кэша потоков (минуты)",
+  "form.cache_ttl_minutes.title": "TTL кэша (мин)",
   "form.cache_ttl_minutes.description": "Как долго этот ввод повторно использует найденный URL потока (10–360).",
   "form.check": "Проверить цели и экземпляры",
   "tile.title": "YouTube",

@@ -1,6 +1,6 @@
 use super::{
     get_adaptive_session_ttl_secs, release_session_addr, ActiveUserConnectionParams, ActiveUserManager,
-    AdmissionRejectionReason, ConnectionAdmission, DeferredWakes, PlaybackLifecycle, ReleasedConnection,
+    AdmissionRejectionReason, ConnectionAdmission, DeferredWakes, MemberBinding, PlaybackLifecycle, ReleasedConnection,
     SessionChangeSignal, SessionIdentity, SessionProviderHeaders, StreamRequestClaim, StreamRequestDetach, UserSession,
     DIVERGENCE_CACHE_CAPACITY, ENDED_SESSION_RECREATE_BLOCK,
 };
@@ -12,7 +12,7 @@ use arc_swap::ArcSwapOption;
 use lru::LruCache;
 use shared::{
     defaults::{default_grace_period_millis, default_grace_period_timeout_secs},
-    model::{CustomVideoStreamType, StreamChannel, StreamInfo, UserConnectionPermission, VirtualId},
+    model::{CustomVideoStreamType, StreamChannel, StreamInfo, StreamMemberInfo, UserConnectionPermission, VirtualId},
     utils::{current_time_secs, sanitize_sensitive_info, strip_port, Internable},
 };
 use std::{
@@ -328,6 +328,19 @@ impl UserConnections {
         Some((data, session))
     }
 
+    pub(super) fn take_valid_pending_member_info(
+        pending_member_bindings: &mut HashMap<String, (Instant, MemberBinding)>,
+        token: &str,
+        now: Instant,
+    ) -> Option<StreamMemberInfo> {
+        let (expires_at, binding) = pending_member_bindings.remove(token)?;
+        if expires_at > now {
+            Some(binding.to_stream_member_info())
+        } else {
+            None
+        }
+    }
+
     /// Returns the live session only while this exact incarnation and binding may still serve requests.
     pub(super) fn current_session(
         &self,
@@ -353,6 +366,7 @@ pub(super) struct UserConnections {
     /// playlist token of such a session must not recreate it; an expired session may.
     pub(super) ended_sessions: HashMap<String, Instant>,
     pub(super) recent_socket_reentry_guards: HashMap<String, RecentWinnerProtection>,
+    pub(super) pending_member_bindings: HashMap<String, (Instant, MemberBinding)>,
     pub(super) by_key: HashMap<String, UserConnectionData>,
     pub(super) key_by_addr: HashMap<SocketAddr, SocketRegistration>,
 }

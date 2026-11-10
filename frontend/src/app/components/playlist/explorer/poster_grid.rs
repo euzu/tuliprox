@@ -21,8 +21,8 @@ const POSTER_GRID_PAGE_SIZE: usize = 120;
 
 crate::app::components::define_table_columns! {
     enum VodTableColumn {
-        Actions => ("actions", "") { can_hide: false, content: false },
-        Select => ("select", "") { can_hide: false, content: false },
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") { can_hide: false, content: false },
+        Select => ("select", "TABLE_COLUMNS.SELECT") { can_hide: false, content: false },
         Logo => ("logo", "LABEL.LOGO"),
         Title => ("title", "LABEL.TITLE") { can_hide: false },
         Year => ("year", "LABEL.EXPLORER_SORT_YEAR"),

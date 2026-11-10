@@ -372,7 +372,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
             {
                 if let Some(streams) = visible_streams.as_ref() {
                     if streams.is_empty() {
-                        html! { <NoContent /> }
+                        html! { <NoContent text={translate.t("LABEL.NO_ACTIVE_STREAMS")} /> }
                     } else {
                         html! {
                             <>
@@ -442,7 +442,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                         }
                     }
                 } else {
-                    html! { <NoContent /> }
+                    html! { <NoContent text={translate.t("LABEL.NO_ACTIVE_STREAMS")} /> }
                 }
             }
            </div>

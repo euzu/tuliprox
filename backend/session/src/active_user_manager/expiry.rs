@@ -344,6 +344,7 @@ impl ActiveUserManager {
                     user_connections
                         .recent_socket_reentry_guards
                         .retain(|_, protection| protection.expires_at > now_instant);
+                    user_connections.pending_member_bindings.retain(|_, (expires_at, _)| *expires_at > now_instant);
                     for connection_data in user_connections.by_key.values_mut() {
                         Self::release_expired_session_reservations(connection_data, now);
                         connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);
