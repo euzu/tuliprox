@@ -795,6 +795,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "test_input".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
         };
@@ -850,6 +851,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "test_input".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None, // originally missing
             explorer_meta: None,
         };
@@ -896,6 +898,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "test_input".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
         };
@@ -912,6 +915,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "test_input".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
         };
@@ -958,6 +962,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "test_input".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
         };
@@ -988,15 +993,16 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "input1".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
         };
 
         let json = serde_json::to_string(&item).expect("serialize item");
-        // Serialization when explorer_meta is None must produce exactly 12 fields
+        // Serialization when explorer_meta is None must produce exactly 13 fields
         let value: serde_json::Value = serde_json::from_str(&json).expect("deserialize as JSON value");
         let arr = value.as_array().expect("array serialization");
-        assert_eq!(arr.len(), 12);
+        assert_eq!(arr.len(), 13);
     }
 
     #[test]
@@ -1015,6 +1021,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "test_input".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: Some(UiItemExplorerMeta {
                 added: Some(1_700_000_000),
@@ -1059,6 +1066,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "in".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: Some(UiItemExplorerMeta { chno: Some(202_362), ..Default::default() }),
         };
@@ -1091,6 +1099,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "in".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
         };

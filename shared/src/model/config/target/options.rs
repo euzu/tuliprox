@@ -166,6 +166,8 @@ pub struct ConfigTargetOptions {
     pub epg_output: EpgOutputOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_redirect: Option<ClusterFlags>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover_groups: Option<super::failover_groups::FailoverGroupsTargetConfig>,
 }
 
 impl ConfigTargetOptions {
@@ -176,7 +178,10 @@ impl ConfigTargetOptions {
             && self.deduplicate.is_none()
             && self.epg_output.is_empty()
             && self.force_redirect.is_none_or(|f| f.has_full_flags() || f.is_empty())
+            && self.failover_groups.is_none()
     }
+
+    pub fn prepare(&mut self) -> Result<(), crate::error::TuliproxError> { Ok(()) }
 
     pub const fn lowercase_epg_ids(&self) -> bool { self.epg_output.lowercase_ids }
 

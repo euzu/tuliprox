@@ -12,6 +12,8 @@ mod db_cli;
 mod db_viewer;
 mod epg_group_index;
 mod epg_repository;
+pub mod failover_group_repository;
+mod failover_repository;
 mod geoip;
 mod library_repository;
 mod lineup_guide_index;
@@ -51,6 +53,8 @@ pub use db_cli::{run_database_command, DatabaseCommand};
 pub use db_viewer::*;
 pub use epg_group_index::*;
 pub use epg_repository::*;
+pub use failover_group_repository::*;
+pub use failover_repository::*;
 pub use geoip::*;
 pub use library_repository::*;
 pub use lineup_guide_index::*;
@@ -81,6 +85,8 @@ pub use stream_history::*;
 pub use strm_repository::*;
 pub use target_bouquet_repository::*;
 pub use target_id_mapping::*;
+pub mod target_stream_item;
+pub use target_stream_item::*;
 // The B+Tree storage engine is its own package. Aliased under its historical
 // module name so every `crate::bplustree::X` path keeps resolving.
 pub use tuliprox_btree as bplustree;

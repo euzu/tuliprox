@@ -7,7 +7,10 @@ use crate::active_provider_manager::ConnectionKind;
 use log::debug;
 use shared::{
     defaults::{default_hls_session_ttl_secs, DASH_EXT, HLS_EXT},
-    model::{PlaylistItemType, StreamInfo, UserConnectionPermission},
+    model::{
+        ActiveUserConnectionChange, EventMessage, PlaylistItemType, StreamInfo, StreamMemberInfo,
+        UserConnectionPermission,
+    },
     utils::{
         current_time_secs, extract_extension_from_url, is_catchup_session_token, sanitize_sensitive_info, strip_port,
     },
@@ -84,6 +87,7 @@ impl Default for UserSession {
             permission: UserConnectionPermission::Allowed,
             connection_kind: None,
             lifecycle: PlaybackLifecycle::default(),
+            member_binding: None,
         }
     }
 }
@@ -403,6 +407,40 @@ impl ActiveUserManager {
         }
     }
 
+    /// After a shared failover group stream switched member: every viewer's stream and session
+    /// of the group on `target_id` shows `provider` and the active member.
+    pub async fn update_shared_group_provider(
+        &self,
+        target_id: u16,
+        group_vid: u32,
+        provider: Arc<str>,
+        member_info: Option<StreamMemberInfo>,
+    ) {
+        let now = current_time_secs();
+        let mut user_connections = self.write_connections().await;
+        for connection_data in user_connections.by_key.values_mut() {
+            let mut tokens = Vec::new();
+            for stream in &mut connection_data.streams {
+                let channel = &stream.channel;
+                if channel.shared && channel.target_id == target_id && channel.client_virtual_id() == group_vid {
+                    stream.provider = Arc::clone(&provider);
+                    if let Some(info) = &member_info {
+                        stream.member_info = Some(info.clone());
+                    }
+                    stream.ts = now;
+                    tokens.extend(stream.session_token.clone());
+                    self.event_manager
+                        .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream.clone())));
+                }
+            }
+            for session in connection_data.sessions.iter_mut().filter(|session| tokens.contains(&session.token)) {
+                if session.provider != provider {
+                    session.switch_provider(Arc::clone(&provider));
+                }
+            }
+        }
+    }
+
     pub async fn clear_unbound_session_addr(&self, username: &str, token: &str, addr: &SocketAddr) {
         let now = current_time_secs();
         let mut user_connections = self.write_connections().await;
@@ -644,6 +682,7 @@ impl ActiveUserManager {
     pub async fn terminate_session(&self, username: &str, session_token: &str) -> bool {
         let (connection_changed, removed_streams, promotions) = {
             let mut user_connections = self.write_connections().await;
+            user_connections.pending_member_bindings.remove(session_token);
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return false;
             };

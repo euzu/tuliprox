@@ -99,6 +99,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: Arc::from("input"),
+            input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: Some(UiItemExplorerMeta {
                 override_id: Some(Arc::from("urlhash-v1:abc123blake3")),
@@ -121,6 +122,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: Arc::from("input"),
+            input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
         };

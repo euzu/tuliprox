@@ -115,6 +115,9 @@ pub struct PlaylistUpdateProgressEvent {
     pub library_scan_result: Option<LibraryScanResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<PlaylistUpdateProgressDetail>,
+    /// Why an input failed or completed partially, with credentials masked. Shown on the update card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
     pub target: String,
     pub message: String,
 }
@@ -137,6 +140,7 @@ impl PlaylistUpdateProgressEvent {
             input_telemetry: None,
             library_scan_result: None,
             detail: None,
+            failure_reason: None,
             target: target.into(),
             message: message.into(),
         }
@@ -164,6 +168,7 @@ impl PlaylistUpdateProgressEvent {
                 PlaylistUpdateState::Partial => PlaylistUpdateProgressDetail::InputCompletedPartially,
                 PlaylistUpdateState::Failure => PlaylistUpdateProgressDetail::InputFailed,
             }),
+            failure_reason: None,
             target: target.into(),
             message: message.into(),
         }
@@ -185,6 +190,7 @@ impl PlaylistUpdateProgressEvent {
             input_telemetry: None,
             library_scan_result: None,
             detail: None,
+            failure_reason: None,
             target: target.into(),
             message: message.into(),
         }
@@ -201,6 +207,7 @@ impl PlaylistUpdateProgressEvent {
             input_telemetry: None,
             library_scan_result: None,
             detail: None,
+            failure_reason: None,
             target: target.into(),
             message: message.into(),
         }
@@ -217,6 +224,7 @@ impl PlaylistUpdateProgressEvent {
             input_telemetry: None,
             library_scan_result: None,
             detail: None,
+            failure_reason: None,
             target: target.into(),
             message: message.into(),
         }
@@ -233,6 +241,13 @@ impl PlaylistUpdateProgressEvent {
     #[must_use]
     pub fn with_library_scan_result(mut self, result: LibraryScanResult) -> Self {
         self.library_scan_result = Some(result);
+        self
+    }
+
+    /// Attaches why an input failed or completed partially; blank reasons are dropped.
+    #[must_use]
+    pub fn with_failure_reason(mut self, reason: Option<String>) -> Self {
+        self.failure_reason = reason.filter(|reason| !reason.trim().is_empty());
         self
     }
 

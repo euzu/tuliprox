@@ -120,6 +120,9 @@ pub enum ProtocolMessage {
     /// Inputs in maintenance after a change. Carries the whole map: it is small,
     /// and a client never has to merge.
     MaintenanceChangedResponse(crate::model::MaintenanceEntries),
+    /// Targets whose failover override section changed on disk and was reloaded. The channel
+    /// group editor re-fetches the section of an affected target.
+    FailoverOverridesChanged(Vec<String>),
     /// The socket cannot serve recordings to this session, and the reason
     /// is actionable.
     ///

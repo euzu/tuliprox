@@ -3,13 +3,13 @@ use crate::model::{
     auth_audit::{AuthAuditEvent, AuthAuditOutcome},
     notification::{registry, EventId, Severity},
     stats::SourceStats,
-    ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, LibraryScanProgressEvent,
-    LibraryScanSummaryStatus, MaintenanceEntries, MetadataUpdateFailure, MsgKind, NotificationDeadLetter, Permission,
-    PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState, PluginUpdateEvent,
-    PluginUpdateOutcome, ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted,
-    ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent,
-    ServerLifecycleState, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
-    WatchDisabled, WatchUnmatched,
+    ActiveUserConnectionChange, CapacityTier, CircuitState, ConfigReloadFailure, ConfigType, ConnectionDenied,
+    DiskAlert, LibraryScanProgressEvent, LibraryScanSummaryStatus, MaintenanceEntries, MetadataUpdateFailure, MsgKind,
+    NotificationDeadLetter, Permission, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
+    PlaylistUpdateState, PluginUpdateEvent, PluginUpdateOutcome, ProviderAccountEvent, ProviderAccountState,
+    ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage,
+    ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SwitchReason, SystemInfo,
+    UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -105,6 +105,34 @@ pub enum EventMessage {
     /// see [`EventMessage::kind`] - so a subscriber can ask for the failures
     /// without being woken by every successful sign-in.
     AuthAudit(AuthAuditEvent),
+
+    FailoverGroupMemberSelected {
+        target_id: u16,
+        group_vid: u32,
+        member_vid: u32,
+        tier: CapacityTier,
+    },
+    FailoverGroupExhausted {
+        target_id: u16,
+        group_vid: u32,
+    },
+    FailoverGroupCircuitChanged {
+        input_name: Arc<str>,
+        input_stream_id: Arc<str>,
+        state: CircuitState,
+    },
+    /// A running group stream continued on another member.
+    FailoverGroupMemberSwitched {
+        target_id: u16,
+        group_vid: u32,
+        from_member_vid: u32,
+        to_member_vid: u32,
+        reason: SwitchReason,
+    },
+    /// Failover override files were reloaded and these targets' sections were added, changed or removed.
+    FailoverOverridesChanged {
+        targets: Vec<String>,
+    },
 }
 
 impl EventMessage {
@@ -180,6 +208,11 @@ impl EventMessage {
                 AuthAuditOutcome::SignInThrottled => EventKind::AuthSignInThrottled,
                 AuthAuditOutcome::PermissionDenied => EventKind::AuthPermissionDenied,
             },
+            Self::FailoverGroupMemberSelected { .. } => EventKind::FailoverGroupMemberSelected,
+            Self::FailoverGroupExhausted { .. } => EventKind::FailoverGroupExhausted,
+            Self::FailoverGroupCircuitChanged { .. } => EventKind::FailoverGroupCircuitChanged,
+            Self::FailoverGroupMemberSwitched { .. } => EventKind::FailoverGroupMemberSwitched,
+            Self::FailoverOverridesChanged { .. } => EventKind::FailoverOverridesChanged,
         }
     }
 
@@ -282,7 +315,14 @@ impl EventMessage {
             Self::RecordingChanged => registry::RECORDING_QUEUE_CHANGED,
             Self::RecordingRulesChanged => registry::RECORDING_RULES_CHANGED,
             Self::MaintenanceChanged(_) => registry::MAINTENANCE_CHANGED,
-            Self::PlaylistUpdateProgress(_) | Self::SystemInfoUpdate(_) | Self::RecordingProgress => return None,
+            Self::PlaylistUpdateProgress(_)
+            | Self::SystemInfoUpdate(_)
+            | Self::RecordingProgress
+            | Self::FailoverGroupMemberSelected { .. }
+            | Self::FailoverGroupExhausted { .. }
+            | Self::FailoverGroupCircuitChanged { .. }
+            | Self::FailoverGroupMemberSwitched { .. }
+            | Self::FailoverOverridesChanged { .. } => return None,
         })
     }
 
@@ -339,6 +379,42 @@ impl EventMessage {
             Self::ScheduledTaskFailed(failure) => encode(failure),
             Self::PluginUpdate(event) => encode(event),
             Self::AuthAudit(event) => encode(event),
+            Self::FailoverGroupMemberSelected { target_id, group_vid, member_vid, tier } => {
+                serde_json::json!({
+                    "target_id": target_id,
+                    "group_vid": group_vid,
+                    "member_vid": member_vid,
+                    "tier": tier,
+                })
+            }
+            Self::FailoverGroupExhausted { target_id, group_vid } => {
+                serde_json::json!({
+                    "target_id": target_id,
+                    "group_vid": group_vid,
+                })
+            }
+            Self::FailoverGroupMemberSwitched { target_id, group_vid, from_member_vid, to_member_vid, reason } => {
+                serde_json::json!({
+                    "target_id": target_id,
+                    "group_vid": group_vid,
+                    "from_member_vid": from_member_vid,
+                    "to_member_vid": to_member_vid,
+                    "reason": reason,
+                })
+            }
+            Self::FailoverOverridesChanged { targets } => serde_json::json!({ "targets": targets }),
+            Self::FailoverGroupCircuitChanged { input_name, input_stream_id, state } => {
+                let state_str = match state {
+                    CircuitState::Closed => "closed",
+                    CircuitState::OpenUntil(_) => "open",
+                    CircuitState::HalfOpenInFlight => "half_open",
+                };
+                serde_json::json!({
+                    "input_name": input_name.as_ref(),
+                    "input_stream_id": input_stream_id.as_ref(),
+                    "state": state_str,
+                })
+            }
         }
     }
 
@@ -379,6 +455,11 @@ pub struct PlaylistUpdateSummary {
 }
 
 impl PlaylistUpdateSummary {
+    /// Names of the targets the run processed, in report order.
+    pub fn processed_targets(&self) -> impl Iterator<Item = &str> {
+        self.stats.iter().flat_map(|source| source.targets.iter()).map(|target| target.name.as_str())
+    }
+
     /// A summary carrying only an outcome - the timeout and panic paths,
     /// which have no statistics to report.
     #[must_use]

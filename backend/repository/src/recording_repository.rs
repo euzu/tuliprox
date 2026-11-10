@@ -1360,7 +1360,7 @@ mod tests {
 
     #[test]
     fn losing_the_strongest_entry_relaxes_the_file() -> io::Result<()> {
-        // The plan's case: remove the former maximum and the file must fall
+        // Removing the former maximum makes the file fall
         // back to what is still attached, not keep a priority nobody holds.
         let dir = tempfile::TempDir::new().expect("tempdir");
         let (mut repository, _opened) = RecordingRepository::open(dir.path(), dir.path())?;

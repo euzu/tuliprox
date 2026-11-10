@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tuliprox_plugin_sdk::{kv, prelude::*};
+use tuliprox_plugin_sdk::{clock, kv, prelude::*};
 
 const CACHE_PREFIX: &str = "yt:str:";
 
@@ -8,6 +8,32 @@ pub struct CachedStream {
     pub url: String,
     pub is_live: bool,
     pub instance: String,
+}
+
+/// Parses the `expire` Unix timestamp from a stream URL (query parameter or path segment), if present.
+fn url_expiry_unix(url: &str) -> Option<i64> {
+    if let Some((_, query)) = url.split_once('?') {
+        for param in query.split('&') {
+            if let Some((key, val)) = param.split_once('=') {
+                if key == "expire" {
+                    if let Ok(exp) = val.parse::<i64>() {
+                        return Some(exp);
+                    }
+                }
+            }
+        }
+    }
+    let mut parts = url.split('/');
+    while let Some(part) = parts.next() {
+        if part == "expire" {
+            if let Some(val) = parts.next() {
+                if let Ok(exp) = val.parse::<i64>() {
+                    return Some(exp);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Retrieves a fresh, non-expired stream from the Wasm KV-store,
@@ -43,13 +69,20 @@ pub fn get_stream(video_id: &str, valid_instances: &[String]) -> Option<CachedSt
 /// Stores a resolved stream into the Wasm KV-store.
 /// Live streams are capped at a 10-minute (600s) TTL to detect stream ending/restarts promptly;
 /// VOD uploads use the user-configured TTL (10–360 minutes).
+/// If the stream URL contains an expiry timestamp, the TTL is capped below that expiry.
 pub fn set_stream(video_id: &str, stream: &CachedStream, configured_ttl_minutes: u32) -> Result<(), String> {
     let key = format!("{CACHE_PREFIX}{video_id}");
-    let ttl_secs = if stream.is_live {
+    let mut ttl_secs = if stream.is_live {
         600 // 10 minutes max for active live streams
     } else {
         configured_ttl_minutes.clamp(10, 360).saturating_mul(60)
     };
+    if let Some(exp) = url_expiry_unix(&stream.url) {
+        let now = clock::now_unix();
+        let remaining = (exp - now).max(0) as u32;
+        let capped = remaining.saturating_sub(60).max(1);
+        ttl_secs = ttl_secs.min(capped);
+    }
     kv::set_json_ttl(&key, stream, ttl_secs).map_err(|e| e.to_string())
 }
 
@@ -88,5 +121,31 @@ mod tests {
         // Advance 2s more (601s total) -> expired
         mock::advance(2);
         assert_eq!(get_stream("live123", &instances), None);
+    }
+
+    #[test]
+    fn cache_stream_ttl_is_capped_below_url_expiry() {
+        mock::reset();
+        mock::set_now(1_000);
+
+        let instances = vec!["yt-dlp".to_string()];
+        // URL with expire=1300 (300s in the future).
+        // Configured TTL is 120m (7200s).
+        // Capped TTL should be (1300 - 1000) - 60 = 240s.
+        let stream = CachedStream {
+            url: "https://googlevideo.com/videoplayback?expire=1300&id=test".to_string(),
+            is_live: false,
+            instance: "yt-dlp".to_string(),
+        };
+
+        set_stream("vod1", &stream, 120).unwrap();
+
+        // After 239s, still fresh
+        mock::advance(239);
+        assert_eq!(get_stream("vod1", &instances), Some(stream.clone()));
+
+        // After 2s more (241s), expired
+        mock::advance(2);
+        assert_eq!(get_stream("vod1", &instances), None);
     }
 }

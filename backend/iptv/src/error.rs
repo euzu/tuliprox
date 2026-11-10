@@ -103,6 +103,7 @@ impl ProviderErrorKind {
             | ErrorKind::ConfigTarget
             | ErrorKind::ConfigWebUi
             | ErrorKind::TargetBouquet
+            | ErrorKind::FailoverGroup
             | ErrorKind::UrlParse
             | ErrorKind::FilterParse
             | ErrorKind::RegexCompile => Self::Config,

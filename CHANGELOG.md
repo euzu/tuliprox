@@ -219,6 +219,67 @@
 
 ## 🌟 New Features
 
+- **youtube-input supports yt-dlp as an optional stream resolver.** The plugin can now resolve playable YouTube streams
+  using a user-provided `yt-dlp` executable instead of Invidious. The input form selects the resolver (`invidious` or
+  `yt-dlp`) and accepts an optional `ytdlp_path` (defaulting to `/app/bin/yt-dlp` then `PATH`). Invidious instances are
+  optional when `yt-dlp` is selected, and all cache-missing videos in a fetch are resolved in a single batch process.
+  The plugin manifest declares the `process` capability.
+
+- **Official plugin packages are published as GitHub Releases.** Built `.tlpx` files are no longer stored in the
+  source repository. A CI workflow builds every new plugin version and publishes it as the release
+  `plugin-<id>-v<version>`; published versions are never replaced and stay installable for older Tuliprox versions. The
+  catalog is generated from the plugin manifests and every published version, and is served from a URL that never
+  changes: `https://github.com/euzu/tuliprox/releases/download/plugin-marketplace/marketplace.json`. This is the new
+  default marketplace source. A `config.yml` that names the old raw URL keeps working with the plugin versions it
+  already lists; switch to the new URL to get new plugin versions. See
+  [Publishing to a Marketplace](docs/src/plugins/marketplace-publishing.md#the-official-tuliprox-catalog).
+
+- **Resizable panes in the Web UI.** The new `SplitPane` component splits an area horizontally or vertically with a
+  divider that is dragged with the mouse or moved with the arrow keys; the size is remembered per browser. The
+  failover groups editor uses it for the group list / detail split and shows the groups and the candidate panel as
+  separate tabs. Its group search uses the common search field with regular expression support, the group filter is a
+  select, and the candidate panel picks its target group in a field whose list has the common search field. The candidate search takes a regular
+  expression as well (`regex=true` on `GET /api/v1/failover/candidates`). The `Select` component gained a `searchable`
+  option for long lists. The EPG group list uses `SplitPane` too and replaces the former shrink panel; its remembered
+  width is kept.
+
+- **Failover groups with stream failover.** A target with `options.failover_groups.enabled` collapses equal live
+  channels from several inputs (matched by caption, name, title or EPG id) into one channel. A start picks the best
+  member by QoS history, probed quality and free provider capacity and moves on to the next member when one fails.
+  While a client watches an MPEG-TS stream, a member that ends, fails, stops sending data or is too slow is replaced
+  underneath the open response, spliced at PAT/PMT and a keyframe; this works for direct and shared streams. Failing
+  members and inputs are paused for a while, and an outage limit and a switch limit bound the switching. The settings
+  live once in `config.yml` (`failover_groups`, Web UI: Settings → Failover groups); a target turns the feature on and
+  can override matching, source order, grace and failover on its own Failover groups page. Off by default. Active
+  streams show the group name and active member (title, input, provider) in the Active Streams dashboard, and admins
+  can manually switch the active stream to another member via row actions. Catch-up and timeshift (Xtream, M3U and
+  HLS) on a group channel use the archive-capable members that cover the requested time, whatever their position in
+  the group, with start failover to the next archive member; the group channel advertises the archive of its members.
+  Channels the mapper copies into other groups (`add_favourite`, `ctx.favourite`) are grouped once and the copies
+  become copies of the group channel. A group channel gets its channel number from the target's numbering, not from a
+  member's provider number, so it follows the target sort order; a locked number or name of the first member stays on
+  the group channel. See [Failover Groups & Stream Failover](docs/src/configuration/failover-groups.md).
+
+- **Failover groups editor and failover files.** Automatic failover groups can be corrected and your own groups can
+  be created, either on the new Web UI page **Failover groups** (sidebar → Playlist) or by editing YAML files. The
+  files only hold deviations from the automatic result (corrections of automatic groups, manual groups, excluded
+  channels), so automatic grouping keeps working and channels that appear later are still grouped; the `.db` files
+  stay derived data. One `failover.yml` or a `failover.d/` directory with any number of `.yml` / `.yaml` files holds
+  any number of targets, each target in exactly one file. With `config_hot_reload: true` changes are picked up
+  without a restart, an invalid change keeps the previous state, order and policy changes take effect immediately
+  (also a new first member, the playlist entry refreshes with the next update) and structural changes wait for a
+  playlist update. The editor offers a group list with filters, member order by
+  drag and drop, a candidate panel, a preview of unsaved changes, save and save & apply, a conflict dialog when the
+  file changed elsewhere, member health columns and a problems view for outdated corrections, inactive manual
+  groups, conflicting or unresolved channels and sections of unknown targets or of targets with failover groups
+  disabled (with "Assign to target…"), a hint with a marker in the group list while the name and logo of a playlist
+  entry wait for the next update, and a refresh when a playlist update of the open target finishes (the WebSocket
+  `PlaylistUpdateResponse` frame carries the processed `targets`). Deep links
+  come from the source editor target block and the playlist explorer context menu. Saving from the Web UI rewrites
+  the owning file, comments and formatting of that file are lost. New REST routes below `/api/v1/failover/` and the
+  event `failover.overrides_changed` serve the editor. See
+  [Corrections and own groups](docs/src/configuration/failover-groups.md#corrections-and-own-groups-failover-files)
+  and the [REST API Cookbook](docs/src/rest-api-cookbook.md#failover-groups-editor).
 - **Notification templates can format numbers and sizes.** Two Handlebars helpers join `json_escape`:
   `{{bytes disk.free_bytes}}` renders a byte count as `45.30 GB`, and `{{round disk.percent}}` (or
   `{{round disk.percent decimals=1}}`) rounds a number. A custom `system.disk.alert` template can now match the
@@ -446,6 +507,7 @@
   with Jellyfin 12.0, which removes the legacy `X-Emby-Token` and `api_key` authentication. Missing (virtual)
   movies and episodes are not imported; remote or `.strm` sources are imported but not playable. The Update tab
   offers Update and Refresh for these inputs. See [Media server inputs](docs/src/configuration/source.md#27-media-server-inputs-plex-emby-jellyfin).
+
 - **Maintenance mode.** Inputs can be put into maintenance from the new dashboard card or through
   `/api/v1/maintenance` (`*` addresses all inputs). New streams of an input in maintenance get the new
   `maintenance.ts` custom video; playlist and EPG updates keep the last persisted state, and probes, metadata
@@ -1407,6 +1469,72 @@
 
 ## 🐛 Fixes
 
+- **Active Streams shows the active failover member from the start.** A plain TS stream of a failover group has no
+  session, so the chosen member was only shown after a manual switch. The binding now waits for the stream and the
+  card shows "Active source" and the check mark at once.
+
+- **The internal stream endpoint uses failover groups.** A group channel opened with "Copy Webplayer Url" played only
+  its first member, without failover or manual switch. It now uses the group runtime like the Xtream and M3U client
+  routes. Recordings that hold a pre-acquired provider connection keep their single input.
+
+- **Videos with an HLS URL stay videos.** An item without a numeric provider id and with an `.m3u8` URL became a
+  live HLS channel, also when it was a video. YouTube uploads resolved by yt-dlp were listed as live channels. Only
+  live items are refined to HLS, DASH or unknown live.
+
+- **The provider explorer lists plugin inputs.** It answered "Invalid Arguments" for plugin inputs and the Web UI
+  showed "Select a playlist". Plugin inputs are read like M3U inputs, and a failed request shows an error.
+
+- **Table action and selection columns have no header, but a name in the column settings.** The column settings
+  listed the selection column of the explorer without a name. Every column now needs a label, checked at compile
+  time. The empty Streams list shows a text, and the youtube-input cache TTL label is no longer cut off.
+
+- **A failed input is fetched once per update run.** When several sources share an input and its fetch failed, every
+  further source asked the provider again in the same run. Each source could then see a different playlist, and a
+  plugin input such as youtube-input repeated its YouTube requests. Later sources now get the first failure without a
+  new request. The same applies to M3U aliases; the next update run fetches them again.
+
+- **A refused Xtream account hands the playlist download to an alias in the same update.** When the login reported the
+  account as banned, disabled or expired, the update failed and only the next update used an alias. The update now
+  continues with the next usable alias, also when the login answers HTTP 401 or 403. An unreachable provider or a
+  server error does not switch accounts.
+
+- **An update card shows the result of its own input.** After an update run, every input card showed the result of the
+  whole run, so an input that loaded without errors showed "Failed" when another input of a shared target failed. The
+  card now shows "Queued" and "Updating" for the run and afterwards the result of its own input.
+
+- **The playlist update card says why an input failed.** "Run details" showed only "Input update failed." (once per
+  affected target). The card now shows each detail once and adds the reason of the first error, with credentials
+  masked, for a failed or partial input. The progress event carries it as `failure_reason`.
+
+- **Plugin approval dialog:** version and plugin id no longer run together in the title.
+
+- **youtube-input names Invidious instances that refuse the video API.** Public Invidious instances
+  usually block the API the plugin needs. The input form's **Check** button now asks each instance for a video instead
+  of its status page and reports `refuses the video API`; a fetch whose instances all refuse fails with that reason
+  instead of a generic error. The plugin documentation explains why and how to run your own instance.
+
+- **An input with aliases can be saved without a main account.** Leaving `url`, `username` and `password` of an
+  Xtream (or M3U/Stalker) input empty while aliases exist was rejected as "url for input is mandatory". Such an input now
+  works like a batch input: its first enabled alias becomes the main account. A partly filled main account still needs
+  all three fields.
+
+- **Channels with a `+` suffix are no longer treated as the same channel.** Deduplication and failover grouping
+  dropped the `+` when they built the match key, so "Viaplay TV" and "Viaplay TV+" (or "RTL" and "RTL+") were merged.
+  `+` is now part of the word.
+
+- **Web auth no longer floods the debug log.** The permission lookup that runs on every Web UI request logs at `trace`
+  level instead of `debug`.
+
+- **The "Pending approval" plugin pill is readable on hover.** The inverted pill used a translucent text color on the
+  solid warning color; it now uses a dark text color in every theme.
+
+- **`.yaml` files in watched config directories now trigger a hot reload.** `mapping_path` and `template_path`
+  directories were loaded with `.yml` and `.yaml` files at start, but the file watcher only reacted to `.yml`, so a
+  `.yaml` file in `mapping.d` or `template.d` was never hot reloaded.
+
+- **Hidden files and editor temporary files in `mapping.d` and `template.d` are skipped.** Files starting with `.`
+  and names ending in `~` or `.swp` are no longer read as mapping or template files, so a half-saved editor file no
+  longer breaks a reload.
 - **A plugin shipped in the plugins directory can be approved from the Web UI.** A package placed in
   `<config dir>/plugins/<id>/` without a config entry, for example one shipped inside a Docker image, showed
   **Pending approval** with no way to review or approve it. The chip now opens the capability review as **Approve plugin**,
@@ -1521,6 +1649,7 @@
 - **Token-only M3U streams on a `provider://` profile no longer fail with 503 on the HLS media manifest.** The HLS
   origin rewrite required the selected account's username/password even when the URL carries only a token and needs
   no credential substitution. Credentials are now required only when a rewrite actually happens.
+
 - **Jellyfin catalogs no longer collapse to one item on a repeated update.** Jellyfin items lost their stable id
   when the input cache was read back, so all of them shared one UUID and the duplicate filter kept a single item.
   Any update that reused the cached input (new mapping rule, added source) published a catalog of one entry. The
@@ -2082,6 +2211,25 @@
 
 ## ⚙️ New Settings
 
+- **config.yml (`failover_groups`)**:
+  - Added the global failover group settings: `match_by`, `match_as_ascii`, `match_normalize`, `epg_conflict`,
+    `name_strip_quality`, `policy`, `allow_provider_grace`, `start` (`timeout_secs`, `max_attempts`), `failover`
+    (`enabled`, `no_data_timeout_secs`, `slow_source_pct`, `slow_source_secs`, `max_outage_secs`,
+    `same_source_retries`, `stable_after_secs`, `max_switches`, `max_switches_window_secs`, `audio_language`) and
+    `circuit` (`source_failures`, `cooldown_secs`, `cooldown_max_secs`, `input_failures`, `input_window_secs`). See
+    [Failover Groups & Stream Failover](docs/src/configuration/failover-groups.md).
+
+- **config.yml (`failover_path`) and CLI `--failover`**:
+  - Added `failover_path`, the file or directory with the failover files (corrections of automatic failover groups
+    and manual groups), relative to the config directory. The CLI argument `--failover <PATH>` overrides it. Without
+    either, `failover.yml` is used if it exists, else the directory `failover.d`, else `failover.yml`, which the Web
+    UI creates with the first save. See
+    [Corrections and own groups](docs/src/configuration/failover-groups.md#corrections-and-own-groups-failover-files).
+    Editable in the Web UI on the main configuration page (Failover Path).
+
+- **source.yml (target `options`)**:
+  - Added `failover_groups` (default off): `enabled` plus the optional overrides `match_by`, `match_as_ascii`,
+    `epg_conflict`, `name_strip_quality`, `policy`, `allow_provider_grace` and `failover`.
 - **`library.scan_directories[].follow_symlinks`: follow symlinks in a scan directory.** Default `true`. With `false`,
   the scanner skips symlinks and streaming only serves files whose resolved path lies inside the resolved scan
   directory. The Web UI library settings show it as the **Follow symlinks** column.

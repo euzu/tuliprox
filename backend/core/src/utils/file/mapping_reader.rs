@@ -105,10 +105,8 @@ fn read_mappings_from_directory(
     path: &Path,
     resolve_env: bool,
 ) -> Result<Option<(Vec<PathBuf>, MappingsDto)>, TuliproxError> {
-    let mut files = crate::utils::collect_yaml_files(path)
+    let files = crate::utils::collect_config_yaml_files(path)
         .map_err(|err| TuliproxError::Io(format!("Failed to read mappings {err}")))?;
-
-    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
     let mut mappings = vec![];
     let mut loaded_mapping_files = vec![];

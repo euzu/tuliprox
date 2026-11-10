@@ -24,6 +24,7 @@ const LABEL_STORAGE_DIR: &str = "LABEL.STORAGE_DIR";
 const LABEL_DEFAULT_USER_AGENT: &str = "LABEL.DEFAULT_USER_AGENT";
 const LABEL_MAPPING_PATH: &str = "LABEL.MAPPING_PATH";
 const LABEL_TEMPLATE_PATH: &str = "LABEL.TEMPLATE_PATH";
+const LABEL_FAILOVER_PATH: &str = "LABEL.FAILOVER_PATH";
 const LABEL_BACKUP_DIR: &str = "LABEL.BACKUP_DIR";
 const LABEL_USER_CONFIG_DIR: &str = "LABEL.USER_CONFIG_DIR";
 const LABEL_SLEEP_TIMER_MINS: &str = "LABEL.SLEEP_TIMER_MINS";
@@ -50,6 +51,7 @@ generate_form_reducer!(
         DefaultUserAgent => default_user_agent: Option<String>,
         MappingPath => mapping_path: Option<String>,
         TemplatePath => template_path: Option<String>,
+        FailoverPath => failover_path: Option<String>,
         BackupDir => backup_dir: Option<String>,
         UserConfigDir => user_config_dir: Option<String>,
         SleepTimerMins => sleep_timer_mins: Option<u32>,
@@ -111,6 +113,7 @@ pub fn MainConfigView() -> Html {
                 { config_field_optional!(form_state.form, translate.t(LABEL_DEFAULT_USER_AGENT), default_user_agent) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_MAPPING_PATH), mapping_path) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_TEMPLATE_PATH), template_path) }
+                { config_field_optional!(form_state.form, translate.t(LABEL_FAILOVER_PATH), failover_path) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_BACKUP_DIR), backup_dir) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_USER_CONFIG_DIR), user_config_dir) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_SLEEP_TIMER_MINS), sleep_timer_mins) }
@@ -138,6 +141,7 @@ pub fn MainConfigView() -> Html {
                 { edit_field_text_option!(form_state, translate.t(LABEL_DEFAULT_USER_AGENT), default_user_agent, MainConfigFormAction::DefaultUserAgent) }
                 { edit_field_text_option!(form_state, translate.t(LABEL_MAPPING_PATH), mapping_path, MainConfigFormAction::MappingPath) }
                 { edit_field_text_option!(form_state, translate.t(LABEL_TEMPLATE_PATH), template_path, MainConfigFormAction::TemplatePath) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_FAILOVER_PATH), failover_path, MainConfigFormAction::FailoverPath) }
                 { edit_field_text_option!(form_state, translate.t(LABEL_BACKUP_DIR), backup_dir, MainConfigFormAction::BackupDir) }
                 { edit_field_text_option!(form_state, translate.t(LABEL_USER_CONFIG_DIR), user_config_dir, MainConfigFormAction::UserConfigDir) }
                 { edit_field_number_option_u32!(form_state, translate.t(LABEL_SLEEP_TIMER_MINS), sleep_timer_mins, MainConfigFormAction::SleepTimerMins) }

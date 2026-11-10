@@ -167,10 +167,15 @@ impl MediaQuality {
 
     fn from_ffprobe_info_audio(audio: Option<&str>) -> Option<(AudioCodec, AudioChannels)> {
         // Assuming the first audio stream is the primary one.
-        let audio_info = audio.and_then(|v| serde_json::from_str::<Map<String, Value>>(v).ok())?;
+        let audio_val = audio.and_then(|v| serde_json::from_str::<Value>(v).ok())?;
+        let audio_info = match &audio_val {
+            Value::Object(map) => Some(map),
+            Value::Array(arr) => arr.first().and_then(Value::as_object),
+            _ => None,
+        }?;
 
         // Audio codec
-        let audio_codec = get_value(&audio_info, &["codec_name"])
+        let audio_codec = get_value(audio_info, &["codec_name"])
             .and_then(|v| v.as_str().map(str::to_lowercase))
             .map_or(AudioCodec::default(), |name| match name.as_str() {
                 "aac" => AudioCodec::AAC,
@@ -183,16 +188,16 @@ impl MediaQuality {
             });
 
         // Audio channels
-        let audio_channels =
-            get_value(&audio_info, &["channels"]).and_then(|v| v.as_i64()).map_or(AudioChannels::default(), |ch| {
-                match ch {
-                    8 => AudioChannels::Surround71,
-                    6 => AudioChannels::Surround51,
-                    2 => AudioChannels::Stereo,
-                    1 => AudioChannels::Mono,
-                    _ => AudioChannels::default(),
-                }
-            });
+        let audio_channels = get_value(audio_info, &["channels"]).and_then(|v| v.as_i64()).map_or(
+            AudioChannels::default(),
+            |ch| match ch {
+                8 => AudioChannels::Surround71,
+                6 => AudioChannels::Surround51,
+                2 => AudioChannels::Stereo,
+                1 => AudioChannels::Mono,
+                _ => AudioChannels::default(),
+            },
+        );
 
         Some((audio_codec, audio_channels))
     }
@@ -200,15 +205,20 @@ impl MediaQuality {
     fn from_ffprobe_info_video(
         video: Option<&str>,
     ) -> Option<(VideoResolution, VideoCodec, VideoDynamicRange, VideoBitDepth)> {
-        let video_info = video.and_then(|v| serde_json::from_str::<Map<String, Value>>(v).ok())?;
+        let video_val = video.and_then(|v| serde_json::from_str::<Value>(v).ok())?;
+        let video_info = match &video_val {
+            Value::Object(map) => Some(map),
+            Value::Array(arr) => arr.first().and_then(Value::as_object),
+            _ => None,
+        }?;
 
         // 1. Classify video resolution from the frame dimensions
-        let width = get_value(&video_info, &["width", "coded_width"]).and_then(|v| v.as_u64());
-        let height = get_value(&video_info, &["height", "coded_height"]).and_then(|v| v.as_u64());
+        let width = get_value(video_info, &["width", "coded_width"]).and_then(|v| v.as_u64());
+        let height = get_value(video_info, &["height", "coded_height"]).and_then(|v| v.as_u64());
         let resolution = VideoResolution::from_dimensions(width, height);
 
         // 2. Classify video codec
-        let video_codec = get_value(&video_info, &["codec_name"])
+        let video_codec = get_value(video_info, &["codec_name"])
             .and_then(|v| v.as_str().map(str::to_lowercase))
             .map_or(VideoCodec::default(), |name| match name.as_str() {
                 "h264" => VideoCodec::H264,
@@ -222,12 +232,12 @@ impl MediaQuality {
         // 3. Classify dynamic range
         let dynamic_range = {
             let tag_string =
-                get_value(&video_info, &["codec_tag_string"]).and_then(|v| v.as_str().map(str::to_lowercase));
+                get_value(video_info, &["codec_tag_string"]).and_then(|v| v.as_str().map(str::to_lowercase));
 
             if tag_string == Some("dovi".to_string()) {
                 VideoDynamicRange::DV
             } else {
-                get_value(&video_info, &["color_transfer"]).and_then(|v| v.as_str().map(str::to_lowercase)).map_or(
+                get_value(video_info, &["color_transfer"]).and_then(|v| v.as_str().map(str::to_lowercase)).map_or(
                     VideoDynamicRange::SDR,
                     |ct| match ct.as_str() {
                         "smpte2084" => VideoDynamicRange::HDR, // Generic HDR/HDR10
@@ -239,7 +249,7 @@ impl MediaQuality {
         };
 
         // 4. Classify bit depth
-        let bit_depth = get_value(&video_info, &["pix_fmt"]).and_then(|v| v.as_str().map(ToString::to_string)).map_or(
+        let bit_depth = get_value(video_info, &["pix_fmt"]).and_then(|v| v.as_str().map(ToString::to_string)).map_or(
             VideoBitDepth::Eight,
             |fmt| {
                 if fmt.contains("10le") || fmt.contains("10be") {

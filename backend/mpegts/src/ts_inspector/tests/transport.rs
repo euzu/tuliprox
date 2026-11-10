@@ -424,10 +424,10 @@ fn ts_inspector_reports_probe_budget_without_reading_whole_source() {
     }
     let count = Rc::new(Cell::new(0));
     let reader = CountingReader { inner: Cursor::new(bytes), bytes_read: Rc::clone(&count) };
-    let budget = HlsTsProbeBudget { max_bytes: (TS_PACKET_BYTES * 4) as u64, ..HlsTsProbeBudget::default() };
+    let budget = HlsTsProbeBudget { max_bytes: (TS_PACKET_SIZE * 4) as u64, ..HlsTsProbeBudget::default() };
     let outcome = inspect_mpeg_ts(reader, HlsTsProbeProtection::Clear, budget).expect("probe succeeds");
     assert!(matches!(outcome, HlsTsProbeOutcome::ProbeBudgetExhausted { .. }));
-    assert_eq!(count.get(), TS_PACKET_BYTES * 4);
+    assert_eq!(count.get(), TS_PACKET_SIZE * 4);
 }
 
 #[test]
@@ -496,7 +496,7 @@ fn ts_inspector_resynchronizes_only_within_named_budget() {
 
 #[test]
 fn ts_inspector_types_framing_crc_and_pmt_errors() {
-    let invalid_sync = vec![0_u8; TS_PACKET_BYTES * 3];
+    let invalid_sync = vec![0_u8; TS_PACKET_SIZE * 3];
     assert_eq!(
         inspect_mpeg_ts(Cursor::new(invalid_sync), HlsTsProbeProtection::Clear, HlsTsProbeBudget::default())
             .expect("probe completes"),

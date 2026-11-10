@@ -189,6 +189,27 @@ fn legacy_playlist_items_fall_back_to_provider_id_without_virtual_id() {
 }
 
 #[test]
+fn failover_group_field_round_trips_through_dsl_setters() {
+    use crate::model::{FieldGet, FieldSet, HeaderField, PlaylistItemHeader};
+    let mut header = PlaylistItemHeader::default();
+    assert_eq!(HeaderField::parse("failover_group"), Some(HeaderField::FailoverGroup));
+    assert_eq!(HeaderField::FailoverGroup.as_str(), "failover_group");
+    assert!(header.set(HeaderField::FailoverGroup, "ZDF"));
+    assert_eq!(header.failover_group.as_deref(), Some("ZDF"));
+    assert!(header.set(HeaderField::FailoverGroup, ""));
+    assert_eq!(header.failover_group.as_deref(), Some(""));
+    assert!(header.get(HeaderField::FailoverGroup).is_some());
+}
+
+#[test]
+fn header_without_failover_group_field_still_deserializes() {
+    let mut value = serde_json::to_value(crate::model::PlaylistItemHeader::default()).expect("serializes");
+    value.as_object_mut().expect("object").remove("failover_group");
+    let header: crate::model::PlaylistItemHeader = serde_json::from_value(value).expect("deserializes");
+    assert!(header.failover_group.is_none());
+}
+
+#[test]
 fn media_server_item_identity_survives_xtream_round_trip() {
     let media_server_item = |id: &str| {
         let mut item = PlaylistItem {

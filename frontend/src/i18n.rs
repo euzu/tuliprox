@@ -196,11 +196,13 @@ mod locale_file_tests {
     use serde::de::{Deserializer, MapAccess, Visitor};
     use std::{collections::BTreeSet, fmt};
 
-    const LOCALES: [(&str, &str); 4] = [
+    const LOCALES: [(&str, &str); 6] = [
         ("en", include_str!("../public/assets/i18n/en.json")),
         ("ru", include_str!("../public/assets/i18n/ru.json")),
         ("ar", include_str!("../public/assets/i18n/ar.json")),
         ("es", include_str!("../public/assets/i18n/es.json")),
+        ("de", include_str!("../public/assets/i18n/de.json")),
+        ("tr", include_str!("../public/assets/i18n/tr.json")),
     ];
 
     /// The dotted key of every translated string, refusing a key that appears
@@ -208,33 +210,65 @@ mod locale_file_tests {
     /// text that looks translated.
     struct Keys(BTreeSet<String>);
 
-    impl<'de> serde::Deserialize<'de> for Keys {
+    enum Entry {
+        Map(Keys),
+        Leaf,
+    }
+
+    struct EntryVisitor;
+
+    impl<'de> Visitor<'de> for EntryVisitor {
+        type Value = Entry;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("a translation object or scalar") }
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            KeysVisitor.visit_map(map).map(Entry::Map)
+        }
+        fn visit_str<E: serde::de::Error>(self, _v: &str) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_string<E: serde::de::Error>(self, _v: String) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_bool<E: serde::de::Error>(self, _v: bool) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_i64<E: serde::de::Error>(self, _v: i64) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_u64<E: serde::de::Error>(self, _v: u64) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_f64<E: serde::de::Error>(self, _v: f64) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(Entry::Leaf) }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
+            Ok(Entry::Leaf)
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for Entry {
         fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            struct KeysVisitor;
-            impl<'de> Visitor<'de> for KeysVisitor {
-                type Value = Keys;
-                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("a translation object") }
-                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
-                    let mut keys = BTreeSet::new();
-                    let mut own = BTreeSet::new();
-                    while let Some(key) = map.next_key::<String>()? {
-                        if !own.insert(key.clone()) {
-                            return Err(serde::de::Error::custom(format!("duplicate key {key}")));
-                        }
-                        match map.next_value::<serde_json::Value>()? {
-                            serde_json::Value::Object(nested) => {
-                                let nested: Keys = serde_json::from_value(serde_json::Value::Object(nested))
-                                    .map_err(serde::de::Error::custom)?;
-                                keys.extend(nested.0.into_iter().map(|child| format!("{key}.{child}")));
-                            }
-                            _ => {
-                                keys.insert(key);
-                            }
-                        }
+            deserializer.deserialize_any(EntryVisitor)
+        }
+    }
+
+    struct KeysVisitor;
+    impl<'de> Visitor<'de> for KeysVisitor {
+        type Value = Keys;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("a translation object") }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+            let mut keys = BTreeSet::new();
+            let mut own = BTreeSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !own.insert(key.clone()) {
+                    return Err(serde::de::Error::custom(format!("duplicate key {key}")));
+                }
+                match map.next_value::<Entry>()? {
+                    Entry::Map(nested) => {
+                        keys.extend(nested.0.into_iter().map(|child| format!("{key}.{child}")));
                     }
-                    Ok(Keys(keys))
+                    Entry::Leaf => {
+                        keys.insert(key);
+                    }
                 }
             }
+            Ok(Keys(keys))
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for Keys {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
             deserializer.deserialize_map(KeysVisitor)
         }
     }

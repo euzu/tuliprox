@@ -102,6 +102,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn test_app_config(
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -109,6 +110,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn test_app_config(
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(crate::model::MediaToolCapabilities::default()),
+        failover: Arc::default(),
     }
 }
 
@@ -147,6 +149,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn test_app_state_with_man
         qos_aggregation: CancellationToken::new(),
         recordings: CancellationToken::new(),
         hls_cache: CancellationToken::new(),
+        failover_groups: tokio_util::sync::CancellationToken::new(),
     };
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
@@ -178,6 +181,8 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn test_app_state_with_man
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests_with_sender(manual_update_sender),
         overrides: crate::api::model::OverrideState::default(),
         maintenance: crate::api::model::create_test_maintenance(""),
+        member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
+        failover_switch_registry: Arc::default(),
         plugins: crate::api::model::AppPlugins::default(),
     })
 }

@@ -36,9 +36,7 @@ pub(super) fn add_pcr_offset_27mhz(timestamp_27mhz: u64, offset_27mhz: u64) -> u
     ((u128::from(timestamp_27mhz) + u128::from(offset_27mhz)) % u128::from(MAX_PCR)) as u64
 }
 
-pub(super) const TS_PACKET_SIZE: usize = 188;
-
-pub(super) const SYNC_BYTE: u8 = 0x47;
+use crate::packet::{TS_PACKET_SIZE, TS_SYNC_BYTE};
 
 pub(super) const PACKET_COUNT: usize = 7;
 
@@ -57,11 +55,6 @@ pub(super) fn ts_chunk_packet_count() -> usize {
     });
     *PACKET_COUNT_OVERRIDE
 }
-
-pub(super) const ADAPTATION_FIELD_FLAG_PCR: u8 = 0x10;
-
-// PCR flag bit in adaptation field flags
-pub(super) const NULL_PID: u16 = 0x1FFF;
 
 pub(super) const HLS_TS_MAX_PENDING_PES_HEADERS: usize = 64;
 
@@ -97,7 +90,7 @@ pub(super) fn encode_timestamp(ts: u64) -> [u8; 5] {
 
 /// Decode PCR from 6 bytes (adaptation field) into 42-bit PCR base + 9-bit extension as u64
 #[inline]
-pub(super) fn decode_pcr(pcr_bytes: &[u8]) -> u64 {
+pub(crate) fn decode_pcr(pcr_bytes: &[u8]) -> u64 {
     let pcr_base = (u64::from(pcr_bytes[0]) << 25)
         | ((u64::from(pcr_bytes[1])) << 17)
         | ((u64::from(pcr_bytes[2])) << 9)
@@ -113,21 +106,18 @@ pub(super) enum HlsTsTimestampKind {
     Pcr,
 }
 
-#[inline]
-pub(super) fn ts_packet_pid(packet: &[u8]) -> u16 { (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) }
-
 pub(super) fn same_finite_ts_packet_layout(source: &[u8], prepared: &[u8]) -> bool {
     if source.len() != TS_PACKET_SIZE
         || prepared.len() != TS_PACKET_SIZE
-        || source[0] != SYNC_BYTE
-        || prepared[0] != SYNC_BYTE
+        || source[0] != TS_SYNC_BYTE
+        || prepared[0] != TS_SYNC_BYTE
         || source[1] & 0x7F != prepared[1] & 0x7F
         || source[2] != prepared[2]
         || source[3] & 0xF0 != prepared[3] & 0xF0
     {
         return false;
     }
-    let adaptation_field_control = (source[3] >> 4) & 0b11;
+    let adaptation_field_control = crate::packet::TsPacket(source).adaptation_field_control();
     !matches!(adaptation_field_control, 0b10 | 0b11) || source[4] == prepared[4]
 }
 
@@ -137,7 +127,7 @@ pub(super) fn append_finite_discontinuity_packet(following_packet: &[u8], output
     let start = output.len();
     output.resize(start.saturating_add(TS_PACKET_SIZE), 0xFF);
     let marker = &mut output[start..start + TS_PACKET_SIZE];
-    marker[0] = SYNC_BYTE;
+    marker[0] = TS_SYNC_BYTE;
     marker[1] = following_packet[1] & 0x1F;
     marker[2] = following_packet[2];
     // FFmpeg retains this adaptation-only marker as the per-PID CC baseline.

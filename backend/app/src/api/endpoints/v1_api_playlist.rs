@@ -79,9 +79,6 @@ use self::recording::epg_channel_id_matches;
 use self::recording::select_epg_channel_candidate;
 #[cfg(test)]
 use self::recording::RecordingStreamQuery;
-pub(in crate::api) use self::recording::{
-    build_webplayer_recording_url, resolve_target_live_recording_source_by_epg_channel, resolve_target_recording_source,
-};
 #[cfg(test)]
 use self::recording::{recording_candidate, RecordingCandidateFields};
 #[cfg(test)]
@@ -91,14 +88,11 @@ pub use self::routes::{
 };
 #[cfg(test)]
 use self::update::read_playlist_update_input_status;
-#[cfg(test)]
-use self::update::resolve_manual_playlist_update_targets;
 use self::{
     analytics::{playlist_analytics, playlist_analytics_unmapped_csv},
     content::{playlist_content, playlist_episode_item, playlist_series_info},
     epg::playlist_epg,
     epg_inspect::{get_target_epg_channel, query_target_epg_channels},
-    error::ManualUpdateEnqueueError,
     filter_preview::playlist_filter_preview,
     items::{list_playlist_sources, query_playlist_items},
     overrides::{
@@ -112,6 +106,14 @@ use self::{
     },
     update::{playlist_update, playlist_update_status_protected, playlist_update_status_response},
     webplayer::{build_playlist_webplayer_url, playlist_webplayer, playlist_webplayer_stream},
+};
+pub(in crate::api) use self::{
+    error::{ManualUpdateEnqueueError, QUEUE_BUSY_MESSAGE},
+    recording::{
+        build_webplayer_recording_url, resolve_target_live_recording_source_by_epg_channel,
+        resolve_target_recording_source,
+    },
+    update::{enqueue_manual_playlist_update, resolve_manual_playlist_update_targets},
 };
 #[cfg(test)]
 use update::playlist_update_status;

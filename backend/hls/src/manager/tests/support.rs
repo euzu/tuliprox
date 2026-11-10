@@ -56,6 +56,7 @@ pub(in crate::manager::tests) fn empty_paths() -> ConfigPaths {
         mapping_files_used: None,
         template_file_path: None,
         template_files_used: None,
+        failover_file_path: None,
         api_proxy_file_path: String::new(),
         custom_stream_response_path: None,
     }
@@ -74,6 +75,7 @@ pub(in crate::manager::tests) fn test_app_config(config: Config) -> AppConfig {
         access_token_secret: [0; 32],
         encrypt_secret: [7; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::default(),
     }
 }
 

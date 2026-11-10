@@ -62,8 +62,8 @@ use tuliprox_curation::{
     SelectorOutcome,
 };
 use tuliprox_repository::{
-    persist_playlist_views, CategoryKey, MemoryPlaylistSource, PlaylistPublicationPlan, PlaylistSource,
-    PlaylistStorageState, TargetPlaylistPersistOptions,
+    persist_playlist_views_with_groups, CategoryKey, FailoverGroupBatch, FailoverGroupMeta, MemoryPlaylistSource,
+    PlaylistPublicationPlan, PlaylistSource, PlaylistStorageState, TargetPlaylistPersistOptions,
 };
 use tuliprox_session::ActiveProviderManager;
 
@@ -511,7 +511,7 @@ pub async fn exec_processing<
         user_targets: targets.clone(),
         events: events.clone(),
         playlist_state: playlist_state.clone(),
-        processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+        processed_inputs: Arc::default(),
         input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         disabled_headers,

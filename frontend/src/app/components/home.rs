@@ -2,6 +2,7 @@ use crate::{
     app::{
         components::{
             config::{ConfigView, PlansView},
+            failover_groups::FailoverGroupsView,
             is_plugin_route,
             loading_indicator::BusyIndicator,
             map_sources_to_playlist_rows,
@@ -12,7 +13,7 @@ use crate::{
             PlaylistUpdateView, PluginMenuPage, PluginUiProvider, PluginsView, RbacView, Setup, Sidebar, SourceEditor,
             StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView, WebsocketStatus,
         },
-        context::{ConfigContext, PlaylistContext, StatusContext},
+        context::{ConfigContext, FailoverGroupsNavigation, PlaylistContext, StatusContext},
     },
     hooks::{use_server_status, use_service_context},
     html_if,
@@ -102,6 +103,7 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::PlaylistSettings => access.can_read_sources || access.can_read_playlist,
         ViewType::PlaylistExplorer => access.can_read_playlist,
         ViewType::PlaylistEpg => access.can_read_epg,
+        ViewType::FailoverGroups => access.can_read_playlist,
         ViewType::Rbac => access.is_admin,
         ViewType::Plugins => access.can_read_system_status,
         ViewType::RecordingLibrary | ViewType::RecordingRules | ViewType::RecordingRuleForm => {
@@ -126,6 +128,7 @@ fn first_allowed_home_view(access: HomeViewAccess) -> ViewType {
         ViewType::PlaylistSettings,
         ViewType::PlaylistExplorer,
         ViewType::PlaylistEpg,
+        ViewType::FailoverGroups,
         ViewType::Rbac,
         ViewType::Plugins,
         ViewType::RecordingLibrary,
@@ -189,6 +192,7 @@ pub fn Home() -> Html {
             get_location_hash().and_then(|hash| ViewType::from_str(&hash).ok())
         }
     });
+    let failover_groups_pending = use_state(|| None);
     let theme = use_state(Theme::get_current_theme);
     let force_update = use_force_update();
     // A plugin menu page is addressed by `#plugin/{id}/{element}`, which is no `ViewType`.
@@ -543,11 +547,13 @@ pub fn Home() -> Html {
     } else {
         resolved_view.intern()
     };
+    let failover_groups_navigation = FailoverGroupsNavigation { pending: failover_groups_pending };
     html! {
         <ContextProvider<ConfigContext> context={config_context}>
         <ContextProvider<StatusContext> context={status_context}>
         <ContextProvider<PlaylistContext> context={playlist_context}>
         <PluginUiProvider>
+        <ContextProvider<FailoverGroupsNavigation> context={failover_groups_navigation}>
         <DialogProvider>
             <ToastrView />
             <div class="tp__app">
@@ -712,6 +718,15 @@ pub fn Home() -> Html {
                                          </ErrorBoundary>
                                        </Panel>
                                        })}
+                                       { html_if!(can_read_playlist, {
+                                       <Panel class="tp__full-width" value={ViewType::FailoverGroups.intern()} active={view_page.clone()}>
+                                         <ErrorBoundary name={translate.t("LABEL.FAILOVER_GROUPS")}>
+                                           { html_if!(view_page == ViewType::FailoverGroups.intern(), {
+                                             <FailoverGroupsView/>
+                                           })}
+                                         </ErrorBoundary>
+                                       </Panel>
+                                       })}
                                        { html_if!(can_read_epg, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistEpg.intern()} active={view_page.clone()}>
                                          <ErrorBoundary name={translate.t("LABEL.PLAYLIST_EPG")}>
@@ -748,6 +763,7 @@ pub fn Home() -> Html {
               </div>
             </div>
         </DialogProvider>
+        </ContextProvider<FailoverGroupsNavigation>>
         </PluginUiProvider>
         </ContextProvider<PlaylistContext>>
         </ContextProvider<StatusContext>>

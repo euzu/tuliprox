@@ -118,6 +118,8 @@ tuliprox-btree = { workspace = true, features = ["test-support"] }
 tuliprox-mpegts = { workspace = true, features = ["test-support"] }
 # API tests build a GeoIp that answers a fixed country.
 tuliprox-repository = { workspace = true, features = ["test-support"] }
+# Failover group selection tests seed pending provider releases.
+tuliprox-session = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 rcgen.workspace = true
 rustls = "0.23.45"

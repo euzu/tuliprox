@@ -94,6 +94,7 @@ Options:
   -i, --source <SOURCE_FILE>
   -m, --mapping <MAPPING_FILE>
   -T, --template <TEMPLATE_FILE>
+  --failover <FAILOVER_FILE>
   -t, --target <TARGET>
   -a, --api-proxy <API_PROXY>
   -s, --server

@@ -1,9 +1,10 @@
 use super::{
     decide_connection_kind, remember_session_addr, stream_history_session_id, ActiveUserConnectionParams,
     ActiveUserManager, PlaybackSessionRegistration, SocketRegistration, StreamRequestDetach, UserConnectionData,
+    UserConnections,
 };
 use shared::{model::StreamInfo, utils::current_time_secs};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use tuliprox_core::utils::utc_day_from_secs;
 
@@ -104,14 +105,15 @@ impl ActiveUserManager {
                 }
             }
 
+            let UserConnections { ref mut key_by_addr, ref mut by_key, ref mut pending_member_bindings, .. } =
+                *user_connections;
+
             let now = current_time_secs();
-            let registration =
-                user_connections.key_by_addr.entry(fingerprint.addr).or_insert_with(SocketRegistration::anonymous);
+            let registration = key_by_addr.entry(fingerprint.addr).or_insert_with(SocketRegistration::anonymous);
             registration.add_user(username, now);
 
-            let tracked_socket_count = user_connections.key_by_addr.len();
-            let connection_data = user_connections
-                .by_key
+            let tracked_socket_count = key_by_addr.len();
+            let connection_data = by_key
                 .entry(username.to_string())
                 .or_insert_with(|| UserConnectionData::new(0, max_connections, soft_connections));
             connection_data.max_connections = max_connections;
@@ -185,6 +187,15 @@ impl ActiveUserManager {
 
                     if let Some(token) = session_token {
                         stream_info.session_token = Some(token.to_string());
+                        if stream_info.member_info.is_none() {
+                            stream_info.member_info = UserConnections::take_valid_pending_member_info(
+                                pending_member_bindings,
+                                token,
+                                Instant::now(),
+                            );
+                        } else {
+                            pending_member_bindings.remove(token);
+                        }
                     }
                     if was_preserved {
                         stream_info.preserved = false;
@@ -229,6 +240,34 @@ impl ActiveUserManager {
                 if let Some(token) = session_token {
                     if let Some(session) = connection_data.sessions.iter().find(|s| s.token == token) {
                         stream_info.started_at = session.started_at;
+                        if let Some(binding) = &session.member_binding {
+                            stream_info.member_info = Some(binding.to_stream_member_info());
+                        }
+                    }
+                    if stream_info.member_info.is_none() {
+                        stream_info.member_info = UserConnections::take_valid_pending_member_info(
+                            pending_member_bindings,
+                            token,
+                            Instant::now(),
+                        );
+                    } else {
+                        pending_member_bindings.remove(token);
+                    }
+                }
+
+                if stream_info.member_info.is_none() && stream_info.channel.shared {
+                    if let Some(group_vid) = stream_info.channel.group_virtual_id {
+                        let existing_member_info = connection_data.streams.iter().find_map(|s| {
+                            if s.channel.shared
+                                && s.channel.target_id == stream_info.channel.target_id
+                                && s.channel.client_virtual_id() == group_vid
+                            {
+                                s.member_info.clone()
+                            } else {
+                                None
+                            }
+                        });
+                        stream_info.member_info = existing_member_info;
                     }
                 }
 

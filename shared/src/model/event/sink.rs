@@ -32,6 +32,16 @@ pub trait EventSink: Send + Sync {
         _exp_date: Option<i64>,
     ) {
     }
+    /// Forward probe technical metadata to the member health index.
+    fn observe_stream_probe(
+        &self,
+        _input_name: Arc<str>,
+        _input_stream_id: Arc<str>,
+        _video: Option<&str>,
+        _audio: Option<&str>,
+        _bitrate_kbps: u32,
+    ) {
+    }
 }
 
 /// The sink that drops everything.
@@ -56,6 +66,16 @@ impl<T: EventSink + ?Sized> EventSink for Arc<T> {
         exp_date: Option<i64>,
     ) {
         (**self).observe_provider_account(name, identity, status, exp_date);
+    }
+    fn observe_stream_probe(
+        &self,
+        input_name: Arc<str>,
+        input_stream_id: Arc<str>,
+        video: Option<&str>,
+        audio: Option<&str>,
+        bitrate_kbps: u32,
+    ) {
+        (**self).observe_stream_probe(input_name, input_stream_id, video, audio, bitrate_kbps);
     }
 }
 

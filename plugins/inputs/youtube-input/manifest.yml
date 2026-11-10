@@ -2,6 +2,7 @@ id: youtube-input
 name: YouTube Input
 version: 0.1.0
 api_version: 1
+min_tuliprox_version: 3.3.186
 category: input
 author: tuliprox
 description: >
@@ -9,6 +10,7 @@ description: >
 capabilities:
   network: true
   storage: true
+  process: true
 provides:
   input_type: true
 hooks:

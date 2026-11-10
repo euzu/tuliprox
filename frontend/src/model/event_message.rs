@@ -30,6 +30,8 @@ pub enum EventMessage {
     },
     RecordingRulesChanged,
     MaintenanceChanged(Rc<shared::model::MaintenanceEntries>),
+    /// Failover override sections of these targets changed on the server.
+    FailoverOverridesChanged(Rc<Vec<String>>),
     /// The socket refused to serve recordings for an actionable reason.
     /// Carries the same stable code the REST routes use, so views map
     /// both through one i18n table.

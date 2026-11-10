@@ -57,6 +57,7 @@ pub struct InputUpdateCardRuntime {
     action_status: InputUpdateCardStatus,
     details: Vec<String>,
     localized_details: Vec<PlaylistUpdateProgressDetail>,
+    failure_reason: Option<String>,
     run_id: Option<PlaylistUpdateRunId>,
     execution_order: Option<PlaylistUpdateRunOrder>,
     refresh_policy: Option<InputRefreshPolicy>,
@@ -71,6 +72,7 @@ impl Default for InputUpdateCardRuntime {
             action_status: InputUpdateCardStatus::Ready,
             details: Vec::new(),
             localized_details: Vec::new(),
+            failure_reason: None,
             run_id: None,
             execution_order: None,
             refresh_policy: None,
@@ -92,6 +94,10 @@ impl InputUpdateCardRuntime {
 
     #[must_use]
     pub fn localized_details(&self) -> &[PlaylistUpdateProgressDetail] { &self.localized_details }
+
+    /// Why the input failed or completed partially in this run, credentials already masked by the server.
+    #[must_use]
+    pub fn failure_reason(&self) -> Option<&str> { self.failure_reason.as_deref() }
 
     /// Stable identity of the run that currently determines this card's status.
     #[must_use]
@@ -137,6 +143,7 @@ struct InputDetails {
     execution_order: PlaylistUpdateRunOrder,
     lines: Vec<String>,
     localized_lines: Vec<PlaylistUpdateProgressDetail>,
+    failure_reason: Option<String>,
     input_telemetry: Option<PlaylistUpdateInputTelemetry>,
 }
 
@@ -250,6 +257,7 @@ impl PlaylistUpdateCardStatuses {
             action_status,
             details: details.map_or_else(Vec::new, |details| details.lines.clone()),
             localized_details: details.map_or_else(Vec::new, |details| details.localized_lines.clone()),
+            failure_reason: details.and_then(|details| details.failure_reason.clone()),
             run_id,
             execution_order,
             refresh_policy,
@@ -396,6 +404,7 @@ impl PlaylistUpdateCardStatuses {
                     execution_order,
                     lines: Vec::new(),
                     localized_lines: Vec::new(),
+                    failure_reason: None,
                     input_telemetry: None,
                     library_scan_result: None,
                 };
@@ -409,6 +418,7 @@ impl PlaylistUpdateCardStatuses {
                         execution_order,
                         lines: Vec::new(),
                         localized_lines: Vec::new(),
+                        failure_reason: None,
                         input_telemetry: None,
                         library_scan_result: None,
                     },
@@ -498,6 +508,7 @@ impl PlaylistUpdateCardStatuses {
             input_telemetry,
             library_scan_result,
             detail,
+            failure_reason,
             message,
             ..
         } = progress
@@ -530,11 +541,15 @@ impl PlaylistUpdateCardStatuses {
                 if details.lines.len() > MAX_CARD_DETAIL_LINES {
                     details.lines.remove(0);
                 }
-                if let Some(detail) = detail {
+                // One line per kind of detail: an input reports its completion once per affected target.
+                if let Some(detail) = detail.filter(|detail| !details.localized_lines.contains(detail)) {
                     details.localized_lines.push(detail);
                     if details.localized_lines.len() > MAX_CARD_DETAIL_LINES {
                         details.localized_lines.remove(0);
                     }
+                }
+                if failure_reason.is_some() {
+                    details.failure_reason = failure_reason;
                 }
                 if let Some(input_telemetry) = input_telemetry {
                     details.input_telemetry = Some(input_telemetry);
@@ -954,6 +969,7 @@ mod tests {
                 action_status: InputUpdateCardStatus::Updating,
                 details: vec!["r1 provider acquisition".into(), "r1 input completed".into()],
                 localized_details: vec![PlaylistUpdateProgressDetail::InputCompletedSuccessfully],
+                failure_reason: None,
                 run_id: Some(run_id("r1")),
                 execution_order: Some(execution_order(1)),
                 refresh_policy: Some(InputRefreshPolicy::FORCE),
@@ -997,6 +1013,7 @@ mod tests {
                 action_status: InputUpdateCardStatus::Updating,
                 details: vec!["r2 cache acquisition".into()],
                 localized_details: Vec::new(),
+                failure_reason: None,
                 run_id: Some(run_id("r2")),
                 execution_order: Some(execution_order(2)),
                 refresh_policy: Some(InputRefreshPolicy::NORMAL),
@@ -1458,6 +1475,32 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_input_shows_one_failure_line_and_its_reason() {
+        let state = reduce(statuses(), accepted("r1", &[7]));
+        let state = reduce(state, progress("r1", 1, 7, "r1 started"));
+        let failed = |message: &str| PlaylistUpdateCardStatusAction::Progress {
+            connection_context: connection(1),
+            progress: PlaylistUpdateProgressEvent::input_completed(
+                run_id("r1"),
+                execution_order(1),
+                7,
+                PlaylistUpdateState::Failure,
+                "input-7",
+                message,
+            )
+            .with_failure_reason(Some("every Invidious instance refuses the video API".to_string())),
+        };
+        // An input reports its completion once per affected target.
+        let state = reduce(state, failed("target a"));
+        let state = reduce(state, failed("target b"));
+        let state = reduce(state, failed("target c"));
+
+        let runtime = state.for_input(7);
+        assert_eq!(runtime.localized_details(), [PlaylistUpdateProgressDetail::InputFailed]);
+        assert_eq!(runtime.failure_reason(), Some("every Invidious instance refuses the video API"));
+    }
+
+    #[test]
     fn playlist_update_status_later_execution_replaces_earlier_status_and_details() {
         let state = reduce(statuses(), accepted("r2", &[7]));
         assert_eq!(state.for_input(7).status(), InputUpdateCardStatus::Queued);
@@ -1637,6 +1680,7 @@ mod tests {
                     execution_order: None,
                     scope_revision: None,
                     state: PlaylistUpdateState::Success,
+                    targets: Vec::new(),
                 },
             },
         );

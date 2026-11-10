@@ -21,18 +21,19 @@ use crate::{
         model::{
             create_cache, create_http_client, create_http_client_no_redirect, create_public_http_client_no_redirect,
             create_resource_http_client_no_redirect, create_resource_public_http_client_no_redirect, exec_provider_dns,
-            exec_qos_aggregation, load_playlists_into_memory_cache,
+            exec_qos_aggregation_with_listener, load_playlists_into_memory_cache,
             recording_rule_scheduler::spawn_recording_rule_scheduler,
-            recording_supervisor::start_recording_supervisors, ActiveProviderManager, ActiveUserManager, AppState,
-            AuthState, CancelTokens, ConnectionManager, EventManager, EventMessage, HdHomerunAppState, HlsState,
-            ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, PlaylistUpdateControl,
-            RecordingQueue, SharedStreamManager,
+            recording_supervisor::start_recording_supervisors, ActiveProviderManager, ActiveUserManager,
+            AppQosAggregationListener, AppState, AuthState, CancelTokens, ConnectionManager, EventManager,
+            EventMessage, HdHomerunAppState, HlsState, ManualPlaylistUpdateRequest, MetadataUpdateManager,
+            PlaylistStorageState, PlaylistUpdateControl, RecordingQueue, SharedStreamManager,
         },
         panel_api::{sync_panel_api_exp_dates, sync_panel_api_exp_dates_on_boot},
         serve::serve,
         sys_usage::exec_system_usage,
         tasks::{
-            exec_config_watch, exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync, spawn_ssdp_discover_task,
+            exec_config_watch, exec_failover_group_member_keys, exec_interner_prune, exec_scheduler,
+            exec_xtream_expiry_sync, spawn_ssdp_discover_task,
         },
     },
     model::{
@@ -305,6 +306,38 @@ fn init_http_clients(app_config: &AppConfig) -> Result<Arc<HttpClients>, Tulipro
     )))
 }
 
+/// Populate initial `QoS` snapshots from repository into the health index.
+fn populate_initial_member_health(storage_dir: &std::path::Path, member_health: &tuliprox_session::MemberHealthIndex) {
+    let mut initial_snapshots = Vec::new();
+    let _ = tuliprox_repository::QosSnapshotRepository::for_each_snapshot_read_only(storage_dir, |record| {
+        initial_snapshots.push(record.clone());
+    });
+    if initial_snapshots.is_empty() {
+        return;
+    }
+    let entries = initial_snapshots.iter().map(|record| {
+        let key = if record.provider_id > 0 {
+            tuliprox_session::QosKey::Provider {
+                input: Arc::clone(&record.input_name),
+                provider_id: record.provider_id,
+            }
+        } else {
+            tuliprox_session::QosKey::TargetMember {
+                target: Arc::clone(&record.target_name),
+                member_vid: record.virtual_id,
+            }
+        };
+        let part = tuliprox_session::QosPart {
+            score_24h: record.window_24h.score,
+            score_7d: record.window_7d.score,
+            confidence: record.window_24h.confidence,
+            failure_streak: record.window_24h.successive_failure_streak,
+        };
+        (key, part)
+    });
+    member_health.replace_qos(entries);
+}
+
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
@@ -377,6 +410,12 @@ async fn create_shared_data(
     })?;
 
     let maintenance = load_maintenance(app_config).await;
+    let member_health = Arc::new(tuliprox_session::MemberHealthIndex::new(
+        tuliprox_session::failover_group::CircuitPolicy::from(&config.failover_groups.circuit),
+    ));
+    event_manager.bind_member_health(&member_health);
+    member_health.set_event_sink(Arc::clone(&event_manager) as Arc<dyn shared::model::EventSink>);
+    populate_initial_member_health(std::path::Path::new(&config.storage_dir), &member_health);
     let plugins = crate::api::model::load_validated_plugins(app_config, Some(&cache)).await;
 
     let app_state = AppState {
@@ -407,6 +446,8 @@ async fn create_shared_data(
         playlist_updates: PlaylistUpdateControl::new(Arc::clone(forced_targets), manual_update_sender),
         overrides: crate::api::model::OverrideState::default(),
         maintenance,
+        member_health,
+        failover_switch_registry: Arc::default(),
         plugins,
     };
 
@@ -467,6 +508,7 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     cancel_tokens.qos_aggregation.cancel();
     cancel_tokens.recordings.cancel();
     cancel_tokens.hls_cache.cancel();
+    cancel_tokens.failover_groups.cancel();
     app_state.active_users.shutdown();
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
@@ -719,7 +761,12 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     exec_interner_prune(&app_state);
     exec_config_watch(&app_state, &cancel_token_file_watch);
     exec_provider_dns(&app_state.app_config, &cancel_token_provider_dns);
-    exec_qos_aggregation(&app_state.app_config, &cancel_token_qos_aggregation);
+    exec_qos_aggregation_with_listener(
+        &app_state.app_config,
+        &cancel_token_qos_aggregation,
+        Some(Arc::new(AppQosAggregationListener { member_health: Arc::clone(&app_state.member_health) })),
+    );
+    exec_failover_group_member_keys(&app_state, &app_state.cancel_tokens.load().failover_groups);
     exec_hls_lifecycle(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
     exec_hls_cache_gc(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
 
@@ -1210,6 +1257,7 @@ mod tests {
                     mapping_files_used: None,
                     template_file_path: None,
                     template_files_used: None,
+                    failover_file_path: None,
                     api_proxy_file_path: String::new(),
                     custom_stream_response_path: None,
                 })),
@@ -1217,6 +1265,7 @@ mod tests {
                 access_token_secret: [0; 32],
                 encrypt_secret: [0; 16],
                 media_tools: Arc::new(MediaToolCapabilities::default()),
+                failover: Arc::default(),
             })
         }
 
@@ -1244,6 +1293,7 @@ mod tests {
                 qos_aggregation: CancellationToken::new(),
                 recordings: CancellationToken::new(),
                 hls_cache: CancellationToken::new(),
+                failover_groups: tokio_util::sync::CancellationToken::new(),
             };
             let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
             Arc::new(AppState {
@@ -1274,6 +1324,8 @@ mod tests {
                 playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
                 overrides: crate::api::model::OverrideState::default(),
                 maintenance: crate::api::model::create_test_maintenance(""),
+                member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
+                failover_switch_registry: Arc::default(),
                 plugins: crate::api::model::AppPlugins::default(),
             })
         }

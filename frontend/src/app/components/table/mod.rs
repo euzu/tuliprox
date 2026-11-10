@@ -160,6 +160,13 @@ fn table_markup<T: PartialEq + Clone + 'static>(
                                 })
                             };
 
+                            let is_structural = !columns[col_index].content;
+                            let header_node = if is_structural {
+                                html! {}
+                            } else {
+                                render_header_cell.emit(col_index)
+                            };
+
                             html!{
                                <th key={columns[col_index].id.as_str()} data-column-id={columns[col_index].id.clone()}
                                  class={classes!(format!("tp__table__th--{}", col_index+1),
@@ -181,12 +188,12 @@ fn table_markup<T: PartialEq + Clone + 'static>(
                                   if sortable {
                                       <button type="button" class="tp__table-header"
                                           onclick={on_click_col} onkeydown={on_key_col}>
-                                       {render_header_cell.emit(col_index)}
+                                       {header_node}
                                        {icon_html}
                                       </button>
                                   } else {
                                       <span class="tp__table-header">
-                                       {render_header_cell.emit(col_index)}
+                                       {header_node}
                                        {icon_html}
                                       </span>
                                   }

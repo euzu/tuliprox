@@ -36,6 +36,7 @@ pub(super) async fn complete_staged_input<E: EventSink + Clone + 'static, M: Met
             &input.name,
             state,
             result.input_telemetry.as_ref(),
+            &result.errors,
         );
     }
 }

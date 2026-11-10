@@ -1,0 +1,8 @@
+version: 1
+targets:
+  - target: testkit
+    auto_overrides:
+      - auto_key: "test channel 17"
+        policy: priority
+        order:
+          - { input: input-b, stream_id: "17" }

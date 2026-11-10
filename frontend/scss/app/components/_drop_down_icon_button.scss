@@ -18,7 +18,16 @@
     width: 100%;
     height: auto;
     min-height: 1.3rem;
+    border-radius: 0;
     cursor: pointer;
+
+    // The focus ring would be cut off by the scrolling list; the highlight replaces it.
+    &:focus,
+    &:focus-visible {
+      outline: none;
+      background-color: var(--menu-item-hover-background-color);
+      color: var(--menu-item-hover-color);
+    }
   }
 
   &__option-item {

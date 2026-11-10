@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{input::Input, RadioButtonGroup, TextButton},
+    app::components::{input::Input, NoContent, RadioButtonGroup, TextButton},
     hooks::{use_clipboard_copy, use_service_context},
     i18n::use_translation,
     model::EventMessage,
@@ -559,7 +559,7 @@ pub fn PluginLogs(props: &PluginLogsProps) -> Html {
                 </div>
                 <div class="tp__log-console__output" ref={console_ref} onscroll={on_scroll}>
                     if filtered.is_empty() {
-                        <div class="tp__log-console__empty">{ translate.t("LABEL.NO_LOGS") }</div>
+                        <NoContent text={translate.t("LABEL.NO_LOGS")} />
                     } else {
                         { for filtered.iter().enumerate().map(|(idx, row)| {
                             let level_str = row.level.as_str();

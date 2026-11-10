@@ -2,7 +2,7 @@ use super::{input_type_label_key, processing::PlaylistProcessingStage};
 use crate::{
     app::components::{
         popup_menu::{PopupMenuPlacement, PopupMenuWidth},
-        Card, DropDownOption, DropDownSelection, PlaylistProcessing, Select, TextButton,
+        Card, DropDownOption, DropDownSelection, NoContent, PlaylistProcessing, Select, TextButton,
     },
     error::Error,
     hooks::use_service_context,
@@ -492,13 +492,7 @@ fn status_dot() -> Html {
 }
 
 fn card_status_badge(view: &InputUpdateRunView, translate: impl Fn(&str) -> String) -> Html {
-    // A persisted input result does not imply a completed target publication.
-    // Only a correlated run supplies the current action status.
-    let status = if view.run_id.is_none() && view.input_state != InputUpdateCardStatus::Ready {
-        view.input_state
-    } else {
-        view.overall_state
-    };
+    let status = view.card_status();
     html! {
         <span
             class={classes!("tp__playlist-update-view__pipeline-status", status.modifier())}
@@ -962,13 +956,18 @@ fn input_content(
                             )
                         })}
                     }
-                    if !view.localized_progress_details.is_empty() {
+                    if !view.localized_progress_details.is_empty() || view.failure_reason.is_some() {
                         <section class="tp__playlist-update-view__progress-details">
                             <h4>{translate("MESSAGES.PLAYLIST_UPDATE.RUN_DETAILS")}</h4>
                             <ul>
                                 {for view.localized_progress_details.iter().map(|detail| {
                                     html! { <li>{translate(progress_detail_label_key(*detail))}</li> }
                                 })}
+                                if let Some(reason) = view.failure_reason.as_deref() {
+                                    <li class="tp__playlist-update-view__failure-reason">
+                                        {translate("MESSAGES.PLAYLIST_UPDATE.DETAIL_FAILURE_REASON").replace("{reason}", reason)}
+                                    </li>
+                                }
                             </ul>
                         </section>
                     }
@@ -1244,9 +1243,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                         <section class="tp__playlist-update-view__input-targets">
                             <h3 id={target_group_heading_id.clone()}>{translate.t("LABEL.AFFECTED_TARGETS")}</h3>
                             if view.target_results.is_empty() {
-                                <p class="tp__playlist-update-view__empty-targets">
-                                    {translate.t("MESSAGES.PLAYLIST_UPDATE.NO_TARGETS_ASSIGNED")}
-                                </p>
+                                <NoContent text={translate.t("MESSAGES.PLAYLIST_UPDATE.NO_TARGETS_ASSIGNED")} />
                             } else {
                                 <div
                                     class="tp__playlist-update-view__target-toggles"

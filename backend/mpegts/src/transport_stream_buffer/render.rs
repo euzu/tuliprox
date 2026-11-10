@@ -2,11 +2,12 @@ use super::{
     clock::{
         add_pcr_offset_27mhz, add_pts_dts_offset, append_finite_discontinuity_packet, decode_pcr_at_location,
         decode_timestamp, encode_pcr, encode_timestamp, gather_timestamp_bytes, pcr_offset_27mhz,
-        same_finite_ts_packet_layout, ts_packet_pid, ADAPTATION_FIELD_FLAG_PCR, NULL_PID, SYNC_BYTE, TS_PACKET_SIZE,
+        same_finite_ts_packet_layout,
     },
     pes::HlsFiniteTsLayoutError,
     HlsFiniteTsLayout, HlsFiniteTsPacketLayout, TransportStreamBuffer,
 };
+use crate::packet::{ts_packet_pid, NULL_PID, TS_PACKET_SIZE, TS_SYNC_BYTE};
 use bytes::{Bytes, BytesMut};
 use std::task::Waker;
 
@@ -179,20 +180,12 @@ impl TransportStreamBuffer {
         out.resize(start + TS_PACKET_SIZE, 0xFF);
         let pkt = &mut out[start..start + TS_PACKET_SIZE];
 
-        pkt[0] = SYNC_BYTE;
+        pkt[0] = TS_SYNC_BYTE;
         pkt[1] = new_packet[1] & 0x1F;
         pkt[2] = new_packet[2];
 
         // Check if the current packet has a PCR (need at least 7 adaptation bytes: 1 flag + 6 PCR).
-        let new_pkt_has_pcr = {
-            let afc = (new_packet[3] >> 4) & 0b11;
-            if afc == 2 || afc == 3 {
-                let adaptation_len = new_packet[4] as usize;
-                adaptation_len >= 7 && (new_packet[5] & ADAPTATION_FIELD_FLAG_PCR) != 0
-            } else {
-                false
-            }
-        };
+        let new_pkt_has_pcr = crate::packet::TsPacket(new_packet).has_pcr();
 
         // AFC=2 (Adaptation Only), Scrambling=00 (Unscrambled), CC=cc
         pkt[3] = 0x20 | (cc & 0x0F);

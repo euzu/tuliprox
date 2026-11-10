@@ -79,6 +79,7 @@ pub fn ConfigStep(props: &ConfigStepProps) -> Html {
                 ConfigForm::Mcp(_, _) => setup_ctx.config_forms.slots.mcp.as_ref(),
                 ConfigForm::Panel(..) => setup_ctx.config_forms.slots.panel.as_ref(),
                 ConfigForm::Library(_, _) => setup_ctx.config_forms.slots.library.as_ref(),
+                ConfigForm::FailoverGroups(_, _) => setup_ctx.config_forms.slots.failover_groups.as_ref(),
             };
             if current_slot == Some(&form_data) {
                 return;

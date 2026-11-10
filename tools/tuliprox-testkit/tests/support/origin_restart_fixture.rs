@@ -412,7 +412,11 @@ impl Fixture {
                 ..Default::default()
             },
             false,
-            &FixtureInputPlan { input_type: FixtureInputType::M3u, stalker: &FixtureStalker::default() },
+            &FixtureInputPlan {
+                input_type: FixtureInputType::M3u,
+                stalker: &FixtureStalker::default(),
+                failover_inputs: &[],
+            },
         )?;
         let responses = paths.root.join("responses");
         std::fs::create_dir(&responses)?;

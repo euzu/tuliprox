@@ -182,17 +182,25 @@ pub fn can_pick_shared(has_recording_manage: bool, is_admin_role: bool) -> bool 
     has_recording_manage && is_admin_role
 }
 
+pub fn target_for_id<'a>(
+    sources: &'a shared::model::SourcesConfigDto,
+    target_id: u16,
+    input_name: Option<&str>,
+) -> Option<&'a shared::model::ConfigTargetDto> {
+    sources.sources.iter().find_map(|source| {
+        if input_name.is_some_and(|name| !source.inputs.iter().any(|configured| configured.as_ref() == name)) {
+            return None;
+        }
+        source.targets.iter().find(|target| target.id == target_id)
+    })
+}
+
 pub fn target_name_for_id(
     sources: &shared::model::SourcesConfigDto,
     target_id: u16,
     input_name: Option<&str>,
 ) -> Option<String> {
-    sources.sources.iter().find_map(|source| {
-        if input_name.is_some_and(|name| !source.inputs.iter().any(|configured| configured.as_ref() == name)) {
-            return None;
-        }
-        source.targets.iter().find(|target| target.id == target_id).map(|target| target.name.clone())
-    })
+    target_for_id(sources, target_id, input_name).map(|target| target.name.clone())
 }
 
 /// Translate the user's form choice into the wire enum. The server's

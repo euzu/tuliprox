@@ -1,7 +1,8 @@
 use super::{
     accepts_requested_stream_url, create_test_app_state_for_config, create_test_dual_provider_app_config,
-    create_test_fingerprint, create_test_provider_app_config, needs_initial_stalker_resolution,
-    resolve_streaming_strategy, should_refresh_stalker_playback, stalker_stream_kind, StreamingAcquireOptions,
+    create_test_fingerprint, create_test_provider_app_config, member_needs_stalker_resolution,
+    needs_initial_stalker_resolution, resolve_streaming_strategy, should_refresh_stalker_playback, stalker_stream_kind,
+    StreamingAcquireOptions,
 };
 use crate::{
     api::model::{ProviderStreamCustomReason, ProviderStreamState},
@@ -72,6 +73,28 @@ fn non_stalker_url_acceptance_follows_the_accept_flag_and_forced_provider() {
     assert!(accepts_requested_stream_url(&input, Some(&forced), None, true, "saray8"));
     assert!(!accepts_requested_stream_url(&input, Some(&forced), None, true, "main"));
     assert!(!accepts_requested_stream_url(&input, Some(&forced), None, false, "saray8"));
+}
+
+/// A group member's Stalker link is account-bound: an empty link or a link owned by another account
+/// resolves for the account that holds the lease.
+#[test]
+fn group_member_stalker_link_resolves_for_the_allocated_account() {
+    let input = input_of_type(InputType::Stalker);
+    let main = "main".intern();
+    let alias = "saray8".intern();
+    let stored = "https://stream.example/live.ts";
+
+    // An empty stored link resolves for whichever account holds the lease.
+    assert!(member_needs_stalker_resolution(&input, "", &main));
+    assert!(member_needs_stalker_resolution(&input, "", &alias));
+    // A stored link is kept only by the account that owns it.
+    assert!(!member_needs_stalker_resolution(&input, stored, &main));
+    assert!(member_needs_stalker_resolution(&input, stored, &alias));
+
+    // Non-Stalker URLs are mapped by the provider selection, never resolved.
+    let xtream = input_of_type(InputType::Xtream);
+    assert!(!member_needs_stalker_resolution(&xtream, stored, &alias));
+    assert!(!member_needs_stalker_resolution(&xtream, "", &alias));
 }
 
 #[test]

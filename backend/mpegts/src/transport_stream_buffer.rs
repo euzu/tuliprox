@@ -109,6 +109,7 @@ mod tests;
 
 mod buffer;
 mod clock;
+pub(crate) use clock::decode_pcr;
 mod layout;
 mod pes;
 mod profile;

@@ -38,7 +38,8 @@ mod view;
 pub use self::test_support::create_test_plugin_system;
 #[cfg(test)]
 pub use self::test_support::{
-    counting_runtime, create_test_app_state, create_test_app_state_with_plugins, create_test_maintenance,
+    counting_runtime, create_test_app_state, create_test_app_state_with_manual_update_sender,
+    create_test_app_state_with_plugins, create_test_maintenance,
 };
 pub use self::{
     auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, override_state::*, playlist_update_control::*,
@@ -72,6 +73,8 @@ pub struct AppState {
     pub overrides: OverrideState,
     /// Inputs taken out of service; read on every new stream request.
     pub maintenance: Arc<MaintenanceRegistry>,
+    pub member_health: Arc<tuliprox_session::MemberHealthIndex>,
+    pub failover_switch_registry: Arc<crate::api::api_utils::failover_group_runtime::FailoverSwitchRegistry>,
     /// Plugin hooks handed to every playlist update this server runs.
     pub plugins: AppPlugins,
 }
@@ -129,4 +132,34 @@ pub struct HdHomerunAppState {
     pub app_state: Arc<AppState>,
     pub device: Arc<HdHomeRunDeviceConfig>,
     pub hd_scan_state: Arc<AtomicI8>,
+}
+
+pub struct AppQosAggregationListener {
+    pub member_health: Arc<tuliprox_session::MemberHealthIndex>,
+}
+
+impl tuliprox_session::qos_aggregation_manager::QosAggregationListener for AppQosAggregationListener {
+    fn on_snapshots(&self, snapshots: &[tuliprox_repository::QosSnapshotRecord]) {
+        let entries = snapshots.iter().map(|record| {
+            let key = if record.provider_id > 0 {
+                tuliprox_session::QosKey::Provider {
+                    input: Arc::clone(&record.input_name),
+                    provider_id: record.provider_id,
+                }
+            } else {
+                tuliprox_session::QosKey::TargetMember {
+                    target: Arc::clone(&record.target_name),
+                    member_vid: record.virtual_id,
+                }
+            };
+            let part = tuliprox_session::QosPart {
+                score_24h: record.window_24h.score,
+                score_7d: record.window_7d.score,
+                confidence: record.window_24h.confidence,
+                failure_streak: record.window_24h.successive_failure_streak,
+            };
+            (key, part)
+        });
+        self.member_health.replace_qos(entries);
+    }
 }

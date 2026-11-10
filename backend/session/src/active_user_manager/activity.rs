@@ -1,16 +1,17 @@
 use super::{
-    next_session_incarnation, remember_session_addr, ActiveUserManager, CreateUserSessionParams, PlaybackLifecycle,
-    SessionChangeSignal, SessionIdentity, SocketRegistration, UserConnectionData, UserSession, UserSessionParams,
+    next_session_incarnation, remember_session_addr, ActiveUserManager, CreateUserSessionParams, MemberBinding,
+    PlaybackLifecycle, SessionChangeSignal, SessionIdentity, SocketRegistration, UserConnectionData, UserSession,
+    UserSessionParams,
 };
 use shared::{
-    model::UserConnectionPermission,
+    model::{ActiveUserConnectionChange, EventMessage, UserConnectionPermission},
     utils::{current_time_secs, sanitize_sensitive_info, Internable},
 };
 use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{atomic::AtomicBool, Arc},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tuliprox_core::utils::debug_if_enabled;
 
@@ -39,6 +40,7 @@ impl ActiveUserManager {
             permission: params.connection_permission,
             connection_kind: params.connection_kind,
             lifecycle: PlaybackLifecycle::Prepared,
+            member_binding: None,
         }
     }
 
@@ -286,5 +288,31 @@ impl ActiveUserManager {
         }
 
         Some(connection_data.sessions[session_index].clone())
+    }
+
+    pub async fn bind_member(&self, username: &str, token: &str, binding: MemberBinding) {
+        let mut user_connections = self.write_connections().await;
+        let member_info = binding.to_stream_member_info();
+        let mut matched_stream = false;
+        if let Some(connection_data) = user_connections.by_key.get_mut(username) {
+            if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
+                session.member_binding = Some(binding.clone());
+            }
+            for stream in &mut connection_data.streams {
+                if stream.session_token.as_deref() == Some(token) {
+                    stream.member_info = Some(member_info.clone());
+                    matched_stream = true;
+                    self.event_manager
+                        .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream.clone())));
+                }
+            }
+        }
+        if matched_stream {
+            user_connections.pending_member_bindings.remove(token);
+        } else {
+            user_connections
+                .pending_member_bindings
+                .insert(token.to_string(), (Instant::now() + Duration::from_secs(60), binding));
+        }
     }
 }

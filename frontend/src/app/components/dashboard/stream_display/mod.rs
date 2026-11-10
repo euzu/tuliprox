@@ -24,8 +24,8 @@ pub(super) use helpers::is_background_transfer_stream;
 use shared::{
     defaults::default_kick_secs,
     model::{
-        PlaylistItemType, PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, StreamInfoConfigDto,
-        UserCommand, VirtualId,
+        Permission, PlaylistItemType, PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo,
+        StreamInfoConfigDto, UserCommand, VirtualId,
     },
 };
 use std::{collections::HashMap, rc::Rc, str::FromStr};
@@ -78,15 +78,31 @@ where
     comments
 }
 
+pub(crate) fn failover_members_effect_deps(
+    selected_dto: Option<&Rc<StreamInfo>>,
+    popup_is_open: bool,
+) -> (Option<u32>, bool) {
+    (selected_dto.map(|d| d.uid), popup_is_open)
+}
+
+pub fn is_eligible_for_failover_switch(stream: &StreamInfo) -> bool {
+    stream.channel.item_type == PlaylistItemType::Live
+        && !is_background_transfer_stream(stream)
+        && !is_recording_stream(stream)
+        && (stream.channel.group_virtual_id.is_some() || stream.member_info.is_some())
+}
+
 #[component]
 pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     let translate = use_translation();
     let service_ctx = use_service_context();
+    let can_switch = service_ctx.auth.has_permission(Permission::SystemWrite);
     let copy_to_clipboard = use_clipboard_copy();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
     let selected_dto = use_state(|| None::<Rc<StreamInfo>>);
+    let failover_members = use_state(|| None::<shared::model::StreamFailoverMembersDto>);
     let adaptive_last_seen = use_state(HashMap::<u32, u64>::new);
     let cleanup_now_secs = use_state(shared::utils::current_time_secs);
     let adaptive_session_ttl_secs = get_adaptive_session_ttl_secs(&config_ctx);
@@ -182,9 +198,48 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
         );
     }
 
+    {
+        let selected_dto = selected_dto.clone();
+        let failover_members = failover_members.clone();
+        let streams_service = service_ctx.streams.clone();
+        use_effect_with(
+            failover_members_effect_deps(selected_dto.as_ref(), *popup_is_open),
+            move |(stream_id_opt, is_open)| {
+                if *is_open {
+                    if can_switch {
+                        if let Some(stream_id) = *stream_id_opt {
+                            if selected_dto.as_ref().is_some_and(|dto| is_eligible_for_failover_switch(dto)) {
+                                let failover_members = failover_members.clone();
+                                let selected_dto = selected_dto.clone();
+                                let streams_service = streams_service.clone();
+                                spawn_local(async move {
+                                    let members = streams_service.get_failover_members(stream_id).await.ok().flatten();
+                                    if selected_dto.as_ref().map(|d| d.uid) == Some(stream_id) {
+                                        failover_members.set(members);
+                                    }
+                                });
+                            } else {
+                                failover_members.set(None);
+                            }
+                        } else {
+                            failover_members.set(None);
+                        }
+                    } else {
+                        failover_members.set(None);
+                    }
+                }
+                || ()
+            },
+        );
+    }
+
     let handle_popup_close = {
         let set_is_open = popup_is_open.clone();
-        Callback::from(move |()| set_is_open.set(false))
+        let set_failover_members = failover_members.clone();
+        Callback::from(move |()| {
+            set_is_open.set(false);
+            set_failover_members.set(None);
+        })
     };
 
     let handle_popup_onclick = {
@@ -202,6 +257,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
 
     let handle_menu_click = {
         let popup_is_open_state = popup_is_open.clone();
+        let failover_members_state = failover_members.clone();
         let translate = translate.clone();
         let services = service_ctx.clone();
         let selected_dto = selected_dto.clone();
@@ -212,6 +268,28 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
             .and_then(|app_cfg| app_cfg.config.web_ui.as_ref())
             .map_or_else(default_kick_secs, |web_ui| web_ui.kick_secs);
         Callback::from(move |(name, _): (String, _)| {
+            if let Some(member_vid_str) = name.strip_prefix("switch_member:") {
+                if services.auth.has_permission(Permission::SystemWrite) {
+                    if let Ok(member_vid) = member_vid_str.parse::<u32>() {
+                        if let Some(dto) = (*selected_dto).as_ref() {
+                            let stream_id = dto.uid;
+                            let services = services.clone();
+                            let translate = translate.clone();
+                            spawn_local(async move {
+                                if services.streams.switch_failover_member(stream_id, member_vid).await.unwrap_or(false)
+                                {
+                                    services.toastr.success(translate.t("MESSAGES.SWITCH_FAILOVER_MEMBER_SUCCESS"));
+                                } else {
+                                    services.toastr.error(translate.t("MESSAGES.SWITCH_FAILOVER_MEMBER_FAILED"));
+                                }
+                            });
+                        }
+                    }
+                }
+                popup_is_open_state.set(false);
+                failover_members_state.set(None);
+                return;
+            }
             if let Ok(action) = StreamDisplayAction::from_str(&name) {
                 if let Some(dto) = (*selected_dto).as_ref() {
                     if is_background_transfer_stream(dto) || is_recording_stream(dto) {
@@ -294,7 +372,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
             {
                 if let Some(streams) = visible_streams.as_ref() {
                     if streams.is_empty() {
-                        html! { <NoContent /> }
+                        html! { <NoContent text={translate.t("LABEL.NO_ACTIVE_STREAMS")} /> }
                     } else {
                         html! {
                             <>
@@ -319,12 +397,52 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                                     <MenuItem icon="Clipboard" name={StreamDisplayAction::CopyLinkTuliproxVirtualId.to_string()} label={translate.t("LABEL.COPY_LINK_TULIPROX_VIRTUAL_ID")} onclick={&handle_menu_click}></MenuItem>
                                     <MenuItem icon="Clipboard" name={StreamDisplayAction::CopyLinkTuliproxWebPlayerUrl.to_string()} label={translate.t("LABEL.COPY_LINK_TULIPROX_WEBPLAYER_URL")} onclick={&handle_menu_click}></MenuItem>
                                     <MenuItem icon="Clipboard" name={StreamDisplayAction::CopyLinkProviderUrl.to_string()} label={translate.t("LABEL.COPY_LINK_PROVIDER_URL")} onclick={&handle_menu_click}></MenuItem>
+                                    {
+                                        if can_switch {
+                                            if let Some(members_dto) = failover_members.as_ref() {
+                                                if members_dto.members.len() > 1 {
+                                                    html! {
+                                                        <>
+                                                            <div class="tp__stream-display__menu-divider" />
+                                                            <div class="tp__stream-display__menu-header">
+                                                                {translate.t("LABEL.SWITCH_SOURCE")}
+                                                            </div>
+                                                            { for members_dto.members.iter().filter_map(|member| {
+                                                                let vid = member.member_vid?.get();
+                                                                let is_active = members_dto.current_member_vid == Some(vid);
+                                                                let icon = if is_active { "CheckMark" } else { "ArrowRight" };
+                                                                let label = format!("{} ({})", member.title, member.input_name);
+                                                                let action_name = format!("switch_member:{vid}");
+                                                                let class = if is_active { "active" } else { "" };
+                                                                Some(html! {
+                                                                    <MenuItem
+                                                                        key={vid}
+                                                                        icon={icon}
+                                                                        name={action_name}
+                                                                        label={label}
+                                                                        class={class}
+                                                                        onclick={&handle_menu_click}
+                                                                    />
+                                                                })
+                                                            })}
+                                                        </>
+                                                    }
+                                                } else {
+                                                    html! {}
+                                                }
+                                            } else {
+                                                html! {}
+                                            }
+                                        } else {
+                                            html! {}
+                                        }
+                                    }
                                 </PopupMenu>
                             </>
                         }
                     }
                 } else {
-                    html! { <NoContent /> }
+                    html! { <NoContent text={translate.t("LABEL.NO_ACTIVE_STREAMS")} /> }
                 }
             }
            </div>
@@ -351,6 +469,7 @@ mod tests {
     use std::{
         collections::HashMap,
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        rc::Rc,
     };
 
     fn test_stream(uid: u32, session_token: Option<&str>, item_type: PlaylistItemType) -> StreamInfo {
@@ -361,6 +480,7 @@ mod tests {
             channel: StreamChannel {
                 target_id: 1,
                 virtual_id: 42,
+                group_virtual_id: None,
                 provider_id: 1,
                 item_type,
                 cluster: XtreamCluster::Live,
@@ -386,6 +506,7 @@ mod tests {
             session_token: session_token.map(str::to_string),
             preserved: false,
             previous_session_id: None,
+            member_info: None,
         }
     }
 
@@ -421,5 +542,57 @@ mod tests {
         let second = test_stream(2, None, PlaylistItemType::Catchup);
 
         assert_ne!(stream_display_key(&first), stream_display_key(&second));
+    }
+
+    #[test]
+    fn test_is_eligible_for_failover_switch() {
+        // Live MPEG-TS group stream is eligible
+        let mut group_ts = test_stream(1, None, PlaylistItemType::Live);
+        group_ts.channel.group_virtual_id = Some(10);
+        assert!(super::is_eligible_for_failover_switch(&group_ts));
+
+        // Non-group stream is not eligible
+        let non_group_ts = test_stream(2, None, PlaylistItemType::Live);
+        assert!(!super::is_eligible_for_failover_switch(&non_group_ts));
+
+        // Live HLS group stream is not eligible (no runtime switcher)
+        let mut group_hls = test_stream(3, None, PlaylistItemType::LiveHls);
+        group_hls.channel.group_virtual_id = Some(10);
+        assert!(!super::is_eligible_for_failover_switch(&group_hls));
+
+        // Catchup group stream is not eligible
+        let mut group_catchup = test_stream(4, None, PlaylistItemType::Catchup);
+        group_catchup.channel.group_virtual_id = Some(10);
+        assert!(!super::is_eligible_for_failover_switch(&group_catchup));
+
+        // Recording stream is not eligible
+        let mut recording = test_stream(5, None, PlaylistItemType::Live);
+        recording.channel.group_virtual_id = Some(10);
+        recording.user_agent = shared::model::RECORDING_STREAM_USER_AGENT.to_string();
+        assert!(!super::is_eligible_for_failover_switch(&recording));
+
+        // Live MPEG-TS stream with member_info is eligible even without group_virtual_id
+        let mut member_info_ts = test_stream(6, None, PlaylistItemType::Live);
+        member_info_ts.channel.group_virtual_id = None;
+        member_info_ts.member_info = Some(shared::model::StreamMemberInfo {
+            title: std::sync::Arc::from("Title"),
+            input_name: std::sync::Arc::from("input-1"),
+            provider: std::sync::Arc::from("prov-1"),
+            member_vid: Some(42),
+        });
+        assert!(super::is_eligible_for_failover_switch(&member_info_ts));
+    }
+
+    #[test]
+    fn test_failover_members_effect_deps_change_on_reopen_same_stream() {
+        let stream = Rc::new(test_stream(42, None, PlaylistItemType::Live));
+        let open_first = super::failover_members_effect_deps(Some(&stream), true);
+        let closed = super::failover_members_effect_deps(Some(&stream), false);
+        let open_second = super::failover_members_effect_deps(Some(&stream), true);
+
+        assert_eq!(open_first, (Some(42), true));
+        assert_eq!(closed, (Some(42), false));
+        assert_eq!(open_second, (Some(42), true));
+        assert_ne!(closed, open_second, "Reopening the same stream must trigger the effect");
     }
 }

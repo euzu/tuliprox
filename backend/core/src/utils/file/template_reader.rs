@@ -63,10 +63,8 @@ fn read_templates_from_directory(
     path: &Path,
     resolve_env: bool,
 ) -> Result<Option<(Vec<PathBuf>, TemplateDefinitionDto)>, TuliproxError> {
-    let mut files = crate::utils::collect_yaml_files(path)
+    let files = crate::utils::collect_config_yaml_files(path)
         .map_err(|err| TuliproxError::Config(format!("Failed to read templates {err}")))?;
-
-    files.sort();
 
     let mut definitions = vec![];
     let mut loaded_template_files = vec![];

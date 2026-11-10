@@ -907,6 +907,7 @@ async fn occupy_the_only_connection(app_state: &Arc<AppState>, user: &ProxyUserC
     let channel = shared::model::StreamChannel {
         target_id: 1,
         virtual_id: 7,
+        group_virtual_id: None,
         provider_id: 7,
         input_name: "provider-b".intern(),
         item_type: PlaylistItemType::Live,
@@ -1012,4 +1013,74 @@ async fn maintenance_answers_before_admission_for_an_exhausted_user() {
         .find_map(|(kind, count)| (kind == shared::model::EventKind::ConnectionDenied).then_some(count))
         .unwrap_or(0);
     assert_eq!(denied, 0, "the request never reached admission");
+}
+
+#[tokio::test]
+async fn xtream_token_stream_routes_group_virtual_id_to_group_playback() {
+    use crate::{
+        api::{
+            api_utils::tests::group_playback_support::GroupPlaybackEnv,
+            endpoints::xtream_api::{xtream_player_api_stream_with_token, ApiStreamContext, ApiStreamRequest},
+        },
+        auth::create_access_token,
+    };
+    use axum::{http::HeaderMap, response::IntoResponse};
+    use tuliprox_core::model::Fingerprint;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .with_qos("korath", 2, 95)
+        .with_qos("solis", 1, 20)
+        .build()
+        .await;
+
+    let token =
+        create_access_token(&env.app_state.app_config.access_token_secret, 60, crate::auth::scope::INTERNAL_PLAYER);
+    let stream_id = format!("{}.ts", env.group_vid);
+    let response = xtream_player_api_stream_with_token(
+        &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:12345".parse().unwrap()),
+        &HeaderMap::new(),
+        &env.app_state,
+        env.target.id,
+        ApiStreamRequest::from_access_token(ApiStreamContext::Live, &token, &stream_id, ""),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(env.origin_hits("korath"), 1, "group playback should pick preferred member korath");
+    assert_eq!(env.origin_hits("solis"), 0);
+}
+
+#[tokio::test]
+async fn playlist_webplayer_stream_routes_group_virtual_id() {
+    use crate::{
+        api::{
+            api_utils::tests::group_playback_support::GroupPlaybackEnv,
+            endpoints::v1_api_playlist::v1_api_playlist_register_public,
+        },
+        auth::create_access_token,
+    };
+    use axum::{body::Body, http::Request};
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .with_qos("korath", 2, 95)
+        .with_qos("solis", 1, 20)
+        .build()
+        .await;
+
+    let token =
+        create_access_token(&env.app_state.app_config.access_token_secret, 60, crate::auth::scope::INTERNAL_PLAYER);
+    let stream_id = format!("{}.ts", env.group_vid);
+    let router = v1_api_playlist_register_public(axum::Router::new()).with_state(Arc::clone(&env.app_state));
+
+    let uri = format!("/playlist/webplayer/{token}/{}/live/{stream_id}", env.target.id);
+    let mut req = Request::builder().uri(uri).body(Body::empty()).expect("request builder");
+    req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+    let response = router.oneshot(req).await.expect("endpoint response");
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(env.origin_hits("korath"), 1, "webplayer token route should pick preferred member korath");
+    assert_eq!(env.origin_hits("solis"), 0);
 }

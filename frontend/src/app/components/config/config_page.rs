@@ -1,8 +1,8 @@
 use shared::{
     error::TuliproxError,
     model::{
-        ApiProxyConfigDto, ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto,
-        MainConfigDto, McpConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto,
+        ApiProxyConfigDto, ConfigApiDto, FailoverGroupsConfig, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto,
+        LogConfigDto, MainConfigDto, McpConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto,
         ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto,
     },
 };
@@ -23,6 +23,7 @@ const RECORDING_PAGE: &str = "recording";
 const METADATA_UPDATE_PAGE: &str = "metadata_update";
 const PANEL_PAGE: &str = "panel";
 const LIBRARY_PAGE: &str = "library";
+const FAILOVER_GROUPS_PAGE: &str = "failover_groups";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum ConfigPage {
@@ -41,11 +42,12 @@ pub enum ConfigPage {
     Mcp,
     Panel,
     Library,
+    FailoverGroups,
 }
 
 impl ConfigPage {
     /// All pages in tab order.
-    pub const ALL: [ConfigPage; 15] = [
+    pub const ALL: [ConfigPage; 16] = [
         ConfigPage::Main,
         ConfigPage::Api,
         ConfigPage::Log,
@@ -61,6 +63,7 @@ impl ConfigPage {
         ConfigPage::Recording,
         ConfigPage::MetadataUpdate,
         ConfigPage::Library,
+        ConfigPage::FailoverGroups,
     ];
 
     pub const fn title_key(self) -> &'static str {
@@ -80,6 +83,7 @@ impl ConfigPage {
             ConfigPage::Mcp => "LABEL.MCP_CONFIG",
             ConfigPage::Panel => "LABEL.PANEL_CONFIG",
             ConfigPage::Library => "LABEL.LIBRARY_CONFIG",
+            ConfigPage::FailoverGroups => "LABEL.FAILOVER_GROUPS_CONFIG",
         }
     }
 
@@ -100,6 +104,7 @@ impl ConfigPage {
             ConfigPage::Mcp => "MCP",
             ConfigPage::Panel => "Settings",
             ConfigPage::Library => "VideoLibrary",
+            ConfigPage::FailoverGroups => "Nodes",
         }
     }
 }
@@ -124,6 +129,7 @@ impl FromStr for ConfigPage {
             MCP_PAGE => Ok(ConfigPage::Mcp),
             PANEL_PAGE => Ok(ConfigPage::Panel),
             LIBRARY_PAGE => Ok(ConfigPage::Library),
+            FAILOVER_GROUPS_PAGE => Ok(ConfigPage::FailoverGroups),
             _ => Err(TuliproxError::Config(format!("Unknown config page: {s}"))),
         }
     }
@@ -147,6 +153,7 @@ impl fmt::Display for ConfigPage {
             ConfigPage::Mcp => MCP_PAGE,
             ConfigPage::Panel => PANEL_PAGE,
             ConfigPage::Library => LIBRARY_PAGE,
+            ConfigPage::FailoverGroups => FAILOVER_GROUPS_PAGE,
         };
         write!(f, "{s}")
     }
@@ -175,6 +182,7 @@ pub enum ConfigForm {
     Mcp(bool, McpConfigDto),
     Panel(bool, SourcesConfigDto, Option<String>),
     Library(bool, LibraryConfigDto),
+    FailoverGroups(bool, FailoverGroupsConfig),
 }
 
 impl ConfigForm {
@@ -196,6 +204,7 @@ impl ConfigForm {
             ConfigForm::Mcp(..) => ConfigPage::Mcp,
             ConfigForm::Panel(..) => ConfigPage::Panel,
             ConfigForm::Library(..) => ConfigPage::Library,
+            ConfigForm::FailoverGroups(..) => ConfigPage::FailoverGroups,
         }
     }
 
@@ -218,6 +227,7 @@ impl ConfigForm {
                 | ConfigForm::Mcp(true, _)
                 | ConfigForm::Panel(true, ..)
                 | ConfigForm::Library(true, _)
+                | ConfigForm::FailoverGroups(true, _)
         )
     }
 }
@@ -240,6 +250,7 @@ pub struct ConfigFormSlots {
     pub mcp: Option<ConfigForm>,
     pub panel: Option<ConfigForm>,
     pub library: Option<ConfigForm>,
+    pub failover_groups: Option<ConfigForm>,
 }
 
 impl ConfigFormSlots {
@@ -263,10 +274,11 @@ impl ConfigFormSlots {
             ConfigForm::Mcp(_, _) => Self::set_form_slot(&mut self.mcp, form),
             ConfigForm::Panel(..) => Self::set_form_slot(&mut self.panel, form),
             ConfigForm::Library(_, _) => Self::set_form_slot(&mut self.library, form),
+            ConfigForm::FailoverGroups(_, _) => Self::set_form_slot(&mut self.failover_groups, form),
         }
     }
 
-    pub fn all_slots(&self) -> [&Option<ConfigForm>; 16] {
+    pub fn all_slots(&self) -> [&Option<ConfigForm>; 17] {
         [
             &self.main,
             &self.api,
@@ -284,6 +296,7 @@ impl ConfigFormSlots {
             &self.mcp,
             &self.panel,
             &self.library,
+            &self.failover_groups,
         ]
     }
 

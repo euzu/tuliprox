@@ -141,11 +141,12 @@ impl SharedStreamManager {
     }
 
     pub(super) async fn finish_unregister(&self, stream_url: &str, state: &SharedStreamState) {
-        self.remove_meter_uid_if_owned_by(stream_url, state.provider_guard.as_ref().map(|handle| handle.allocation_id));
+        self.remove_meter_uid_if_owned_by(stream_url, state.provider_allocation_id());
         state.cancel_subscribers().await;
         state.stop_token.cancel();
-        if let Some(handle) = &state.provider_guard {
-            self.provider_manager.release_handle(handle);
+        let handle = state.lock_provider_guard().clone();
+        if let Some(handle) = handle {
+            self.provider_manager.release_handle(&handle);
         }
     }
 
@@ -166,9 +167,7 @@ impl SharedStreamManager {
 
     pub async fn teardown_preempted_stream(&self, stream_url: &str, allocation_id: u64) {
         let mut register = self.shared_streams.write().await;
-        if !register.by_key.get(stream_url).is_some_and(|state| {
-            state.provider_guard.as_ref().is_some_and(|handle| handle.allocation_id == allocation_id)
-        }) {
+        if register.by_key.get(stream_url).is_none_or(|state| state.provider_allocation_id() != Some(allocation_id)) {
             return;
         }
         let state = {
@@ -397,6 +396,37 @@ impl SharedStreamManager {
         );
         shared_state.broadcast(stream_url, bytes_stream, Arc::clone(ctx.shared_stream_manager));
         Some(subscribed_stream)
+    }
+
+    /// Releases the provider allocation `expected` of the shared stream `key` while its
+    /// subscribers keep receiving; a group stream calls this before it opens another member.
+    pub async fn detach_provider(&self, key: &str, expected: AllocationId) -> bool {
+        let register = self.shared_streams.read().await;
+        register.by_key.contains_key(key) && self.provider_manager.detach_shared_allocation(key, expected)
+    }
+
+    /// Hands the allocation of the member a group stream switched to over to the shared stream
+    /// `key`. Without the stream the handle is dropped, which releases its slot.
+    pub async fn attach_provider(&self, key: &str, detached: AllocationId, mut handle: ManagedProviderHandle) -> bool {
+        // The registry lock keeps the stream from being torn down between attaching the
+        // allocation and storing its handle, which teardown releases.
+        let register = self.shared_streams.read().await;
+        let Some(state) = register.by_key.get(key) else {
+            return false;
+        };
+        let Some(provider_handle) = handle.handle() else {
+            return false;
+        };
+        if !self.provider_manager.attach_shared_allocation(key, detached, provider_handle) {
+            return false;
+        }
+        let allocation_id = provider_handle.allocation_id;
+        let Some(provider_handle) = handle.disarm() else {
+            return false;
+        };
+        *state.lock_provider_guard() = Some(provider_handle);
+        self.adopt_meter_uid(key, allocation_id);
+        true
     }
 
     pub async fn subscribe_shared_stream(

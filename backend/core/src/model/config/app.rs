@@ -1,9 +1,9 @@
 use crate::{
     model::{
         ApiProxyConfig, ApiProxyServerInfo, CompiledMappings, CompiledTargetMappings, Config, ConfigInput,
-        ConfigInputOptions, ConfigTarget, CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags,
-        MediaToolCapabilities, PluginsConfig, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig,
-        TargetOutput,
+        ConfigInputOptions, ConfigTarget, CustomStreamResponse, FailoverOverrides, GracePeriodOptions, HdHomeRunConfig,
+        HdHomeRunFlags, MediaToolCapabilities, PluginsConfig, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig,
+        SourcesConfig, TargetOutput, TargetOverridesEntry,
     },
     utils,
 };
@@ -51,9 +51,15 @@ pub struct AppConfig {
     pub access_token_secret: [u8; 32],
     pub encrypt_secret: [u8; 16],
     pub media_tools: Arc<MediaToolCapabilities>,
+    pub failover: Arc<ArcSwap<FailoverOverrides>>,
 }
 
 impl AppConfig {
+    /// Override section of `target` from the current failover snapshot.
+    pub fn failover_section(&self, target: &str) -> Option<Arc<TargetOverridesEntry>> {
+        self.failover.load().sections.get(target).map(Arc::clone)
+    }
+
     #[must_use]
     pub fn resolve_storage_dir(&self) -> std::path::PathBuf {
         let paths = self.paths.load();
@@ -626,6 +632,7 @@ mod tests {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         }
@@ -647,6 +654,7 @@ mod tests {
             access_token_secret: [0; 32],
             encrypt_secret: [0; 16],
             media_tools: Arc::new(MediaToolCapabilities::new()),
+            failover: Arc::default(),
         }
     }
 

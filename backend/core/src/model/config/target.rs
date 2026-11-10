@@ -12,10 +12,10 @@ use shared::{
     apply_flags, create_bitset,
     foundation::{Filter, ValueProvider},
     model::{
-        ConfigTargetDto, ConfigTargetOptions, DeduplicateConfig, HdHomeRunTargetOutputDto, M3uTargetOutputDto,
-        MappingStage, PlaylistItemType, PluginHook, PluginRef, PluginTargetOutputDto, ProcessingOrder, StrmExportStyle,
-        StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto, WatchContext, WatchContextSet,
-        XtreamTargetOutputDto,
+        ConfigTargetDto, ConfigTargetOptions, DeduplicateConfig, FailoverGroupsTargetConfig, HdHomeRunTargetOutputDto,
+        M3uTargetOutputDto, MappingStage, PlaylistItemType, PluginHook, PluginRef, PluginTargetOutputDto,
+        ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto,
+        WatchContext, WatchContextSet, XtreamTargetOutputDto,
     },
 };
 use std::{borrow::Cow, sync::Arc};
@@ -35,6 +35,8 @@ pub struct TargetExecutionPlan {
     pub transform_stages: Vec<TransformStage>,
     pub pre_transform_identity_dedup: bool,
     pub post_merge_content_dedup: Option<DeduplicateConfig>,
+    /// The target's failover group switch and overrides; resolved against `config.yml` when used.
+    pub failover_groups: Option<FailoverGroupsTargetConfig>,
     /// The plugin strategies the target opted into. Unlike the always-on stage
     /// hooks these never run unless the config names a plugin (plan §6).
     pub plugin_strategies: PluginStrategies,
@@ -74,6 +76,7 @@ impl Default for TargetExecutionPlan {
             transform_stages: vec![TransformStage::Filter, TransformStage::Rename, TransformStage::Map],
             pre_transform_identity_dedup: false,
             post_merge_content_dedup: None,
+            failover_groups: None,
             plugin_strategies: PluginStrategies::default(),
         }
     }
@@ -103,6 +106,7 @@ impl TargetExecutionPlan {
                 assign_chno: dto.chno.clone(),
                 merge_groups: dto.group_merge.clone(),
             },
+            failover_groups: dto.options.as_ref().and_then(|options| options.failover_groups).filter(|cfg| cfg.enabled),
         }
     }
 }

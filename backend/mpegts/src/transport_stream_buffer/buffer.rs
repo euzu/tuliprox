@@ -1,12 +1,10 @@
 use super::{
-    clock::{
-        add_pts_dts_offset, decode_pcr_at_location, ticks_90khz_to_rounded_millis, ts_chunk_packet_count,
-        TS_PACKET_SIZE,
-    },
+    clock::{add_pts_dts_offset, decode_pcr_at_location, ticks_90khz_to_rounded_millis, ts_chunk_packet_count},
     layout::{build_hls_finite_ts_layout, find_ts_alignment, finite_hls_presentation_duration},
     profile::timestamp_profile_from_finite_layout,
     HlsTsTimestampProfile, TransportStreamBuffer,
 };
+use crate::packet::TS_PACKET_SIZE;
 use bytes::{Bytes, BytesMut};
 use futures::task::AtomicWaker;
 use sha2::{Digest, Sha256};
@@ -200,10 +198,10 @@ impl TransportStreamBuffer {
             let packet_layout =
                 self.finite_hls_layout.as_ref().ok().and_then(|layout| layout.packets.get(current_pos)).copied();
             let packet_has_payload = packet_layout
-                .map_or_else(|| matches!((packet[3] >> 4) & 0b11, 0b01 | 0b11), |layout| layout.has_payload);
+                .map_or_else(|| crate::packet::TsPacket(packet).has_payload(), |layout| layout.has_payload);
 
             // O(1) PID lookup — PID is at most 13 bits (0–8191).
-            let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
+            let pid = crate::packet::ts_packet_pid(packet);
             let entry = &mut self.cc_entries[pid as usize];
             // Normalize payload continuity per PID to a clean local sequence.
             let (counter, discontinuity_sent) = entry.get_or_insert((0, false));

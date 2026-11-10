@@ -1,28 +1,17 @@
 use super::{
-    clock::{decode_pcr_at_location, decode_timestamp_at_location, MAX_PTS_DTS, SYNC_BYTE, TS_PACKET_SIZE},
+    clock::{decode_pcr_at_location, decode_timestamp_at_location, MAX_PTS_DTS},
     pes::{inspect_hls_ts_packet, HlsFiniteTsLayoutError},
     HlsFiniteTsLayout, HlsFiniteTsPacketLayout, HlsPesHeaderAssembler, HlsTsTimestampFieldKind,
 };
+use crate::packet::TS_PACKET_SIZE;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
 
-/// Finds TS alignment by checking for 0x47 sync byte every 188 bytes
+/// Finds TS alignment by checking for 0x47 sync byte every 188 bytes, five packets in a row.
 pub(super) fn find_ts_alignment(buf: &[u8]) -> Option<usize> {
-    for offset in 0..TS_PACKET_SIZE {
-        let mut valid = true;
-        for i in 0..5 {
-            if buf.get(offset + i * TS_PACKET_SIZE) != Some(&SYNC_BYTE) {
-                valid = false;
-                break;
-            }
-        }
-        if valid {
-            return Some(offset);
-        }
-    }
-    None
+    crate::packet::find_sync(buf, 0..TS_PACKET_SIZE, 5, false)
 }
 
 pub(super) fn build_hls_finite_ts_layout(buffer: &[u8]) -> Result<HlsFiniteTsLayout, HlsFiniteTsLayoutError> {

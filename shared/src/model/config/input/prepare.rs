@@ -13,8 +13,17 @@ use log::warn;
 use std::{collections::HashSet, sync::Arc};
 
 impl ConfigInputDto {
+    /// Main URL and credentials left empty while aliases define the accounts: an inline batch. Like a `batch://`
+    /// input, its first enabled alias becomes the main account at runtime.
+    pub fn is_inline_batch(&self) -> bool {
+        self.url.trim().is_empty()
+            && self.username.as_deref().is_none_or(|value| value.trim().is_empty())
+            && self.password.as_deref().is_none_or(|value| value.trim().is_empty())
+            && self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty())
+    }
+
     pub(super) fn normalize_input_type_from_batch_url(&mut self) {
-        let is_batch_url = self.url.trim().starts_with(BATCH_SCHEME_PREFIX);
+        let is_batch_url = self.url.trim().starts_with(BATCH_SCHEME_PREFIX) || self.is_inline_batch();
         self.input_type = match self.input_type {
             InputType::M3u | InputType::M3uBatch => {
                 if is_batch_url {
@@ -248,7 +257,6 @@ impl ConfigInputDto {
                     )));
                 }
             }
-            // R7
             if self.media_server.is_some() {
                 return Err(TuliproxError::ConfigInput(format!(
                     "staged input does not support media_server configuration (input: {})",
@@ -338,7 +346,10 @@ impl ConfigInputDto {
             )));
         }
 
-        check_input_credentials!(self, self.input_type, true, false);
+        // An inline batch has no main account of its own; its aliases are validated one by one.
+        if !self.is_inline_batch() {
+            check_input_credentials!(self, self.input_type, true, false);
+        }
         check_input_connections!(self, self.input_type, false);
         // Always run stalker validation: it rejects a stray `stalker` block on
         // non-stalker inputs and surfaces a malformed MAC at config load even

@@ -343,6 +343,25 @@ async fn contactable_input_hides_inputs_in_maintenance() {
 }
 
 #[tokio::test]
+async fn config_reload_applies_failover_group_circuit_settings() {
+    let state = super::create_test_app_state(Config::default());
+    let circuit = shared::model::FailoverGroupCircuitConfig {
+        source_failures: 5,
+        ..shared::model::FailoverGroupCircuitConfig::default()
+    };
+    let config = Config {
+        failover_groups: shared::model::FailoverGroupsConfig {
+            circuit,
+            ..shared::model::FailoverGroupsConfig::default()
+        },
+        ..Config::default()
+    };
+
+    assert!(state.set_config(config).await.is_ok());
+    assert_eq!(*state.member_health.policy(), tuliprox_session::failover_group::CircuitPolicy::from(&circuit));
+}
+
+#[tokio::test]
 async fn recording_ctx_shares_the_queue_and_capacity_held_by_the_state() {
     let state = super::create_test_app_state(Config::default());
 

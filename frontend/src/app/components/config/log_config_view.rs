@@ -442,13 +442,17 @@ mod browser_tests {
     }
 
     fn syslog_enabled_config() -> AppConfigDto {
-        let mut log = LogConfigDto::default();
-        log.log_level = Some("info".to_string());
-        log.syslog.enabled = true;
-        log.syslog.host = "127.0.0.1".to_string();
-        log.syslog.log_level = Some(LogLevel::Debug);
-        let mut config = ConfigDto::default();
-        config.log = Some(log);
+        let log = LogConfigDto {
+            log_level: Some("info".to_string()),
+            syslog: SyslogConfigDto {
+                enabled: true,
+                host: "127.0.0.1".to_string(),
+                log_level: Some(LogLevel::Debug),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config = ConfigDto { log: Some(log), ..Default::default() };
         AppConfigDto {
             config,
             sources: SourcesConfigDto { templates: None, provider: None, inputs: vec![], sources: vec![] },

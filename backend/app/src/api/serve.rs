@@ -293,6 +293,7 @@ mod tests {
         let stream_channel = StreamChannel {
             target_id: 1,
             virtual_id: 1,
+            group_virtual_id: None,
             provider_id: 1,
             input_name: "input".intern(),
             item_type: PlaylistItemType::Series,
@@ -337,6 +338,7 @@ mod tests {
             req_headers: &HeaderMap::new(),
             meter_uid: 0,
             meter_stream: false,
+            group_failover: None,
         })
         .await
         .expect("test stream admission should succeed");

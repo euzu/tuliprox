@@ -574,20 +574,24 @@ pub fn reapply_target_overrides_ext<'a, S: std::hash::BuildHasher>(
 
     let mut group_restored = false;
     for item in items {
-        if let Some(uuid) = resolve_item_uuid(item) {
-            if let Some(ov) = locked.get(&uuid) {
-                let old_group = if ov.group.is_keep() { None } else { Some(Arc::clone(&item.header.group)) };
+        // A copy of a group channel carries its alias uuid but the group's `failover_group_uuid`.
+        // The lock of the representative is registered under the group uuid, so fall back to it
+        // when the item has no locked override of its own.
+        let open = resolve_item_uuid(item)
+            .and_then(|uuid| locked.get(&uuid))
+            .or_else(|| item.header.failover_group_uuid.and_then(|uuid| locked.get(&uuid)));
+        if let Some(ov) = open {
+            let old_group = if ov.group.is_keep() { None } else { Some(Arc::clone(&item.header.group)) };
 
-                if skip_chno {
-                    tuliprox_core::model::apply_override_skip_chno(&mut item.header, ov);
-                } else {
-                    apply_override(&mut item.header, ov);
-                }
+            if skip_chno {
+                tuliprox_core::model::apply_override_skip_chno(&mut item.header, ov);
+            } else {
+                apply_override(&mut item.header, ov);
+            }
 
-                if let Some(old) = old_group {
-                    if old != item.header.group {
-                        group_restored = true;
-                    }
+            if let Some(old) = old_group {
+                if old != item.header.group {
+                    group_restored = true;
                 }
             }
         }

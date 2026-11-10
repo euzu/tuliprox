@@ -71,6 +71,8 @@ pub struct UiPlaylistItem {
     pub category_id: u32,
     pub rating: f64,
     pub input_name: Arc<str>,
+    /// Stable provider/origin id of the stream; empty when the item does not carry one.
+    pub input_stream_id: Arc<str>,
     pub epg_channel_id: Option<Arc<str>>,
     pub explorer_meta: Option<UiItemExplorerMeta>,
 }
@@ -89,11 +91,11 @@ impl Serialize for UiPlaylistItem {
         S: Serializer,
     {
         let len = if self.explorer_meta.is_some() {
-            14
+            15
         } else if self.epg_channel_id.is_some() {
-            13
+            14
         } else {
-            12
+            13
         };
         let mut s = serializer.serialize_tuple_struct("UiPlaylistItem", len)?;
         s.serialize_field(&self.virtual_id)?;
@@ -108,13 +110,14 @@ impl Serialize for UiPlaylistItem {
         s.serialize_field(&self.category_id)?;
         s.serialize_field(&self.rating)?;
         s.serialize_field(self.input_name.as_ref())?;
-        if len >= 13 {
+        s.serialize_field(self.input_stream_id.as_ref())?;
+        if len >= 14 {
             match &self.epg_channel_id {
                 Some(id) => s.serialize_field(id.as_ref())?,
                 None => s.serialize_field(&Option::<&str>::None)?,
             }
         }
-        if len == 14 {
+        if len == 15 {
             if let Some(ref meta) = self.explorer_meta {
                 s.serialize_field(meta)?;
             }
@@ -142,7 +145,7 @@ impl<'de> Deserialize<'de> for UiPlaylistItem {
             type Value = UiPlaylistItem;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a tuple struct UiPlaylistItem with 12 to 14 elements")
+                formatter.write_str("a tuple struct UiPlaylistItem with 13 to 15 elements")
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -168,6 +171,8 @@ impl<'de> Deserialize<'de> for UiPlaylistItem {
                 let rating = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(10, &self))?;
                 let input_name =
                     seq.next_element::<ArcStrWrap>()?.ok_or_else(|| serde::de::Error::invalid_length(11, &self))?.0;
+                let input_stream_id =
+                    seq.next_element::<ArcStrWrap>()?.ok_or_else(|| serde::de::Error::invalid_length(12, &self))?.0;
 
                 let epg_channel_id = seq.next_element::<OptionArcStrWrap>()?.and_then(|w| w.0);
                 let explorer_meta = seq.next_element::<Option<UiItemExplorerMeta>>()?.flatten();
@@ -187,6 +192,7 @@ impl<'de> Deserialize<'de> for UiPlaylistItem {
                     category_id,
                     rating,
                     input_name,
+                    input_stream_id,
                     epg_channel_id,
                     explorer_meta,
                 })
@@ -292,6 +298,7 @@ impl UiPlaylistItem {
             category_id: item.category_id.unwrap_or(0),
             rating: get_rating(item.additional_properties.as_ref()),
             input_name: Arc::clone(&item.input_name),
+            input_stream_id: "".intern(),
             epg_channel_id: item.epg_channel_id.clone(),
             explorer_meta,
         }
@@ -317,6 +324,7 @@ impl UiPlaylistItem {
             category_id: item.category_id,
             rating: get_rating(item.additional_properties.as_ref()),
             input_name: Arc::clone(&item.input_name),
+            input_stream_id: Arc::clone(&item.input_stream_id),
             epg_channel_id: item.epg_channel_id,
             explorer_meta,
         }
@@ -342,6 +350,7 @@ impl UiPlaylistItem {
             category_id: 0,
             rating: 0.0,
             input_name: Arc::clone(&item.input_name),
+            input_stream_id: Arc::clone(&item.input_stream_id),
             epg_channel_id: item.epg_channel_id,
             explorer_meta,
         }
@@ -363,6 +372,7 @@ impl UiPlaylistItem {
             category_id: header.category_id,
             rating: get_rating(header.additional_properties.as_ref()),
             input_name: Arc::clone(&header.input_name),
+            input_stream_id: Arc::clone(&header.input_stream_id),
             epg_channel_id: header.epg_channel_id.clone(),
             explorer_meta,
         }
@@ -404,6 +414,7 @@ mod tests {
             category_id: 10,
             rating: 5.0,
             input_name: "in1".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
         }
@@ -421,51 +432,51 @@ mod tests {
             ..Default::default()
         };
 
-        // Case 1: epg_channel_id None + explorer_meta None -> 12 elements
+        // Case 1: epg_channel_id None + explorer_meta None -> 13 elements
         let item1 = base_item();
         let json1 = serde_json::to_string(&item1).expect("serialize item1 to JSON");
         let val1: serde_json::Value = serde_json::from_str(&json1).expect("parse JSON value");
-        assert_eq!(val1.as_array().expect("array").len(), 12);
+        assert_eq!(val1.as_array().expect("array").len(), 13);
         let back_json1: UiPlaylistItem = serde_json::from_str(&json1).expect("deserialize JSON");
         assert_eq!(back_json1, item1);
         let cbor1 = bin_serialize(&item1).expect("serialize item1 to CBOR");
         let back_cbor1: UiPlaylistItem = bin_deserialize(&cbor1).expect("deserialize CBOR");
         assert_eq!(back_cbor1, item1);
 
-        // Case 2: epg_channel_id Some + explorer_meta None -> 13 elements
+        // Case 2: epg_channel_id Some + explorer_meta None -> 14 elements
         let item2 = UiPlaylistItem { epg_channel_id: Some("epg1".intern()), ..base_item() };
         let json2 = serde_json::to_string(&item2).expect("serialize item2 to JSON");
         let val2: serde_json::Value = serde_json::from_str(&json2).expect("parse JSON value");
-        assert_eq!(val2.as_array().expect("array").len(), 13);
+        assert_eq!(val2.as_array().expect("array").len(), 14);
         let back_json2: UiPlaylistItem = serde_json::from_str(&json2).expect("deserialize JSON");
         assert_eq!(back_json2, item2);
         let cbor2 = bin_serialize(&item2).expect("serialize item2 to CBOR");
         let back_cbor2: UiPlaylistItem = bin_deserialize(&cbor2).expect("deserialize CBOR");
         assert_eq!(back_cbor2, item2);
 
-        // Case 3: epg_channel_id None + explorer_meta Some -> 14 elements (epg_channel_id is null on wire)
+        // Case 3: epg_channel_id None + explorer_meta Some -> 15 elements (epg_channel_id is null on wire)
         let item3 = UiPlaylistItem { epg_channel_id: None, explorer_meta: Some(sample_meta.clone()), ..base_item() };
         let json3 = serde_json::to_string(&item3).expect("serialize item3 to JSON");
         let val3: serde_json::Value = serde_json::from_str(&json3).expect("parse JSON value");
         let arr3 = val3.as_array().expect("array");
-        assert_eq!(arr3.len(), 14);
-        assert!(arr3[12].is_null(), "element 12 must be null placeholder when epg_channel_id is None");
-        assert!(arr3[13].is_object(), "element 13 must be explorer_meta object");
+        assert_eq!(arr3.len(), 15);
+        assert!(arr3[13].is_null(), "element 13 must be null placeholder when epg_channel_id is None");
+        assert!(arr3[14].is_object(), "element 14 must be explorer_meta object");
         let back_json3: UiPlaylistItem = serde_json::from_str(&json3).expect("deserialize JSON");
         assert_eq!(back_json3, item3);
         let cbor3 = bin_serialize(&item3).expect("serialize item3 to CBOR");
         let back_cbor3: UiPlaylistItem = bin_deserialize(&cbor3).expect("deserialize CBOR");
         assert_eq!(back_cbor3, item3);
 
-        // Case 4: epg_channel_id Some + explorer_meta Some -> 14 elements
+        // Case 4: epg_channel_id Some + explorer_meta Some -> 15 elements
         let item4 =
             UiPlaylistItem { epg_channel_id: Some("epg1".intern()), explorer_meta: Some(sample_meta), ..base_item() };
         let json4 = serde_json::to_string(&item4).expect("serialize item4 to JSON");
         let val4: serde_json::Value = serde_json::from_str(&json4).expect("parse JSON value");
         let arr4 = val4.as_array().expect("array");
-        assert_eq!(arr4.len(), 14);
-        assert_eq!(arr4[12].as_str(), Some("epg1"));
-        assert!(arr4[13].is_object());
+        assert_eq!(arr4.len(), 15);
+        assert_eq!(arr4[13].as_str(), Some("epg1"));
+        assert!(arr4[14].is_object());
         let back_json4: UiPlaylistItem = serde_json::from_str(&json4).expect("deserialize JSON");
         assert_eq!(back_json4, item4);
         let cbor4 = bin_serialize(&item4).expect("serialize item4 to CBOR");

@@ -58,6 +58,9 @@ fn playlist_update_run_failure_text_makes_no_unverified_previous_data_claim() {
     assert!(progress.iter().all(|event| event.execution_order == Some(execution_order)));
     assert!(progress.iter().all(|event| event.state == Some(PlaylistUpdateState::Failure)));
     assert!(progress.iter().all(|event| !event.message.contains("secret")));
+    // The failure reason names the error, with the credentials of its URL masked.
+    assert!(progress.iter().all(|event| event.failure_reason.as_deref().is_some_and(|reason| !reason.is_empty())));
+    assert!(progress.iter().all(|event| !event.failure_reason.as_deref().unwrap_or_default().contains("secret")));
     assert!(progress.iter().all(|event| !event.message.contains("previous accepted data")));
 }
 
@@ -224,7 +227,7 @@ fn legacy_messagepack_playlist_items_default_missing_input_stream_id() {
         },
     };
 
-    let header_bytes = serialize_without_trailing_fields(&source.header, &[0xa0, 0xc0, 0xa0]);
+    let header_bytes = serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xa0, 0xc0, 0xa0]);
     let decoded_header: PlaylistItemHeader =
         rmp_serde::from_slice(&header_bytes).expect("legacy header should deserialize");
     assert!(decoded_header.input_stream_id.is_empty());
@@ -264,7 +267,7 @@ fn previous_messagepack_playlist_items_default_missing_upstream_user_agent() {
     };
 
     let header: PlaylistItemHeader =
-        rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xa0, 0xc0]))
+        rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xa0, 0xc0]))
             .expect("previous header should deserialize");
     let m3u: M3uPlaylistItem =
         rmp_serde::from_slice(&serialize_without_trailing_fields(&M3uPlaylistItem::from(&source), &[0xa0, 0xc0]))
@@ -292,8 +295,9 @@ fn previous_messagepack_playlist_items_default_missing_input_url() {
         },
     };
 
-    let header: PlaylistItemHeader = rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xa0]))
-        .expect("previous header should deserialize");
+    let header: PlaylistItemHeader =
+        rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xa0]))
+            .expect("previous header should deserialize");
     let m3u: M3uPlaylistItem =
         rmp_serde::from_slice(&serialize_without_trailing_fields(&M3uPlaylistItem::from(&source), &[0xa0]))
             .expect("previous M3U item should deserialize");

@@ -162,7 +162,7 @@ async fn check_divergence_detects_stream_without_counted_session() {
         let mut connections = manager.connections.write().await;
         let data = connections.by_key.entry(user.username.clone()).or_insert_with(|| UserConnectionData::new(0, 1, 0));
 
-        // Add a session with GraceHold pending — exempt from Invariant 1
+        // A session with a pending GraceHold is not expected to have a counted connection
         data.add_session(UserSession {
             token: "tok-div-3".to_string(),
             transition_version: 1,
@@ -218,6 +218,7 @@ async fn check_divergence_detects_stream_without_counted_session() {
                 epg_channel_id: None,
                 epg_reference_ts: None,
                 upstream_user_agent: None,
+                group_virtual_id: None,
             },
             user_agent: "ua".to_string(),
             country_code: None,

@@ -18,6 +18,7 @@ pub fn PlaylistExplorerView() -> Html {
     let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.EXPLORER")]));
     let playlist = use_state(|| None::<Rc<UiPlaylistCategories>>);
     let playlist_req = use_state(|| None::<PlaylistRequest>);
+    let error = use_state(|| None::<String>);
 
     let config = use_context::<ConfigContext>().and_then(|ctx| ctx.config);
     let target_name = use_state(|| None::<String>);
@@ -28,7 +29,7 @@ pub fn PlaylistExplorerView() -> Html {
         }
         _ => false,
     };
-    let context = PlaylistExplorerContext { playlist, playlist_request: playlist_req, target_name };
+    let context = PlaylistExplorerContext { playlist, playlist_request: playlist_req, error, target_name };
 
     html! {
         <ContextProvider<PlaylistExplorerContext> context={context}>

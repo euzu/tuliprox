@@ -12,7 +12,7 @@
       "releases": [
         {
           "version": "0.1.0",
-          "package_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/packages/youtube-input-0.1.0.tlpx",
+          "package_url": "https://github.com/euzu/tuliprox/releases/download/plugin-youtube-input-v0.1.0/youtube-input-0.1.0.tlpx",
           "min_tuliprox_version": "3.3.186",
           "plugin_api": 1,
           "capabilities": [

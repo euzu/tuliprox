@@ -231,12 +231,15 @@ pub enum ResourceFetchPolicy {
 const API_STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 mod activation;
 mod auth;
 mod catchup;
 mod clock;
+pub(crate) mod failover_group;
+pub(crate) mod failover_group_hot_apply;
+pub(crate) mod failover_group_runtime;
 mod local_files;
 mod maintenance;
 mod media_server;
@@ -252,6 +255,8 @@ mod stalker;
 mod strategy;
 mod streaming;
 
+#[cfg(test)]
+use self::failover_group::member_needs_stalker_resolution;
 #[cfg(test)]
 use self::metering::resolve_stream_config_u64;
 #[cfg(test)]
@@ -289,10 +294,7 @@ use self::{
     resources::hls_resource_failure_status,
     response::stream_admission_rejected_response,
     session_identity::session_reacquire_cleanup_addrs,
-    stalker::{
-        accepts_requested_stream_url, re_resolve_stalker_url_singleflight, should_refresh_stalker_playback,
-        stalker_stream_kind,
-    },
+    stalker::{accepts_requested_stream_url, re_resolve_stalker_url_singleflight, should_refresh_stalker_playback},
     strategy::{get_grace_period_millis, should_defer_provider_open_for_grace_hold},
     streaming::{
         create_stream_response_details, force_stream_response, is_hop_by_hop_response_header,
@@ -324,15 +326,19 @@ pub use self::{
     strategy::redirect_response,
     streaming::{
         force_provider_stream_response, is_hls_stream_share_enabled, is_seek_request, is_seekable_media_request,
-        is_stream_share_enabled,
+        is_stream_share_enabled, sticky_playback_context,
     },
 };
 pub(crate) use self::{
     auth::{input_for_user, with_recording_headers},
     catchup::get_catchup_session_ttl_secs,
+    failover_group::{
+        archive_member_order, group_playback_settings, member_playback_url, resolve_hls_group_entry,
+        GroupSelectionRequest, PlaybackSource,
+    },
     local_files::local_stream_response,
     maintenance::{blocks_new_playback, is_running_playback, maintenance_rejection_response},
-    provider_acquire::stream_response_with_provider_handle,
+    provider_acquire::{stream_response_with_provider_handle, StreamPlaybackOutcome},
     provider_urls::{lookup_account_m3u_stream_url, select_provider_stream_url},
     resources::force_hls_resource_response,
     response::admission_failure_response,
@@ -341,7 +347,7 @@ pub(crate) use self::{
         create_playback_session_fingerprint, get_hls_session_ttl_secs, get_session_reservation_ttl_secs,
         is_session_based_playback, is_socket_bound_playback_session, should_pin_provider_for_session,
     },
-    stalker::{resolve_initial_stalker_playback_url, resolve_stalker_stream_for_account},
+    stalker::{resolve_initial_stalker_playback_url, resolve_stalker_stream_for_account, stalker_stream_kind},
     strategy::resolve_redirect_location,
     streaming::{
         get_hls_playback_ttl_secs, plugin_upstream_headers, record_connect_failed_attempt,

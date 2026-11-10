@@ -375,7 +375,11 @@ impl Fixture {
                 ..FixtureStreamOptions::default()
             },
             false,
-            &FixtureInputPlan { input_type: FixtureInputType::M3u, stalker: &FixtureStalker::default() },
+            &FixtureInputPlan {
+                input_type: FixtureInputType::M3u,
+                stalker: &FixtureStalker::default(),
+                failover_inputs: &[],
+            },
         )?;
         let original = std::fs::read_to_string(&paths.config_file)?;
         let custom_response = custom_response_config(case, &paths)?;

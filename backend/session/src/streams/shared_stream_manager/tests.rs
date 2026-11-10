@@ -64,6 +64,7 @@ fn create_test_app_config_with_conns(max_connections: u16) -> AppConfig {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -71,6 +72,7 @@ fn create_test_app_config_with_conns(max_connections: u16) -> AppConfig {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::default(),
     }
 }
 
@@ -92,6 +94,7 @@ fn create_test_stream_channel(url: &str) -> StreamChannel {
         epg_channel_id: None,
         epg_reference_ts: None,
         upstream_user_agent: None,
+        group_virtual_id: None,
     }
 }
 

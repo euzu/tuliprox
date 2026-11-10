@@ -57,6 +57,7 @@ fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
         mapping_files_used: None,
         template_file_path: None,
         template_files_used: None,
+        failover_file_path: None,
         api_proxy_file_path: String::new(),
         custom_stream_response_path: None,
     };
@@ -72,6 +73,7 @@ fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::default(),
     };
     PlaylistProcessingContext {
         client: reqwest::Client::new(),
@@ -87,7 +89,7 @@ fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
         events: shared::model::NoopSink,
         playlist_state: None,
         disabled_headers: None,
-        processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+        processed_inputs: Arc::default(),
         input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         provider_manager: None,
@@ -167,7 +169,43 @@ async fn m3u_alias_playlist_is_downloaded_and_indexed_separately() {
 }
 
 #[tokio::test]
-async fn failed_m3u_alias_is_retried_after_primary_input_is_processed() {
+async fn an_input_that_failed_in_this_run_is_not_fetched_again() {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let playlist_path = temp.path().join("late.m3u");
+    let ctx = processing_context();
+    let config =
+        Config { storage_dir: temp.path().join("storage").to_string_lossy().into_owned(), ..Config::default() };
+    ctx.config.config.store(Arc::new(config));
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "shared-account".intern(),
+        input_type: InputType::M3u,
+        url: playlist_path.to_string_lossy().into_owned(),
+        enabled: true,
+        ..ConfigInput::default()
+    });
+
+    let mut first = download_input(&ctx, &input, false).await;
+    assert!(!first.errors.is_empty(), "a missing playlist should fail");
+    assert!(first.source.is_empty());
+
+    // The provider recovers before the next source of the same run asks for the input.
+    tokio::fs::write(&playlist_path, "#EXTM3U\n#EXTINF:-1,Channel\nhttp://stream.example/1.ts\n")
+        .await
+        .expect("playlist fixture should be written");
+
+    let mut second = download_input(&ctx, &input, false).await;
+    assert!(second.source.is_empty(), "the failed input must not be fetched again in this run");
+    assert_eq!(
+        second.errors.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        first.errors.iter().take(1).map(ToString::to_string).collect::<Vec<_>>(),
+        "a later source sees the first failure"
+    );
+    assert!(!ctx.is_input_downloaded("shared-account").await);
+}
+
+#[tokio::test]
+async fn failed_m3u_alias_is_fetched_once_per_run_and_again_in_the_next_run() {
     let temp = tempfile::tempdir().expect("temp dir should be created");
     let primary_playlist_path = temp.path().join("main.m3u");
     let alias_playlist_path = temp.path().join("retry.m3u");
@@ -227,6 +265,16 @@ async fn failed_m3u_alias_is_retried_after_primary_input_is_processed() {
         .await
         .expect("alias fixture should be written");
 
+    // A later source of the same run gets the alias failure without a new fetch.
+    let same_run = download_input(&ctx, &input, false).await;
+    assert_eq!(
+        same_run.errors.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        first_errors.iter().take(1).map(ToString::to_string).collect::<Vec<_>>()
+    );
+    assert!(!ctx.is_input_downloaded("retry-account").await);
+
+    // The next run fetches the alias again.
+    let ctx = PlaylistProcessingContext { processed_inputs: Arc::default(), ..ctx.clone() };
     let InputDownloadResult {
         errors: second_errors,
         source: mut second_playlist,

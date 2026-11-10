@@ -31,6 +31,13 @@ pub(crate) fn check_duplicate_manual_chno(
 
     for group in playlist {
         for chan in &group.channels {
+            // A copy of a group channel intentionally shares the group's locked number; only the
+            // group channel itself takes part in the duplicate check.
+            let is_group_copy =
+                chan.header.failover_group_uuid.is_some_and(|group_uuid| group_uuid != chan.header.uuid);
+            if is_group_copy {
+                continue;
+            }
             if chan.header.chno != 0 {
                 *counts.entry(chan.header.chno).or_default() += 1;
                 if let Some(uuid) = resolve_item_uuid(chan) {
@@ -738,9 +745,10 @@ async fn plugin_duplicate_keepers<P: PluginHost>(
     ctx: &HookCtx<'_>,
     dedup_config: &DeduplicateConfig,
     playlist: &[PlaylistGroup],
+    skip: &HashSet<UUIDType>,
     report: &mut PluginRunReport,
 ) -> Result<Option<PluginKeepers>, PluginAbort> {
-    let sets = group_duplicates(dedup_config, playlist);
+    let sets = group_duplicates(dedup_config, playlist, skip);
     if sets.is_empty() {
         return Ok(None);
     }
@@ -758,6 +766,7 @@ pub(crate) async fn prepare_eligible_catalog<P: PluginHost>(
     plugins: &P,
     target: &ConfigTarget,
     mut playlist: Vec<PlaylistGroup>,
+    group_uuids: &HashSet<UUIDType>,
     step: &mut StepMeasure,
     report: &mut PluginRunReport,
 ) -> Result<Vec<PlaylistGroup>, PluginAbort> {
@@ -778,12 +787,17 @@ pub(crate) async fn prepare_eligible_catalog<P: PluginHost>(
     if let Some(dedup_config) = target.execution_plan.post_merge_content_dedup.as_ref() {
         let keepers = match &strategies.resolve_duplicates {
             Some(plugin) => {
-                plugin_duplicate_keepers(plugins, plugin.id(), &ctx, dedup_config, &playlist, report).await?
+                plugin_duplicate_keepers(plugins, plugin.id(), &ctx, dedup_config, &playlist, group_uuids, report)
+                    .await?
             }
             None => None,
         };
-        let removed =
-            crate::processor::deduplicate::deduplicate_playlist(dedup_config, &mut playlist, keepers.as_ref());
+        let removed = crate::processor::deduplicate::deduplicate_playlist(
+            dedup_config,
+            &mut playlist,
+            keepers.as_ref(),
+            group_uuids,
+        );
         if removed > 0 {
             info!("Deduplicated {removed} eligible channels for target {}", target.name);
         }
@@ -1076,6 +1090,79 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     finalize_prepared_target_with_tmdb(ctx, prepared, tmdb_client.as_ref()).await
 }
 
+/// A group channel replaces the representative's uuid with the group uuid, so a target override
+/// locked on the representative is unreachable under the group uuid. Register the same override
+/// for the group uuid; copies of the group channel resolve it through their `failover_group_uuid`
+/// in the re-apply path, so they need no lock entry of their own.
+pub(crate) fn lock_group_representatives(
+    pending: &[tuliprox_repository::PendingFailoverGroup],
+    locked: &mut HashMap<UUIDType, Arc<ItemOverride>>,
+) {
+    if locked.is_empty() {
+        return;
+    }
+    for group in pending {
+        let Some(representative) = group.members.first() else {
+            continue;
+        };
+        let Some(representative_uuid) = resolve_item_uuid(representative) else {
+            continue;
+        };
+        if let Some(item_override) = locked.get(&representative_uuid).map(Arc::clone) {
+            locked.insert(group.group_uuid, item_override);
+        }
+    }
+}
+
+pub(super) fn process_target_failover_groups(
+    config: &tuliprox_core::model::AppConfig,
+    target: &ConfigTarget,
+    playlist: &mut Vec<PlaylistGroup>,
+    step: &mut StepMeasure,
+    errors: &mut Vec<TuliproxError>,
+) -> FailoverGroupBatch {
+    let Some(target_cfg) = target.execution_plan.failover_groups.as_ref() else {
+        return FailoverGroupBatch::default();
+    };
+    let cg_cfg = config.config.load().failover_groups.for_target(target_cfg);
+    // One snapshot for error and section, so the meta never mixes two failover generations.
+    let failover = config.failover.load();
+    if let Some(error) = failover.error.as_deref() {
+        errors.push(TuliproxError::FailoverGroup(format!(
+            "Failover overrides are not applied to target '{}': {error}",
+            target.name
+        )));
+    }
+    let overrides = failover.sections.get(target.name.as_str());
+    step.broadcast("Processing failover groups for '{}' playlist", &target.name);
+    let mut batch = crate::processor::failover_group::group_playlist(
+        &cg_cfg,
+        overrides.map(|entry| &entry.overrides),
+        &target.name,
+        playlist,
+    );
+    batch.meta = FailoverGroupMeta {
+        overrides_etag: overrides.map(|entry| Arc::clone(&entry.etag)),
+        overrides_error: failover.error.clone(),
+        applied_overrides: overrides.map(|entry| entry.overrides.clone()),
+        // A publication shows the current representatives, so nothing is stale after it.
+        display_stale_groups: Vec::new(),
+    };
+    step.tick("failover grouping");
+    log_memory_snapshot(format!("target '{}' after_failover_grouping", target.name).as_str());
+    batch
+}
+
+/// Nothing is published: keep the previous metrics and CSV, only record the run.
+async fn record_unchanged_target_analytics(
+    config: &tuliprox_core::model::Config,
+    target_name: &str,
+    analytics_input: &TargetAnalyticsInput,
+) {
+    let (empty_analytics, empty_csv) = compute_target_analytics(&config.storage_dir, analytics_input, &[], &[]);
+    persist_target_analytics(config, target_name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged).await;
+}
+
 pub(super) async fn finalize_prepared_target_with_tmdb<
     E: EventSink + Clone + 'static,
     M: MetadataUpdateSink,
@@ -1104,6 +1191,11 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
     let mut errors = Vec::new();
     let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
+
+    let pending_failover_groups =
+        process_target_failover_groups(&ctx.config, target, &mut new_playlist, &mut step, &mut errors);
+    lock_group_representatives(&pending_failover_groups.groups, &mut prepared.overrides.target_locked.lock());
+
     if target.favourites.is_some() {
         step.broadcast("Processing favourites for '{}' playlist", &target.name);
         process_favourites(&mut new_playlist, target.favourites.as_deref());
@@ -1115,22 +1207,22 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
-        // Nothing is published: keep the previous metrics and CSV, only record the run.
-        let (empty_analytics, empty_csv) =
-            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
-        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged)
-            .await;
+        record_unchanged_target_analytics(&config, &target.name, &prepared.analytics_input).await;
         return (Ok(()), errors);
     }
 
-    let eligible_catalog = match prepare_eligible_catalog(&ctx.plugins, target, new_playlist, &mut step, report).await {
-        Ok(catalog) => catalog,
-        Err(abort) => {
-            step.stop("");
-            return (Err(vec![TuliproxError::Plugin(abort.to_string())]), errors);
-        }
-    };
+    let group_uuids: HashSet<UUIDType> = pending_failover_groups.groups.iter().map(|p| p.group_uuid).collect();
+    let eligible_catalog =
+        match prepare_eligible_catalog(&ctx.plugins, target, new_playlist, &group_uuids, &mut step, report).await {
+            Ok(catalog) => catalog,
+            Err(abort) => {
+                step.stop("");
+                return (Err(vec![TuliproxError::Plugin(abort.to_string())]), errors);
+            }
+        };
     let mut views = prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await;
+    views.failover_groups = pending_failover_groups;
+
     if views.base.is_empty()
         && views.xtream.is_none()
         && views.publication_plan == PlaylistPublicationPlan::Ordinary
@@ -1139,11 +1231,7 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
-        // Nothing is published: keep the previous metrics and CSV, only record the run.
-        let (empty_analytics, empty_csv) =
-            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
-        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged)
-            .await;
+        record_unchanged_target_analytics(&config, &target.name, &prepared.analytics_input).await;
         return (Ok(()), errors);
     }
 
@@ -1242,7 +1330,7 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
         flatten_tvguide(new_epg)
     };
     let library_empty = library_empty.for_filtered_playlist(&finalized_base);
-    let result = persist_playlist_views(
+    let result = persist_playlist_views_with_groups(
         &ctx.config,
         &mut finalized_base,
         finalized_xtream.as_deref_mut(),
@@ -1254,6 +1342,7 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
             library_empty,
             publication_plan: views.publication_plan,
         },
+        &mut views.failover_groups,
     )
     .await;
     // `type: plugin` outputs (plan §7 *Output providers*): the repository has no
@@ -1573,6 +1662,7 @@ pub(crate) struct TargetPlaylistViews {
     pub(crate) base: Vec<PlaylistGroup>,
     pub(crate) xtream: Option<Vec<PlaylistGroup>>,
     pub(crate) publication_plan: PlaylistPublicationPlan,
+    pub(crate) failover_groups: FailoverGroupBatch,
 }
 
 /// Builds the curated playlist views for base and Xtream outputs.
@@ -1604,6 +1694,7 @@ pub(crate) fn build_curated_playlist_views(
             has_xtream_output && !config.include_xtream_base_categories,
             appearance_filter_configured,
         ),
+        failover_groups: FailoverGroupBatch::default(),
     }
 }
 
@@ -1618,6 +1709,7 @@ pub(crate) async fn prepare_target_playlist_views(
             base: playlist,
             xtream: None,
             publication_plan: PlaylistPublicationPlan::Ordinary,
+            failover_groups: FailoverGroupBatch::default(),
         };
     };
 
@@ -1632,13 +1724,21 @@ pub(super) fn curation_playlist_views(
     outcome: CurationRunOutcome,
 ) -> TargetPlaylistViews {
     match outcome {
-        CurationRunOutcome::NotConfigured => {
-            TargetPlaylistViews { base: playlist, xtream: None, publication_plan: PlaylistPublicationPlan::Ordinary }
-        }
+        CurationRunOutcome::NotConfigured => TargetPlaylistViews {
+            base: playlist,
+            xtream: None,
+            publication_plan: PlaylistPublicationPlan::Ordinary,
+            failover_groups: FailoverGroupBatch::default(),
+        },
         CurationRunOutcome::Failed(failure) => {
             warn_curation_failure(&target.name, &failure);
             // Discovery is optional; unavailable selections must not suppress the source catalog or EPG.
-            TargetPlaylistViews { base: playlist, xtream: None, publication_plan: PlaylistPublicationPlan::Ordinary }
+            TargetPlaylistViews {
+                base: playlist,
+                xtream: None,
+                publication_plan: PlaylistPublicationPlan::Ordinary,
+                failover_groups: FailoverGroupBatch::default(),
+            }
         }
         CurationRunOutcome::Complete(evaluation) => {
             let views = build_curated_playlist_views(
@@ -1845,6 +1945,51 @@ pub(crate) async fn process_watch<E: EventSink>(
     }
 
     true
+}
+
+#[cfg(test)]
+pub(crate) async fn run_finalize_until_persist(
+    target: &ConfigTarget,
+    playlist: Vec<PlaylistGroup>,
+) -> (Vec<PlaylistGroup>, Vec<tuliprox_repository::PendingFailoverGroup>) {
+    run_finalize_until_persist_with_locked(target, playlist, HashMap::new()).await
+}
+
+#[cfg(test)]
+pub(crate) async fn run_finalize_until_persist_with_locked(
+    target: &ConfigTarget,
+    mut playlist: Vec<PlaylistGroup>,
+    mut locked: HashMap<UUIDType, Arc<ItemOverride>>,
+) -> (Vec<PlaylistGroup>, Vec<tuliprox_repository::PendingFailoverGroup>) {
+    let mut step = StepMeasure::new("test", |_, _| {});
+    let pending = if let Some(target_cfg) = target.execution_plan.failover_groups.as_ref() {
+        let cg_cfg = shared::model::FailoverGroupsConfig::default().for_target(target_cfg);
+        crate::processor::failover_group::group_playlist(&cg_cfg, None, &target.name, &mut playlist).groups
+    } else {
+        Vec::new()
+    };
+    lock_group_representatives(&pending, &mut locked);
+    if target.favourites.is_some() {
+        process_favourites(&mut playlist, target.favourites.as_deref());
+    }
+    let group_uuids: HashSet<UUIDType> = pending.iter().map(|p| p.group_uuid).collect();
+    let mut report = PluginRunReport::default();
+    let eligible = prepare_eligible_catalog(&NoPlugins, target, playlist, &group_uuids, &mut step, &mut report)
+        .await
+        .expect("no plugin to abort");
+    let finalized = finalize_playlist_view(
+        &NoPlugins,
+        target,
+        eligible,
+        &mut step,
+        PlaylistViewKind::Base,
+        &mut PluginChnos::default(),
+        &mut report,
+        Some(&locked),
+    )
+    .await
+    .expect("no plugin to abort");
+    (finalized, pending)
 }
 
 /// Reconcile each binding once for the entire target, then preserve its per-input playback origin.

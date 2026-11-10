@@ -250,6 +250,7 @@ mod tests {
             channel: StreamChannel {
                 target_id: 1,
                 virtual_id: uid,
+                group_virtual_id: None,
                 provider_id: 1,
                 item_type,
                 cluster: item_type.cluster(),
@@ -275,6 +276,7 @@ mod tests {
             session_token: has_session.then(|| "session".to_string()),
             preserved,
             previous_session_id: None,
+            member_info: None,
         })
     }
 

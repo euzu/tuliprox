@@ -57,6 +57,7 @@ async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool)
             .to_vec(),
         readiness_url: "{base_url}/healthcheck".to_owned(),
         readiness_timeout_millis: 30_000,
+        extra_config_files: Vec::new(),
     };
     let channels = HashMap::from([("channel".to_owned(), Channel { origin_marker: 17, protocol: "hls".to_owned() })]);
     let options = FixtureStreamOptions {
@@ -74,7 +75,11 @@ async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool)
         &channels,
         &options,
         false,
-        &FixtureInputPlan { input_type: FixtureInputType::M3u, stalker: &FixtureStalker::default() },
+        &FixtureInputPlan {
+            input_type: FixtureInputType::M3u,
+            stalker: &FixtureStalker::default(),
+            failover_inputs: &[],
+        },
     )
     .await?;
     let result = async {

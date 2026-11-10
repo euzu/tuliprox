@@ -128,7 +128,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
 }
 
 /// Admits the virtual HLS entry and reserves its origin account; `false` when admission or reservation fails.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     app_state: &Arc<AppState>,
     fingerprint: &Fingerprint,
@@ -182,6 +182,39 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
         (None, get_hls_session_ttl_secs(app_state))
     };
     let session_owner = shared_hls_session_owner.as_deref().unwrap_or(session_token.as_str());
+
+    let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
+        &app_state.app_config,
+        &app_state.playlists,
+        target,
+        VirtualId::new(virtual_id),
+    )
+    .await;
+    if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) = classified {
+        let playback = crate::api::api_utils::group_playback_settings(app_state, target);
+        let req = crate::api::api_utils::GroupSelectionRequest {
+            lease: Some(PlaybackLeaseRef::new(session_owner, PlaybackKind::LiveHls)),
+            allow_provider_grace: playback.allow_provider_grace,
+            bypass_maintenance: user.is_recording_proxy_user(),
+            ..crate::api::api_utils::GroupSelectionRequest::new(
+                target.name.as_str(),
+                &group,
+                playback.start,
+                &fingerprint.addr,
+                &user.username,
+                connection_priority_for_kind(user, connection_kind),
+                connection_kind,
+            )
+        };
+        let Ok(resolved) = crate::api::api_utils::resolve_hls_group_entry(app_state, Arc::clone(&group), req).await
+        else {
+            return false;
+        };
+        let mut acquired_handle = resolved.acquired.handle;
+        let provider_handle = acquired_handle.take();
+        app_state.connection_manager.release_provider_handle(provider_handle);
+        return true;
+    }
 
     let Some(reservation) = try_reserve_hls_entry_origin_account_for_redirect(
         app_state,

@@ -9,6 +9,9 @@
   text-align: center;
 
   &__indicator {
+    // Fixed circle: parents that force `box-sizing: border-box` on all children must not shrink the icon away.
+    box-sizing: content-box;
+    flex-shrink: 0;
     display: flex;
     flex-flow: column;
     justify-content: center;
@@ -18,10 +21,11 @@
     color: var(--tag-color);
     fill: currentColor;
     border-radius: 50%;
-    width: 2rem;
-    height: 2rem;
+    min-width: 48px;
+    min-height: 48px;
 
     .svg-icon {
+      flex-shrink: 0;
       width: 1.2rem;
       height: 1.2rem;
     }

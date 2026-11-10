@@ -122,6 +122,7 @@ pub(crate) mod tests {
             stream_channel: shared::model::StreamChannel {
                 target_id: 1,
                 virtual_id: 1234,
+                group_virtual_id: None,
                 provider_id: 1,
                 input_name: shared::utils::Internable::intern("provider-input"),
                 item_type: shared::model::PlaylistItemType::Live,

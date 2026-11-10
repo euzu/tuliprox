@@ -480,6 +480,7 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         EventMessage::PlaylistUpdate(summary) => {
             (
                 ProtocolMessage::PlaylistUpdateResponse(PlaylistUpdateRunStateEvent {
+                    targets: summary.processed_targets().map(str::to_string).collect(),
                     run_id: summary.run_id,
                     execution_order: summary.execution_order,
                     scope_revision: summary.scope_revision,
@@ -505,6 +506,9 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
             ProtocolMessage::MaintenanceChangedResponse(unwrap_or_clone(entries)),
             "Input maintenance changed",
         ),
+        EventMessage::FailoverOverridesChanged { targets } => {
+            (ProtocolMessage::FailoverOverridesChanged(targets), "Failover group overrides changed")
+        }
 
         // Handled by `handle_event_message`, not translatable here:
         // `RecordingChanged` needs a per-session snapshot re-fetch, and the
@@ -546,7 +550,11 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // Auth decisions reach notification channels and plugins, not the
         // Web UI socket: there is no panel that renders them, and pushing
         // every sign-in to every connected admin is noise.
-        | EventMessage::AuthAudit(_) => return None,
+        | EventMessage::AuthAudit(_)
+        | EventMessage::FailoverGroupMemberSelected { .. }
+        | EventMessage::FailoverGroupExhausted { .. }
+        | EventMessage::FailoverGroupCircuitChanged { .. }
+        | EventMessage::FailoverGroupMemberSwitched { .. } => return None,
     })
 }
 
@@ -754,7 +762,7 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 31] = [
+        const NOT_ON_THE_WIRE: [EventKind; 35] = [
             EventKind::ConnectionDenied,
             EventKind::PluginUpdateAvailable,
             EventKind::PluginUpdateApplied,
@@ -786,6 +794,10 @@ mod tests {
             EventKind::AuthSignInFailed,
             EventKind::AuthSignInThrottled,
             EventKind::AuthPermissionDenied,
+            EventKind::FailoverGroupMemberSelected,
+            EventKind::FailoverGroupExhausted,
+            EventKind::FailoverGroupCircuitChanged,
+            EventKind::FailoverGroupMemberSwitched,
         ];
 
         for (event, kind) in sample_event_of_every_kind() {
@@ -812,6 +824,37 @@ mod tests {
         assert_eq!(terminal.run_id, Some(run_id));
         assert_eq!(terminal.execution_order, Some(execution_order));
         assert_eq!(terminal.state, PlaylistUpdateState::Partial);
+    }
+
+    #[test]
+    fn playlist_update_run_websocket_terminal_names_the_processed_targets() {
+        use shared::model::{SourceStats, TargetStats};
+        let mut summary = PlaylistUpdateSummary::for_run(
+            PlaylistUpdateRunId::from("websocket-run"),
+            PlaylistUpdateRunOrder::from(30),
+            PlaylistUpdateState::Success,
+        );
+        summary.stats = vec![
+            SourceStats {
+                inputs: Vec::new(),
+                targets: vec![TargetStats::success("Main TV"), TargetStats::failure("Kids")],
+            },
+            SourceStats { inputs: Vec::new(), targets: vec![TargetStats::success("Sport")] },
+        ];
+        let mapped = to_protocol_message(EventMessage::PlaylistUpdate(summary)).expect("wire mapped");
+        let ProtocolMessage::PlaylistUpdateResponse(terminal) = mapped.0 else {
+            panic!("expected playlist update terminal response");
+        };
+        assert_eq!(terminal.targets, vec!["Main TV".to_string(), "Kids".to_string(), "Sport".to_string()]);
+
+        let bare = to_protocol_message(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+            PlaylistUpdateState::Success,
+        )))
+        .expect("wire mapped");
+        let ProtocolMessage::PlaylistUpdateResponse(terminal) = bare.0 else {
+            panic!("expected playlist update terminal response");
+        };
+        assert_eq!(terminal.targets.len(), 0);
     }
 
     fn provider_fetch_failure() -> ProviderFetchFailure {
@@ -962,6 +1005,26 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
             EventMessage::MaintenanceChanged(Arc::default()),
+            EventMessage::FailoverGroupMemberSelected {
+                target_id: 1,
+                group_vid: 10,
+                member_vid: 11,
+                tier: shared::model::failover_group::CapacityTier::Free,
+            },
+            EventMessage::FailoverGroupExhausted { target_id: 1, group_vid: 10 },
+            EventMessage::FailoverGroupMemberSwitched {
+                target_id: 1,
+                group_vid: 10,
+                from_member_vid: 11,
+                to_member_vid: 12,
+                reason: shared::model::failover_group::SwitchReason::UpstreamEof,
+            },
+            EventMessage::FailoverGroupCircuitChanged {
+                input_name: "test".into(),
+                input_stream_id: "1".into(),
+                state: shared::model::failover_group::CircuitState::Closed,
+            },
+            EventMessage::FailoverOverridesChanged { targets: vec!["main".to_string()] },
             plugin_update(shared::model::PluginUpdateOutcome::Available),
             plugin_update(shared::model::PluginUpdateOutcome::Applied),
             plugin_update(shared::model::PluginUpdateOutcome::Failed),

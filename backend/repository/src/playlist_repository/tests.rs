@@ -328,6 +328,7 @@ fn make_media_server_episode(
     }
 }
 
+mod failover_groups;
 mod lifecycle;
 mod playlist;
 mod policy;

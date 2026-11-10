@@ -1,6 +1,6 @@
 use super::{BPlusTree, VirtualIdRecord};
 use shared::model::{M3uPlaylistItem, PlaylistItem, PlaylistItemType, VirtualId, XtreamCluster, XtreamPlaylistItem};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Mutex};
 use tokio::sync::RwLock;
 use tuliprox_core::model::ConfigTarget;
 
@@ -132,6 +132,9 @@ pub type TargetPlaylistStorageMap = HashMap<String, TargetPlaylistStorage>;
 
 pub struct PlaylistStorageState {
     pub data: RwLock<TargetPlaylistStorageMap>,
+    /// Generation of the persisted failover groups per target name; a missing entry is generation 0.
+    failover_group_generations: Mutex<HashMap<String, u64>>,
+    pub failover_groups: crate::FailoverGroupCache,
 }
 
 impl Default for PlaylistStorageState {
@@ -139,7 +142,26 @@ impl Default for PlaylistStorageState {
 }
 
 impl PlaylistStorageState {
-    pub fn new() -> Self { Self { data: RwLock::new(HashMap::new()) } }
+    pub fn new() -> Self {
+        Self {
+            data: RwLock::new(HashMap::new()),
+            failover_group_generations: Mutex::new(HashMap::new()),
+            failover_groups: crate::FailoverGroupCache::new(),
+        }
+    }
+
+    pub fn bump_failover_group_generation(&self, target_name: &str) -> u64 {
+        let mut generations = self.failover_group_generations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = generations.entry(target_name.to_string()).or_insert(0);
+        *generation += 1;
+        *generation
+    }
+
+    #[must_use]
+    pub fn failover_group_generation(&self, target_name: &str) -> u64 {
+        let generations = self.failover_group_generations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        generations.get(target_name).copied().unwrap_or(0)
+    }
 
     /// Replaces one target only after its complete persisted state has been loaded.
     pub(crate) async fn replace_target(&self, target_name: &str, storage: TargetPlaylistStorage) {

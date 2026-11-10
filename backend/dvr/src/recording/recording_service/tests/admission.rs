@@ -78,6 +78,7 @@ async fn edit_recording_re_validates_quota_against_new_duration_atomically() {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -85,6 +86,7 @@ async fn edit_recording_re_validates_quota_against_new_duration_atomically() {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::default()),
+        failover: Arc::default(),
     });
     let service = RecordingService::new(Arc::clone(&downloads), app_config);
     let claims = shared::model::Claims {

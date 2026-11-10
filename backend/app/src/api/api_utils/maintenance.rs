@@ -1,4 +1,4 @@
-//! Gate 1: a new playback request for an input in maintenance gets the
+//! Maintenance check: a new playback request for an input in maintenance gets the
 //! maintenance clip instead of a provider connection.
 //!
 //! Requests that continue something already admitted pass: the DVR's internal

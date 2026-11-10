@@ -10,9 +10,9 @@ use crate::{
         is_false, is_none_or_empty_metadata_update, is_true, is_zero_u32,
     },
     model::{
-        ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, McpConfigDto,
-        MessagingConfigDto, MetadataUpdateConfigDto, PluginsConfigDto, ProxyConfigDto, ReverseProxyConfigDto,
-        ScheduleConfigDto, VideoConfigDto, WebUiConfigDto,
+        ConfigApiDto, FailoverGroupsConfig, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto,
+        McpConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, PluginsConfigDto, ProxyConfigDto,
+        ReverseProxyConfigDto, ScheduleConfigDto, VideoConfigDto, WebUiConfigDto,
     },
     utils::is_blank_optional_string,
 };
@@ -35,6 +35,8 @@ pub struct ConfigDto {
     pub mapping_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_or_default_template_path")]
     pub template_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub failover_path: Option<String>,
     #[serde(
         default = "default_custom_stream_response_path",
         skip_serializing_if = "is_blank_or_default_custom_stream_response_path"
@@ -108,6 +110,8 @@ pub struct ConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<LibraryConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover_groups: Option<FailoverGroupsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins: Option<PluginsConfigDto>,
@@ -124,6 +128,7 @@ impl Default for ConfigDto {
             user_config_dir: None,
             mapping_path: None,
             template_path: None,
+            failover_path: None,
             custom_stream_response_path: None,
             custom_stream_response_timeout_secs: 0,
             custom_stream_response_enabled: true,
@@ -149,6 +154,7 @@ impl Default for ConfigDto {
             proxy: None,
             ipcheck: None,
             library: None,
+            failover_groups: None,
             mcp: None,
             plugins: None,
         }
@@ -177,6 +183,8 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             mapping_path: Option<String>,
             #[serde(default)]
             template_path: Option<String>,
+            #[serde(default)]
+            failover_path: Option<String>,
             #[serde(default = "default_custom_stream_response_path")]
             custom_stream_response_path: Option<String>,
             #[serde(default)]
@@ -228,6 +236,8 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             #[serde(default)]
             library: Option<LibraryConfigDto>,
             #[serde(default)]
+            failover_groups: Option<FailoverGroupsConfig>,
+            #[serde(default)]
             mcp: Option<McpConfigDto>,
             #[serde(default)]
             plugins: Option<PluginsConfigDto>,
@@ -244,6 +254,7 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             user_config_dir: raw.user_config_dir,
             mapping_path: raw.mapping_path,
             template_path: raw.template_path,
+            failover_path: raw.failover_path,
             custom_stream_response_path: raw.custom_stream_response_path,
             custom_stream_response_timeout_secs: raw.custom_stream_response_timeout_secs,
             custom_stream_response_enabled: raw.custom_stream_response_enabled,
@@ -269,6 +280,7 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             proxy: raw.proxy,
             ipcheck: raw.ipcheck,
             library: raw.library,
+            failover_groups: raw.failover_groups,
             mcp: raw.mcp,
             plugins: raw.plugins,
         })

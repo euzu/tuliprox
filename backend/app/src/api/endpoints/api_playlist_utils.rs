@@ -249,7 +249,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 entry.map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item)))
             });
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
-        } else if input.input_type.is_m3u() {
+        } else if input.input_type.is_m3u() || input.input_type.is_plugin() {
             let Some(channels) = iter_raw_m3u_input_playlist(&app_state.app_config, input, Some(cluster)).await else {
                 return empty_json_list_response();
             };
@@ -422,6 +422,7 @@ mod tests {
             category_id: 0,
             rating: 0.0,
             input_name: "test".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
         }
@@ -547,5 +548,42 @@ mod tests {
         assert_eq!(items[1].virtual_id, 26);
         assert_eq!(items[2].virtual_id, 25);
         assert_eq!(items[3].virtual_id, 27);
+    }
+
+    #[tokio::test]
+    async fn test_get_playlist_for_input_routes_plugin_input_as_m3u() {
+        use crate::{
+            api::model::create_test_app_state,
+            model::{Config, ConfigInput},
+        };
+        use axum::response::IntoResponse;
+        use shared::model::InputType;
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config { storage_dir: dir.path().to_string_lossy().to_string(), ..Config::default() };
+        let app_state = create_test_app_state(config);
+
+        let input = Arc::new(ConfigInput {
+            name: Arc::from("youtube-plugin-input"),
+            input_type: InputType::Plugin,
+            plugin: Some(Arc::from("youtube-input")),
+            url: "http://localhost/playlist.m3u".to_string(),
+            enabled: true,
+            ..ConfigInput::default()
+        });
+
+        let response = super::get_playlist_for_input(Some(&input), &app_state, XtreamCluster::Live, None, false)
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let explorer_response =
+            super::get_playlist_for_input(Some(&input), &app_state, XtreamCluster::Live, None, true)
+                .await
+                .into_response();
+
+        assert_eq!(explorer_response.status(), axum::http::StatusCode::OK);
     }
 }

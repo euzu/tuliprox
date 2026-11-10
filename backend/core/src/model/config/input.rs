@@ -874,6 +874,14 @@ impl ConfigInput {
         Ok(())
     }
 
+    /// No main URL or credentials, only aliases: the first enabled alias becomes the main account.
+    fn is_inline_batch(&self) -> bool {
+        self.url.trim().is_empty()
+            && self.username.as_deref().is_none_or(|value| value.trim().is_empty())
+            && self.password.as_deref().is_none_or(|value| value.trim().is_empty())
+            && self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty())
+    }
+
     pub fn prepare(&mut self, provider_configs: &[Arc<ConfigProvider>]) -> Result<Option<PathBuf>, TuliproxError> {
         // Defensive fallback: From<&ConfigInputDto> for ConfigInput sets options, but ConfigInput can
         // still be built via Default::default(), batch/internal/test paths, so prepare() normalizes
@@ -883,7 +891,8 @@ impl ConfigInput {
         }
 
         // For batch definitions, validate root URL/credentials before alias promotion in prepare_batch().
-        if self.enabled && self.input_type.is_batch() {
+        // An inline batch (no main URL, aliases only) has no root account to validate.
+        if self.enabled && self.input_type.is_batch() && !self.is_inline_batch() {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
         }
@@ -959,8 +968,9 @@ impl ConfigInput {
                 InputType::Stalker
             };
 
-            self.t_batch_url = Some(self.url.clone());
-            let file_path = get_csv_file_path(self.url.as_str()).ok();
+            // Only a `batch://` CSV owns its accounts; an inline batch keeps them in the source file.
+            self.t_batch_url = self.url.starts_with(BATCH_SCHEME_PREFIX).then(|| self.url.clone());
+            let file_path = self.t_batch_url.as_deref().and_then(|url| get_csv_file_path(url).ok());
             if self.enabled {
                 if let Some(aliases) = self.aliases.as_mut() {
                     if !aliases.is_empty() {
@@ -1052,15 +1062,19 @@ impl ConfigInput {
 
     /// Account used for playlist downloads: the root, or the first usable alias
     /// when the root is excluded or expired.
-    pub fn playlist_account(&self) -> Option<Cow<'_, ConfigInput>> {
-        if !self.account_disabled && !is_input_expired(self.exp_date) {
-            return Some(Cow::Borrowed(self));
-        }
-        self.aliases
+    pub fn playlist_account(&self) -> Option<Cow<'_, ConfigInput>> { self.playlist_accounts().next() }
+
+    /// Accounts usable for playlist downloads, in the order they are tried: the root unless it is excluded or
+    /// expired, then every enabled alias that has not expired.
+    pub fn playlist_accounts(&self) -> impl Iterator<Item = Cow<'_, ConfigInput>> {
+        let root = (!self.account_disabled && !is_input_expired(self.exp_date)).then_some(Cow::Borrowed(self));
+        let aliases = self
+            .aliases
             .iter()
             .flatten()
-            .find(|alias| alias.enabled && !is_input_expired(alias.exp_date))
-            .map(|alias| Cow::Owned(self.as_input(alias)))
+            .filter(|alias| alias.enabled && !is_input_expired(alias.exp_date))
+            .map(|alias| Cow::Owned(self.as_input(alias)));
+        root.into_iter().chain(aliases)
     }
 
     /// The alias with the given name, enabled or not.
@@ -1921,6 +1935,43 @@ mod tests {
     }
 
     #[test]
+    fn playlist_accounts_list_the_root_then_every_usable_alias_in_order() {
+        let alias = |id, name: &str, enabled, exp_date| ConfigInputAlias {
+            id,
+            name: name.into(),
+            url: format!("http://{name}.example.com"),
+            username: None,
+            password: None,
+            priority: 0,
+            max_connections: 0,
+            exp_date,
+            enabled,
+            stalker: None,
+        };
+        let mut input = ConfigInput {
+            name: "root".into(),
+            input_type: InputType::Xtream,
+            url: "http://example.com".to_string(),
+            enabled: true,
+            aliases: Some(vec![
+                alias(1, "first", true, None),
+                alias(2, "disabled", false, None),
+                alias(3, "expired", true, Some(1)),
+                alias(4, "second", true, None),
+            ]),
+            ..Default::default()
+        };
+        let names =
+            |input: &ConfigInput| input.playlist_accounts().map(|account| account.name.to_string()).collect::<Vec<_>>();
+        assert_eq!(names(&input), ["root", "first", "second"]);
+        input.account_disabled = true;
+        assert_eq!(names(&input), ["first", "second"]);
+        input.account_disabled = false;
+        input.exp_date = Some(1);
+        assert_eq!(names(&input), ["first", "second"]);
+    }
+
+    #[test]
     fn expired_root_with_aliases_is_not_persistently_disabled() -> Result<(), TuliproxError> {
         let mut input = ConfigInput {
             name: "root".into(),
@@ -2051,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_xtream_batch_requires_root_url_even_with_aliases() {
+    fn test_prepare_inline_xtream_batch_promotes_first_alias() {
         let mut input = ConfigInput {
             name: "xtream_batch_missing_root_url".into(),
             input_type: InputType::XtreamBatch,
@@ -2072,10 +2123,13 @@ mod tests {
             ..Default::default()
         };
 
-        let err =
-            input.prepare(&[]).expect_err("prepare must require root URL even when aliases are attached directly");
-        assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
-        assert!(err.to_string().contains("xtream_batch_missing_root_url"), "Error: {err}");
+        // No main URL or credentials: an inline batch whose first enabled alias becomes the main account.
+        let batch_file = input.prepare(&[]).expect("an inline batch prepares from its aliases");
+        assert!(batch_file.is_none());
+        assert!(input.t_batch_url.is_none(), "inline batch accounts live in the source file, not in a CSV");
+        assert_eq!(input.url, "http://alias.example");
+        assert_eq!(input.username.as_deref(), Some("alias_user"));
+        assert_eq!(input.password.as_deref(), Some("alias_pass"));
     }
 
     #[test]

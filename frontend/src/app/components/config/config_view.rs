@@ -9,9 +9,10 @@ use crate::{
                     save_modified_plugins, use_plugin_settings, PluginConfigExtensions, PluginConfigTab,
                     PluginSettingsContext,
                 },
-                ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView,
-                MainConfigView, McpConfigView, MessagingConfigView, MetadataUpdateConfigView, PanelConfigView,
-                ProxyConfigView, RecordingConfigView, ReverseProxyConfigView, SchedulesConfigView, WebUiConfigView,
+                ApiConfigView, FailoverGroupsConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView,
+                LogConfigView, MainConfigView, McpConfigView, MessagingConfigView, MetadataUpdateConfigView,
+                PanelConfigView, ProxyConfigView, RecordingConfigView, ReverseProxyConfigView, SchedulesConfigView,
+                WebUiConfigView,
             },
             input::Input,
             plugin_available, plugin_id_of_tab, use_plugin_ui, validate_credentials, Card, NoSubmitForm, TabItem,
@@ -19,7 +20,7 @@ use crate::{
         },
         ConfigContext,
     },
-    hooks::{use_icon_context, use_key_down, use_service_context},
+    hooks::{use_icon_context, use_key_down, use_service_context, use_unsaved_changes_guard},
     html_if,
     i18n::use_translation,
     services::{get_base_href, SetupCompleteRequestDto, SetupWebUserCredentialDto},
@@ -28,8 +29,6 @@ use crate::{
 use log::warn;
 use shared::model::{permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
 use std::{rc::Rc, str::FromStr};
-use wasm_bindgen::{closure::Closure, JsCast};
-use web_sys::BeforeUnloadEvent;
 use yew::{platform::spawn_local, prelude::*};
 
 const LABEL_CONFIG: &str = "LABEL.CONFIG";
@@ -72,6 +71,7 @@ fn builtin_config_page_view(page: ConfigPage) -> Html {
         ConfigPage::Recording => html! { <RecordingConfigView/> },
         ConfigPage::MetadataUpdate => html! { <MetadataUpdateConfigView/> },
         ConfigPage::Library => html! { <LibraryConfigView/> },
+        ConfigPage::FailoverGroups => html! { <FailoverGroupsConfigView/> },
     }
 }
 
@@ -496,27 +496,7 @@ pub fn ConfigView() -> Html {
         && (!form_state.slots.collect_modified_forms().is_empty()
             || setup_credentials_dirty
             || plugin_settings.has_changes());
-    {
-        use_effect_with(has_unsaved_changes, move |&dirty| {
-            let closure = Closure::<dyn FnMut(BeforeUnloadEvent)>::wrap(Box::new(move |event: BeforeUnloadEvent| {
-                event.prevent_default();
-                event.set_return_value("");
-            }));
-            if dirty {
-                if let Some(win) = web_sys::window() {
-                    let _ = win.add_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
-                }
-            }
-            move || {
-                if dirty {
-                    if let Some(win) = web_sys::window() {
-                        let _ =
-                            win.remove_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
-                    }
-                }
-            }
-        });
-    }
+    use_unsaved_changes_guard(has_unsaved_changes);
 
     // Save shortcut (Ctrl/Cmd+S) while editing
     {

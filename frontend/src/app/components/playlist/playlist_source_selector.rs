@@ -73,6 +73,7 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
         } else {
             let playlist_explorer_ctx_clone =
                 playlist_explorer_ctx.expect("PlaylistExplorer context not found").clone();
+            let translate = translate.clone();
             let sources = playlist_ctx.sources.clone();
             let revision = playlist_ctx.revision.clone();
             Callback::from(move |request: PlaylistRequest| {
@@ -83,7 +84,9 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
                     let revision = revision.clone();
                     let services = services.clone();
                     let playlist_explorer_ctx_clone = playlist_explorer_ctx_clone.clone();
+                    let translate = translate.clone();
                     set_loading.set(true);
+                    playlist_explorer_ctx_clone.error.set(None);
                     services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
                     let set_loading = set_loading.clone();
                     let req = request;
@@ -97,10 +100,20 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
                         _ => None,
                     };
                     spawn_local(async move {
-                        let playlist =
+                        let res =
                             services.playlist.get_playlist_categories_for_explorer(&req, revision.as_deref()).await;
                         playlist_explorer_ctx_clone.target_name.set(target_name);
-                        playlist_explorer_ctx_clone.playlist.set(playlist);
+                        match res {
+                            Ok(playlist) => {
+                                playlist_explorer_ctx_clone.playlist.set(playlist);
+                                playlist_explorer_ctx_clone.error.set(None);
+                            }
+                            Err(err) => {
+                                playlist_explorer_ctx_clone.playlist.set(None);
+                                playlist_explorer_ctx_clone.error.set(Some(err.to_string()));
+                                services.toastr.error(translate.t("MESSAGES.PLAYLIST_EXPLORER.FETCH_FAILED"));
+                            }
+                        }
                         playlist_explorer_ctx_clone.playlist_request.set(Some(req));
                         set_loading.set(false);
                         services.event.broadcast(EventMessage::Busy(BusyStatus::Hide));

@@ -1,0 +1,54 @@
+name: Plugin Releases
+
+# Builds the official plugins, publishes every new plugin version as a GitHub Release
+# (plugin-<id>-v<version>) and rebuilds the marketplace catalog (release plugin-marketplace).
+# Published versions are never overwritten; a changed plugin needs a version bump in its manifest.yml.
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - "plugins/**"
+      - "bin/publish-plugins.sh"
+      - "bin/package-plugin.sh"
+      - ".github/workflows/plugins-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time: two runs must not race on the catalog asset.
+concurrency:
+  group: plugin-releases
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish plugins
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Tags are needed to tell a plugin that changed without a version bump.
+          fetch-depth: 0
+
+      - name: Install Stable Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: wasm32-wasip2
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: plugin-releases
+
+      - name: Publish new plugin versions and update the catalog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: ./bin/publish-plugins.sh all

@@ -1426,3 +1426,59 @@ async fn guarded_resource_registration_rechecks_user_capacity_at_commit() -> Res
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn bind_member_sessionless_stream_reaches_stream_info() {
+    let manager = provider_header_test_manager();
+    let user = super::test_user_credentials("alice", 2, 0);
+
+    let session_token = "tok-sessionless-ts";
+    manager
+        .bind_member(
+            &user.username,
+            session_token,
+            crate::MemberBinding {
+                group_vid: 100,
+                member_vid: 200,
+                member_index: 0,
+                input_name: "member-input".into(),
+                member_title: "Member 1".into(),
+                provider: "provider-1".into(),
+            },
+        )
+        .await;
+
+    let addr: SocketAddr = "127.0.0.1:55422".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-1".to_string(), "127.0.0.1".to_string(), addr);
+    manager.add_connection(&addr).await;
+
+    let mut channel = test_channel(100);
+    channel.group_virtual_id = Some(100);
+
+    let stream_info = manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 1,
+            meter_uid: 0,
+            username: &user.username,
+            max_connections: user.max_connections,
+            soft_connections: user.soft_connections,
+            connection_kind: ConnectionKind::Normal,
+            priority: user.priority,
+            soft_priority: user.soft_priority,
+            fingerprint: &fingerprint,
+            provider: "provider-1".intern(),
+            stream_channel: &channel,
+            user_agent: Cow::Borrowed("ua"),
+            session_token: Some(session_token),
+        })
+        .await
+        .expect("stream should register");
+
+    let member_info = stream_info
+        .member_info
+        .expect("member_info should be present for sessionless stream bound before registration");
+    assert_eq!(member_info.member_vid, Some(200));
+    assert_eq!(member_info.provider.as_ref(), "provider-1");
+    assert_eq!(member_info.title.as_ref(), "Member 1");
+    assert_eq!(member_info.input_name.as_ref(), "member-input");
+}

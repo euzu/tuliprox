@@ -4,7 +4,7 @@ use crate::{
             custom_dialog::CustomDialog,
             define_table_columns,
             table::{PagedTable, TableDefinition},
-            Checkbox, DropDownOption, DropDownSelection, IconButton, Select, TextButton,
+            Checkbox, DropDownOption, DropDownSelection, IconButton, NoContent, Select, TextButton,
         },
         context::ConfigContext,
     },
@@ -33,9 +33,9 @@ fn portal_to_body(content: Html) -> Html {
 
 define_table_columns! {
     enum OrphanTableColumn {
-        // Row actions come first with an empty header (project rule).
-        Actions => ("actions", "") { can_hide: false },
-        Select => ("select", "") { can_hide: false },
+        // Structural columns (actions and selection) hide the header centrally via content: false.
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") { can_hide: false, content: false },
+        Select => ("select", "TABLE_COLUMNS.SELECT") { can_hide: false, content: false },
         Scope => ("scope", "LABEL.SCOPE"),
         File => ("file", "LABEL.FILE"),
         Kind => ("kind", "LABEL.TYPE"),
@@ -564,7 +564,7 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
                         if *is_loading {
                             html! { <div class="tp__loading">{ translate.t("LABEL.LOADING") }</div> }
                         } else if entries.is_empty() && orphaned_files.is_empty() {
-                            html! { <div class="tp__empty-msg">{ translate.t("LABEL.EXPLORER_NO_ORPHANS") }</div> }
+                            html! { <NoContent text={translate.t("LABEL.EXPLORER_NO_ORPHANS")} /> }
                         } else {
                             html! {
                                 <PagedTable<OverrideOrphanEntryDto>

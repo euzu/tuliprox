@@ -463,9 +463,16 @@ async fn dedupe_with(host: &Spy, target: &ConfigTarget) -> Vec<String> {
     // "News" and "News HD" share the normalized key `news`; "Sports" is alone.
     let playlist = vec![view_group(1, "G", &["News", "News HD", "Sports"])];
     let mut step = StepMeasure::new("test", |_, _| {});
-    let catalog = prepare_eligible_catalog(host, target, playlist, &mut step, &mut PluginRunReport::default())
-        .await
-        .expect("no plugin aborts");
+    let catalog = prepare_eligible_catalog(
+        host,
+        target,
+        playlist,
+        &std::collections::HashSet::new(),
+        &mut step,
+        &mut PluginRunReport::default(),
+    )
+    .await
+    .expect("no plugin aborts");
     layout(&catalog)
 }
 
@@ -496,9 +503,16 @@ async fn merge_groups_strategy_renames_members_so_the_catalog_merges_them() {
         vec![view_group(1, "Sport", &["s1"]), view_group(2, "News", &["n1"]), view_group(3, "SPORTS HD", &["s2"])];
     let mut step = StepMeasure::new("test", |_, _| {});
 
-    let catalog = prepare_eligible_catalog(&host, &target, playlist, &mut step, &mut PluginRunReport::default())
-        .await
-        .expect("no plugin aborts");
+    let catalog = prepare_eligible_catalog(
+        &host,
+        &target,
+        playlist,
+        &std::collections::HashSet::new(),
+        &mut step,
+        &mut PluginRunReport::default(),
+    )
+    .await
+    .expect("no plugin aborts");
 
     assert_eq!(host.calls(), ["merge-groups:Sport,News,SPORTS HD"]);
     assert_eq!(layout(&catalog), ["Sports:s1,s2", "News:n1"]);
@@ -520,9 +534,16 @@ async fn no_plugins_leaves_the_finalize_side_untouched_even_when_strategies_are_
 
     let mut step = StepMeasure::new("test", |_, _| {});
     let playlist = vec![view_group(1, "G", &["News", "News HD", "Sports"])];
-    let catalog = prepare_eligible_catalog(&NoPlugins, &target, playlist, &mut step, &mut PluginRunReport::default())
-        .await
-        .expect("NoPlugins never aborts");
+    let catalog = prepare_eligible_catalog(
+        &NoPlugins,
+        &target,
+        playlist,
+        &std::collections::HashSet::new(),
+        &mut step,
+        &mut PluginRunReport::default(),
+    )
+    .await
+    .expect("NoPlugins never aborts");
     assert_eq!(layout(&catalog), ["G:News HD,Sports"], "the host keeps the best quality");
 }
 
@@ -685,6 +706,7 @@ async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() 
         plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
+        failover: Arc::default(),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
             home_path: String::new(),
             config_path: String::new(),
@@ -695,6 +717,7 @@ async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() 
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),

@@ -37,41 +37,48 @@ pub(super) fn normalize_target_playlist_epg_ids(
     }
 }
 
+pub(super) fn assign_item_identity(
+    header: &mut PlaylistItemHeader,
+    source_ordinal: &mut u32,
+    target_id_mapping: &mut TargetIdMapping,
+) {
+    *source_ordinal += 1;
+    header.source_ordinal = *source_ordinal;
+    let provider_id = header.get_provider_id().unwrap_or_default();
+    if provider_id == 0 {
+        header.item_type = match header.item_type {
+            PlaylistItemType::Live | PlaylistItemType::LiveUnknown => {
+                if is_hls_url(&header.url) {
+                    PlaylistItemType::LiveHls
+                } else if is_dash_url(&header.url) {
+                    PlaylistItemType::LiveDash
+                } else {
+                    PlaylistItemType::LiveUnknown
+                }
+            }
+            _ => header.item_type,
+        };
+    }
+
+    let uuid = header.get_uuid();
+    let item_type = header.item_type;
+    let parent_virtual_id = if item_type.is_series() {
+        target_id_mapping.get_parent_virtual_id_by_uuid(uuid).unwrap_or_default()
+    } else {
+        VirtualId::default()
+    };
+    header.virtual_id = target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, parent_virtual_id);
+}
+
 pub(super) fn prepare_target_playlist_for_persistence(
     playlist: &mut [PlaylistGroup],
     target: &ConfigTarget,
     target_id_mapping: &mut TargetIdMapping,
+    source_ordinal: &mut u32,
 ) {
-    let mut source_ordinal: u32 = 0;
     for group in playlist.iter_mut() {
         for channel in &mut group.channels {
-            let header = &mut channel.header;
-            source_ordinal += 1;
-            header.source_ordinal = source_ordinal;
-            let provider_id = header.get_provider_id().unwrap_or_default();
-            if provider_id == 0 {
-                header.item_type = match (is_hls_url(&header.url), header.item_type) {
-                    (true, _) => PlaylistItemType::LiveHls,
-                    (false, PlaylistItemType::Live) => {
-                        if is_dash_url(&header.url) {
-                            PlaylistItemType::LiveDash
-                        } else {
-                            PlaylistItemType::LiveUnknown
-                        }
-                    }
-                    _ => header.item_type,
-                };
-            }
-
-            let uuid = header.get_uuid();
-            let item_type = header.item_type;
-            let parent_virtual_id = if item_type.is_series() {
-                target_id_mapping.get_parent_virtual_id_by_uuid(uuid).unwrap_or_default()
-            } else {
-                VirtualId::default()
-            };
-            header.virtual_id =
-                target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, parent_virtual_id);
+            assign_item_identity(&mut channel.header, source_ordinal, target_id_mapping);
         }
     }
 
@@ -391,5 +398,79 @@ pub(super) fn rewrite_series_episode_parent_virtual_ids(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::utils::Internable;
+
+    #[test]
+    fn assign_item_identity_preserves_non_live_item_types_for_hls_urls() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let mapping_path = temp_dir.path().join("mapping.db");
+        let mut target_id_mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping");
+        let mut source_ordinal = 0;
+
+        // Video upload with non-numeric provider ID and HLS URL must remain Video
+        let mut video_header = PlaylistItemHeader {
+            id: "custom-video-stream".intern(),
+            url: "http://example.com/vod/stream.m3u8".intern(),
+            item_type: PlaylistItemType::Video,
+            ..PlaylistItemHeader::default()
+        };
+        assign_item_identity(&mut video_header, &mut source_ordinal, &mut target_id_mapping);
+        assert_eq!(video_header.item_type, PlaylistItemType::Video);
+
+        // Series with non-numeric provider ID and HLS URL must remain Series
+        let mut series_header = PlaylistItemHeader {
+            id: "series-episode".intern(),
+            url: "http://example.com/series/stream.m3u8".intern(),
+            item_type: PlaylistItemType::Series,
+            ..PlaylistItemHeader::default()
+        };
+        assign_item_identity(&mut series_header, &mut source_ordinal, &mut target_id_mapping);
+        assert_eq!(series_header.item_type, PlaylistItemType::Series);
+
+        // Live item with HLS URL should be refined to LiveHls
+        let mut live_hls_header = PlaylistItemHeader {
+            id: "live-stream-hls".intern(),
+            url: "http://example.com/live/stream.m3u8".intern(),
+            item_type: PlaylistItemType::Live,
+            ..PlaylistItemHeader::default()
+        };
+        assign_item_identity(&mut live_hls_header, &mut source_ordinal, &mut target_id_mapping);
+        assert_eq!(live_hls_header.item_type, PlaylistItemType::LiveHls);
+
+        // Live item with DASH URL should be refined to LiveDash
+        let mut live_dash_header = PlaylistItemHeader {
+            id: "live-stream-dash".intern(),
+            url: "http://example.com/live/manifest.mpd".intern(),
+            item_type: PlaylistItemType::Live,
+            ..PlaylistItemHeader::default()
+        };
+        assign_item_identity(&mut live_dash_header, &mut source_ordinal, &mut target_id_mapping);
+        assert_eq!(live_dash_header.item_type, PlaylistItemType::LiveDash);
+
+        // Live item with generic URL should be refined to LiveUnknown
+        let mut live_unknown_header = PlaylistItemHeader {
+            id: "live-stream-ts".intern(),
+            url: "http://example.com/live/stream.ts".intern(),
+            item_type: PlaylistItemType::Live,
+            ..PlaylistItemHeader::default()
+        };
+        assign_item_identity(&mut live_unknown_header, &mut source_ordinal, &mut target_id_mapping);
+        assert_eq!(live_unknown_header.item_type, PlaylistItemType::LiveUnknown);
+
+        // LiveUnknown item with HLS URL should be refined to LiveHls
+        let mut unknown_hls_header = PlaylistItemHeader {
+            id: "unknown-stream-hls".intern(),
+            url: "http://example.com/live/stream.m3u8".intern(),
+            item_type: PlaylistItemType::LiveUnknown,
+            ..PlaylistItemHeader::default()
+        };
+        assign_item_identity(&mut unknown_hls_header, &mut source_ordinal, &mut target_id_mapping);
+        assert_eq!(unknown_hls_header.item_type, PlaylistItemType::LiveHls);
     }
 }

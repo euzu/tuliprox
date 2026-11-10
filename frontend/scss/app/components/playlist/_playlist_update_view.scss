@@ -280,11 +280,6 @@
     }
   }
 
-  &__empty-targets {
-    margin: 0;
-    color: var(--modest-text-color);
-  }
-
   &__action-area,
   &__policy-control {
     min-width: 0;
@@ -490,6 +485,7 @@
 
   &__progress-details ul { margin: 0; padding-inline-start: 20px; }
   &__progress-details li { overflow-wrap: anywhere; }
+  &__failure-reason { color: var(--error-color); }
 
   &__input-card-footer {
     display: flex;

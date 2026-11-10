@@ -95,6 +95,8 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         overrides: crate::api::model::OverrideState::default(),
         maintenance: crate::api::model::create_test_maintenance(""),
+        member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
+        failover_switch_registry: Arc::default(),
         plugins: crate::api::model::AppPlugins::default(),
     })
 }
@@ -428,6 +430,7 @@ async fn test_active_client_stream_deferred_provider_grace_retains_provider_hand
         req_headers: &HeaderMap::default(),
         meter_uid: 0,
         meter_stream: false,
+        group_failover: None,
     })
     .await
     .expect("deferred test stream admission should succeed");
@@ -505,6 +508,7 @@ async fn test_active_client_stream_shared_deferred_provider_grace_retains_provid
         req_headers: &HeaderMap::default(),
         meter_uid: 0,
         meter_stream: false,
+        group_failover: None,
     })
     .await
     .expect("shared deferred test stream admission should succeed");

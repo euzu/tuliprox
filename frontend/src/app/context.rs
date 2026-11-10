@@ -1,4 +1,8 @@
-use crate::app::components::{InputRow, UserlistPage};
+use crate::{
+    app::components::{failover_groups::FailoverGroupsPreselect, InputRow, UserlistPage},
+    model::ViewType,
+    utils::set_location_hash,
+};
 use shared::model::{
     ApiProxyConfigDto, AppConfigDto, ConfigTargetDto, PlaylistRequest, ProxyUserCredentialsDto, SearchRequest,
     StatusCheck, SystemInfo, TargetUserDto, UiPlaylistCategories,
@@ -18,6 +22,7 @@ pub struct PlaylistContext {
 pub struct PlaylistExplorerContext {
     pub playlist: UseStateHandle<Option<Rc<UiPlaylistCategories>>>,
     pub playlist_request: UseStateHandle<Option<PlaylistRequest>>,
+    pub error: UseStateHandle<Option<String>>,
     pub target_name: UseStateHandle<Option<String>>,
 }
 
@@ -28,6 +33,23 @@ pub struct PlaylistExplorerContext {
 // actual state changes), so the overhead is negligible.
 impl PartialEq for PlaylistExplorerContext {
     fn eq(&self, _other: &Self) -> bool { false }
+}
+
+/// Hands a deep link request to the "Failover groups" page, which takes it over once.
+#[derive(Clone)]
+pub struct FailoverGroupsNavigation {
+    pub pending: UseStateHandle<Option<Rc<FailoverGroupsPreselect>>>,
+}
+
+impl PartialEq for FailoverGroupsNavigation {
+    fn eq(&self, _other: &Self) -> bool { false }
+}
+
+impl FailoverGroupsNavigation {
+    pub fn open(&self, preselect: FailoverGroupsPreselect) {
+        self.pending.set(Some(Rc::new(preselect)));
+        set_location_hash(ViewType::FailoverGroups.as_str());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

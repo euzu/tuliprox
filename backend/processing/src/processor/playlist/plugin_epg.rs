@@ -380,6 +380,7 @@ mod tests {
             plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapOption::default()),
             file_locks: Arc::new(FileLockManager::default()),
+            failover: Arc::default(),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
                 home_path: String::new(),
                 config_path: String::new(),
@@ -390,6 +391,7 @@ mod tests {
                 mapping_files_used: None,
                 template_file_path: None,
                 template_files_used: None,
+                failover_file_path: None,
                 api_proxy_file_path: String::new(),
                 custom_stream_response_path: None,
             })),
@@ -474,6 +476,7 @@ mod tests {
             plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapOption::default()),
             file_locks: Arc::new(FileLockManager::default()),
+            failover: Arc::default(),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
                 home_path: String::new(),
                 config_path: String::new(),
@@ -484,6 +487,7 @@ mod tests {
                 mapping_files_used: None,
                 template_file_path: None,
                 template_files_used: None,
+                failover_file_path: None,
                 api_proxy_file_path: String::new(),
                 custom_stream_response_path: None,
             })),

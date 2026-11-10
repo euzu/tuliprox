@@ -137,14 +137,7 @@ pub(super) fn find_target_by_name(
     app_config: &crate::model::AppConfig,
     target_name: &str,
 ) -> Option<Arc<ConfigTarget>> {
-    app_config
-        .sources
-        .load()
-        .sources
-        .iter()
-        .flat_map(|source| &source.targets)
-        .find(|target| target.name == target_name)
-        .cloned()
+    app_config.sources.load().get_target_by_name(target_name).cloned()
 }
 
 /// Whether `input_name` belongs to the source that configures `target`.
@@ -315,6 +308,8 @@ pub(super) async fn playlist_recording_stream(
         None,
         None,
         query.provider_allocation_id,
+        None,
+        None,
     )
     .await
     .into_response()

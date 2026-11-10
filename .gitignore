@@ -88,3 +88,4 @@ GOAL.md
 # Testkit report artifacts
 /testkit-report/
 
+plugins/packages/

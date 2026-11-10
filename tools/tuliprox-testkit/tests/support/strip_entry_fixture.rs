@@ -137,7 +137,11 @@ impl Fixture {
                 ..Default::default()
             },
             false,
-            &FixtureInputPlan { input_type: FixtureInputType::M3u, stalker: &FixtureStalker::default() },
+            &FixtureInputPlan {
+                input_type: FixtureInputType::M3u,
+                stalker: &FixtureStalker::default(),
+                failover_inputs: &[],
+            },
         )?;
         let config = std::fs::read_to_string(&paths.config_file)?;
         std::fs::write(&paths.config_file, format!("config_hot_reload: true\n{config}    origin_manifest_timeout_ms: 1000\n    initial_manifest_wait_timeout_secs: 8\n    max_segments_prefetch: {prefetch}\n    segment_repair:\n      max_level: off\n"))?;

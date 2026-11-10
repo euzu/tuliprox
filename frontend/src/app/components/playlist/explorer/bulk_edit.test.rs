@@ -29,6 +29,7 @@ fn make_test_item(
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from(input_name),
+        input_stream_id: "".into(),
         epg_channel_id: Some(Arc::from("epg-1")),
         explorer_meta: Some(UiItemExplorerMeta {
             override_state: UiOverrideState { edited: false, pending: false, ambiguous: false },

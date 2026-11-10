@@ -144,6 +144,15 @@ async fn extract_error_message(response: Response) -> String {
     extract_error_message_checked(response).await.unwrap_or_default()
 }
 
+/// The one status every request path turns into `Error::Unauthorized`, before any other status handling.
+fn reject_unauthorized(status: u16) -> Result<(), Error> {
+    if status == 401 {
+        Err(Error::Unauthorized)
+    } else {
+        Ok(())
+    }
+}
+
 fn unexpected_response_error(message: String) -> Error {
     if message.trim().is_empty() {
         Error::RequestError
@@ -216,18 +225,16 @@ pub fn check_dummy_token() {
     }
 }
 
-/// build all kinds of http request: post/get/delete etc.
-async fn request<B, T>(
+/// Builds and sends a request; the payload is attached last, after all headers are set.
+async fn send_request<B>(
     method: RequestMethod,
     url: &str,
     body: B,
     content_type: Option<Encoding>,
     response_type: Option<Encoding>,
     request_headers: Option<&[(String, String)]>,
-    response_header_keys: Option<&[&str]>,
-) -> Result<ResponseMeta<T>, Error>
+) -> Result<Response, Error>
 where
-    T: DeserializeOwned + 'static + std::fmt::Debug,
     B: Serialize + std::fmt::Debug,
 {
     let c_type = content_type.unwrap_or(Encoding::Json);
@@ -257,10 +264,33 @@ where
         Some(encoded) => apply_encoded_body(request, encoded, c_type.as_content_type())?.send().await,
         None => request.send().await,
     };
+    sent.map_err(|e| {
+        error!("{e}");
+        Error::RequestError
+    })
+}
+
+/// build all kinds of http request: post/get/delete etc.
+async fn request<B, T>(
+    method: RequestMethod,
+    url: &str,
+    body: B,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
+    request_headers: Option<&[(String, String)]>,
+    response_header_keys: Option<&[&str]>,
+) -> Result<ResponseMeta<T>, Error>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+    B: Serialize + std::fmt::Debug,
+{
+    let r_type = response_type.unwrap_or(Encoding::Json);
+    let sent = send_request(method, url, body, content_type, response_type, request_headers).await;
 
     match sent {
         Ok(response) => {
             let status = response.status();
+            reject_unauthorized(status)?;
             let mut response_headers = HashMap::new();
             if let Some(header_keys) = response_header_keys {
                 for key in header_keys {
@@ -310,11 +340,42 @@ where
                 }
             }
         }
-        Err(e) => {
-            error!("{e}");
-            Err(Error::RequestError)
-        }
+        Err(e) => Err(e),
     }
+}
+
+/// Sends a JSON request and hands back status and text body for callers that handle non-success statuses
+/// themselves. A 401 is not handed back: it is the same `Error::Unauthorized` every other request path reports.
+async fn request_method_raw<B>(method: RequestMethod, url: &str, body: B) -> Result<RawResponse, Error>
+where
+    B: Serialize + std::fmt::Debug,
+{
+    let response = send_request(method, url, body, Some(Encoding::Json), Some(Encoding::Json), None).await?;
+    let status = response.status();
+    reject_unauthorized(status)?;
+    let body = response.text().await.map_err(|_| Error::RequestError)?;
+    Ok(RawResponse { status, body })
+}
+
+/// Put request that hands back every status with its body instead of mapping errors.
+pub async fn request_put_raw<B>(url: &str, body: B) -> Result<RawResponse, Error>
+where
+    B: Serialize + std::fmt::Debug,
+{
+    request_method_raw(RequestMethod::Put, url, body).await
+}
+
+/// Post request that hands back every status with its body instead of mapping errors.
+pub async fn request_post_raw<B>(url: &str, body: B) -> Result<RawResponse, Error>
+where
+    B: Serialize + std::fmt::Debug,
+{
+    request_method_raw(RequestMethod::Post, url, body).await
+}
+
+/// Delete request that hands back every status with its body instead of mapping errors.
+pub async fn request_delete_raw(url: &str) -> Result<RawResponse, Error> {
+    request_method_raw(RequestMethod::Delete, url, ()).await
 }
 
 /// Delete request
@@ -412,55 +473,21 @@ pub async fn request_get_binary(url: &str, if_match: Option<&str>) -> Result<Vec
         Error::RequestError
     })?;
 
-    match response.status() {
+    reject_unauthorized(response.status())?;
+    let status = response.status();
+    match status {
         200 | 205 | 206 => response.binary().await.map_err(|err| {
             error!("Failed to read binary response body: {err}");
             Error::RequestError
         }),
-        400 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::BadRequest("400".to_string()))
-            } else {
-                Err(Error::BadRequest(message))
+        _ => {
+            let message =
+                if matches!(status, 401 | 404) { String::new() } else { extract_error_message(response).await };
+            match status_error(status, &message) {
+                Some(error) => Err(error),
+                None => Err(unexpected_response_error(message)),
             }
         }
-        401 => Err(Error::Unauthorized),
-        403 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::Forbidden("Forbidden".to_string()))
-            } else {
-                Err(Error::Forbidden(message))
-            }
-        }
-        404 => Err(Error::NotFound),
-        409 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::Conflict("Configuration conflict (409)".to_string()))
-            } else {
-                Err(Error::Conflict(message))
-            }
-        }
-        412 => Err(Error::PreconditionFailed(extract_error_message(response).await)),
-        428 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::PreconditionRequired("Missing precondition header (428)".to_string()))
-            } else {
-                Err(Error::PreconditionRequired(message))
-            }
-        }
-        500 => {
-            let message = extract_error_message(response).await;
-            if message.trim().is_empty() {
-                Err(Error::InternalServerError("Internal Server Error".to_string()))
-            } else {
-                Err(Error::InternalServerError(message))
-            }
-        }
-        _ => Err(unexpected_response_error(extract_error_message(response).await)),
     }
 }
 
@@ -681,7 +708,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{should_decode_success_body, unexpected_response_error};
+    use super::{reject_unauthorized, should_decode_success_body, unexpected_response_error};
     use crate::error::Error;
 
     #[test]
@@ -698,6 +725,14 @@ mod tests {
     fn no_content_and_unit_responses_are_not_decoded() {
         assert!(!should_decode_success_body::<serde_json::Value>(204, "application/json"));
         assert!(!should_decode_success_body::<()>(202, "application/json"));
+    }
+
+    #[test]
+    fn only_401_is_rejected_as_unauthorized() {
+        assert_eq!(reject_unauthorized(401), Err(Error::Unauthorized));
+        for status in [200, 204, 400, 403, 404, 409, 422, 423, 500] {
+            assert_eq!(reject_unauthorized(status), Ok(()));
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod use_key_down;
 mod use_log_stream;
 mod use_server_status;
 mod use_service_context;
+mod use_unsaved_changes_guard;
 mod use_websocket_status;
 
 pub use use_clipboard_copy::*;
@@ -12,4 +13,5 @@ pub use use_key_down::*;
 pub use use_log_stream::*;
 pub use use_server_status::*;
 pub use use_service_context::*;
+pub use use_unsaved_changes_guard::*;
 pub use use_websocket_status::*;

@@ -89,12 +89,20 @@
     flex: 1 1 0;
     min-height: 0;
     overflow: hidden;
+
+    > .tp__split-pane__second {
+      display: flex;
+      flex-flow: row;
+      flex: 1 1 0;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+    }
   }
 
-  // Width comes from the surrounding HorizontalShrinkPanel (drag handle).
   .tp__explorer-group-panel {
-    flex: 0 0 auto;
     min-height: 0;
+    height: 100%;
   }
 
   .side {
@@ -102,7 +110,6 @@
     height: 100%;
     min-width: 0;
     background: var(--theme-brand-surface-soft);
-    border-right: 1px solid var(--theme-brand-border);
     padding: var(--padding-small) 0;
     overflow-y: auto;
 
@@ -1387,6 +1394,14 @@
       min-height: 0;
       flex: none;
       display: block;
+
+      > .tp__split-pane__second {
+        overflow: visible;
+        height: auto;
+        min-height: 0;
+        flex: none;
+        display: block;
+      }
     }
 
     .tp__explorer-group-panel {

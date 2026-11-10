@@ -15,6 +15,7 @@ use tuliprox_core::{
     model::{ApiProxyConfig, CustomStreamResponse, HdHomeRunConfig, MediaToolCapabilities, SourcesConfig},
     utils::FileLockManager,
 };
+use tuliprox_repository::persist_playlist_views;
 
 pub(super) fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
     Arc::new(AppConfig {
@@ -37,6 +38,7 @@ pub(super) fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -44,6 +46,7 @@ pub(super) fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::default(),
     })
 }
 
@@ -65,7 +68,7 @@ pub(super) fn processing_context(
         events: NoopSink,
         playlist_state,
         disabled_headers: None,
-        processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+        processed_inputs: Arc::default(),
         input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         provider_manager: None,

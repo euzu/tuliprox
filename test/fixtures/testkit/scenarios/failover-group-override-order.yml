@@ -1,0 +1,60 @@
+schema_version: 1
+name: failover-group-override-order
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}", "--failover", "{run_directory}/failover.d"]
+    readiness_url: "{base_url}/healthcheck"
+    extra_config_files:
+      - source: fixtures/failover-group-override-order.yml
+        destination: failover.d/testkit.yml
+  fixture_stream: { share_live_hls: false, share_live_mpeg_ts: false }
+  failover_groups:
+    inputs: [input-a, input-b]
+origin:
+  run_id: failover-group-override-order
+actors:
+  - id: velora-viewer
+    agent: local
+    username: solis
+    user_agent: tuliprox-testkit/velora-viewer
+    client_ip: { mode: forwarded, value: 10.40.0.10 }
+  - id: kestrel-viewer
+    agent: local
+    username: solis
+    user_agent: tuliprox-testkit/kestrel-viewer
+    client_ip: { mode: forwarded, value: 10.40.0.11 }
+channels:
+  velora-one: { origin_marker: 17, protocol: hls }
+  kestrel-news: { origin_marker: 18, protocol: hls }
+steps:
+  - command_id: play-velora-one-overridden-order
+    start:
+      actor: velora-viewer
+      playback_id: velora-one
+      session_group: velora-one
+      channel: velora-one
+    await: { valid_frames: 3 }
+    assert_origin:
+      latest_request_account: input-b
+  - command_id: play-kestrel-news-auto-group
+    start:
+      actor: kestrel-viewer
+      playback_id: kestrel-news
+      session_group: kestrel-news
+      channel: kestrel-news
+    await: { valid_frames: 3 }
+    assert_origin:
+      latest_request_account: input-a
+  - command_id: stop-velora-one
+    stop: { playback_id: velora-one }
+  - command_id: stop-kestrel-news
+    stop: { playback_id: kestrel-news }
+    assert_runtime: { active_users: 0, active_user_connections: 0 }
+policy_contract:
+  user_access_control: true
+  users:
+    solis: { max_connections: 2 }
+  admission_strategies: []

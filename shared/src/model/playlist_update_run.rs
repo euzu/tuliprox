@@ -62,6 +62,10 @@ pub struct PlaylistUpdateRunStateEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_revision: Option<String>,
     pub state: PlaylistUpdateState,
+    /// Names of the targets the run processed. Empty when the run processed none or the sender does not
+    /// report them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
 }
 
 impl PlaylistUpdateRunStateEvent {
@@ -71,12 +75,28 @@ impl PlaylistUpdateRunStateEvent {
         execution_order: PlaylistUpdateRunOrder,
         state: PlaylistUpdateState,
     ) -> Self {
-        Self { run_id: Some(run_id), execution_order: Some(execution_order), scope_revision: None, state }
+        Self {
+            run_id: Some(run_id),
+            execution_order: Some(execution_order),
+            scope_revision: None,
+            state,
+            targets: Vec::new(),
+        }
     }
 
     #[must_use]
+    pub fn with_targets(mut self, targets: Vec<String>) -> Self {
+        self.targets = targets;
+        self
+    }
+
+    /// Whether the run processed the target `name`.
+    #[must_use]
+    pub fn processed_target(&self, name: &str) -> bool { self.targets.iter().any(|target| target == name) }
+
+    #[must_use]
     pub const fn uncorrelated(state: PlaylistUpdateState) -> Self {
-        Self { run_id: None, execution_order: None, scope_revision: None, state }
+        Self { run_id: None, execution_order: None, scope_revision: None, state, targets: Vec::new() }
     }
 }
 
@@ -97,13 +117,15 @@ impl<'de> Deserialize<'de> for PlaylistUpdateRunStateEvent {
                 #[serde(default)]
                 scope_revision: Option<String>,
                 state: PlaylistUpdateState,
+                #[serde(default)]
+                targets: Vec<String>,
             },
         }
 
         Ok(match CompatiblePayload::deserialize(deserializer)? {
             CompatiblePayload::Legacy(state) => Self::uncorrelated(state),
-            CompatiblePayload::Correlated { run_id, execution_order, scope_revision, state } => {
-                Self { run_id, execution_order, scope_revision, state }
+            CompatiblePayload::Correlated { run_id, execution_order, scope_revision, state, targets } => {
+                Self { run_id, execution_order, scope_revision, state, targets }
             }
         })
     }
@@ -136,6 +158,20 @@ mod tests {
         assert_eq!(decoded, event);
         assert_eq!(decoded.run_id.as_ref().map(PlaylistUpdateRunId::as_ref), Some("run-17"));
         assert_eq!(decoded.execution_order.map(PlaylistUpdateRunOrder::get), Some(17));
+        Ok(())
+    }
+
+    #[test]
+    fn playlist_update_terminal_event_targets_are_optional_on_the_wire() -> Result<(), serde_json::Error> {
+        let event = PlaylistUpdateRunStateEvent::uncorrelated(PlaylistUpdateState::Success);
+        assert_eq!(serde_json::to_string(&event)?, r#"{"state":"Success"}"#);
+        let old = serde_json::from_str::<PlaylistUpdateRunStateEvent>(r#"{"run_id":"r","state":"Success"}"#)?;
+        assert_eq!(old.targets.len(), 0);
+        let event = event.with_targets(vec!["Main TV".to_string()]);
+        let decoded = serde_json::from_str::<PlaylistUpdateRunStateEvent>(&serde_json::to_string(&event)?)?;
+        assert_eq!(decoded, event);
+        assert!(decoded.processed_target("Main TV"));
+        assert!(!decoded.processed_target("Kids"));
         Ok(())
     }
 

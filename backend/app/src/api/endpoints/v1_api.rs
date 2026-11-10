@@ -4,6 +4,7 @@ use crate::{
         auth_middleware::permission_layer,
         endpoints::{
             extract_accept_header::ExtractAcceptHeader,
+            failover_api::{failover_api_register_unprotected, failover_api_register_with_permissions},
             library_api::library_api_register,
             rbac_api::{rbac_api_register, rbac_api_register_unprotected},
             recording_api::{recording_api_register, recording_availability_register, recording_enabled_layer},
@@ -177,6 +178,10 @@ pub fn v1_api_register(
     let system_read = axum::routing::Router::new()
         .route("/status", axum::routing::get(status))
         .route("/streams", axum::routing::get(streams))
+        .route(
+            "/streams/{stream_id}/failover-members",
+            axum::routing::get(super::stream_failover_api::get_stream_failover_members),
+        )
         .route("/ipinfo", axum::routing::get(ipinfo))
         .route("/events/stats", axum::routing::get(event_bus))
         .route("/stream-history", axum::routing::get(super::stream_history_api::stream_history_page_query))
@@ -188,7 +193,10 @@ pub fn v1_api_register(
             axum::routing::get(super::stream_history_api::qos_snapshot_detail_query),
         );
 
-    let system_write = axum::routing::Router::new().route("/geoip/update", axum::routing::get(geoip_update));
+    let system_write = axum::routing::Router::new().route("/geoip/update", axum::routing::get(geoip_update)).route(
+        "/streams/{stream_id}/failover-switch",
+        axum::routing::post(super::stream_failover_api::post_stream_failover_switch),
+    );
 
     let mut router = super::user_settings_api::user_settings_api_register(app_state)
         .merge(super::plugins_http_api::plugins_http_api_register(web_auth_enabled));
@@ -202,6 +210,7 @@ pub fn v1_api_register(
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
             .merge(target_bouquet_api_register_with_permissions(app_state))
+            .merge(failover_api_register_with_permissions(app_state))
             .merge(super::maintenance_api::maintenance_api_register_with_permissions(app_state))
             .merge(super::plugins_api::plugins_api_register_with_permissions(app_state))
             .merge(super::plugins_rpc_api::plugins_rpc_api_register_with_permissions(app_state))
@@ -226,6 +235,7 @@ pub fn v1_api_register(
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
             .merge(library_api_register(axum::routing::Router::new(), None))
             .merge(target_bouquet_api_register_unprotected())
+            .merge(failover_api_register_unprotected())
             .merge(super::maintenance_api::maintenance_api_register_unprotected())
             .merge(super::plugins_api::plugins_api_register_unprotected())
             .merge(super::plugins_rpc_api::plugins_rpc_api_register_unprotected())
@@ -439,6 +449,7 @@ mod tests {
         let channel = StreamChannel {
             target_id: 1,
             virtual_id: 70,
+            group_virtual_id: None,
             provider_id: 1,
             input_name: "input".intern(),
             item_type: PlaylistItemType::Series,

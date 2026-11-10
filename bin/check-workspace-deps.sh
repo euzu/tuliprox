@@ -157,6 +157,7 @@ dev tuliprox -> tuliprox-hls
 dev tuliprox -> tuliprox-mpegts
 dev tuliprox -> tuliprox-processing
 dev tuliprox -> tuliprox-repository
+dev tuliprox -> tuliprox-session
 dev tuliprox-hls -> tuliprox-mpegts
 dev tuliprox-iptv -> tuliprox-repository
 dev tuliprox-processing -> tuliprox-iptv

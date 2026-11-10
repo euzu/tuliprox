@@ -2,6 +2,38 @@ use crate::utils::Internable;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Archive availability and duration of a live channel.
+///
+/// One rule for every reader: an archive is advertised when the live properties carry
+/// `tv_archive > 0` or any catchup configuration, or the header has a non-blank timeshift.
+/// The duration comes from a positive `tv_archive_duration`, else positive `catchup.days`,
+/// else a positive numeric timeshift; missing or non-positive values yield `None`.
+#[must_use]
+pub fn archive_info(props: Option<&StreamProperties>, time_shift: &str) -> (bool, Option<u32>) {
+    let live = match props {
+        Some(StreamProperties::Live(live)) => Some(live.as_ref()),
+        _ => None,
+    };
+    let has_archive = live.is_some_and(|live| live.tv_archive.unwrap_or(0) > 0 || live.catchup.is_some())
+        || !time_shift.trim().is_empty();
+    if !has_archive {
+        return (false, None);
+    }
+
+    let duration = live
+        .and_then(|live| live.tv_archive_duration)
+        .and_then(|days| u32::try_from(days).ok())
+        .filter(|days| *days > 0)
+        .or_else(|| {
+            live.and_then(|live| live.catchup.as_ref())
+                .and_then(|catchup| catchup.days.as_deref())
+                .and_then(|days| days.trim().parse::<u32>().ok())
+                .filter(|days| *days > 0)
+        })
+        .or_else(|| time_shift.trim().parse::<u32>().ok().filter(|days| *days > 0));
+    (true, duration)
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum StreamProperties {
     Live(Box<LiveStreamProperties>),

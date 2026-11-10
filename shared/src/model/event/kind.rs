@@ -62,6 +62,11 @@ pub enum EventKind {
     RecordingProgress,
     /// Appended last for the same reason.
     MaintenanceChanged,
+    FailoverGroupMemberSelected,
+    FailoverGroupExhausted,
+    FailoverGroupCircuitChanged,
+    FailoverGroupMemberSwitched,
+    FailoverOverridesChanged,
     /// A marketplace update of an installed plugin waits for an admin (W10).
     PluginUpdateAvailable,
     /// A marketplace update of an installed plugin is active (W10).
@@ -75,7 +80,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 51] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -119,6 +124,11 @@ impl EventKind {
         Self::AuthPermissionDenied,
         Self::RecordingProgress,
         Self::MaintenanceChanged,
+        Self::FailoverGroupMemberSelected,
+        Self::FailoverGroupExhausted,
+        Self::FailoverGroupCircuitChanged,
+        Self::FailoverGroupMemberSwitched,
+        Self::FailoverOverridesChanged,
         Self::PluginUpdateAvailable,
         Self::PluginUpdateApplied,
         Self::PluginUpdateFailed,
@@ -187,10 +197,16 @@ impl EventKind {
             | Self::StreamProbeFailed
             | Self::NotificationDeadLettered
             | Self::ScheduledTaskFailed
+            | Self::FailoverGroupMemberSelected
+            | Self::FailoverGroupExhausted
+            | Self::FailoverGroupCircuitChanged
+            | Self::FailoverGroupMemberSwitched
             | Self::PluginUpdateAvailable
             | Self::PluginUpdateApplied
             | Self::PluginUpdateFailed => Permission::SystemRead,
             Self::MaintenanceChanged => Permission::MaintenanceRead,
+            // The failover files back the failover group editor, which is a playlist view.
+            Self::FailoverOverridesChanged => Permission::PlaylistRead,
         }
     }
 
@@ -290,6 +306,11 @@ impl EventKind {
             Self::AuthSignInThrottled => "auth.sign_in.throttled",
             Self::AuthPermissionDenied => "auth.permission.denied",
             Self::MaintenanceChanged => "maintenance.changed",
+            Self::FailoverGroupMemberSelected => "failover_group.member_selected",
+            Self::FailoverGroupExhausted => "failover_group.exhausted",
+            Self::FailoverGroupCircuitChanged => "failover_group.circuit_changed",
+            Self::FailoverGroupMemberSwitched => "failover_group.member_switched",
+            Self::FailoverOverridesChanged => "failover.overrides_changed",
             Self::PluginUpdateAvailable => "plugin.update.available",
             Self::PluginUpdateApplied => "plugin.update.applied",
             Self::PluginUpdateFailed => "plugin.update.failed",

@@ -269,6 +269,9 @@ impl ConfigTargetDto {
         if let Some(sort) = self.sort.as_mut() {
             sort.prepare(templates)?;
         }
+        if let Some(options) = &mut self.options {
+            options.prepare()?;
+        }
         Ok(())
     }
 }
@@ -276,10 +279,16 @@ impl ConfigTargetDto {
 #[cfg(test)]
 mod tests;
 
+mod failover_groups;
 mod filter;
 mod managed_channels;
 mod options;
 mod output;
+pub use failover_groups::{
+    ChannelMatchBy, ChannelMatchNormalize, EpgConflictMode, FailoverGroupCircuitConfig, FailoverGroupPlayback,
+    FailoverGroupPolicy, FailoverGroupRuntimeConfig, FailoverGroupStartConfig, FailoverGroupsConfig,
+    FailoverGroupsTargetConfig, RuntimeAudioLanguage, MIN_GROUP_MEMBERS,
+};
 mod plugin_ref;
 pub use filter::ConfigTargetFilterDto;
 pub use managed_channels::{validate_managed_channel_refs, ManagedChannelBinding, ManagedChannelStage};

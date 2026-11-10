@@ -1038,7 +1038,7 @@ mod tests {
         assert!(buttons.split_once(".tp__text-button.active,").unwrap().0.contains("font-weight: bold;"));
         assert!(!buttons.split_once(".tp__text-button.active,").unwrap().1.contains("font-weight"));
         assert!(!radio_buttons.contains("font-weight"));
-        let target_styles = cards.split_once("&__target-toggle {").unwrap().1.split_once("&__empty-targets").unwrap().0;
+        let target_styles = cards.split_once("&__target-toggle {").unwrap().1.split_once("&__action-area").unwrap().0;
         assert!(!target_styles.contains("font-weight"));
         assert!(!target_styles.contains("font:"));
     }

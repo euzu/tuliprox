@@ -103,6 +103,7 @@ fn patch_playlist_item_applies_form_fields_and_sets_pending() {
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("main-input"),
+        input_stream_id: "".into(),
         epg_channel_id: Some(Arc::from("epg-1")),
         explorer_meta: None,
     };
@@ -148,6 +149,7 @@ fn patch_playlist_item_resets_fields_and_clears_edited_when_no_deltas_remain() {
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("main-input"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: Some(shared::model::UiItemExplorerMeta {
             override_state: shared::model::UiOverrideState { edited: true, pending: false, ambiguous: false },
@@ -219,6 +221,7 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("in"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
     });
@@ -236,6 +239,7 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("in"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
     });
@@ -253,6 +257,7 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
         category_id: 2,
         rating: 0.0,
         input_name: Arc::from("in"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
     });
@@ -311,6 +316,7 @@ fn replace_item_in_categories_matches_only_virtual_id_even_if_provider_id_collid
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("Provider A"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
     });
@@ -328,6 +334,7 @@ fn replace_item_in_categories_matches_only_virtual_id_even_if_provider_id_collid
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("Provider B"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
     });
@@ -370,6 +377,7 @@ fn replace_item_in_categories_moves_item_to_group_creates_missing_and_drops_empt
         category_id: 10,
         rating: 0.0,
         input_name: Arc::from("in"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
     });
@@ -412,6 +420,7 @@ fn apply_bulk_patches_to_categories_updates_multiple_items_and_rebuilds_groups()
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("in"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
     });
@@ -428,6 +437,7 @@ fn apply_bulk_patches_to_categories_updates_multiple_items_and_rebuilds_groups()
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("in"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
     });
@@ -476,6 +486,7 @@ fn find_duplicate_chno_uses_precomputed_map() {
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("in"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: Some(shared::model::UiItemExplorerMeta { chno: Some(10), ..Default::default() }),
     });
@@ -520,6 +531,7 @@ fn patch_from_patch_updates_channel_number_meta() {
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("in"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: Some(shared::model::UiItemExplorerMeta { chno: Some(10), ..Default::default() }),
     };
@@ -548,6 +560,7 @@ fn apply_bulk_patches_to_categories_ignores_same_virtual_id_in_other_cluster() {
             category_id: 1,
             rating: 0.0,
             input_name: Arc::from("in"),
+            input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
         })
@@ -596,6 +609,7 @@ fn bulk_patch_map_keeps_same_virtual_id_of_different_clusters_apart() {
             category_id: 1,
             rating: 0.0,
             input_name: Arc::from("in"),
+            input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
         })

@@ -244,6 +244,39 @@
     color: var(--stream-tech-chip-container-color);
   }
 
+  &__member-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gap-mini);
+    font-size: var(--font-size-sm);
+    color: var(--modest-text-color);
+  }
+
+  &__member-label {
+    font-weight: 600;
+    color: var(--text-color);
+  }
+
+  &__member-value {
+    color: var(--stream-tech-chip-audio-codec-color);
+  }
+
+  &__menu-divider {
+    height: 1px;
+    background: var(--card-border-color);
+    margin: var(--margin-mini) 0;
+  }
+
+  &__menu-header {
+    padding: var(--padding-micro) var(--padding-small);
+    font-size: var(--font-size-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--modest-text-color);
+    letter-spacing: 0.05em;
+  }
+
   &__country {
     display: inline-flex;
     align-items: center;

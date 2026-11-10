@@ -291,7 +291,12 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         // which is the single place that decision is made.
         EventMessage::PlaylistUpdateProgress(_)
         | EventMessage::SystemInfoUpdate(_)
-        | EventMessage::RecordingProgress => None,
+        | EventMessage::RecordingProgress
+        | EventMessage::FailoverGroupMemberSelected { .. }
+        | EventMessage::FailoverGroupExhausted { .. }
+        | EventMessage::FailoverGroupCircuitChanged { .. }
+        | EventMessage::FailoverGroupMemberSwitched { .. }
+        | EventMessage::FailoverOverridesChanged { .. } => None,
     }
 }
 
@@ -668,6 +673,26 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInFailed),
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
+            EventMessage::FailoverGroupMemberSelected {
+                target_id: 1,
+                group_vid: 10,
+                member_vid: 11,
+                tier: shared::model::failover_group::CapacityTier::Free,
+            },
+            EventMessage::FailoverGroupExhausted { target_id: 1, group_vid: 10 },
+            EventMessage::FailoverGroupMemberSwitched {
+                target_id: 1,
+                group_vid: 10,
+                from_member_vid: 11,
+                to_member_vid: 12,
+                reason: shared::model::failover_group::SwitchReason::UpstreamEof,
+            },
+            EventMessage::FailoverGroupCircuitChanged {
+                input_name: "test".into(),
+                input_stream_id: "1".into(),
+                state: shared::model::failover_group::CircuitState::Closed,
+            },
+            EventMessage::FailoverOverridesChanged { targets: vec!["main".to_string()] },
             plugin_update(shared::model::PluginUpdateOutcome::Available),
             plugin_update(shared::model::PluginUpdateOutcome::Applied),
             plugin_update(shared::model::PluginUpdateOutcome::Failed),

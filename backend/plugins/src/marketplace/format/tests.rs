@@ -131,3 +131,12 @@ fn releases_sort_newest_first_with_compatible_ones_before_incompatible() {
     assert_eq!(order, [("1.10.0", true), ("1.9.0", true), ("1.2.0", true), ("2.0.0", false)]);
     assert!(rows[3].incompatible_reason.is_some());
 }
+
+/// Tuliprox 3.3.192 and older read the repository copy of the official catalog by default; it must stay valid.
+#[test]
+fn the_repository_catalog_parses_without_problems() {
+    let (parsed, warnings) =
+        parse(include_bytes!("../../../../../plugins/marketplace.json"), false).expect("the repository catalog parses");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_ne!(parsed.plugins.len(), 0, "the repository catalog lists plugins");
+}

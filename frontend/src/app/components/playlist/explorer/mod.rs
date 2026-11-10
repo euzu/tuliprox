@@ -13,15 +13,17 @@ pub mod sort;
 use crate::{
     app::{
         components::{
+            failover_groups::FailoverGroupsPreselect,
             menu_item::MenuItem,
             popup_menu::{PopupMenu, PopupMenuPlacement},
             recording::{
-                ensure_recording_available, target_name_for_id, PaddingBounds, RecordingForm, RecordingFormPrefill,
+                ensure_recording_available, target_for_id, target_name_for_id, PaddingBounds, RecordingForm,
+                RecordingFormPrefill,
             },
-            DropDownOption, DropDownSelection, HorizontalShrinkPanel, IconButton, NoContent, PluginActionDialog,
-            PluginActionMenuItems, PluginActionRequest, PluginSlot, Search, Select, SplitButton, TextButton,
+            DropDownOption, DropDownSelection, IconButton, NoContent, PluginActionDialog, PluginActionMenuItems,
+            PluginActionRequest, PluginSlot, Search, Select, SplitButton, SplitPane, TextButton,
         },
-        context::{ConfigContext, PlaylistContext, PlaylistExplorerContext},
+        context::{ConfigContext, FailoverGroupsNavigation, PlaylistContext, PlaylistExplorerContext},
     },
     hooks::{use_clipboard_copy, use_service_context},
     html_if,
@@ -47,9 +49,10 @@ use serde_json::{json, Value};
 use shared::{
     error::TuliproxError,
     model::{
-        recording::RecordingVisibility, OverrideScopeDto, Permission, PlaylistRequest, PlaylistUrlResolveRequest,
-        PluginChannelContextDto, PluginSlotDto, SearchRequest, SeriesStreamDetailEpisodeProperties,
-        SeriesStreamProperties, UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
+        recording::RecordingVisibility, ChannelMemberRefDto, OverrideScopeDto, Permission, PlaylistRequest,
+        PlaylistUrlResolveRequest, PluginChannelContextDto, PluginSlotDto, SearchRequest,
+        SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, SourcesConfigDto, UiPlaylistCategories,
+        UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::format_float_localized,
 };
@@ -69,6 +72,8 @@ const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 const RECORD_ITEM: &str = "record_item";
+const OPEN_FAILOVER_GROUP: &str = "open_failover_group";
+const ADD_TO_FAILOVER_GROUP: &str = "add_to_failover_group";
 const TP_EXPLORER_SEARCH_FIELDS_KEY: &str = "tp-explorer-search-fields";
 
 #[derive(Clone)]
@@ -79,6 +84,7 @@ pub struct ChannelSelection {
     pub url: String,
     pub title: String,
     pub input_name: String,
+    pub input_stream_id: String,
     /// What a plugin may see of the channel; never carries a URL.
     pub plugin_context: PluginChannelContextDto,
 }
@@ -104,6 +110,8 @@ pub enum ExplorerAction {
     CopyLinkTuliproxWebPlayerUrl,
     CopyLinkProviderUrl,
     Record,
+    OpenFailoverGroup,
+    AddToFailoverGroup,
 }
 
 impl Display for ExplorerAction {
@@ -116,6 +124,8 @@ impl Display for ExplorerAction {
                 Self::CopyLinkTuliproxWebPlayerUrl => COPY_LINK_TULIPROX_WEBPLAYER_URL,
                 Self::CopyLinkProviderUrl => COPY_LINK_PROVIDER_URL,
                 Self::Record => RECORD_ITEM,
+                Self::OpenFailoverGroup => OPEN_FAILOVER_GROUP,
+                Self::AddToFailoverGroup => ADD_TO_FAILOVER_GROUP,
             }
         )
     }
@@ -133,6 +143,10 @@ impl FromStr for ExplorerAction {
             Ok(Self::CopyLinkProviderUrl)
         } else if s.eq(RECORD_ITEM) {
             Ok(Self::Record)
+        } else if s.eq(OPEN_FAILOVER_GROUP) {
+            Ok(Self::OpenFailoverGroup)
+        } else if s.eq(ADD_TO_FAILOVER_GROUP) {
+            Ok(Self::AddToFailoverGroup)
         } else {
             Err(TuliproxError::Config(format!("Unknown ExplorerAction: {s}")))
         }
@@ -143,6 +157,29 @@ impl FromStr for ExplorerAction {
 pub fn can_show_record_action(can_write_recordings: bool, selected_channel: Option<&ChannelSelection>) -> bool {
     can_write_recordings
         && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live || item.downloadable)
+}
+
+/// Name of the browsed target when it has failover groups enabled.
+#[must_use]
+pub fn failover_group_target(
+    request: Option<&PlaylistRequest>,
+    sources: Option<&SourcesConfigDto>,
+    input_name: &str,
+) -> Option<String> {
+    let PlaylistRequest::Target(target_id) = request? else { return None };
+    let target = target_for_id(sources?, *target_id, Some(input_name))?;
+    target.options.as_ref()?.failover_groups.as_ref()?.enabled.then(|| target.name.clone())
+}
+
+/// Live channels of a target with failover groups can be opened in, or added to, a failover group; the channel
+/// reference needs the id the provider gave the stream.
+#[must_use]
+pub fn can_show_failover_group_actions(
+    selected_channel: Option<&ChannelSelection>,
+    failover_target: Option<&str>,
+) -> bool {
+    failover_target.is_some()
+        && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live && !item.input_stream_id.is_empty())
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -194,6 +231,7 @@ pub struct PlaylistExplorerProps {
 #[component]
 pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     let explorer_ctx = use_context::<PlaylistExplorerContext>();
+    let failover_navigation = use_context::<FailoverGroupsNavigation>();
     let cfg_ctx = use_context::<ConfigContext>();
     let playlist_scope = use_context::<PlaylistContext>().and_then(|ctx| ctx.revision);
     let dialog_ctx = use_context::<DialogService>();
@@ -608,6 +646,7 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                 url: dto.url.to_string(),
                 title: dto.title.to_string(),
                 input_name: dto.input_name.to_string(),
+                input_stream_id: dto.input_stream_id.to_string(),
                 plugin_context: plugin_channel_context(&dto),
             },
             event,
@@ -630,6 +669,7 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         let translate_clone = translate.clone();
         let copy_to_clipboard = copy_to_clipboard.clone();
         let config = config_ctx.config.clone();
+        let failover_navigation = failover_navigation.clone();
         let popup_scope = (*popup_scope).clone();
 
         Callback::from(move |(name, _): (String, _)| {
@@ -638,6 +678,25 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
             }
             if let Ok(action) = ExplorerAction::from_str(&name) {
                 match action {
+                    ExplorerAction::OpenFailoverGroup | ExplorerAction::AddToFailoverGroup => {
+                        let (Some(navigation), Some(dto)) = (failover_navigation.as_ref(), selected_channel.as_ref())
+                        else {
+                            return;
+                        };
+                        let request = playlist_ctx.playlist_request.as_ref();
+                        let sources = config.as_ref().map(|app_config| &app_config.sources);
+                        let Some(target) = failover_group_target(request, sources, &dto.input_name) else { return };
+                        let preselect = FailoverGroupsPreselect::for_target(&target);
+                        navigation.open(if action == ExplorerAction::OpenFailoverGroup {
+                            preselect.with_group_search(&dto.title)
+                        } else {
+                            let member = ChannelMemberRefDto {
+                                input: dto.input_name.clone(),
+                                stream_id: dto.input_stream_id.clone(),
+                            };
+                            preselect.with_channel(member, &dto.title)
+                        });
+                    }
                     ExplorerAction::CopyLinkTuliproxVirtualId => {
                         if let Some(dto) = &*selected_channel {
                             copy_to_clipboard.emit(dto.virtual_id.to_string());
@@ -1099,6 +1158,20 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     };
 
     if playlist.is_none() {
+        if let Some(err) = context.error.as_ref() {
+            return html! {
+                <div class="tp__playlist-explorer">
+                    <NoContent
+                        text={translate.t("MESSAGES.PLAYLIST_EXPLORER.FETCH_FAILED")}
+                        hint={if err.is_empty() {
+                            translate.t("MESSAGES.PLAYLIST_EXPLORER.FETCH_FAILED_HINT")
+                        } else {
+                            err.clone()
+                        }}
+                    />
+                </div>
+            };
+        }
         return html! {
             <div class="tp__playlist-explorer">
                 <NoContent
@@ -1147,6 +1220,7 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                     url: chan.direct_source.to_string(),
                     title: chan.title.to_string(),
                     input_name: String::new(),
+                    input_stream_id: String::new(),
                     plugin_context: PluginChannelContextDto {
                         virtual_id: chan.id,
                         name: chan.title.to_string(),
@@ -1242,6 +1316,14 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         (*popup_anchor_ref).as_ref().and_then(|anchor| anchor.closest(".post").ok().flatten()).is_some();
     let popup_placement = if popup_in_card { PopupMenuPlacement::BottomEndFlip } else { PopupMenuPlacement::default() };
 
+    let failover_target = selected_channel.as_ref().and_then(|channel| {
+        failover_group_target(
+            context.playlist_request.as_ref(),
+            config_ctx.config.as_ref().map(|app_config| &app_config.sources),
+            &channel.input_name,
+        )
+    });
+
     html! {
         <div class="tp__playlist-explorer tpx">
             // TOP BAR
@@ -1304,16 +1386,14 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
             </div>
 
             // BODY: SIDEBAR + MAIN + DETAIL PANEL
-            <div class="body">
-                // SIDEBAR
-                { html_if!(!*is_mobile, {
-                    <HorizontalShrinkPanel
-                        class="tp__explorer-group-panel"
-                        shrink_width="8rem"
-                        default_width="14rem"
-                        max_width="28rem"
-                        storage_key="tp-explorer-group-panel-width"
-                    >
+            <SplitPane
+                class="body"
+                first_class="tp__explorer-group-panel"
+                second_class="tp__split-pane__second"
+                first={if *is_mobile {
+                    html! {}
+                } else {
+                    html! {
                         <ExplorerSidebar
                             cluster={*active_cluster}
                             groups={Id::from_option((*groups_for_cluster).clone())}
@@ -1323,11 +1403,12 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                             selected_group={(*selected_group).clone()}
                             on_select_group={handle_select_group}
                         />
-                    </HorizontalShrinkPanel>
-                })}
-
-                // MAIN CONTENT
-                <div class="main">
+                    }
+                }}
+                second={html! {
+                    <>
+                        // MAIN CONTENT
+                        <div class="main">
                     // BACK BUTTON IF IN SERIES EPISODES
                     {
                         if matches!(*current_level, ExplorerLevel::SeriesEpisodes(_, _)) {
@@ -1643,7 +1724,16 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                         html! {}
                     }
                 }
-            </div>
+                    </>
+                }}
+                first_hidden={*is_mobile}
+                initial_size="14rem"
+                min_size="8rem"
+                max_size="28rem"
+                collapsible={true}
+                start_collapsed={*is_mobile}
+                storage_key="tp-explorer-group-panel-width"
+            />
 
             // POPUP CONTEXT MENU
             <PopupMenu
@@ -1678,6 +1768,31 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                     label={translate.t("LABEL.COPY_LINK_PROVIDER_URL")}
                     onclick={&handle_menu_click}
                 />
+                {
+                    html_if!(
+                        can_show_failover_group_actions(selected_channel.as_ref(), failover_target.as_deref()),
+                        {
+                            <>
+                                <MenuItem
+                                    icon="Group"
+                                    name={ExplorerAction::OpenFailoverGroup.to_string()}
+                                    label={translate.t("LABEL.FAILOVER_GROUPS_OPEN_FAILOVER_GROUP")}
+                                    onclick={&handle_menu_click}
+                                />
+                                {
+                                    html_if!(can_write, {
+                                        <MenuItem
+                                            icon="Add"
+                                            name={ExplorerAction::AddToFailoverGroup.to_string()}
+                                            label={translate.t("LABEL.FAILOVER_GROUPS_ADD_TO_GROUP_ELLIPSIS")}
+                                            onclick={&handle_menu_click}
+                                        />
+                                    })
+                                }
+                            </>
+                        }
+                    )
+                }
                 {
                     html_if!(can_show_record_action(can_write_recordings, selected_channel.as_ref()), {
                         <MenuItem
@@ -1790,6 +1905,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: Arc::from("m3u-input"),
+            input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: Some(UiItemExplorerMeta {
                 override_id: Some(Arc::from("urlhash-v1:blake3hash123")),
@@ -1810,6 +1926,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: Arc::from("xtream-input"),
+            input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
         });
@@ -1880,6 +1997,7 @@ mod tests {
             category_id: 1,
             rating: 8.0,
             input_name: std::sync::Arc::from("input-1"),
+            input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
         }

@@ -27,6 +27,7 @@ fn create_test_item(
         category_id: 1,
         rating,
         input_name: Arc::from("input-1"),
+        input_stream_id: "".into(),
         epg_channel_id: epg_channel_id.map(Arc::from),
         explorer_meta: Some(UiItemExplorerMeta {
             override_state: UiOverrideState { edited, pending: false, ambiguous: false },
@@ -194,6 +195,7 @@ fn create_timestamp_item(
         category_id: 1,
         rating: 0.0,
         input_name: Arc::from("input-1"),
+        input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: Some(UiItemExplorerMeta {
             override_state: UiOverrideState::default(),

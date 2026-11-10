@@ -1,4 +1,6 @@
-use super::{ActiveProviderManager, ConnectionKind, Connections, PriorityKey, PriorityOwner};
+use super::{
+    allocation::ActiveConnectionInfo, ActiveProviderManager, ConnectionKind, Connections, PriorityKey, PriorityOwner,
+};
 use crate::SharedStreamManager;
 use ::shared::utils::sanitize_sensitive_info;
 use log::error;
@@ -332,26 +334,11 @@ impl ActiveProviderManager {
         if connections.shared.by_key.contains_key(key) {
             return false;
         }
-        let Some(info) = connections.single.remove(&handle.allocation_id) else {
+        let Some(info) = Self::take_single_locked(&mut connections, handle) else {
             return false;
         };
-        if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
-            set.remove(&handle.allocation_id);
-            if set.is_empty() {
-                connections.single_by_addr.remove(&info.client_addr);
-            }
-        }
-        let provider_name = info.allocation.get_provider_name().unwrap_or_default();
         if !info.allocation.is_unlimited_provider() {
-            if let Some(list) = connections.by_provider.get_mut(&provider_name) {
-                list.remove(&handle.allocation_id);
-            }
-            Self::remove_priority_entry(
-                &mut connections,
-                &provider_name,
-                &(info.priority, Reverse(info.created_at), handle.allocation_id),
-                info.kind,
-            );
+            let provider_name = info.allocation.get_provider_name().unwrap_or_default();
             Self::upsert_priority_entry(
                 &mut connections,
                 &provider_name,
@@ -383,6 +370,115 @@ impl ActiveProviderManager {
         true
     }
 
+    /// Removes the single allocation of `handle` from the single-connection indexes so a shared
+    /// stream can own it.
+    fn take_single_locked(connections: &mut Connections, handle: &ProviderHandle) -> Option<ActiveConnectionInfo> {
+        let info = connections.single.remove(&handle.allocation_id)?;
+        if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
+            set.remove(&handle.allocation_id);
+            if set.is_empty() {
+                connections.single_by_addr.remove(&info.client_addr);
+            }
+        }
+        if !info.allocation.is_unlimited_provider() {
+            let provider_name = info.allocation.get_provider_name().unwrap_or_default();
+            if let Some(list) = connections.by_provider.get_mut(&provider_name) {
+                list.remove(&handle.allocation_id);
+            }
+            Self::remove_priority_entry(
+                connections,
+                &provider_name,
+                &(info.priority, Reverse(info.created_at), handle.allocation_id),
+                info.kind,
+            );
+        }
+        Some(info)
+    }
+
+    /// Releases the provider allocation `expected` behind the shared stream `key` while its
+    /// subscribers stay, so a group stream can move to another member. Refused when the stream
+    /// runs on another allocation, e.g. a successor stream under the same key.
+    pub fn detach_shared_allocation(&self, key: &str, expected: AllocationId) -> bool {
+        let _transition = self.lock_capacity_transition();
+        let allocation = {
+            let mut connections = self.write_connections();
+            let Some(shared) = connections.shared.by_key.get_mut(key) else {
+                return false;
+            };
+            if shared.allocation_id != expected || matches!(shared.allocation, ProviderAllocation::Exhausted) {
+                return false;
+            }
+            let allocation_id = shared.allocation_id;
+            let allocation = std::mem::replace(&mut shared.allocation, ProviderAllocation::Exhausted);
+            shared.cancel_token = None;
+            let priority_key = (shared.priority, Reverse(shared.created_at), allocation_id);
+            let kind = shared.kind;
+            let owner = shared.session_owner.clone();
+            connections.shared.shared_by_allocation_id.remove(&allocation_id);
+            Self::unindex_owner(&mut connections, allocation_id, owner.as_ref());
+            if !allocation.is_unlimited_provider() {
+                if let Some(name) = allocation.get_provider_name() {
+                    if let Some(list) = connections.by_provider.get_mut(&name) {
+                        list.remove(&allocation_id);
+                    }
+                    Self::remove_priority_entry(&mut connections, &name, &priority_key, kind);
+                }
+            }
+            allocation
+        };
+        allocation.release();
+        if let Some(name) = allocation.get_provider_name() {
+            self.capacity.notify(&name);
+        }
+        true
+    }
+
+    /// Moves the single allocation of `handle` under the shared stream `key`, whose subscribers
+    /// keep their priority and kind. Only the stream detached from `detached` takes it.
+    pub fn attach_shared_allocation(&self, key: &str, detached: AllocationId, handle: &ProviderHandle) -> bool {
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
+        let _transition = self.lock_capacity_transition();
+        let mut connections = self.write_connections();
+        let Some((shared_key, shared)) = connections.shared.by_key.get_key_value(key) else {
+            return false;
+        };
+        if shared.allocation_id != detached || !matches!(shared.allocation, ProviderAllocation::Exhausted) {
+            return false;
+        }
+        let shared_key = Arc::clone(shared_key);
+        let Some(info) = Self::take_single_locked(&mut connections, handle) else {
+            return false;
+        };
+        let Some(shared) = connections.shared.by_key.get_mut(key) else {
+            return false;
+        };
+        shared.allocation_id = handle.allocation_id;
+        shared.allocation = info.allocation;
+        shared.cancel_token = Some(info.cancel_token);
+        shared.created_at = info.created_at;
+        let (priority, kind, created_at) = (shared.priority, shared.kind, shared.created_at);
+        // The new allocation serves the shared stream's session owner, not the one it was
+        // acquired for.
+        let shared_owner = shared.session_owner.clone();
+        let provider_name =
+            (!shared.allocation.is_unlimited_provider()).then(|| shared.allocation.get_provider_name()).flatten();
+        Self::unindex_owner(&mut connections, handle.allocation_id, info.session_owner.as_ref());
+        Self::index_owner(&mut connections, handle.allocation_id, shared_owner.as_ref());
+        if let Some(provider_name) = provider_name {
+            Self::upsert_priority_entry(
+                &mut connections,
+                &provider_name,
+                (priority, Reverse(created_at), handle.allocation_id),
+                PriorityOwner::Shared(handle.allocation_id),
+                kind,
+            );
+        }
+        connections.shared.shared_by_allocation_id.insert(handle.allocation_id, shared_key);
+        true
+    }
+
     pub fn add_shared_connection(
         &self,
         addr: &SocketAddr,
@@ -408,11 +504,13 @@ impl ActiveProviderManager {
                 s.priority,
                 s.kind,
                 s.created_at,
-                s.allocation.is_unlimited_provider(),
+                // A detached stream (member switch) has no provider and no index entry; attaching
+                // the next allocation indexes it with the subscribers' priority.
+                s.allocation.is_unlimited_provider() || matches!(s.allocation, ProviderAllocation::Exhausted),
             )
         });
 
-        let Some((alloc_id, provider_name, old_priority, old_kind, created_at, shared_is_unlimited)) = metadata else {
+        let Some((alloc_id, provider_name, old_priority, old_kind, created_at, not_indexed)) = metadata else {
             let err =
                 format!("Failed to add shared connection for {addr}: url {} not found", sanitize_sensitive_info(key));
             error!("{err}");
@@ -447,7 +545,7 @@ impl ActiveProviderManager {
         let _ = shared_allocation;
         // Skip priority-index rebuild for unlimited providers: they are not
         // subject to preemption and therefore must not be in the index.
-        if !shared_is_unlimited && needs_reindex {
+        if !not_indexed && needs_reindex {
             Self::remove_priority_entry(
                 &mut connections,
                 &provider_name,

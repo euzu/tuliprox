@@ -1,6 +1,6 @@
 use crate::app::components::{DropDownOption, DropDownSelection};
 use std::str::FromStr;
-use yew::Html;
+use yew::{virtual_dom::VNode, Html};
 
 pub(crate) fn build_options<T, I, F>(values: I, selected: &T, label: F) -> Vec<DropDownOption>
 where
@@ -81,5 +81,37 @@ mod tests {
         assert_eq!(selection_parse_first::<u8>(&selection), Some(7));
         assert_eq!(selection_first_owned(selection.clone()), Some("7".to_string()));
         assert_eq!(selection_vec(selection), vec!["7".to_string(), "9".to_string()]);
+    }
+}
+
+/// Plain text of the markup of an option label, for filtering. Components in the label contribute no text.
+pub(crate) fn html_text(node: &Html) -> String {
+    fn collect(node: &VNode, out: &mut String) {
+        match node {
+            VNode::VText(text) => out.push_str(&text.text),
+            VNode::VTag(tag) => {
+                if let Some(children) = tag.children() {
+                    collect(children, out);
+                }
+            }
+            VNode::VList(list) => list.iter().for_each(|child| collect(child, out)),
+            _ => {}
+        }
+    }
+    let mut text = String::new();
+    collect(node, &mut text);
+    text
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::html_text;
+    use yew::html;
+
+    #[test]
+    fn html_text_reads_text_of_nested_markup() {
+        assert_eq!(html_text(&html! { "Plain" }), "Plain");
+        assert_eq!(html_text(&html! { <span>{ "Nested " }<b>{ "label" }</b></span> }), "Nested label");
+        assert_eq!(html_text(&html! { <>{ "a" }{ "b" }</> }), "ab");
     }
 }

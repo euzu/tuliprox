@@ -199,6 +199,9 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
             ConfigForm::IpCheck(_, ipcheck_cfg) => config.ipcheck = Some(ipcheck_cfg),
             ConfigForm::Mcp(_, mcp_cfg) => update_mcp_field(config, mcp_cfg),
             ConfigForm::Library(_, library_cfg) => apply_setup_library_form(config, library_cfg),
+            ConfigForm::FailoverGroups(_, failover_groups_cfg) => {
+                config.failover_groups = (!failover_groups_cfg.is_default()).then_some(failover_groups_cfg);
+            }
             ConfigForm::Panel(..) => {}
             ConfigForm::ApiProxy(_, _) => {}
         }

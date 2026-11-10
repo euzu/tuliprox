@@ -156,6 +156,26 @@ impl ProviderLineup {
             }
         }
     }
+
+    fn probe_excluding(
+        &self,
+        with_grace: bool,
+        grace_period_timeout_secs: u64,
+        excluded_providers: &std::collections::HashSet<Arc<str>>,
+    ) -> ProviderAllocation {
+        match self {
+            ProviderLineup::Single(lineup) => {
+                if excluded_providers.contains(&lineup.provider.name) {
+                    ProviderAllocation::Exhausted
+                } else {
+                    lineup.probe(with_grace, grace_period_timeout_secs)
+                }
+            }
+            ProviderLineup::Multi(lineup) => {
+                lineup.probe_excluding(with_grace, grace_period_timeout_secs, excluded_providers)
+            }
+        }
+    }
 }
 
 /// Handles a single provider and ensures safe allocation/release of connections.
@@ -181,6 +201,10 @@ impl SingleProviderLineup {
 
     fn acquire(&self, with_grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
         self.provider.try_allocate(with_grace, grace_period_timeout_secs)
+    }
+
+    fn probe(&self, with_grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
+        self.provider.probe_capacity(with_grace, grace_period_timeout_secs)
     }
 
     #[cfg(test)]
@@ -337,6 +361,63 @@ impl MultiProviderLineup {
         ProviderAllocation::Exhausted
     }
 
+    fn probe_next_provider_from_group(
+        priority_group: &ProviderPriorityGroup,
+        grace: bool,
+        grace_period_timeout_secs: u64,
+        excluded_providers: &std::collections::HashSet<Arc<str>>,
+    ) -> ProviderAllocation {
+        match priority_group {
+            ProviderPriorityGroup::SingleProviderGroup(p) => {
+                if excluded_providers.contains(&p.name) {
+                    return ProviderAllocation::Exhausted;
+                }
+                let result = p.probe_capacity(grace, grace_period_timeout_secs);
+                if !matches!(result, ProviderAllocation::Exhausted) {
+                    return result;
+                }
+            }
+            ProviderPriorityGroup::MultiProviderGroup(index, pg) => {
+                let provider_count = pg.len();
+                if provider_count == 0 {
+                    return ProviderAllocation::Exhausted;
+                }
+                if grace {
+                    for p in pg {
+                        if excluded_providers.contains(&p.name) {
+                            continue;
+                        }
+                        let result = p.probe_capacity(true, grace_period_timeout_secs);
+                        if !matches!(result, ProviderAllocation::Exhausted) {
+                            return result;
+                        }
+                    }
+                    return ProviderAllocation::Exhausted;
+                }
+
+                let start = index.load(Ordering::Acquire) % provider_count;
+                let mut idx = start;
+
+                loop {
+                    let p = &pg[idx];
+                    if !excluded_providers.contains(&p.name) {
+                        let result = p.probe_capacity(grace, grace_period_timeout_secs);
+                        if !matches!(result, ProviderAllocation::Exhausted) {
+                            return result;
+                        }
+                    }
+
+                    idx = (idx + 1) % provider_count;
+
+                    if idx == start {
+                        break;
+                    }
+                }
+            }
+        }
+        ProviderAllocation::Exhausted
+    }
+
     // Used for redirect to cyclce through provider
     fn get_next_provider_from_group(
         priority_group: &ProviderPriorityGroup,
@@ -415,6 +496,24 @@ impl MultiProviderLineup {
     ) -> ProviderAllocation {
         self.scan_priority_groups(with_grace, |priority_group, grace| {
             let allocation = Self::acquire_next_provider_from_group(
+                priority_group,
+                grace,
+                grace_period_timeout_secs,
+                excluded_providers,
+            );
+            (!matches!(allocation, ProviderAllocation::Exhausted)).then_some(allocation)
+        })
+        .unwrap_or(ProviderAllocation::Exhausted)
+    }
+
+    fn probe_excluding(
+        &self,
+        with_grace: bool,
+        grace_period_timeout_secs: u64,
+        excluded_providers: &std::collections::HashSet<Arc<str>>,
+    ) -> ProviderAllocation {
+        self.scan_priority_groups(with_grace, |priority_group, grace| {
+            let allocation = Self::probe_next_provider_from_group(
                 priority_group,
                 grace,
                 grace_period_timeout_secs,
@@ -928,6 +1027,40 @@ impl ProviderLineupManager {
         }
         Self::log_allocation(&allocation);
         allocation
+    }
+
+    pub fn probe_exact_connection_with_grace_override(
+        &self,
+        provider_name: &Arc<str>,
+        allow_grace: bool,
+    ) -> ProviderAllocation {
+        let snapshot = self.snapshot.load_full();
+        let with_grace = allow_grace && self.grace_period_millis.load(Ordering::Acquire) > 0;
+        match Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
+            None => ProviderAllocation::Exhausted,
+            Some((_lineup, config)) => {
+                config.probe_capacity(with_grace, self.grace_period_timeout_secs.load(Ordering::Acquire))
+            }
+        }
+    }
+
+    pub fn probe_connection_with_grace_override_excluding(
+        &self,
+        input_name: &Arc<str>,
+        allow_grace: bool,
+        excluded_providers: &std::collections::HashSet<Arc<str>>,
+    ) -> ProviderAllocation {
+        let snapshot = self.snapshot.load_full();
+        let lineup_opt = Self::get_provider_config_by_name(input_name, &snapshot.providers);
+        let with_grace = allow_grace && self.grace_period_millis.load(Ordering::Acquire) > 0;
+        match lineup_opt {
+            None => ProviderAllocation::Exhausted,
+            Some((lineup, _config)) => lineup.probe_excluding(
+                with_grace,
+                self.grace_period_timeout_secs.load(Ordering::Acquire),
+                excluded_providers,
+            ),
+        }
     }
 
     /// Report that every provider behind an input is at capacity.

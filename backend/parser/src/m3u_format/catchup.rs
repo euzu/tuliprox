@@ -221,12 +221,29 @@ fn is_append_like_query_source(mode: &str, source: &str) -> bool {
 /// Build `archive|{utc}|{duration}` when the resolved provider URL still carries append/shift
 /// query markers. Session tokens keep this discriminator so the panel can show Catchup/EPG
 /// after HLS rewrite drops `utc`/`utcstart` from segment URLs.
-fn parse_catchup_timestamp(value: &str) -> Option<i64> {
+pub fn parse_catchup_timestamp(value: &str) -> Option<i64> {
     if value.len() == 14 && value.bytes().all(|byte| byte.is_ascii_digit()) {
         return NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok().map(|dt| dt.and_utc().timestamp());
     }
     let timestamp = value.parse::<i64>().ok()?;
     DateTime::from_timestamp(timestamp, 0).map(|_| timestamp)
+}
+
+/// Extract catch-up start timestamp from raw query parameters (such as `utc`, `utcstart`, `v0`, or `timestamp`).
+pub fn extract_m3u_catchup_start_ts(raw_query: Option<&str>) -> Option<i64> {
+    let query = raw_query?;
+    for (key, val) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key.eq_ignore_ascii_case("utc")
+            || key.eq_ignore_ascii_case("utcstart")
+            || key.eq_ignore_ascii_case("timestamp")
+            || key.eq_ignore_ascii_case("v0")
+        {
+            if let Some(ts) = parse_catchup_timestamp(&val) {
+                return Some(ts);
+            }
+        }
+    }
+    None
 }
 
 fn validate_catchup_start(start: i64) -> Result<(), TuliproxError> {
@@ -510,7 +527,7 @@ fn xtream_m3u_catchup_segments(source_url: &str, catchup: &CatchupProperties) ->
     has_placeholder.then_some(segments)
 }
 
-fn parse_xtream_bridge_start(start: &str) -> Result<i64, TuliproxError> {
+pub fn parse_xtream_bridge_start(start: &str) -> Result<i64, TuliproxError> {
     if let Ok(ts) = start.parse::<i64>() {
         return DateTime::from_timestamp(ts, 0)
             .map(|_| ts)

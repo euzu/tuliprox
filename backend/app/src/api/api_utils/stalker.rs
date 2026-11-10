@@ -28,7 +28,7 @@ pub(super) fn needs_initial_stalker_resolution(input_type: InputType, stream_url
 }
 
 /// Maps a cluster and item type to the Stalker stream kind; catchup items are archive streams.
-pub(super) fn stalker_stream_kind(cluster: XtreamCluster, item_type: PlaylistItemType) -> StalkerStreamKind {
+pub(crate) fn stalker_stream_kind(cluster: XtreamCluster, item_type: PlaylistItemType) -> StalkerStreamKind {
     if item_type == PlaylistItemType::Catchup {
         StalkerStreamKind::Archive
     } else {

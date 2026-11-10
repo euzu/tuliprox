@@ -79,7 +79,8 @@ impl AppState {
             change_detect!(hdhomerun_changed, old_config.hdhomerun.as_ref(), config.hdhomerun.as_ref());
         let changed_file_watch =
             change_detect!(string_changed, old_config.mapping_path.as_ref(), config.mapping_path.as_ref())
-                || change_detect!(string_changed, old_config.template_path.as_ref(), config.template_path.as_ref());
+                || change_detect!(string_changed, old_config.template_path.as_ref(), config.template_path.as_ref())
+                || change_detect!(string_changed, old_config.failover_path.as_ref(), config.failover_path.as_ref());
 
         let geoip_enabled = config.is_geoip_enabled();
         let geoip_enabled_old = old_config.is_geoip_enabled();

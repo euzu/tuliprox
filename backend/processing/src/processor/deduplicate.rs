@@ -1,49 +1,25 @@
+use super::match_key::{dedup_match_by, extract_normalized_match_key, raw_match_value};
 use indexmap::IndexMap;
 use shared::{
     model::{
-        DeduplicateConfig, DeduplicateKeep, DeduplicateMatchBy, PlaylistGroup, PlaylistItem, PluginDuplicateGroup,
-        PluginKeepers, XtreamCluster,
+        DeduplicateConfig, DeduplicateKeep, PlaylistGroup, PlaylistItem, PluginDuplicateGroup, PluginKeepers, UUIDType,
+        XtreamCluster,
     },
-    utils::{deunicode_string, quality_rank, quality_tokens, token_quality},
+    utils::quality_rank,
 };
 use std::collections::HashSet;
 
-/// Lowercased token join with quality tokens removed, so "News HD" and
-/// "NEWS [FHD]" produce the same key.
-fn normalized_dedup_key(value: &str, match_as_ascii: bool) -> String {
-    let value = if match_as_ascii { deunicode_string(value) } else { std::borrow::Cow::Borrowed(value) };
-    let mut key = String::with_capacity(value.len());
-    for token in quality_tokens(&value) {
-        if token_quality(token).is_some() {
-            continue;
-        }
-        if !key.is_empty() {
-            key.push(' ');
-        }
-        for ch in token.chars() {
-            key.extend(ch.to_lowercase());
-        }
-    }
-    key
-}
-
 fn match_value(config: &DeduplicateConfig, item: &PlaylistItem) -> String {
-    normalized_dedup_key(raw_match_value(config, item), config.match_as_ascii)
+    extract_normalized_match_key(&item.header, dedup_match_by(config.match_by), config.match_as_ascii, None)
 }
 
-fn raw_match_value<'a>(config: &DeduplicateConfig, item: &'a PlaylistItem) -> &'a str {
-    let header = &item.header;
-    match config.match_by {
-        DeduplicateMatchBy::Caption => {
-            if header.title.is_empty() {
-                header.name.as_ref()
-            } else {
-                header.title.as_ref()
-            }
-        }
-        DeduplicateMatchBy::Name => header.name.as_ref(),
-        DeduplicateMatchBy::Title => header.title.as_ref(),
-    }
+fn item_raw_match_value<'a>(config: &DeduplicateConfig, item: &'a PlaylistItem) -> &'a str {
+    raw_match_value(&item.header, dedup_match_by(config.match_by))
+}
+
+/// Failover group items and their members never take part in deduplication.
+fn should_skip(channel: &PlaylistItem, skip: &HashSet<UUIDType>) -> bool {
+    skip.contains(&channel.header.uuid) || channel.header.failover_group_uuid.is_some()
 }
 
 /// Channels sharing one `(cluster, normalized key)`: the duplicates of each
@@ -59,10 +35,14 @@ pub(in crate::processor) struct DuplicateSet {
 pub(in crate::processor) fn group_duplicates(
     config: &DeduplicateConfig,
     playlist: &[PlaylistGroup],
+    skip: &HashSet<UUIDType>,
 ) -> Vec<DuplicateSet> {
     let mut sets: IndexMap<(XtreamCluster, String), Vec<(usize, usize)>> = IndexMap::new();
     for (group_idx, group) in playlist.iter().enumerate() {
         for (channel_idx, channel) in group.channels.iter().enumerate() {
+            if should_skip(channel, skip) {
+                continue;
+            }
             let key_value = match_value(config, channel);
             if key_value.is_empty() {
                 continue;
@@ -97,7 +77,7 @@ fn host_winner(config: &DeduplicateConfig, playlist: &[PlaylistGroup], set: &Dup
     }
     let mut winner = (0usize, 0u8);
     for (index, &(group, channel)) in set.members.iter().enumerate() {
-        let rank = quality_rank(raw_match_value(config, &playlist[group].channels[channel]));
+        let rank = quality_rank(item_raw_match_value(config, &playlist[group].channels[channel]));
         // strictly greater: ties keep the first occurrence
         if index == 0 || rank > winner.1 {
             winner = (index, rank);
@@ -127,8 +107,9 @@ pub(in crate::processor) fn deduplicate_playlist(
     config: &DeduplicateConfig,
     playlist: &mut Vec<PlaylistGroup>,
     keepers: Option<&PluginKeepers>,
+    skip: &HashSet<UUIDType>,
 ) -> usize {
-    let sets = group_duplicates(config, playlist);
+    let sets = group_duplicates(config, playlist, skip);
     let keepers = keepers.filter(|keepers| {
         let aligned = keepers.len() == sets.len();
         if !aligned {
@@ -175,7 +156,10 @@ pub(in crate::processor) fn deduplicate_playlist(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::{model::PlaylistItemHeader, utils::Internable};
+    use shared::{
+        model::{DeduplicateMatchBy, PlaylistItemHeader},
+        utils::Internable,
+    };
 
     fn make_item(title: &str) -> PlaylistItem {
         PlaylistItem { header: PlaylistItemHeader { title: title.intern(), ..Default::default() } }
@@ -205,7 +189,7 @@ mod tests {
             keep: DeduplicateKeep::BestQuality,
             match_as_ascii: false,
         };
-        let removed = deduplicate_playlist(&config, &mut playlist, None);
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
         assert_eq!(removed, 2);
         let titles: Vec<_> = playlist[0].channels.iter().map(|c| c.header.title.to_string()).collect();
         assert_eq!(titles, vec!["News [FHD]", "Sports HD"]);
@@ -221,7 +205,7 @@ mod tests {
             match_as_ascii: false,
         };
 
-        let removed = deduplicate_playlist(&config, &mut playlist, None);
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
 
         // Target-wide curation evaluates only this surviving winner.
         assert_eq!(removed, 1);
@@ -238,7 +222,7 @@ mod tests {
             keep: DeduplicateKeep::First,
             match_as_ascii: false,
         };
-        let removed = deduplicate_playlist(&config, &mut playlist, None);
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
         assert_eq!(removed, 1);
         assert_eq!(playlist[0].channels[0].header.title.as_ref(), "News HD");
     }
@@ -255,7 +239,7 @@ mod tests {
             keep: DeduplicateKeep::BestQuality,
             match_as_ascii: false,
         };
-        let removed = deduplicate_playlist(&config, &mut playlist, None);
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
         assert_eq!(removed, 1);
         // "A" was emptied by dedup and dropped, the already-empty group survives
         assert_eq!(playlist.len(), 2);
@@ -274,7 +258,7 @@ mod tests {
             keep: DeduplicateKeep::BestQuality,
             match_as_ascii: true,
         };
-        let removed = deduplicate_playlist(&config, &mut playlist, None);
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
         assert_eq!(removed, 1);
         assert_eq!(playlist[0].channels[0].header.title.as_ref(), "Cafe FHD");
 
@@ -285,7 +269,7 @@ mod tests {
             keep: DeduplicateKeep::BestQuality,
             match_as_ascii: false,
         };
-        assert_eq!(deduplicate_playlist(&config, &mut playlist, None), 0);
+        assert_eq!(deduplicate_playlist(&config, &mut playlist, None, &HashSet::new()), 0);
     }
 
     fn plugin_config() -> DeduplicateConfig {
@@ -302,7 +286,7 @@ mod tests {
             make_group("A", vec![make_item("News HD"), make_item("Sports"), make_item("")]),
             make_group("B", vec![make_item("News [FHD]"), make_item("")]),
         ];
-        let sets = group_duplicates(&plugin_config(), &playlist);
+        let sets = group_duplicates(&plugin_config(), &playlist, &HashSet::new());
         assert_eq!(sets, vec![DuplicateSet { key: "news".to_string(), members: vec![(0, 0), (1, 0)] }]);
         assert_eq!(playlist[0].channels.len(), 3, "grouping removes nothing");
         let groups = plugin_duplicate_groups(&playlist, &sets);
@@ -314,7 +298,7 @@ mod tests {
         let mut playlist = vec![make_group("G", vec![make_item("News HD"), make_item("News [FHD]")])];
         // the host would keep the FHD one (index 1); the plugin keeps the first
         let keepers: PluginKeepers = vec![vec![0]];
-        assert_eq!(deduplicate_playlist(&plugin_config(), &mut playlist, Some(&keepers)), 1);
+        assert_eq!(deduplicate_playlist(&plugin_config(), &mut playlist, Some(&keepers), &HashSet::new()), 1);
         assert_eq!(playlist[0].channels[0].header.title.as_ref(), "News HD");
     }
 
@@ -322,7 +306,7 @@ mod tests {
     fn empty_or_invalid_plugin_keepers_fall_back_to_the_host_keep() {
         for keepers in [vec![vec![]], vec![vec![7]], vec![vec![0], vec![0]]] {
             let mut playlist = vec![make_group("G", vec![make_item("News HD"), make_item("News [FHD]")])];
-            assert_eq!(deduplicate_playlist(&plugin_config(), &mut playlist, Some(&keepers)), 1);
+            assert_eq!(deduplicate_playlist(&plugin_config(), &mut playlist, Some(&keepers), &HashSet::new()), 1);
             assert_eq!(playlist[0].channels[0].header.title.as_ref(), "News [FHD]");
         }
     }
@@ -331,8 +315,19 @@ mod tests {
     fn a_plugin_may_keep_several_members() {
         let mut playlist = vec![make_group("G", vec![make_item("News HD"), make_item("News"), make_item("News 4K")])];
         let keepers: PluginKeepers = vec![vec![2, 0]];
-        assert_eq!(deduplicate_playlist(&plugin_config(), &mut playlist, Some(&keepers)), 1);
+        assert_eq!(deduplicate_playlist(&plugin_config(), &mut playlist, Some(&keepers), &HashSet::new()), 1);
         let titles: Vec<_> = playlist[0].channels.iter().map(|c| c.header.title.to_string()).collect();
         assert_eq!(titles, vec!["News HD", "News 4K"], "survivors keep playlist order");
+    }
+
+    #[test]
+    fn dedup_never_drops_group_item() {
+        let group_item = make_item("ZDF HD");
+        let excluded = make_item("ZDF UHD");
+        let skip: HashSet<UUIDType> = [group_item.header.uuid].into_iter().collect();
+        let mut playlist = vec![make_group("News", vec![group_item, excluded])];
+        let removed = deduplicate_playlist(&DeduplicateConfig::default(), &mut playlist, None, &skip);
+        assert_eq!(removed, 0);
+        assert_eq!(playlist[0].channels.len(), 2);
     }
 }

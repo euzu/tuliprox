@@ -100,8 +100,8 @@ fn packetize_section(pid: u16, section: &[u8], first_counter: u8) -> Vec<u8> {
     let mut counter = first_counter & 0x0F;
     let mut first = true;
     while offset < section.len() {
-        let mut packet = [0xFF_u8; TS_PACKET_BYTES];
-        packet[0] = Packet::SYNC_BYTE;
+        let mut packet = [0xFF_u8; TS_PACKET_SIZE];
+        packet[0] = crate::packet::TS_SYNC_BYTE;
         packet[1] = u8::try_from(pid >> 8).unwrap_or(0) & 0x1F;
         packet[2] = u8::try_from(pid & 0xFF).unwrap_or(0);
         packet[3] = 0x10 | counter;
@@ -112,7 +112,7 @@ fn packetize_section(pid: u16, section: &[u8], first_counter: u8) -> Vec<u8> {
         } else {
             4
         };
-        let copied = section.len().saturating_sub(offset).min(TS_PACKET_BYTES.saturating_sub(payload_start));
+        let copied = section.len().saturating_sub(offset).min(TS_PACKET_SIZE.saturating_sub(payload_start));
         packet[payload_start..payload_start.saturating_add(copied)]
             .copy_from_slice(&section[offset..offset.saturating_add(copied)]);
         output.extend_from_slice(&packet);
@@ -133,10 +133,10 @@ fn packetize_section_with_split_syntax_header(pid: u16, section: &[u8], first_he
     output
 }
 
-fn psi_start_packet_with_pointer(pid: u16, previous_section: &[u8], section_start: &[u8]) -> [u8; TS_PACKET_BYTES] {
+fn psi_start_packet_with_pointer(pid: u16, previous_section: &[u8], section_start: &[u8]) -> [u8; TS_PACKET_SIZE] {
     let payload_length = 1usize.saturating_add(previous_section.len()).saturating_add(section_start.len()).min(184);
-    let mut packet = [0xFF_u8; TS_PACKET_BYTES];
-    packet[0] = Packet::SYNC_BYTE;
+    let mut packet = [0xFF_u8; TS_PACKET_SIZE];
+    packet[0] = crate::packet::TS_SYNC_BYTE;
     packet[1] = (u8::try_from(pid >> 8).unwrap_or(0) & 0x1F) | 0x40;
     packet[2] = u8::try_from(pid & 0xFF).unwrap_or(0);
     packet[3] = 0x30;
@@ -155,9 +155,9 @@ fn psi_start_packet_with_pointer(pid: u16, previous_section: &[u8], section_star
     packet
 }
 
-fn null_packet() -> [u8; TS_PACKET_BYTES] {
-    let mut packet = [0xFF_u8; TS_PACKET_BYTES];
-    packet[0] = Packet::SYNC_BYTE;
+fn null_packet() -> [u8; TS_PACKET_SIZE] {
+    let mut packet = [0xFF_u8; TS_PACKET_SIZE];
+    packet[0] = crate::packet::TS_SYNC_BYTE;
     packet[1] = 0x1F;
     packet[2] = 0xFF;
     packet[3] = 0x10;
@@ -181,10 +181,10 @@ fn media_payload_packet(
     payload_unit_start: bool,
     discontinuity: bool,
     payload: &[u8],
-) -> [u8; TS_PACKET_BYTES] {
+) -> [u8; TS_PACKET_SIZE] {
     assert!(!payload.is_empty() && payload.len() <= 182);
-    let mut packet = [0xFF_u8; TS_PACKET_BYTES];
-    packet[0] = Packet::SYNC_BYTE;
+    let mut packet = [0xFF_u8; TS_PACKET_SIZE];
+    packet[0] = crate::packet::TS_SYNC_BYTE;
     packet[1] = u8::try_from(pid >> 8).unwrap_or(0) & 0x1F;
     if payload_unit_start {
         packet[1] |= 0x40;
@@ -201,9 +201,9 @@ fn media_payload_packet(
     packet
 }
 
-fn media_adaptation_only_packet(pid: u16, continuity_counter: u8, discontinuity: bool) -> [u8; TS_PACKET_BYTES] {
-    let mut packet = [0xFF_u8; TS_PACKET_BYTES];
-    packet[0] = Packet::SYNC_BYTE;
+fn media_adaptation_only_packet(pid: u16, continuity_counter: u8, discontinuity: bool) -> [u8; TS_PACKET_SIZE] {
+    let mut packet = [0xFF_u8; TS_PACKET_SIZE];
+    packet[0] = crate::packet::TS_SYNC_BYTE;
     packet[1] = u8::try_from(pid >> 8).unwrap_or(0) & 0x1F;
     packet[2] = u8::try_from(pid & 0xFF).unwrap_or(0);
     packet[3] = 0x20 | (continuity_counter & 0x0F);

@@ -2,11 +2,12 @@ use super::{
     clock::{
         add_pts_dts_offset, decode_pcr, decode_pcr_at_location, decode_timestamp, decode_timestamp_at_location,
         forward_clock_distance_90khz, HlsTsTimestampKind, HLS_TS_PROFILE_MIN_TOLERANCE_TICKS_90KHZ,
-        HLS_TS_SPLICE_MIN_GAP_TICKS_90KHZ, MAX_PTS_DTS, TS_PACKET_SIZE,
+        HLS_TS_SPLICE_MIN_GAP_TICKS_90KHZ, MAX_PTS_DTS,
     },
     pes::inspect_hls_ts_packet,
     HlsFiniteTsLayout, HlsPesHeaderAssembler, HlsTsTimestampProfileAccumulator, HlsTsTimestampProfileScanner,
 };
+use crate::packet::TS_PACKET_SIZE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HlsTsTimestampProfile {

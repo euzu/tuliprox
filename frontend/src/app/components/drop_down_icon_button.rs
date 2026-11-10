@@ -2,10 +2,12 @@ use crate::{
     app::components::{
         button_utils::prevent_default_and_stop,
         popup_menu::{PopupMenu, PopupMenuPlacement, PopupMenuWidth},
-        AppIcon, IconButton,
+        select_helpers::html_text,
+        AppIcon, IconButton, Search,
     },
     html_if,
 };
+use shared::model::SearchRequest;
 use std::{collections::HashSet, rc::Rc};
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::MouseEvent;
@@ -40,6 +42,9 @@ pub struct DropDownIconButtonProps {
     pub options: Rc<Vec<DropDownOption>>,
     #[prop_or_default]
     pub multi_select: bool,
+    /// Shows a filter field above the options; options match by the text of their label.
+    #[prop_or_default]
+    pub searchable: bool,
     #[prop_or_default]
     pub button_ref: Option<NodeRef>,
     #[prop_or_default]
@@ -72,6 +77,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
     let selections = use_set(HashSet::<String>::new());
+    let filter = use_state(|| SearchRequest::Clear);
 
     {
         let set_selections = selections.clone();
@@ -123,8 +129,10 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         let button_ref = button_ref.clone();
         let set_anchor_ref = popup_anchor_ref.clone();
         let set_is_open = popup_is_open.clone();
+        let filter = filter.clone();
         Callback::from(move |(_name, _event): (String, MouseEvent)| {
             if let Some(button) = button_ref.cast::<web_sys::Element>() {
+                filter.set(SearchRequest::Clear);
                 set_anchor_ref.set(Some(button));
                 set_is_open.set(true);
             }
@@ -138,7 +146,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         let onselect = props.on_select.clone();
         let set_is_open = popup_is_open.clone();
         let button_ref = button_ref.clone();
-        Callback::from(move |(id, _event): (String, MouseEvent)| {
+        Callback::from(move |id: String| {
             let selected_options = if multi_select {
                 if selections.current().contains(&id) {
                     selections.remove(&id);
@@ -165,6 +173,32 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         })
     };
 
+    let matches_label = filter.name_matcher();
+    let visible = props
+        .options
+        .iter()
+        .filter(|option| !props.searchable || matches_label(&html_text(&option.label)))
+        .collect::<Vec<_>>();
+    // The filter field only exists while the popup is open; a closed popup stays free of a second search field.
+    // Enter picks the first option that matches the submitted search.
+    let handle_submit = {
+        let options = props.options.clone();
+        let handle_option_click = handle_option_click.clone();
+        Callback::from(move |request: SearchRequest| {
+            let matches_label = request.name_matcher();
+            if let Some(option) = options.iter().find(|option| matches_label(&html_text(&option.label))) {
+                handle_option_click.emit(option.id.clone());
+            }
+        })
+    };
+    let header = (props.searchable && *popup_is_open).then(|| {
+        let filter = filter.clone();
+        html! {
+            <Search min_length={1} on_submit={Some(handle_submit)}
+                onsearch={Some(Callback::from(move |request: SearchRequest| filter.set(request)))}/>
+        }
+    });
+
     html! {
          <>
          <IconButton button_ref={button_ref} class={props.class.clone()} name={props.name.clone()} icon={props.icon.clone()} onclick={handle_click}
@@ -178,14 +212,14 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
          <PopupMenu list_role="listbox" is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()}
             width={props.popup_width} placement={props.popup_placement} gap={props.popup_gap}
             class={props.popup_class.clone()}
-            width_anchor_ref={props.width_anchor_ref.clone()} on_close={handle_popup_close}>
+            width_anchor_ref={props.width_anchor_ref.clone()} on_close={handle_popup_close} header={header}>
             {
-                for props.options.iter().map(|o| {
+                for visible.into_iter().map(|o| {
                     let checkbox_id = o.id.clone();
                     let checkbox_handler = handle_option_click.clone();
                     let option_click = prevent_default_and_stop::<(), _>({
                         let id = checkbox_id.clone();
-                        move |event| checkbox_handler.emit((id.clone(), event))
+                        move |_event| checkbox_handler.emit(id.clone())
                     });
                     html! {
                         <button type="button" role="option" aria-selected={selections.current().contains(&o.id).to_string()} class={classes!("tp__dropdown-icon-button__option", "tp__menu-item", if selections.current().contains(&o.id) {"checked"} else {"unchecked"})} onclick={option_click}>

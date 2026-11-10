@@ -282,6 +282,8 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
             input_stream_id: input_stream_id.unwrap_or_else(|| "".intern()),
             upstream_user_agent: item.upstream_user_agent.clone(),
             input_url: Arc::clone(&item.input_url),
+            failover_group: None,
+            failover_group_uuid: None,
         };
 
         PlaylistItem { header }
@@ -315,6 +317,8 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             input_stream_id: item.get_input_stream_id().unwrap_or_else(|| "".intern()),
             upstream_user_agent: item.upstream_user_agent.clone(),
             input_url: Arc::clone(&item.input_url),
+            failover_group: None,
+            failover_group_uuid: None,
         };
 
         PlaylistItem { header }
@@ -386,6 +390,8 @@ impl PlaylistItem {
             input_stream_id: stream_id_str,
             upstream_user_agent: None,
             input_url: "".intern(),
+            failover_group: None,
+            failover_group_uuid: None,
         };
 
         PlaylistItem { header }

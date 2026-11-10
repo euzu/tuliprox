@@ -2,7 +2,7 @@ use crate::transport_stream_buffer::HlsTsTimestampProfileScanner;
 use aes::Aes128;
 use mpeg2ts_reader::{
     demultiplex::{self, FilterChangeset},
-    packet::{Packet, Pid},
+    packet::Pid,
     psi::{self, BufferSectionSyntaxParser, SectionPacketConsumer, SectionProcessor, SectionSyntaxSectionProcessor},
 };
 use std::{
@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 const AES_128_BLOCK_BYTES: usize = 16;
 
-const TS_PACKET_BYTES: usize = Packet::SIZE;
+use crate::packet::TS_PACKET_SIZE;
 
 const TS_ALIGNMENT_CONFIRMATION_PACKETS: usize = 2;
 
@@ -23,7 +23,7 @@ const HLS_TS_PROBE_MAX_PACKETS: u64 = 8_192;
 
 const HLS_TS_PROBE_READ_CHUNK_BYTES: usize = 64 * 1024;
 
-const HLS_TS_PROBE_MAX_RESYNC_BYTES: usize = TS_PACKET_BYTES * 4;
+const HLS_TS_PROBE_MAX_RESYNC_BYTES: usize = TS_PACKET_SIZE * 4;
 
 const PSI_SYNTAX_HEADER_BYTES: usize = psi::SectionCommonHeader::SIZE + psi::TableSyntaxHeader::SIZE;
 

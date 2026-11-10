@@ -192,7 +192,7 @@ impl PlaylistService {
     pub async fn get_playlist_categories(
         &self,
         playlist_request: &PlaylistRequest,
-    ) -> Option<Rc<UiPlaylistCategories>> {
+    ) -> Result<Option<Rc<UiPlaylistCategories>>, crate::error::Error> {
         self.get_playlist_categories_opts(playlist_request, false, None).await
     }
 
@@ -200,7 +200,7 @@ impl PlaylistService {
         &self,
         playlist_request: &PlaylistRequest,
         revision: Option<&str>,
-    ) -> Option<Rc<UiPlaylistCategories>> {
+    ) -> Result<Option<Rc<UiPlaylistCategories>>, crate::error::Error> {
         self.get_playlist_categories_opts(playlist_request, true, revision).await
     }
 
@@ -209,7 +209,7 @@ impl PlaylistService {
         playlist_request: &PlaylistRequest,
         explorer: bool,
         revision: Option<&str>,
-    ) -> Option<Rc<UiPlaylistCategories>> {
+    ) -> Result<Option<Rc<UiPlaylistCategories>>, crate::error::Error> {
         let live_url = self.playlist_content_url(XtreamCluster::Live, explorer);
         let vod_url = self.playlist_content_url(XtreamCluster::Video, explorer);
         let series_url = self.playlist_content_url(XtreamCluster::Series, explorer);
@@ -235,32 +235,39 @@ impl PlaylistService {
             ),
         );
 
-        let live = live_res.map_or_else(
-            |err| {
+        let mut first_err = None;
+        let live = match live_res {
+            Ok(r) => r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Live)),
+            Err(err) => {
                 error!("Failed to fetch live playlist: {err}");
+                first_err.get_or_insert(err);
                 None
-            },
-            |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Live)),
-        );
-        let vod = vod_res.map_or_else(
-            |err| {
+            }
+        };
+        let vod = match vod_res {
+            Ok(r) => r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Video)),
+            Err(err) => {
                 error!("Failed to fetch vod playlist: {err}");
+                first_err.get_or_insert(err);
                 None
-            },
-            |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Video)),
-        );
-        let series = series_res.map_or_else(
-            |err| {
+            }
+        };
+        let series = match series_res {
+            Ok(r) => r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Series)),
+            Err(err) => {
                 error!("Failed to fetch series playlist: {err}");
+                first_err.get_or_insert(err);
                 None
-            },
-            |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Series)),
-        );
+            }
+        };
 
         if live.is_some() || vod.is_some() || series.is_some() {
-            return Some(Rc::new(UiPlaylistCategories { live, vod, series }));
+            return Ok(Some(Rc::new(UiPlaylistCategories { live, vod, series })));
         }
-        None
+        if let Some(err) = first_err {
+            return Err(err);
+        }
+        Ok(None)
     }
 
     pub async fn resolve_url(&self, request: PlaylistUrlResolveRequest) -> Option<String> {

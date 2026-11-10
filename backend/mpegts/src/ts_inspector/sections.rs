@@ -1,7 +1,7 @@
 use super::{
     demux::HlsPatSectionParser, HlsPatPacketFilter, HlsPmtEvidence, HlsPmtPacketFilter, HlsPmtSectionEvidence,
     HlsPmtSectionParser, HlsPsiSectionConsumer, HlsTsDemuxContext, HlsTsMalformedReason, HlsTsProgramTopology,
-    PSI_SYNTAX_HEADER_BYTES, TS_PACKET_BYTES,
+    PSI_SYNTAX_HEADER_BYTES, TS_PACKET_SIZE,
 };
 use mpeg2ts_reader::{
     demultiplex,
@@ -191,12 +191,12 @@ where
     }
 }
 
-pub(super) fn synthetic_psi_packet(pid: Pid, starts_section: bool, payload: &[u8]) -> [u8; TS_PACKET_BYTES] {
+pub(super) fn synthetic_psi_packet(pid: Pid, starts_section: bool, payload: &[u8]) -> [u8; TS_PACKET_SIZE] {
     let pointer_bytes = usize::from(starts_section);
     let payload_length = payload.len().saturating_add(pointer_bytes).min(184);
     let pid = u16::from(pid);
-    let mut packet = [0xFF_u8; TS_PACKET_BYTES];
-    packet[0] = Packet::SYNC_BYTE;
+    let mut packet = [0xFF_u8; TS_PACKET_SIZE];
+    packet[0] = crate::packet::TS_SYNC_BYTE;
     packet[1] = (u8::try_from(pid >> 8).unwrap_or(0) & 0x1F) | if starts_section { 0x40 } else { 0 };
     packet[2] = pid.to_be_bytes()[1];
     let payload_offset = if payload_length == 184 {
@@ -217,7 +217,7 @@ pub(super) fn synthetic_psi_packet(pid: Pid, starts_section: bool, payload: &[u8
     } else {
         payload_offset
     };
-    let copy_length = payload.len().min(TS_PACKET_BYTES.saturating_sub(data_offset));
+    let copy_length = payload.len().min(TS_PACKET_SIZE.saturating_sub(data_offset));
     packet[data_offset..data_offset.saturating_add(copy_length)].copy_from_slice(&payload[..copy_length]);
     packet
 }

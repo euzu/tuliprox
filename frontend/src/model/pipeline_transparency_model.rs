@@ -31,11 +31,24 @@ pub struct InputUpdateRunView {
     pub progress_details: Vec<String>,
     /// Structured details safe for localized presentation.
     pub localized_progress_details: Vec<PlaylistUpdateProgressDetail>,
+    /// Why the input failed or completed partially, credentials already masked by the server.
+    pub failure_reason: Option<String>,
     pub cluster_results: Vec<InputClusterRunView>,
     pub target_results: Vec<TargetRunView>,
 }
 
 impl InputUpdateRunView {
+    /// The card badge: the run while it is queued or updating, afterwards this input's own result. A target
+    /// that failed for another input does not mark this input as failed.
+    #[must_use]
+    pub const fn card_status(&self) -> InputUpdateCardStatus {
+        match (self.overall_state, self.input_state) {
+            (InputUpdateCardStatus::Queued | InputUpdateCardStatus::Updating, _)
+            | (_, InputUpdateCardStatus::Ready) => self.overall_state,
+            (_, input_state) => input_state,
+        }
+    }
+
     /// Content proven by the canonical catalog, not a fabricated per-cluster run outcome.
     #[must_use]
     pub fn catalog_content_clusters(&self) -> Vec<XtreamCluster> {
@@ -177,6 +190,7 @@ pub fn build_input_update_run_views(
                 last_update_at: card.last_update_at,
                 progress_details: runtime.details().to_vec(),
                 localized_progress_details: runtime.localized_details().to_vec(),
+                failure_reason: runtime.failure_reason().map(str::to_string),
                 cluster_results,
                 target_results,
             }
@@ -706,6 +720,13 @@ mod tests {
             let view = build_input_update_run_views(&sources, &cards, &state, &persisted).remove(0);
             assert_eq!(view.input_state, InputUpdateCardStatus::Success);
             assert_eq!(view.overall_state, InputUpdateCardStatus::Failed);
+            assert_eq!(view.card_status(), InputUpdateCardStatus::Success, "the card shows its own input");
+            for running in [InputUpdateCardStatus::Queued, InputUpdateCardStatus::Updating] {
+                let busy = InputUpdateRunView { overall_state: running, ..view.clone() };
+                assert_eq!(busy.card_status(), running, "a running update shows the run");
+            }
+            let unreported = InputUpdateRunView { input_state: InputUpdateCardStatus::Ready, ..view.clone() };
+            assert_eq!(unreported.card_status(), InputUpdateCardStatus::Failed, "no input result shows the run");
             persisted.inputs[0].last_input_update =
                 Some(PersistedPlaylistUpdateInputResult { state: PlaylistUpdateState::Success, timestamp: 456 });
             let reloaded = state
@@ -755,6 +776,7 @@ mod tests {
                 execution_order: Some(order.into()),
                 scope_revision: None,
                 state,
+                targets: Vec::new(),
             },
         };
         for terminal in [PlaylistUpdateState::Success, PlaylistUpdateState::Partial, PlaylistUpdateState::Failure] {

@@ -9,6 +9,7 @@ via Invidious REST endpoints with sticky instance failover, accurate live status
 * **`network`**: Fetches YouTube Atom/RSS feeds and queries Invidious REST endpoints.
 * **`storage`**: Caches resolved stream URLs in the plugin's KV store using video-scoped keys
   (`yt:str:<video_id>`) with active instance verification and configurable TTL.
+* **`process`**: Runs a local `yt-dlp` executable to resolve stream URLs when `resolver` is set to `yt-dlp`.
 
 ## Input Configuration
 
@@ -39,7 +40,9 @@ Everything a fetch needs belongs to the input itself. The plugin has no global s
 | Field | Meaning |
 | --- | --- |
 | `channels` | Targets for this input: `@handle`, channel id `UC…`, playlist id `PL…`, or a video. Added to the input's `Url`; a target named twice is fetched once |
-| `invidious_instances` | Mirrors this input resolves streams through, in failover order. Required: without one the fetch fails and names this field |
+| `resolver` | Stream resolver: `invidious` (default) or `yt-dlp` |
+| `ytdlp_path` | Optional custom path to `yt-dlp`. If empty, searches `/app/bin/yt-dlp` then `PATH` |
+| `invidious_instances` | Mirrors this input resolves streams through, in failover order. Required with `invidious`; optional with `yt-dlp` |
 | `mode` | `recent_uploads` (newest videos) or `live_only` (only the current live stream) |
 | `max_uploads` | Newest uploads per channel, 1 to 15 |
 | `cache_ttl_minutes` | How long this input reuses a resolved stream URL, 10 to 360 |
@@ -53,9 +56,9 @@ inputs:
       channels:
         - "@tagesschau"
         - "https://www.youtube.com/@SkyNews"
+      resolver: invidious
       invidious_instances:
-        - "https://yewtu.be"
-        - "https://invidious.nerdvpn.de"
+        - "http://invidious:3000"
       mode: recent_uploads
       max_uploads: 10
 
@@ -64,8 +67,7 @@ inputs:
     plugin: youtube-input
     url: "https://www.youtube.com/@tagesschau"
     plugin_config:
-      invidious_instances:
-        - "https://invidious.nerdvpn.de"
+      resolver: yt-dlp
       mode: live_only
       cache_ttl_minutes: 30
 ```
@@ -112,6 +114,55 @@ channel that is not live is never confused with a stream it merely recommends. F
 are resolved and everything that is not live is dropped. A channel that is simply not live is not an error; a
 channel whose live stream cannot be resolved is.
 
+## Invidious instance
+
+The plugin does not talk to YouTube's player directly: it asks an Invidious instance for each video's stream. A YouTube
+URL alone is not enough; `invidious_instances` needs at least one instance that serves the video API.
+
+**Public instances usually do not.** YouTube throttles and blocks instances that fetch for many users from a few
+addresses, and scrapers abuse public APIs, so most public instances disable `/api/v1/videos` or answer it with `403` or
+`access_denied` while their web page and status page still work. The input form's **Check** button asks every instance
+for a video and reports `refuses the video API` for such an instance; a fetch whose instances all refuse ends with an
+error that says so instead of an empty playlist.
+
+**Run your own instance.** It serves only you, so YouTube does not treat it as a bulk fetcher, and the Invidious team
+keeps it working when YouTube changes. It runs as Docker containers, independent of the platform Tuliprox runs on:
+
+1. Follow the Docker Compose installation of the official guide (<https://docs.invidious.io/installation/>). It sets up
+   Invidious, its companion service (which talks to YouTube) and a PostgreSQL database, and generates the two secret
+   keys (`hmac_key`, `invidious_companion_key`).
+2. Put the Invidious container in the same Docker network as Tuliprox, or publish its port (`3000`) to Tuliprox's host.
+3. Enter the instance in the input's `invidious_instances`, for example `http://invidious:3000`, and press **Check**.
+   It should report `serves videos`.
+
+Streams are requested with `local=true`, so playback runs through your instance as well. Keep the instance updated:
+YouTube changes often, and an outdated instance starts refusing videos.
+
+## yt-dlp stream resolver
+
+When `resolver` is set to `yt-dlp`, the plugin resolves streams with a user-provided `yt-dlp` executable instead of
+querying an Invidious instance. It resolves uploads to progressive MP4 URLs (`best[ext=mp4][protocol^=http]/best`) and
+live broadcasts to HLS manifest URLs.
+
+* **Docker:** Mount the `yt-dlp` binary into the container:
+  `-v /host/yt-dlp:/app/bin/yt-dlp:ro`.
+  **Only the `alpine` image works**, and it requires the **musl build** of `yt-dlp`. The minimal `scratch` image
+  contains no libc, so an external binary cannot run there.
+* **Bare metal:** Place `yt-dlp` at `/app/bin/yt-dlp`, put it on the host's `PATH`, or specify its location in the
+  input's `ytdlp_path` field.
+* **JavaScript runtime:** YouTube frequently updates player protections. `yt-dlp` may need a JavaScript runtime
+  (such as [Deno](https://deno.land/)) installed and available on `PATH` to resolve YouTube streams.
+* **Stream URLs and proxy mode:** Stream URLs produced by `yt-dlp` are signed by Google, expire after several hours,
+  and are bound to the server's IP address. Client players cannot play these URLs directly; playback must pass through
+  Tuliprox (proxied stream mode), not in redirect mode.
+* **YouTube bot check:** YouTube may answer a server with "Sign in to confirm you're not a bot". yt-dlp then fails for
+  that video and the update card shows this message as the reason. Fewer and less frequent updates make it less likely.
+* **Separate audio and video:** YouTube often offers no combined format. The plugin then uses the HLS master playlist
+  yt-dlp reports, which carries both.
+* **Batch resolution:** All cache-missing videos in an input fetch are resolved in a single batch process run, bounded
+  by the remaining fetch budget. Resolved stream URLs are kept in the KV store with their TTL capped below the signed
+  URL's expiry.
+
 ## Field Reference
 
 Values an input leaves empty keep the plugin's built-in default.
@@ -119,7 +170,9 @@ Values an input leaves empty keep the plugin's built-in default.
 | Field | Default | Description |
 | --- | --- | --- |
 | `channels` | `[]` | Targets for this input (@handle, channel ID `UC...`, playlist ID `PL...`, or a video). Added to the input's `Url`; one entry may hold a comma-separated list. |
-| `invidious_instances` | *(none)* | Invidious mirrors for stream resolution with sticky failover. Required per input; the fetch fails without one. |
+| `resolver` | `"invidious"` | `invidious` (Invidious REST API) or `yt-dlp` (local `yt-dlp` executable). |
+| `ytdlp_path` | *(none)* | Optional custom path to `yt-dlp`. If empty, searches `/app/bin/yt-dlp` then `PATH`. |
+| `invidious_instances` | *(none)* | Invidious mirrors for stream resolution with sticky failover. Required when `resolver` is `invidious`. |
 | `mode` | `"recent_uploads"` | `recent_uploads` (latest uploads) or `live_only` (active streams only). |
 | `max_uploads` | `10` | Uploads to import per channel (1 to 15; RSS provides up to 15). |
 | `cache_ttl_minutes` | `120` | How long a resolved stream URL is reused (10 to 360). Active live streams use 10m. |
@@ -152,7 +205,11 @@ Builds the component for `wasm32-wasip2` and writes the uploadable package to
 The wasm target must be installed once: `rustup target add wasm32-wasip2`.
 
 Install it in the Plugin Manager (**Plugins → Install plugin**) by uploading that file, or over the API. This plugin
-asks for the `network` and `storage` capabilities, so the approval has to name both:
+asks for the `network`, `storage`, and `process` capabilities, so the approval has to name all three:
+
+> [!NOTE]
+> Approving the plugin now grants the `process` capability, allowing it to start local programs (such as `yt-dlp`) on
+> the server as the Tuliprox user. See [Running programs](./security.md#running-programs).
 
 ```sh
 PACKAGE=target/plugin-youtube-input/youtube-input.tlpx
@@ -166,7 +223,7 @@ curl -s -F "file=@$PACKAGE" "$API" > "$REVIEW"
 HASH=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["wasmSha256"])' "$REVIEW")
 curl -s -X PUT "$API/youtube-input/approve" \
   -H 'Content-Type: application/json' \
-  -d "{\"wasmSha256\": \"$HASH\", \"capabilities\": [\"network\", \"storage\"], \"mcp\": false}"
+  -d "{\"wasmSha256\": \"$HASH\", \"capabilities\": [\"network\", \"storage\", \"process\"], \"mcp\": false}"
 
 # 3. Enable.
 curl -s -X PUT "$API/youtube-input/enable"

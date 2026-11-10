@@ -245,6 +245,7 @@ mod tests {
             category_id: 1,
             rating: 0.0,
             input_name: "test_input".intern(),
+            input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
         })

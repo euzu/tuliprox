@@ -534,6 +534,30 @@ impl ProviderConfig {
         true
     }
 
+    pub fn probe_capacity(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderConfigAllocation {
+        let guard = self.read_connection();
+        if self.is_account_blocked_with_connection(&guard) {
+            return ProviderConfigAllocation::Exhausted;
+        }
+
+        if self.max_connections == 0 {
+            return ProviderConfigAllocation::Available;
+        }
+        let connections = guard.current_connections;
+        if connections < self.max_connections {
+            return ProviderConfigAllocation::Available;
+        }
+        if !grace || connections > self.max_connections {
+            return ProviderConfigAllocation::Exhausted;
+        }
+
+        let now = Instant::now();
+        if Self::grace_is_active(&guard, now, grace_period_timeout_secs) {
+            return ProviderConfigAllocation::Exhausted;
+        }
+        ProviderConfigAllocation::GracePeriod
+    }
+
     pub fn release(&self) {
         let mut guard = self.write_connection();
         // Releasing while over capacity ends the single outstanding grace grant.
@@ -569,6 +593,14 @@ impl ProviderConfigWrapper {
 
     pub fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
         match self.inner.try_allocate(grace, grace_period_timeout_secs) {
+            ProviderConfigAllocation::Available => ProviderAllocation::new_available(Arc::clone(&self.inner)),
+            ProviderConfigAllocation::GracePeriod => ProviderAllocation::new_grace_period(Arc::clone(&self.inner)),
+            ProviderConfigAllocation::Exhausted => ProviderAllocation::Exhausted,
+        }
+    }
+
+    pub fn probe_capacity(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
+        match self.inner.probe_capacity(grace, grace_period_timeout_secs) {
             ProviderConfigAllocation::Available => ProviderAllocation::new_available(Arc::clone(&self.inner)),
             ProviderConfigAllocation::GracePeriod => ProviderAllocation::new_grace_period(Arc::clone(&self.inner)),
             ProviderConfigAllocation::Exhausted => ProviderAllocation::Exhausted,

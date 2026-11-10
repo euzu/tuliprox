@@ -204,7 +204,7 @@ fn default_plugin_repositories() -> Vec<PluginRepositoryDto> {
     vec![PluginRepositoryDto {
         id: "tuliprox-plugins".to_string(),
         name: "Tuliprox plugins".to_string(),
-        url: "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json".to_string(),
+        url: "https://github.com/euzu/tuliprox/releases/download/plugin-marketplace/marketplace.json".to_string(),
         enabled: true,
     }]
 }
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(from_json(json!({})).repositories, defaults.repositories);
         assert_eq!(
             defaults.repositories[0].url,
-            "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/plugins/marketplace.json"
+            "https://github.com/euzu/tuliprox/releases/download/plugin-marketplace/marketplace.json"
         );
         assert!(defaults.repositories[0].enabled);
         let empty = from_json(json!({"repositories": []}));

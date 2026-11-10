@@ -124,7 +124,9 @@ pub async fn create_provider_stream(
                 Some(status),
                 Some(failure.provider_error_class()),
             );
-            if stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource) {
+            if stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource)
+                || stream_options.flags.contains(ProviderStreamFactoryFlags::GroupMember)
+            {
                 let headers = match failure {
                     ProviderStreamRequestFailure::HlsStatus { headers, .. } => headers,
                     ProviderStreamRequestFailure::Status { .. } => Vec::new(),
