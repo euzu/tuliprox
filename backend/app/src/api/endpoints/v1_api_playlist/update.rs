@@ -79,6 +79,9 @@ pub(super) async fn playlist_update(
         }
     }
     let sources = app_state.app_config.sources.load_full();
+    let batch_action = input_action.is_some_and(|action| {
+        sources.inputs.iter().any(|input| input.id == action.input_id && input.playlist_update_input_type().is_batch())
+    });
     let expected_scope = if let Some(revision) = headers.get(IF_MATCH) {
         let scope = sources.playlist_update_scope();
         if revision.to_str().ok() != Some(scope.revision().as_str()) {
@@ -90,6 +93,12 @@ pub(super) async fn playlist_update(
         return (
             StatusCode::PRECONDITION_REQUIRED,
             axum::Json(json!({"error": "Replacing target contents requires If-Match"})),
+        )
+            .into_response();
+    } else if batch_action {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            axum::Json(json!({"error": "Manual batch updates require If-Match"})),
         )
             .into_response();
     } else {
@@ -149,12 +158,12 @@ pub(in crate::api) fn resolve_manual_playlist_update_targets(
             .iter()
             .find(|input| input.id == manual.input_id)
             .ok_or_else(|| TuliproxError::ConfigSource(format!("No input found for id {}", manual.input_id)))?;
-        if !InputUpdateCapabilities::for_input_type(input.input_type, input.enabled).supports_action(manual.action) {
+        let input_type = input.playlist_update_input_type();
+        if !InputUpdateCapabilities::for_input_type(input_type, input.enabled).supports_action(manual.action) {
             return Err(TuliproxError::ConfigSource("Manual action is not supported for this input".to_string()));
         }
-        // Only the additive action wire form requires IDs. Legacy input_refresh
-        // requests retain the existing name resolution, including empty = all.
-        if request.input_action.is_some() && request.target_ids.is_none() {
+        // Legacy non-batch input_refresh requests retain the existing name resolution.
+        if (request.input_action.is_some() || input_type.is_batch()) && request.target_ids.is_none() {
             return Err(TuliproxError::ConfigSource("Manual input actions require explicit target IDs".to_string()));
         }
         Some(input)

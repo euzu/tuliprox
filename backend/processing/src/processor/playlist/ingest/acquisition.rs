@@ -8,7 +8,8 @@ use super::{
         report_forced_update_request, ClusterStatusSource,
     },
     telemetry::{
-        finalize_input_telemetry, input_telemetry_for_fetch, is_cluster_input, persist_finalized_cluster_snapshots,
+        finalize_input_telemetry, input_telemetry_for_fetch, is_cluster_input, merge_alias_quality_telemetry,
+        persist_finalized_cluster_snapshots,
     },
     CacheStatusScope, InputDownloadResult, InputRunOutcome, LibraryProvider, MediaServerProvider,
     PendingInputStatusUpdate, PlaylistDownloadResult, PlaylistProcessingContext, PlaylistUpdateExecutionRef,
@@ -307,11 +308,20 @@ fn failed_earlier_in_run(input: &ConfigInput, failure: Option<TuliproxError>) ->
     InputDownloadResult::empty(failure.into_iter().collect())
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     ctx: &PlaylistProcessingContext<E, M, P>,
     input: &Arc<ConfigInput>,
     allow_staged_input: bool,
+) -> InputDownloadResult {
+    download_input_with_policy(ctx, input, allow_staged_input, input.id).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn download_input_with_policy<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
+    input: &Arc<ConfigInput>,
+    allow_staged_input: bool,
+    policy_input_id: u16,
 ) -> InputDownloadResult {
     if input.staged.is_some() && !allow_staged_input {
         return InputDownloadResult::empty(Vec::new());
@@ -336,7 +346,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     // so parallel sources sharing the same input cannot observe a half-written state.
     let mut input_lock = if need_download { Some(ctx.get_input_lock(&input.name).await) } else { None };
     let mut mark_as_processed = false;
-    let refresh_policy = ctx.refresh_policy(input.id);
+    let refresh_policy = ctx.refresh_policy(policy_input_id);
 
     let mut playlist_download_result = if need_download {
         // Check again after lock: a parallel source may have finished the input meanwhile.
@@ -370,7 +380,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
                 PlaylistUpdateExecutionRef { run_id: &ctx.run_id, execution_order: ctx.execution_order },
                 input,
                 ctx.stalker_refresh_mode,
-                ctx.acquisition(input.id),
+                ctx.acquisition(policy_input_id),
             )
             .await
         }
@@ -418,7 +428,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
                         PlaylistUpdateExecutionRef { run_id: &ctx.run_id, execution_order: ctx.execution_order },
                         input,
                         ctx.stalker_refresh_mode,
-                        ctx.acquisition(input.id),
+                        ctx.acquisition(policy_input_id),
                     )
                     .await;
                 }
@@ -537,8 +547,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     }
 
     if input.input_type == InputType::M3u {
-        let alias_errors = download_m3u_alias_playlists(ctx, input).await;
-        playlist_download_result.download_err.extend(alias_errors);
+        download_m3u_alias_playlists(ctx, input, &mut playlist_download_result).await;
     }
 
     let replacement_failure = if ctx.replace_target_contents {
@@ -584,7 +593,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     finalize_input_telemetry(&mut playlist_download_result, error.as_ref());
     let request_policy = ctx
         .input_refresh
-        .filter(|input_refresh| input_refresh.input_id == input.id)
+        .filter(|input_refresh| input_refresh.input_id == policy_input_id)
         .map(|input_refresh| input_refresh.policy);
     persist_finalized_cluster_snapshots(&mut playlist_download_result, request_policy, error.as_ref()).await;
 
@@ -747,15 +756,17 @@ async fn apply_playlist_loaded_hook_within<P: PluginHost>(
 async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
-) -> Vec<TuliproxError> {
-    let Some(aliases) = input.get_enabled_aliases() else { return vec![] };
+    parent: &mut PlaylistDownloadResult,
+) {
+    let Some(aliases) = input.get_enabled_aliases() else { return };
     // Maintenance is keyed by the parent input; an alias carries its own name and would
     // otherwise contact the provider. Its persisted playlist stays in place.
     if ctx.is_input_in_maintenance(&input.name) {
         debug!("Input '{}' is in maintenance; skipping its M3U alias downloads", input.name);
-        return vec![];
+        return;
     }
-    let mut errors = Vec::new();
+    let batch = input.playlist_update_input_type().is_batch();
+    let errors = &mut parent.download_err;
 
     for alias in aliases {
         if ctx.is_input_downloaded(&alias.name).await {
@@ -769,7 +780,17 @@ async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: Metadat
         alias_input.epg = None;
         let alias_input = Arc::new(alias_input);
 
-        let mut alias_result = Box::pin(download_input(ctx, &alias_input, false)).await;
+        // The alias keeps its own download/cache identity, but a batch action
+        // applies the parent's policy to each separately acquired playlist.
+        let policy_input_id = if batch { input.id } else { alias_input.id };
+        let mut alias_result = Box::pin(download_input_with_policy(ctx, &alias_input, false, policy_input_id)).await;
+        if batch {
+            // Block replacement on a rejected alias even when its previous playlist is still readable.
+            parent.quality_rejections.append(&mut alias_result.quality_rejections);
+            if let (Some(parent), Some(alias)) = (&mut parent.input_telemetry, alias_result.input_telemetry) {
+                merge_alias_quality_telemetry(parent, alias);
+            }
+        }
         let alias_had_errors = !alias_result.errors.is_empty() || alias_result.storage_error.is_some();
         errors.append(&mut alias_result.errors);
         if let Some(storage_error) = alias_result.storage_error {
@@ -784,8 +805,6 @@ async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: Metadat
             errors.push(TuliproxError::RepositoryPlaylist(format!("M3U alias '{}' playlist is empty", alias.name)));
         }
     }
-
-    errors
 }
 
 #[cfg(test)]

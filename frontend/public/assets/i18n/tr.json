@@ -2681,7 +2681,6 @@
       "REPLACE_HELP": "Başarılı bir güncellemeden sonra boş kümeler dahil seçili hedefleri değiştir.",
       "REPLACE_SELECT_TARGET": "En az bir hedef seçin.",
       "REPLACE_XTREAM_ONLY": "Yalnızca Xtream çıktısı olan hedeflerde kullanılabilir.",
-      "BATCH_TARGET_DESCRIPTION": "Seçili hedefleri gerekli tüm girişlerle normal güncelleme kuralına göre yeniden oluştur.",
       "SCOPE_LOAD_FAILED": "Geçerli güncelleme hedefleri yüklenemedi. Giriş başına güncellemeleri etkinleştirmek için yeniden deneyin.",
       "BULK_ONLY_DESCRIPTION": "Single-input updates are not available for this input. Use ‘Update all inputs’.",
       "CACHE_BYPASSED_FORCE": "Bypassed by Force",

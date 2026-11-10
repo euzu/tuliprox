@@ -114,13 +114,13 @@ impl PlaylistService {
     pub async fn replace_target_contents(
         &self,
         target_ids: &[u16],
-        provider_input_id: Option<u16>,
+        provider_input_id: u16,
         revision: &str,
     ) -> Result<OperationRunAccepted, Error> {
         let mut request = build_target_id_update_request(target_ids)?;
         request.replace_target_contents = true;
         request.input_refresh =
-            provider_input_id.map(|input_id| InputRefreshOverride { input_id, policy: InputRefreshPolicy::NORMAL });
+            Some(InputRefreshOverride { input_id: provider_input_id, policy: InputRefreshPolicy::NORMAL });
         self.submit_update_request_with_revision(&request, Some(revision)).await
     }
 

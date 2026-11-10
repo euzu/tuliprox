@@ -1156,7 +1156,7 @@ mod tests {
     }
 
     #[test]
-    fn playlist_update_bulk_includes_enabled_update_only_cards_in_configuration_order() {
+    fn playlist_update_bulk_includes_enabled_batch_cards_in_configuration_order() {
         let sources = SourcesConfigDto {
             inputs: vec![
                 input(30, "m3u-batch", InputType::M3uBatch),
@@ -1170,7 +1170,7 @@ mod tests {
             ..SourcesConfigDto::default()
         };
         let cards = build_input_update_card_models(&sources, &Default::default());
-        assert!(cards.iter().all(|card| card.capabilities == InputUpdateCapabilities::BulkOnly));
+        assert!(cards.iter().all(|card| card.capabilities.supports(InputRefreshPolicy::FORCE)));
         assert_eq!(
             playlist_update_bulk_scope(&sources, &cards),
             PlaylistUpdateBulkScope { can_submit: true, visible_input_ids: vec![30, 10, 20] }

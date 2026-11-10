@@ -2681,7 +2681,6 @@
       "REPLACE_HELP": "Replace selected targets, including empty clusters, after a successful update.",
       "REPLACE_SELECT_TARGET": "Select at least one target.",
       "REPLACE_XTREAM_ONLY": "Only available for Xtream-only targets.",
-      "BATCH_TARGET_DESCRIPTION": "Rebuild the selected targets with all required inputs using the regular update policy.",
       "SCOPE_LOAD_FAILED": "Could not load the current update targets. Retry to enable per-input updates.",
       "BULK_ONLY_DESCRIPTION": "Single-input updates are not available for this input. Use ‘Update all inputs’.",
       "CACHE_BYPASSED_FORCE": "Bypassed by Force",

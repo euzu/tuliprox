@@ -614,6 +614,8 @@ pub struct ConfigInput {
     pub staged: Option<ConfigInputStaged>,
     pub exp_date: Option<i64>,
     pub t_batch_url: Option<String>,
+    /// A configured batch without a CSV, after conversion to its download type.
+    pub inline_batch: bool,
     pub panel_api: Option<PanelApiConfig>,
     pub cache_duration_seconds: u64,
     pub provider_configs: Option<Vec<Arc<ConfigProvider>>>,
@@ -629,6 +631,17 @@ pub struct ConfigInput {
 }
 
 impl ConfigInput {
+    #[must_use]
+    pub fn playlist_update_input_type(&self) -> InputType {
+        match (self.input_type, self.inline_batch || self.t_batch_url.is_some()) {
+            (_, _) if self.staged.is_some() => InputType::Staged,
+            (InputType::M3u, true) => InputType::M3uBatch,
+            (InputType::Xtream, true) => InputType::XtreamBatch,
+            (InputType::Stalker, true) => InputType::StalkerBatch,
+            (kind, _) => kind,
+        }
+    }
+
     /// The plugin hook this input needs, for the check against the loaded
     /// plugins right after plugin load (core does not validate it, plugins load
     /// after the config). `None` for a disabled input, which never runs.
@@ -970,6 +983,7 @@ impl ConfigInput {
 
             // Only a `batch://` CSV owns its accounts; an inline batch keeps them in the source file.
             self.t_batch_url = self.url.starts_with(BATCH_SCHEME_PREFIX).then(|| self.url.clone());
+            self.inline_batch = self.t_batch_url.is_none();
             let file_path = self.t_batch_url.as_deref().and_then(|url| get_csv_file_path(url).ok());
             if self.enabled {
                 if let Some(aliases) = self.aliases.as_mut() {
@@ -1040,6 +1054,7 @@ impl ConfigInput {
             staged: None,
             exp_date: None,
             t_batch_url: None,
+            inline_batch: false,
             panel_api: self.panel_api.clone(),
             cache_duration_seconds: self.cache_duration_seconds,
             provider_configs: self.provider_configs.clone(),
@@ -1165,6 +1180,7 @@ impl From<&ConfigInputDto> for ConfigInput {
             exp_date: dto.exp_date,
             staged: dto.staged.as_ref().map(ConfigInputStaged::from),
             t_batch_url: None,
+            inline_batch: false,
             panel_api: dto.panel_api.as_ref().map(PanelApiConfig::from),
             cache_duration_seconds: dto.cache_duration_seconds,
             provider_configs: None,
@@ -2127,6 +2143,7 @@ mod tests {
         let batch_file = input.prepare(&[]).expect("an inline batch prepares from its aliases");
         assert!(batch_file.is_none());
         assert!(input.t_batch_url.is_none(), "inline batch accounts live in the source file, not in a CSV");
+        assert_eq!(input.playlist_update_input_type(), InputType::XtreamBatch);
         assert_eq!(input.url, "http://alias.example");
         assert_eq!(input.username.as_deref(), Some("alias_user"));
         assert_eq!(input.password.as_deref(), Some("alias_pass"));

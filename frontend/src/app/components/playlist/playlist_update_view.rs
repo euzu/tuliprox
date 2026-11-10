@@ -617,7 +617,7 @@ mod tests {
         let cards = build_input_update_card_models(&sources, &Default::default());
         let scope = playlist_update_bulk_scope(&sources, &cards);
         assert_eq!(scope.visible_input_ids, [41, 7, 3]);
-        assert_eq!(cards[2].capabilities, shared::model::InputUpdateCapabilities::BulkOnly);
+        assert!(cards[2].capabilities.supports(InputRefreshPolicy::FORCE));
         let context = connection(1);
         let mut state = Rc::new(PlaylistUpdateCardStatuses::for_connection(context));
         state = state.reduce(PlaylistUpdateCardStatusAction::Accepted(PlaylistUpdateAcceptedScope {

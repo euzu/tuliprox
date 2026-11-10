@@ -2673,7 +2673,6 @@
       "REPLACE_HELP": "Reemplaza los objetivos seleccionados, incluidos los clústeres vacíos, tras una actualización correcta.",
       "REPLACE_SELECT_TARGET": "Selecciona al menos un objetivo.",
       "REPLACE_XTREAM_ONLY": "Solo disponible para objetivos con salida exclusivamente Xtream.",
-      "BATCH_TARGET_DESCRIPTION": "Reconstruye los objetivos seleccionados con todas las entradas necesarias y la política de actualización normal.",
       "SCOPE_LOAD_FAILED": "No se pudieron cargar los destinos de actualización actuales. Reintenta para habilitar las actualizaciones por entrada.",
       "BULK_ONLY_DESCRIPTION": "Esta entrada no admite actualizaciones individuales. Usa ‘Actualizar todas las entradas’.",
       "CACHE_BYPASSED_FORCE": "Omitida por Forzar",

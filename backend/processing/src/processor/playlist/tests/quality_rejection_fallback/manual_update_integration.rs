@@ -138,7 +138,11 @@ fn assert_run_state(ctx: &PlaylistProcessingContext<CollectSink>, state: Playlis
 async fn manual_update_scope_change_before_processing_writes_no_target() {
     let temp = tempfile::tempdir().unwrap();
     let ctx = library_context(temp.path(), ProcessingOrder::default()).await;
+    let mut sources = (*ctx.config.sources.load_full()).clone();
+    Arc::make_mut(&mut sources.inputs[1]).inline_batch = true;
+    ctx.config.sources.store(Arc::new(sources));
     let expected = ctx.config.sources.load().playlist_update_scope();
+    assert_eq!(expected.inputs[1].input_type, InputType::M3uBatch);
     let mut changed = (*ctx.config.sources.load_full()).clone();
     let targets = &mut changed.sources[0].targets;
     Arc::make_mut(&mut targets[0]).id = 21;
@@ -158,6 +162,10 @@ async fn manual_update_scope_change_before_processing_writes_no_target() {
             ctx.events.clone(),
         )
         .with_expected_scope(Some(expected))
+        .with_manual_input_update(Some(InputUpdateRequest {
+            input_id: 3,
+            action: InputUpdateAction::Provider(InputRefreshPolicy::NORMAL),
+        }))
         .with_replace_target_contents(true)
         .with_update_guard(UpdateGuard::new())
         .with_bootstrap({

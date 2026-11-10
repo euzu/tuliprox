@@ -110,6 +110,49 @@ async fn m3u_update_quality_all_clusters_accepted() {
     verify_effective(&ctx, &input, &mut result, [9, 11, 10]).await;
 }
 
+#[tokio::test]
+async fn m3u_batch_alias_only_quality_rejection_reaches_batch_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let (ctx, mut input) = fixture(temp.path(), None, [80, 0, 0]).await;
+    let alias_url = temp.path().join("alias.m3u");
+    Arc::make_mut(&mut input).inline_batch = true;
+    Arc::make_mut(&mut input).aliases = Some(vec![ConfigInputAlias {
+        id: 28,
+        name: "m3u-batch-alias".intern(),
+        url: alias_url.to_string_lossy().into_owned(),
+        username: None,
+        password: None,
+        priority: 1,
+        max_connections: 1,
+        exp_date: None,
+        enabled: true,
+        stalker: None,
+    }]);
+    tokio::fs::write(&alias_url, document("alias-previous", [4, 0, 0])).await.unwrap();
+    assert_eq!(run(&ctx, &input, [4, 0, 0]).await.update_state(), PlaylistUpdateState::Success);
+
+    let mut ctx = PlaylistProcessingContext { processed_inputs: Arc::default(), ..ctx };
+    set_refresh_policy(&mut ctx, &input, InputRefreshPolicy::REFRESH);
+    tokio::fs::write(&alias_url, document("alias-candidate", [1, 0, 0])).await.unwrap();
+    let mut result = run(&ctx, &input, [4, 0, 0]).await;
+    assert_eq!(result.update_state(), PlaylistUpdateState::Partial);
+    assert!(result.errors.is_empty());
+    assert_eq!(result.quality_rejections.len(), 1);
+    let live =
+        result.input_telemetry.as_ref().unwrap().clusters.iter().find(|c| c.cluster == XtreamCluster::Live).unwrap();
+    assert_eq!(live.decision, Some(PlaylistUpdateClusterDecision::Rejected));
+    assert_eq!((live.candidate_count, live.active_count, live.quality), (Some(1), Some(4), Some(25)));
+
+    let storage = &ctx.config.config.load().storage_dir;
+    let primary_status =
+        input_cache::load_input_status(&input_cache::resolve_input_storage_path(storage, &input.name).await);
+    let alias_status =
+        input_cache::load_input_status(&input_cache::resolve_input_storage_path(storage, "m3u-batch-alias").await);
+    assert_eq!(primary_status.clusters["default"].status, input_cache::ClusterState::Ok);
+    assert_eq!(alias_status.clusters["default"].status, input_cache::ClusterState::Failed);
+    assert_eq!(primary_status.clusters["live"].last_update, alias_status.clusters["live"].last_update);
+}
+
 async fn order_candidate(
     ctx: &PlaylistProcessingContext<shared::model::NoopSink>,
     input: &ConfigInput,

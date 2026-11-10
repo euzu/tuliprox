@@ -180,6 +180,27 @@ pub(super) fn finalize_input_telemetry(
     }
 }
 
+/// Show a rejected alias candidate on the batch card without changing the primary cache status.
+pub(super) fn merge_alias_quality_telemetry(
+    batch: &mut PlaylistUpdateInputTelemetry,
+    alias: PlaylistUpdateInputTelemetry,
+) {
+    for rejection in
+        alias.clusters.into_iter().filter(|cluster| cluster.decision == Some(PlaylistUpdateClusterDecision::Rejected))
+    {
+        if let Some(primary) = batch.clusters.iter_mut().find(|cluster| cluster.cluster == rejection.cluster) {
+            // Keep any primary rejection or technical failure, and the first alias rejection per cluster.
+            if !matches!(
+                primary.decision,
+                Some(PlaylistUpdateClusterDecision::Rejected | PlaylistUpdateClusterDecision::TechnicalError)
+            ) && primary.technical_state != Some(PersistedPlaylistUpdateTechnicalState::Failed)
+            {
+                *primary = rejection;
+            }
+        }
+    }
+}
+
 pub(crate) fn neutralize_overlaid_cluster_facts(
     input_telemetry: &mut PlaylistUpdateInputTelemetry,
     overlaid_clusters: ClusterFlags,

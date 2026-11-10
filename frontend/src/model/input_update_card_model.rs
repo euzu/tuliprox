@@ -31,12 +31,6 @@ pub struct InputUpdateCardModel {
 }
 
 impl InputUpdateCardModel {
-    /// Enabled CSV batches use a target rebuild without a manual input action.
-    #[must_use]
-    pub fn updates_targets_only(&self) -> bool {
-        self.capabilities == InputUpdateCapabilities::BulkOnly && self.input_type.is_batch()
-    }
-
     /// Builds the deterministic last-update presentation for a supplied clock value.
     #[must_use]
     pub fn last_update(&self, now: u64) -> LastUpdateViewModel { last_update_view_model(self.last_update_at, now) }
@@ -234,7 +228,7 @@ mod tests {
         let sources = playlist_update_sources(&file, &scope);
         let cards = build_input_update_card_models(&sources, &PlaylistUpdateStatusDto::default());
         assert_eq!(cards[0].input_id, 2);
-        assert!(cards[0].updates_targets_only());
+        assert!(cards[0].capabilities.supports(InputRefreshPolicy::FORCE));
         assert_eq!(
             cards[0].targets,
             [super::InputUpdateCardTarget { id: 3, name: "selected".into(), xtream_only: false }]
@@ -383,7 +377,7 @@ mod tests {
                 .filter(|card| card.capabilities.supports(InputRefreshPolicy::NORMAL))
                 .map(|card| card.input_id)
                 .collect::<Vec<_>>(),
-            vec![1, 5, 6, 10, 11, 12]
+            vec![1, 3, 4, 5, 6, 7, 10, 11, 12]
         );
     }
 

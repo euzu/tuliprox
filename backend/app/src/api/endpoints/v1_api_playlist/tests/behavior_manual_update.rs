@@ -69,6 +69,7 @@ async fn manual_update_scope_rejects_reused_target_ids_before_queueing() {
     let bodies = [
         r#"{"targets":[],"target_ids":[1]}"#,
         r#"{"targets":[],"target_ids":[1],"input_refresh":{"input_id":3,"policy":{"cache":"respect","quality":"enforce"}}}"#,
+        r#"{"target_ids":[1],"input_action":{"input_id":2,"action":{"kind":"provider","policy":{"cache":"bypass","quality":"enforce"}}}}"#,
     ];
     for body in bodies {
         assert_eq!(routes.clone().oneshot(request(body)).await.unwrap().status(), StatusCode::ACCEPTED);
@@ -97,9 +98,9 @@ fn manual_update_capabilities_reject_unsupported_actions_and_keep_all_required_i
         (InputType::Library, 1),
         (InputType::Jellyfin, 2),
         (InputType::Emby, 2),
-        (InputType::M3uBatch, 0),
-        (InputType::XtreamBatch, 0),
-        (InputType::StalkerBatch, 0),
+        (InputType::M3uBatch, 3),
+        (InputType::XtreamBatch, 3),
+        (InputType::StalkerBatch, 3),
         (InputType::Staged, 0),
     ] {
         for enabled in [false, true] {

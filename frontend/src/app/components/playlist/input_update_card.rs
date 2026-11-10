@@ -313,10 +313,9 @@ fn selected_current_target_ids(model: &InputUpdateCardModel, selected_target_ids
 
 fn can_start_update(state: &InputUpdateCardInteractionState, model: &InputUpdateCardModel, can_submit: bool) -> bool {
     can_submit
-        && (model.updates_targets_only()
-            || (model.capabilities.supports_action(model.capabilities.selected_action(state.controls.policy))
-                && (model.capabilities != InputUpdateCapabilities::Rescan
-                    || state.controls.policy == InputRefreshPolicy::NORMAL)))
+        && model.capabilities.supports_action(model.capabilities.selected_action(state.controls.policy))
+        && (model.capabilities != InputUpdateCapabilities::Rescan
+            || state.controls.policy == InputRefreshPolicy::NORMAL)
         && !state.is_submitting()
         && !selected_current_target_ids(model, &state.controls.selected_target_ids).is_empty()
 }
@@ -1049,7 +1048,6 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
     let view = Rc::clone(&props.view);
     let state = use_reducer(|| InputUpdateCardInteractionState::from_model(&model));
     let pending_submission = use_mut_ref(|| None::<WebSocketConnectionContext>);
-    let target_update_only = model.updates_targets_only();
     let targets_current = state.targets == model.targets;
     let can_submit = props.can_submit && props.update_revision.is_some() && targets_current;
     {
@@ -1061,7 +1059,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
             || ()
         });
     }
-    let rebuilds_targets = target_update_only || model.capabilities.rebuilds_targets();
+    let rebuilds_targets = model.capabilities.rebuilds_targets();
     let target_ids = view.target_results.iter().map(|target| target.target_id).collect::<Vec<_>>();
     let all_selection = target_selection_state(&state.controls.selected_target_ids, &target_ids);
 
@@ -1089,8 +1087,8 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
     // Render consistently while the effect synchronizes the retained reducer state.
     let effective_policy = state.policy_for_capabilities(model.capabilities);
     let policy_options = policy_options(model.capabilities, effective_policy, |key| translate.t(key));
-    let show_replacement = effective_policy == InputRefreshPolicy::NORMAL
-        && (target_update_only || model.capabilities.supports(InputRefreshPolicy::NORMAL));
+    let show_replacement =
+        effective_policy == InputRefreshPolicy::NORMAL && model.capabilities.supports(InputRefreshPolicy::NORMAL);
     let replacement_reason = replacement_unavailable_reason(&model.targets, &state.controls.selected_target_ids);
     let can_replace = show_replacement && can_submit && replacement_reason.is_none();
     let replace_target_contents = can_replace && state.controls.replace_target_contents;
@@ -1137,7 +1135,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
             {
                 return;
             }
-            let request_policy = if target_update_only { InputRefreshPolicy::NORMAL } else { state.controls.policy };
+            let request_policy = state.controls.policy;
             let target_ids = selected_current_target_ids(&model, &state.controls.selected_target_ids);
             if target_ids.is_empty() {
                 return;
@@ -1186,16 +1184,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                 }
 
                 let result = if replace_target_contents {
-                    services
-                        .playlist
-                        .replace_target_contents(
-                            &target_ids,
-                            (!target_update_only).then_some(model.input_id),
-                            &update_revision,
-                        )
-                        .await
-                } else if target_update_only {
-                    services.playlist.update_target_ids(&target_ids, Some(&update_revision)).await
+                    services.playlist.replace_target_contents(&target_ids, model.input_id, &update_revision).await
                 } else {
                     services
                         .playlist
@@ -1263,11 +1252,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
         action_message(translate.t("MESSAGES.PLAYLIST_UPDATE.POLICY_LABEL"), &view.input_name, &action_label);
     let start_aria_label =
         action_message(translate.t("MESSAGES.PLAYLIST_UPDATE.START_LABEL"), &view.input_name, &start_label);
-    let policy_description = translate.t(if target_update_only {
-        "MESSAGES.PLAYLIST_UPDATE.BATCH_TARGET_DESCRIPTION"
-    } else {
-        model.capabilities.description_key(effective_policy)
-    });
+    let policy_description = translate.t(model.capabilities.description_key(effective_policy));
     let last_update = last_update_view_model(view.last_update_at, props.now);
     let last_update_text = match last_update.relative {
         LastUpdateRelative::Never => translate.t("LABEL.LAST_UPDATE_NEVER"),
@@ -1356,9 +1341,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                     <div class="tp__playlist-update-view__action-area">
                         <div class="tp__playlist-update-view__input-actions">
                         <div class="tp__playlist-update-view__policy-control">
-                            if target_update_only {
-                                <span>{translate.t("LABEL.UPDATE")}</span>
-                            } else if model.capabilities.rebuilds_targets() {
+                            if rebuilds_targets {
                                 <Select
                                     name={select_label}
                                     icon={Some("ChevronDown".to_string())}
@@ -2191,9 +2174,9 @@ mod tests {
             (InputType::Xtream, &[POLICY_NORMAL, POLICY_REFRESH, POLICY_FORCE], true),
             (InputType::Stalker, &[POLICY_NORMAL, POLICY_REFRESH, POLICY_FORCE], true),
             (InputType::M3u, &[POLICY_NORMAL, POLICY_REFRESH, POLICY_FORCE], true),
-            (InputType::M3uBatch, &[], false),
-            (InputType::XtreamBatch, &[], false),
-            (InputType::StalkerBatch, &[], false),
+            (InputType::M3uBatch, &[POLICY_NORMAL, POLICY_REFRESH, POLICY_FORCE], true),
+            (InputType::XtreamBatch, &[POLICY_NORMAL, POLICY_REFRESH, POLICY_FORCE], true),
+            (InputType::StalkerBatch, &[POLICY_NORMAL, POLICY_REFRESH, POLICY_FORCE], true),
             (InputType::Staged, &[], false),
             (InputType::Library, &["rescan"], true),
             (InputType::Plex, &[POLICY_NORMAL, POLICY_REFRESH], true),
@@ -2241,8 +2224,10 @@ mod tests {
             model.capabilities = InputUpdateCapabilities::for_input_type(input_type, true);
             model.targets[1].name = model.targets[0].name.clone();
             let state = InputUpdateCardInteractionState::from_model(&model);
-            assert!(model.updates_targets_only());
-            assert_eq!(model.capabilities.policies(), []);
+            assert_eq!(
+                model.capabilities.policies(),
+                [InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE]
+            );
             assert!(can_start_update(&state, &model, true));
             assert!(!can_start_update(&state, &model, false));
 
