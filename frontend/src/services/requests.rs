@@ -398,8 +398,11 @@ pub async fn request_raw(request: RequestBuilder, json_body: Option<String>) -> 
     Ok(RawResponse { status: response.status(), body: response.text().await.unwrap_or_default() })
 }
 
-pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {
+pub async fn request_get_binary(url: &str, if_match: Option<&str>) -> Result<Vec<u8>, Error> {
     let mut request = Request::get(url);
+    if let Some(revision) = if_match {
+        request = request.header("If-Match", revision);
+    }
     if let Some(token) = get_token() {
         request = request.header("Authorization", format!("Bearer {token}").as_str());
     }

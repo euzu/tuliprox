@@ -251,11 +251,16 @@ pub(super) async fn load_epg_channels_for_input(
 pub(super) async fn playlist_epg(
     ExtractAcceptHeader(accept): ExtractAcceptHeader,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Json(playlist_epg_req): axum::extract::Json<PlaylistEpgRequest>,
 ) -> impl IntoResponse + Send {
     match playlist_epg_req {
         PlaylistEpgRequest::Target(target_id) => {
-            if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
+            let sources = match app_state.playlist_sources_for_request(&headers) {
+                Ok(sources) => sources,
+                Err(status) => return status.into_response(),
+            };
+            if let Some(target) = sources.get_target_by_id(target_id) {
                 let config = &app_state.app_config.config.load();
                 let epg_path = crate::api::endpoints::xmltv_api::get_epg_path_for_target_by_type(
                     config,

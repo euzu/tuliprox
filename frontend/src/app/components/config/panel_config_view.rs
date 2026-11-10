@@ -12,6 +12,7 @@ use crate::{
         },
         context::ConfigContext,
     },
+    hooks::use_service_context,
     html_if,
     i18n::use_translation,
 };
@@ -612,25 +613,35 @@ pub fn PanelConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
+    let services = use_service_context();
+    let base_revision = use_state(|| None::<String>);
+    let revision = config_ctx.config.as_ref().and_then(|cfg| services.config.sources_revision_for(cfg));
 
     let form_state: UseReducerHandle<PanelConfigFormState> =
         use_reducer(|| PanelConfigFormState { form: SourcesConfigDto::default(), modified: false });
 
     {
-        use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::Panel);
+        let revision = (*base_revision).clone();
+        use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), move |modified, form| {
+            ConfigForm::Panel(modified, form, revision.clone())
+        });
     }
 
     {
         let form_state = form_state.clone();
         let sources_cfg = config_ctx.config.as_ref().map(|c| c.sources.clone());
-        use_effect_with((sources_cfg, *config_view_ctx.edit_mode), move |(sources_cfg, _mode)| {
-            if let Some(src) = sources_cfg {
-                form_state.dispatch(PanelConfigFormAction::SetAll((*src).clone()));
-            } else {
-                form_state.dispatch(PanelConfigFormAction::SetAll(SourcesConfigDto::default()));
-            }
-            || ()
-        });
+        let base_revision = base_revision.clone();
+        let preserve_draft = *config_view_ctx.edit_mode && form_state.modified;
+        use_effect_with(
+            (sources_cfg, revision.clone(), *config_view_ctx.edit_mode),
+            move |(sources_cfg, revision, _)| {
+                if !preserve_draft {
+                    base_revision.set(revision.clone());
+                    form_state.dispatch(PanelConfigFormAction::SetAll(sources_cfg.clone().unwrap_or_default()));
+                }
+                || ()
+            },
+        );
     }
 
     let render_input_card = |input_idx: usize, input: &ConfigInputDto| -> Html {
@@ -970,6 +981,9 @@ pub fn PanelConfigView() -> Html {
             <div class="tp__panel-api-config-view__header tp__config-view-page__header">
                 <Card class="tp__config-view__card tp__panel-api-config-view__info-card">
                     <h1>{ translate.t(ConfigPage::Panel.title_key()) }</h1>
+                    { html_if!(form_state.modified && *base_revision != revision, {
+                        <p role="alert">{ translate.t("MESSAGES.CONFIG_CHANGED") }</p>
+                    }) }
                     <div class="tp__panel-api-config-view__info-text">
                         { translate.t(HINT_PANEL_INFO) }
                     </div>

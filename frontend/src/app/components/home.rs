@@ -30,7 +30,8 @@ use log::error;
 use shared::{
     model::{
         permission::{Permission, PERM_ALL},
-        ApiProxyConfigDto, AppConfigDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck, SystemInfo,
+        ApiProxyConfigDto, AppConfigDto, ConfigType, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck,
+        SystemInfo,
     },
     utils::Internable,
 };
@@ -236,10 +237,24 @@ pub fn Home() -> Html {
                     services_ctx_clone.toastr.error(msg);
                 }
                 EventMessage::ConfigChange(config_type) => {
-                    services_ctx_clone.toastr.warning_with_options(
-                        format!("{}: {config_type}", translate_clone.t("MESSAGES.CONFIG_CHANGED")),
-                        ToastOptions { close_mode: ToastCloseMode::Manual },
-                    );
+                    if !services_ctx_clone.event.is_config_change_message_blocked() {
+                        services_ctx_clone.toastr.warning_with_options(
+                            format!("{}: {config_type}", translate_clone.t("MESSAGES.CONFIG_CHANGED")),
+                            ToastOptions { close_mode: ToastCloseMode::Manual },
+                        );
+                    }
+                    if !setup_mode && config_type == ConfigType::Sources {
+                        let services = services_ctx_clone.clone();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            services.config.get_server_config().await;
+                        });
+                    }
+                }
+                EventMessage::WebSocketStatus(true) if !setup_mode => {
+                    let services = services_ctx_clone.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        services.config.get_server_config().await;
+                    });
                 }
                 EventMessage::PlaylistUpdate(update) => match update.state {
                     PlaylistUpdateState::Success => {
@@ -315,7 +330,10 @@ pub fn Home() -> Html {
     let config_context = ConfigContext { config: (*config).clone(), api_proxy: (*api_proxy_config).clone() };
 
     let status_context = StatusContext { status: (*status).clone(), system_info: (*system_info).clone() };
-    let playlist_context = PlaylistContext { sources: sources.clone() };
+    let playlist_context = PlaylistContext {
+        sources: sources.clone(),
+        revision: config.as_ref().and_then(|cfg| services.config.playlist_scope_for(cfg)),
+    };
 
     // combine_views_stats_streams=true means embed streams in stats (no separate page), so show_streams_page = !combine_views_stats_streams.
     // The default unwrap_or(true) correctly preserves backward compatibility (separate pages by default).

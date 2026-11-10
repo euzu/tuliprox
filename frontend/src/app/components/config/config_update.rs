@@ -151,7 +151,7 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
             ConfigForm::IpCheck(_, mut ipcheck_cfg) => set_config_field!(config, ipcheck_cfg, ipcheck),
             ConfigForm::Mcp(_, mcp_cfg) => update_mcp_field(config, mcp_cfg),
             ConfigForm::Library(_, library_cfg) => update_library_field(config, library_cfg),
-            ConfigForm::Panel(_, _) => {}
+            ConfigForm::Panel(..) => {}
             ConfigForm::ApiProxy(_, _) => {}
         }
     }

@@ -30,7 +30,7 @@ pub fn SourcesStep() -> Html {
     };
     let local_sources =
         use_memo((*local_app_config).clone(), |app_config| Some(map_sources_to_playlist_rows(&app_config.sources)));
-    let local_playlist_context = PlaylistContext { sources: local_sources.clone() };
+    let local_playlist_context = PlaylistContext { sources: local_sources.clone(), revision: None };
 
     let handle_sources_change = {
         let setup_ctx = setup_ctx.clone();

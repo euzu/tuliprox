@@ -10,8 +10,8 @@ use crate::{
     model::{
         last_update_view_model, DialogResult, InputClusterOutcomeView, InputClusterRunView, InputDataSourceView,
         InputUpdateCapabilities, InputUpdateCapabilitiesExt, InputUpdateCardModel, InputUpdateCardState,
-        InputUpdateCardStatus, InputUpdateRunView, LastUpdateRelative, PlaylistUpdateAcceptedScope, RuleStageSummary,
-        TargetPipelineView, TargetRunView,
+        InputUpdateCardStatus, InputUpdateCardTarget, InputUpdateRunView, LastUpdateRelative,
+        PlaylistUpdateAcceptedScope, RuleStageSummary, TargetPipelineView, TargetRunView,
     },
     services::{DialogService, WebSocketConnectionContext},
     utils::content_cluster_presentation,
@@ -68,6 +68,7 @@ enum ConfirmationSubmissionDecision {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InputUpdateCardInteractionState {
     controls: InputUpdateCardState,
+    targets: Vec<InputUpdateCardTarget>,
     submitting_for: Option<WebSocketConnectionContext>,
 }
 
@@ -78,6 +79,7 @@ impl InputUpdateCardInteractionState {
                 selected_target_ids: model.targets.iter().map(|target| target.id).collect(),
                 policy: InputRefreshPolicy::NORMAL,
             },
+            targets: model.targets.clone(),
             submitting_for: None,
         }
     }
@@ -106,6 +108,7 @@ enum InputUpdateCardAction {
     SelectAll(Vec<u16>),
     SelectPolicy(InputRefreshPolicy),
     SyncPolicy(InputUpdateCapabilities),
+    SyncTargets(Vec<InputUpdateCardTarget>),
     BeginSubmission(WebSocketConnectionContext),
     CancelSubmission(WebSocketConnectionContext),
     ConnectionChanged,
@@ -145,6 +148,20 @@ fn reduce_input_update_card_state(
         InputUpdateCardAction::SelectPolicy(policy) if !state.is_submitting() => state.controls.policy = policy,
         InputUpdateCardAction::SyncPolicy(capabilities) => {
             state.controls.policy = state.policy_for_capabilities(capabilities);
+        }
+        InputUpdateCardAction::SyncTargets(targets) => {
+            let selected = &state.controls.selected_target_ids;
+            state.controls.selected_target_ids = targets
+                .iter()
+                .filter(|target| {
+                    let mut old = state.targets.iter().filter(|previous| previous.name == target.name);
+                    old.next().is_some_and(|previous| selected.contains(&previous.id))
+                        && old.next().is_none()
+                        && targets.iter().filter(|other| other.name == target.name).count() == 1
+                })
+                .map(|target| target.id)
+                .collect();
+            state.targets = targets;
         }
         InputUpdateCardAction::BeginSubmission(connection_context) if !state.is_submitting() => {
             state.submitting_for = Some(connection_context);
@@ -990,7 +1007,17 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
     let state = use_reducer(|| InputUpdateCardInteractionState::from_model(&model));
     let pending_submission = use_mut_ref(|| None::<WebSocketConnectionContext>);
     let target_update_only = model.updates_targets_only();
-    let can_submit = props.can_submit && props.update_revision.is_some();
+    let targets_current = state.targets == model.targets;
+    let can_submit = props.can_submit && props.update_revision.is_some() && targets_current;
+    {
+        let state = state.clone();
+        use_effect_with(model.targets.clone(), move |targets| {
+            if state.targets != *targets {
+                state.dispatch(InputUpdateCardAction::SyncTargets(targets.clone()));
+            }
+            || ()
+        });
+    }
     let rebuilds_targets = target_update_only || model.capabilities.rebuilds_targets();
     let target_ids = view.target_results.iter().map(|target| target.target_id).collect::<Vec<_>>();
     let all_selection = target_selection_state(&state.controls.selected_target_ids, &target_ids);
@@ -2409,6 +2436,17 @@ mod tests {
         assert_eq!(selected_current_target_ids(&model, &[1]), vec![1]);
         assert_eq!(selected_current_target_ids(&model, &[4]), vec![4]);
         assert_eq!(selected_current_target_ids(&model, &[4, 1]), vec![1, 4]);
+    }
+
+    #[test]
+    fn input_update_card_keeps_selected_names_when_ids_are_reused() {
+        let before = card_with_targets(7, &[(1, "keep".into()), (2, "removed".into())]);
+        let after = card_with_targets(7, &[(1, "other".into()), (2, "keep".into())]);
+        let state = reduce(
+            InputUpdateCardInteractionState::from_model(&before),
+            InputUpdateCardAction::SyncTargets(after.targets),
+        );
+        assert_eq!(state.controls.selected_target_ids, [2]);
     }
 
     #[test]

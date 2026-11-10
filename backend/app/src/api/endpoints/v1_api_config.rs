@@ -28,12 +28,12 @@ use shared::{
     error::TuliproxError,
     model::{
         permission::{Permission, PermissionSet},
-        ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigDto, ConfigTargetDto, InputFetchMethod, PlansConfigDto,
-        SourcesConfigDto, XtreamLoginRequest,
+        ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigDto, ConfigTargetDto, ConfigType, EventMessage,
+        InputFetchMethod, PlansConfigDto, SourcesConfigDto, XtreamLoginRequest,
     },
     utils::{
         parse_provider_scheme_url_parts, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
-        HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH, PROVIDER_SCHEME_PREFIX,
+        HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH, HEADER_PLAYLIST_SCOPE_REVISION, PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{collections::HashMap, path::Path, sync::Arc};
@@ -609,6 +609,7 @@ async fn save_config_sources(
             return internal_server_error!();
         }
     };
+    app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Sources));
     response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_SOURCES_REVISION, &updated_revision)
 }
 
@@ -747,6 +748,7 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
             return internal_server_error!();
         }
     };
+    let _sources_lock = app_state.app_config.file_locks.read_lock(Path::new(&sources_file_path)).await;
     let sources_revision = match read_file_revision(&sources_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
@@ -795,7 +797,22 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
                 internal_server_error!()
             } else {
                 filter_app_config_by_permissions(&mut app_config, permissions);
-                let response = axum::response::Json(app_config).into_response();
+                let loaded = app_state.app_config.sources.load_full();
+                // The editor document can differ from the running configuration. Attach a
+                // precondition only when every visible ID maps to the displayed target.
+                let targets = app_config.sources.sources.iter().flat_map(|source| &source.targets);
+                let scope_matches = targets.clone().next().is_some()
+                    && targets.clone().all(|target| {
+                        loaded.get_target_by_id(target.id).is_some_and(|current| current.name == target.name)
+                    });
+                let mut response = axum::response::Json(app_config).into_response();
+                if scope_matches {
+                    response = response_with_revision_header(
+                        response,
+                        HEADER_PLAYLIST_SCOPE_REVISION,
+                        &loaded.playlist_update_scope().revision(),
+                    );
+                }
                 let response = response_with_revision_header(response, HEADER_CONFIG_MAIN_REVISION, &main_revision);
                 let response =
                     response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
@@ -1728,20 +1745,38 @@ mod tests {
             ..Default::default()
         };
 
+        let mut events = app_state.event_manager.get_event_channel();
+        let previous_scope = app_state.app_config.sources.load().playlist_update_scope().revision();
         let rev = super::read_file_revision(sources_file.to_str().unwrap()).await.unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_IF_MATCH, HeaderValue::from_str(&rev).unwrap());
 
         let save_future = super::save_config_sources(
             axum::extract::State(Arc::clone(&app_state)),
-            headers,
-            axum::Json(updated_sources),
+            headers.clone(),
+            axum::Json(updated_sources.clone()),
         );
         let response = tokio::time::timeout(Duration::from_secs(5), save_future)
             .await
             .expect("save_config_sources must not deadlock");
 
         assert_eq!(response.into_response().status(), StatusCode::OK);
+        let source_change = |event| matches!(event, super::EventMessage::ConfigChange(super::ConfigType::Sources));
+        assert_eq!(
+            std::iter::from_fn(|| events.try_recv().ok()).filter(|event| source_change(event.clone())).count(),
+            1,
+        );
+        let mut stale_scope = HeaderMap::new();
+        stale_scope.insert(HEADER_IF_MATCH, HeaderValue::from_str(&previous_scope).unwrap());
+        assert_eq!(app_state.playlist_sources_for_request(&stale_scope).err(), Some(StatusCode::PRECONDITION_FAILED),);
+        let rejected = super::save_config_sources(
+            axum::extract::State(Arc::clone(&app_state)),
+            headers,
+            axum::Json(updated_sources),
+        )
+        .await;
+        assert_eq!(rejected.into_response().status(), StatusCode::CONFLICT);
+        assert!(!std::iter::from_fn(|| events.try_recv().ok()).any(source_change));
         assert!(!tuliprox_repository::target_bouquet_exists(temp_dir.path(), "target_1").await);
         assert!(!tuliprox_repository::target_bouquet_exists(temp_dir.path(), "target_renamed").await);
         let runtime_sources = app_state.app_config.sources.load();

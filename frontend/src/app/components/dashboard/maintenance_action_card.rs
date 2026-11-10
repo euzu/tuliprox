@@ -49,6 +49,7 @@ pub fn MaintenanceActionCard() -> Html {
         })
     };
 
+    let request_generation = use_mut_ref(|| 0u64);
     let reload = {
         let services = services.clone();
         let translate = translate.clone();
@@ -62,8 +63,18 @@ pub fn MaintenanceActionCard() -> Html {
             let latest = latest.clone();
             let event_generation = event_generation.clone();
             let started_at = *event_generation.borrow();
+            let request_generation = request_generation.clone();
+            let generation = {
+                let mut current = request_generation.borrow_mut();
+                *current += 1;
+                *current
+            };
             wasm_bindgen_futures::spawn_local(async move {
-                match services.maintenance.get().await {
+                let response = services.maintenance.get().await;
+                if generation != *request_generation.borrow() {
+                    return;
+                }
+                match response {
                     Ok(loaded) => {
                         let stale = *event_generation.borrow() != started_at;
                         let current = Rc::clone(&latest.borrow());

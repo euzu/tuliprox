@@ -8,7 +8,7 @@ use crate::{
             use_plugin_ui, Breadcrumbs, EpgSourceSelector, HorizontalShrinkPanel, IconButton, NoContent, PluginSlot,
             Search,
         },
-        context::ConfigContext,
+        context::{ConfigContext, PlaylistContext},
     },
     hooks::use_service_context,
     i18n::use_translation,
@@ -228,6 +228,7 @@ fn recording_padding(config: Option<&AppConfigDto>) -> PaddingBounds {
 pub fn EpgView() -> Html {
     let services = use_service_context();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
+    let playlist_revision = use_context::<PlaylistContext>().and_then(|ctx| ctx.revision);
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let translate = use_translation();
     let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.PLAYLIST_EPG")]));
@@ -258,6 +259,7 @@ pub fn EpgView() -> Html {
     let program_pan_listeners: PanListeners = use_mut_ref(|| None);
     let timeline_pan_listeners: PanListeners = use_mut_ref(|| None);
     let selected_epg_source = use_state(|| None::<PlaylistEpgRequest>);
+    let hosted_target_name = use_state(|| None::<String>);
     let search_filter = use_state::<SearchRequest, _>(|| SearchRequest::Clear);
     // Playlist groups of a target source; the grid shows one group at a time.
     let groups = use_state(|| Rc::new(Vec::<EpgGroupInfo>::new()));
@@ -283,6 +285,13 @@ pub fn EpgView() -> Html {
     let can_write_recordings = services.auth.has_permission(Permission::RecordingCreate);
     let is_admin_role = services.auth.is_admin();
     let is_hosted_epg = matches!(*selected_epg_source, Some(PlaylistEpgRequest::Target(_)));
+    let stale_target = match *selected_epg_source {
+        Some(PlaylistEpgRequest::Target(id)) => {
+            let current = config_ctx.config.as_ref().and_then(|cfg| target_name_for_id(&cfg.sources, id, None));
+            hosted_target_name.is_none() || current != *hosted_target_name
+        }
+        _ => false,
+    };
 
     let filtered = use_memo(((*grid_model).clone(), (*search_filter).clone()), |(model, filter)| {
         model.as_ref().map_or_else(Vec::new, |m| filter_channel_indices(&m.0, filter))
@@ -337,7 +346,9 @@ pub fn EpgView() -> Html {
         let epg_request_seq = epg_request_seq.clone();
         let pending_recenter = pending_recenter.clone();
         let reset_view = reset_view.clone();
+        let playlist_revision = playlist_revision.clone();
         Callback::from(move |request: GridLoad| {
+            let Some(revision) = playlist_revision.clone() else { return };
             reset_view();
             let token = epg_request_seq.borrow_mut().begin();
             if request.channel_count as usize > MAX_EPG_GRID_ROWS {
@@ -352,7 +363,7 @@ pub fn EpgView() -> Html {
             spawn_local(async move {
                 let rows = service_ctx
                     .playlist
-                    .get_epg_grid(request.target_id, request.group.to_string(), request.filter)
+                    .get_epg_grid(request.target_id, request.group.to_string(), request.filter, &revision)
                     .await;
                 // The timeout lets the busy indicator paint before the model build blocks the thread.
                 set_timeout(
@@ -399,7 +410,9 @@ pub fn EpgView() -> Html {
         let group_index_missing = group_index_missing.clone();
         let last_group = last_group.clone();
         let load_grid = load_grid.clone();
+        let playlist_revision = playlist_revision.clone();
         Callback::from(move |(target_id, filter, preferred): (u16, Option<EpgChannelFilter>, Option<Arc<str>>)| {
+            let Some(revision) = playlist_revision.clone() else { return };
             let token = epg_request_seq.borrow_mut().begin();
             let service_ctx = service_ctx.clone();
             let translate = translate.clone();
@@ -415,7 +428,7 @@ pub fn EpgView() -> Html {
             groups_ready.set(false);
             service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Show));
             spawn_local(async move {
-                let result = service_ctx.playlist.get_epg_groups(target_id, filter.clone()).await;
+                let result = service_ctx.playlist.get_epg_groups(target_id, filter.clone(), &revision).await;
                 let mut next_grid = None;
                 finish_load(
                     &epg_request_seq.borrow(),
@@ -468,7 +481,7 @@ pub fn EpgView() -> Html {
         let load_groups = load_groups.clone();
         let last_group = last_group.clone();
         let group_target = match *selected_epg_source {
-            Some(PlaylistEpgRequest::Target(target_id)) if !*group_index_missing => Some(target_id),
+            Some(PlaylistEpgRequest::Target(target_id)) if !*group_index_missing && !stale_target => Some(target_id),
             _ => None,
         };
         Callback::from(move |req: SearchRequest| {
@@ -503,7 +516,15 @@ pub fn EpgView() -> Html {
         let last_group = last_group.clone();
         let reset_view = reset_view.clone();
         let load_groups = load_groups.clone();
+        let hosted_target_name = hosted_target_name.clone();
+        let config = config_ctx.config.clone();
         Callback::from(move |req: PlaylistEpgRequest| {
+            hosted_target_name.set(match &req {
+                PlaylistEpgRequest::Target(id) => {
+                    config.as_ref().and_then(|cfg| target_name_for_id(&cfg.sources, *id, None))
+                }
+                _ => None,
+            });
             // Everything of the previous source goes first, so its groups can never be selected
             // for the new source and its in-flight requests are superseded.
             selected_epg_source.set(Some(req.clone()));
@@ -529,7 +550,7 @@ pub fn EpgView() -> Html {
             let grid_model = grid_model.clone();
             let pending_recenter = pending_recenter.clone();
             spawn_local(async move {
-                let playlist_epg = service_ctx.playlist.get_playlist_epg(req).await;
+                let playlist_epg = service_ctx.playlist.get_playlist_epg(req, None).await;
                 // The timeout lets the busy indicator paint before the model build blocks the thread.
                 set_timeout(
                     move || {
@@ -560,7 +581,7 @@ pub fn EpgView() -> Html {
         let load_grid = load_grid.clone();
         let filter = epg_channel_filter(&search_filter);
         Callback::from(move |group: Arc<str>| {
-            if !*groups_ready {
+            if !*groups_ready || stale_target {
                 return;
             }
             // The target comes from the current selection, never from a separately read source.
@@ -1092,19 +1113,18 @@ pub fn EpgView() -> Html {
                 (*grid_model).clone(),
                 (*selected_epg_source).clone(),
                 config_ctx.config.as_ref().map(Rc::as_ptr),
+                (*hosted_target_name).clone(),
+                stale_target,
                 translate.clone(),
                 can_write_recordings,
                 is_admin_role,
             ),
             move |(key, idx): (usize, usize), deps| {
-                let (model, source, _, _, can_write_recordings, is_admin_role) = deps;
+                let (model, source, _, target_name, stale_target, _, can_write_recordings, is_admin_role) = deps;
                 let translate = translate_for_body.clone();
-                let Some(PlaylistEpgRequest::Target(target_id)) = source.clone() else {
-                    services.toastr.error(translate.t("MESSAGES.RECORDING.NO_TARGET"));
-                    return;
-                };
-                let Some(target_name) =
-                    config.as_ref().and_then(|app_config| target_name_for_id(&app_config.sources, target_id, None))
+                let Some(target_name) = target_name
+                    .clone()
+                    .filter(|_| matches!(source, Some(PlaylistEpgRequest::Target(_))) && !stale_target)
                 else {
                     services.toastr.error(translate.t("MESSAGES.RECORDING.NO_TARGET"));
                     return;
@@ -1353,10 +1373,16 @@ pub fn EpgView() -> Html {
             </div>
             <EpgSourceSelector on_select={handle_select_source} hide_title=true />
             <div class="tp__epg__main">
-                { group_panel }
-                <div class="tp__epg__body" ref={container_ref}>
-                    { body }
-                </div>
+                { if stale_target {
+                    html! { <p role="alert">{translate.t("MESSAGES.CONFIG_CHANGED")}</p> }
+                } else {
+                    html! {
+                        <>
+                            { group_panel }
+                            <div class="tp__epg__body" ref={container_ref}>{ body }</div>
+                        </>
+                    }
+                } }
             </div>
             if let Some(context) = overlay {
                 <div class="tp__epg__plugin-overlay" style="flex:0 0 auto;max-height:45vh;overflow:auto">

@@ -223,7 +223,6 @@ pub fn PlaylistUpdateView() -> Html {
                     match response {
                         Ok(status) => library_catalog.set(status),
                         Err(err) => {
-                            library_catalog.set(None);
                             warn!("Failed to load Library catalog status: {err}");
                         }
                     }
@@ -449,7 +448,7 @@ pub fn PlaylistUpdateView() -> Html {
                 let input_id = view.input_id;
                 input_update_cards_by_id.get(&input_id).map(|model| html! {
                     <InputUpdateCard
-                        key={format!("{input_id}:{}:{}", model.input_name, update_revision.as_deref().unwrap_or_default())}
+                        key={model.input_name.to_string()}
                         model={Rc::clone(model)}
                         view={Rc::new(view)}
                         now={*now}

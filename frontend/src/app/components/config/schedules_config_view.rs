@@ -170,6 +170,8 @@ pub fn SchedulesConfigView() -> Html {
         })
     };
 
+    let stale_targets = *selected_type == ScheduleTaskType::PlaylistUpdate
+        && selected_targets.as_ref().is_some_and(|targets| targets.iter().any(|target| !all_targets.contains(target)));
     let handle_add_schedule = {
         let services = services_ctx.clone();
         let translate = translate.clone();
@@ -179,6 +181,10 @@ pub fn SchedulesConfigView() -> Html {
         let selected_type = selected_type.clone();
         let editing_index = editing_index.clone();
         Callback::from(move |_| {
+            if stale_targets {
+                services.toastr.warning(translate.t("MESSAGES.CONFIG_CHANGED"));
+                return;
+            }
             if let Some(schedule) = (*set_selected_schedule).as_ref() {
                 let task_type = *selected_type;
                 let targets = if task_type == ScheduleTaskType::PlaylistUpdate {
@@ -416,6 +422,9 @@ pub fn SchedulesConfigView() -> Html {
                     />
                 }})
             })}
+            { html_if!(stale_targets, {
+                <p role="alert">{ translate.t("MESSAGES.CONFIG_CHANGED") }</p>
+            }) }
             { if is_editing {
                 html! {
                     <div class="tp__form-page__toolbar">

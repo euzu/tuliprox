@@ -117,8 +117,13 @@ fn send_error<T>(send: &dyn Fn(Result<T, String>) -> bool, message: String) {
 }
 
 /// EPG db path of the grid output, or the status to answer with instead.
-fn resolve_epg_path(app_state: &AppState, target_id: u16) -> Result<PathBuf, axum::http::StatusCode> {
-    let target = app_state.app_config.get_target_by_id(target_id).ok_or(axum::http::StatusCode::NOT_FOUND)?;
+fn resolve_epg_path(
+    app_state: &AppState,
+    headers: &axum::http::HeaderMap,
+    target_id: u16,
+) -> Result<PathBuf, axum::http::StatusCode> {
+    let sources = app_state.playlist_sources_for_request(headers)?;
+    let target = sources.get_target_by_id(target_id).ok_or(axum::http::StatusCode::NOT_FOUND)?;
     let output = epg_grid_output_type(&target).ok_or(axum::http::StatusCode::NOT_FOUND)?;
     let config = app_state.app_config.config.load();
     get_epg_path_for_target_by_type(&config, &target, output).ok_or(axum::http::StatusCode::NO_CONTENT)
@@ -148,13 +153,14 @@ fn count_group_matches(
 pub(in crate::api) async fn playlist_epg_groups(
     ExtractAcceptHeader(accept): ExtractAcceptHeader,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Json(request): axum::extract::Json<EpgGroupsRequest>,
 ) -> axum::response::Response {
     let matcher = match ChannelMatcher::new(request.filter.as_ref()) {
         Ok(matcher) => matcher,
         Err(message) => return bad_search_request(&message),
     };
-    let epg_path = match resolve_epg_path(&app_state, request.target_id) {
+    let epg_path = match resolve_epg_path(&app_state, &headers, request.target_id) {
         Ok(epg_path) => epg_path,
         Err(status) => return status.into_response(),
     };
@@ -204,13 +210,14 @@ pub(in crate::api) async fn playlist_epg_groups(
 pub(in crate::api) async fn playlist_epg_grid(
     ExtractAcceptHeader(accept): ExtractAcceptHeader,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Json(request): axum::extract::Json<EpgGridRequest>,
 ) -> axum::response::Response {
     let matcher = match ChannelMatcher::new(request.filter.as_ref()) {
         Ok(matcher) => matcher,
         Err(message) => return bad_search_request(&message),
     };
-    let epg_path = match resolve_epg_path(&app_state, request.target_id) {
+    let epg_path = match resolve_epg_path(&app_state, &headers, request.target_id) {
         Ok(epg_path) => epg_path,
         Err(status) => return status.into_response(),
     };

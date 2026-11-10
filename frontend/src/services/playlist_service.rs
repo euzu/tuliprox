@@ -1,8 +1,8 @@
 use crate::{
     error::Error,
     services::{
-        get_base_href, request_get, request_get_binary, request_post, request_post_meta, request_post_with_error_body,
-        Encoding, WriteFailure,
+        get_base_href, request_get, request_get_binary, request_get_meta, request_post, request_post_meta,
+        request_post_with_error_body, Encoding, WriteFailure,
     },
 };
 use futures::join;
@@ -18,7 +18,7 @@ use shared::{
         StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto, UiPlaylistCategories,
         UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
-    utils::{concat_path_leading_slash, HEADER_IF_MATCH},
+    utils::{concat_path_leading_slash, HEADER_IF_MATCH, HEADER_PLAYLIST_SCOPE_REVISION},
 };
 use std::rc::Rc;
 
@@ -28,6 +28,22 @@ pub enum OverrideSaveResult {
     Conflict(OverrideConflictDto),
     FieldErrors(Vec<FieldError>),
     Err(String),
+}
+
+async fn post_scoped<B, T>(
+    path: &str,
+    body: B,
+    revision: Option<&str>,
+    encoding: Option<Encoding>,
+) -> Result<Option<T>, Error>
+where
+    B: serde::Serialize + std::fmt::Debug,
+    T: serde::de::DeserializeOwned + std::fmt::Debug + 'static,
+{
+    let headers = revision.map(|revision| [(HEADER_IF_MATCH.to_string(), revision.to_string())]);
+    request_post_meta(path, body, None, encoding, headers.as_ref().map(<[_; 1]>::as_slice), &[])
+        .await
+        .map(|response| response.body)
 }
 
 pub struct PlaylistService {
@@ -115,8 +131,8 @@ impl PlaylistService {
         request_get(&format!("{}?include_scope=true", self.playlist_update_status_path), None, None).await
     }
 
-    pub async fn get_target_analytics(&self) -> Result<Option<TargetAnalyticsResponseDto>, Error> {
-        request_get(&self.playlist_analytics_path, None, None).await
+    pub async fn get_target_analytics(&self) -> Result<super::ResponseMeta<TargetAnalyticsResponseDto>, Error> {
+        request_get_meta(&self.playlist_analytics_path, None, None, &[HEADER_PLAYLIST_SCOPE_REVISION]).await
     }
 
     pub fn unmapped_csv_url_from_base(base_href: &str, target_id: u16) -> String {
@@ -127,19 +143,15 @@ impl PlaylistService {
         Self::unmapped_csv_url_from_base(&get_base_href(), target_id)
     }
 
-    pub async fn download_unmapped_csv(&self, target_id: u16, target_name: &str) -> Result<(), Error> {
+    pub async fn download_unmapped_csv(&self, target_id: u16, target_name: &str, revision: &str) -> Result<(), Error> {
         let url = self.unmapped_csv_url(target_id);
-        let bytes = request_get_binary(&url).await?;
+        let bytes = request_get_binary(&url, Some(revision)).await?;
         let mut sanitized = shared::utils::sanitize_filename_chars(target_name, true);
         if sanitized.is_empty() {
             sanitized = format!("target-{target_id}");
         }
         let filename = format!("{sanitized}-unmapped.csv");
         crate::utils::trigger_browser_download(&bytes, &filename, "text/csv;charset=utf-8")
-    }
-
-    pub async fn update_target_by_id(&self, target_id: u16) -> Result<OperationRunAccepted, Error> {
-        self.update_target_ids(&[target_id], None).await
     }
 
     async fn submit_update_request(&self, request: &PlaylistUpdateRequestDto) -> Result<OperationRunAccepted, Error> {
@@ -181,42 +193,44 @@ impl PlaylistService {
         &self,
         playlist_request: &PlaylistRequest,
     ) -> Option<Rc<UiPlaylistCategories>> {
-        self.get_playlist_categories_opts(playlist_request, false).await
+        self.get_playlist_categories_opts(playlist_request, false, None).await
     }
 
     pub async fn get_playlist_categories_for_explorer(
         &self,
         playlist_request: &PlaylistRequest,
+        revision: Option<&str>,
     ) -> Option<Rc<UiPlaylistCategories>> {
-        self.get_playlist_categories_opts(playlist_request, true).await
+        self.get_playlist_categories_opts(playlist_request, true, revision).await
     }
 
-    pub async fn get_playlist_categories_opts(
+    async fn get_playlist_categories_opts(
         &self,
         playlist_request: &PlaylistRequest,
         explorer: bool,
+        revision: Option<&str>,
     ) -> Option<Rc<UiPlaylistCategories>> {
         let live_url = self.playlist_content_url(XtreamCluster::Live, explorer);
         let vod_url = self.playlist_content_url(XtreamCluster::Video, explorer);
         let series_url = self.playlist_content_url(XtreamCluster::Series, explorer);
 
         let (live_res, vod_res, series_res) = join!(
-            request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
+            post_scoped::<&PlaylistRequest, Vec<UiPlaylistItem>>(
                 &live_url,
                 playlist_request,
-                None,
+                revision,
                 Some(Encoding::Cbor),
             ),
-            request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
+            post_scoped::<&PlaylistRequest, Vec<UiPlaylistItem>>(
                 &vod_url,
                 playlist_request,
-                None,
+                revision,
                 Some(Encoding::Cbor),
             ),
-            request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
+            post_scoped::<&PlaylistRequest, Vec<UiPlaylistItem>>(
                 &series_url,
                 playlist_request,
-                None,
+                revision,
                 Some(Encoding::Cbor),
             ),
         );
@@ -250,16 +264,24 @@ impl PlaylistService {
     }
 
     pub async fn resolve_url(&self, request: PlaylistUrlResolveRequest) -> Option<String> {
+        self.resolve_url_scoped(request, None).await
+    }
+
+    pub async fn resolve_url_scoped(
+        &self,
+        request: PlaylistUrlResolveRequest,
+        revision: Option<&str>,
+    ) -> Option<String> {
         if let PlaylistUrlResolveRequest::Provider { url, .. } = &request {
-            if !url.starts_with(shared::utils::PROVIDER_SCHEME_PREFIX) {
+            if revision.is_none() && !url.starts_with(shared::utils::PROVIDER_SCHEME_PREFIX) {
                 return Some(url.clone());
             }
         }
 
-        request_post::<&PlaylistUrlResolveRequest, String>(
+        post_scoped::<&PlaylistUrlResolveRequest, String>(
             &self.playlist_api_resolve_url_path,
             &request,
-            None,
+            revision,
             Some(Encoding::Text),
         )
         .await
@@ -269,11 +291,11 @@ impl PlaylistService {
         })
     }
 
-    pub async fn get_playlist_epg(&self, request: PlaylistEpgRequest) -> Option<EpgTv> {
-        match request_post::<&PlaylistEpgRequest, Vec<EpgChannel>>(
+    pub async fn get_playlist_epg(&self, request: PlaylistEpgRequest, revision: Option<&str>) -> Option<EpgTv> {
+        match post_scoped::<&PlaylistEpgRequest, Vec<EpgChannel>>(
             &self.playlist_api_epg_path,
             &request,
-            None,
+            revision,
             Some(Encoding::Cbor),
         )
         .await
@@ -293,8 +315,15 @@ impl PlaylistService {
         &self,
         target_id: u16,
         filter: Option<EpgChannelFilter>,
+        revision: &str,
     ) -> Result<Option<Vec<EpgGroupInfo>>, Error> {
-        request_post(&self.epg_groups_path, &EpgGroupsRequest { target_id, filter }, None, Some(Encoding::Cbor)).await
+        post_scoped(
+            &self.epg_groups_path,
+            &EpgGroupsRequest { target_id, filter },
+            Some(revision),
+            Some(Encoding::Cbor),
+        )
+        .await
     }
 
     /// Channels of one playlist group with their programmes (time and title only).
@@ -304,9 +333,15 @@ impl PlaylistService {
         target_id: u16,
         group: String,
         filter: Option<EpgChannelFilter>,
+        revision: &str,
     ) -> Result<Option<Vec<EpgGridRow>>, Error> {
-        request_post(&self.epg_grid_path, &EpgGridRequest { target_id, group, filter }, None, Some(Encoding::Cbor))
-            .await
+        post_scoped(
+            &self.epg_grid_path,
+            &EpgGridRequest { target_id, group, filter },
+            Some(revision),
+            Some(Encoding::Cbor),
+        )
+        .await
     }
 
     /// Fetches per-stream EPG data for the UI "now playing" / "up next" display.
@@ -324,9 +359,10 @@ impl PlaylistService {
         &self,
         pli: &UiPlaylistItem,
         playlist_request: &PlaylistRequest,
+        revision: Option<&str>,
     ) -> Option<SeriesStreamProperties> {
         let path = format!("{}/{}/{}", self.playlist_api_series_info_path, pli.virtual_id, pli.provider_id);
-        request_post::<&PlaylistRequest, XtreamSeriesInfoDoc>(&path, playlist_request, None, Some(Encoding::Cbor))
+        post_scoped::<&PlaylistRequest, XtreamSeriesInfoDoc>(&path, playlist_request, revision, Some(Encoding::Cbor))
             .await
             .map_or_else(
                 |err| {
@@ -337,9 +373,14 @@ impl PlaylistService {
             )
     }
 
-    pub async fn get_episode(&self, virtual_id: u32, playlist_request: &PlaylistRequest) -> Option<UiPlaylistItem> {
+    pub async fn get_episode(
+        &self,
+        virtual_id: u32,
+        playlist_request: &PlaylistRequest,
+        revision: Option<&str>,
+    ) -> Option<UiPlaylistItem> {
         let path = format!("{}/{virtual_id}", self.playlist_api_episode_info_path);
-        request_post::<&PlaylistRequest, UiPlaylistItem>(&path, playlist_request, None, None).await.unwrap_or_else(
+        post_scoped::<&PlaylistRequest, UiPlaylistItem>(&path, playlist_request, revision, None).await.unwrap_or_else(
             |err| {
                 error!("{err}");
                 None

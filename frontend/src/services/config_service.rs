@@ -6,6 +6,7 @@ use crate::{
         Encoding, EventService,
     },
 };
+use futures::lock::Mutex;
 use futures_signals::signal::{Mutable, SignalExt};
 use log::error;
 use shared::{
@@ -16,21 +17,16 @@ use shared::{
     },
     utils::{
         concat_path, concat_path_leading_slash, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
-        HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH,
+        HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH, HEADER_PLAYLIST_SCOPE_REVISION,
     },
 };
-use std::{
-    cell::RefCell,
-    fmt,
-    future::Future,
-    rc::Rc,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{cell::RefCell, fmt, future::Future, rc::Rc};
 
 #[derive(Default, Debug, Clone)]
 struct ConfigRevisions {
     main: Option<String>,
     sources: Option<String>,
+    playlist_scope: Option<String>,
     api_proxy: Option<String>,
 }
 
@@ -60,7 +56,7 @@ pub struct ConfigService {
     revisions: RefCell<ConfigRevisions>,
     config_channel: Mutable<Option<Rc<AppConfigDto>>>,
     api_proxy_config_channel: Mutable<Option<Rc<ApiProxyConfigDto>>>,
-    is_fetching: AtomicBool,
+    fetch_lock: Mutex<()>,
     config_path: String,
     api_proxy_config_path: String,
     plans_config_path: String,
@@ -88,7 +84,7 @@ impl ConfigService {
             revisions: RefCell::new(ConfigRevisions::default()),
             config_channel: Mutable::new(None),
             api_proxy_config_channel: Mutable::new(None),
-            is_fetching: AtomicBool::new(false),
+            fetch_lock: Mutex::new(()),
             config_path: config_path.clone(),
             api_proxy_config_path: api_config("apiproxy"),
             plans_config_path: api_config("plans"),
@@ -127,9 +123,7 @@ impl ConfigService {
     }
 
     async fn fetch_server_config(&self) {
-        if self.is_fetching.swap(true, Ordering::AcqRel) {
-            return;
-        }
+        let _fetch = self.fetch_lock.lock().await;
 
         let can_read_config = self.auth.has_any_permissions(
             Permission::ConfigRead
@@ -147,7 +141,12 @@ impl ConfigService {
                     &self.config_path,
                     None,
                     None,
-                    &[HEADER_CONFIG_MAIN_REVISION, HEADER_CONFIG_SOURCES_REVISION, HEADER_CONFIG_API_PROXY_REVISION],
+                    &[
+                        HEADER_CONFIG_MAIN_REVISION,
+                        HEADER_CONFIG_SOURCES_REVISION,
+                        HEADER_CONFIG_API_PROXY_REVISION,
+                        HEADER_PLAYLIST_SCOPE_REVISION,
+                    ],
                 )
                 .await,
             )
@@ -172,11 +171,12 @@ impl ConfigService {
         let config_result = match config_response {
             Some(Ok(response)) => {
                 revisions.main = response.headers.get(HEADER_CONFIG_MAIN_REVISION).cloned();
-                revisions.sources = response.headers.get(HEADER_CONFIG_SOURCES_REVISION).cloned();
                 if let Some(rev) = response.headers.get(HEADER_CONFIG_API_PROXY_REVISION) {
                     revisions.api_proxy = Some(rev.clone());
                 }
                 if let Some(mut app_config) = response.body {
+                    revisions.sources = response.headers.get(HEADER_CONFIG_SOURCES_REVISION).cloned();
+                    revisions.playlist_scope = response.headers.get(HEADER_PLAYLIST_SCOPE_REVISION).cloned();
                     let templates = {
                         if let Some(template_definition) = app_config.templates.as_mut() {
                             match prepare_templates(&mut template_definition.templates) {
@@ -287,13 +287,13 @@ impl ConfigService {
 
                     Some(Rc::new(app_config))
                 } else {
-                    Some(Rc::new(AppConfigDto::default()))
+                    self.server_config.borrow().clone()
                 }
             }
             Some(Err(Error::Forbidden(_))) | None => Some(Rc::new(AppConfigDto::default())),
             Some(Err(err)) => {
                 error!("{err}");
-                Some(Rc::new(AppConfigDto::default()))
+                self.server_config.borrow().clone()
             }
         };
 
@@ -306,17 +306,16 @@ impl ConfigService {
             }
             Some(Err(err)) => {
                 error!("{err}");
-                None
+                self.api_proxy_config.borrow().clone()
             }
             None => None,
         };
 
+        self.revisions.replace(revisions);
         self.server_config.replace(config_result.clone());
         self.config_channel.set(config_result);
         self.api_proxy_config.replace(api_proxy_result.clone());
         self.api_proxy_config_channel.set(api_proxy_result);
-        self.revisions.replace(revisions);
-        self.is_fetching.store(false, Ordering::Release);
     }
 
     pub async fn get_plans_config(&self) -> Option<Rc<PlansConfigDto>> {
@@ -443,12 +442,18 @@ impl ConfigService {
         }
     }
 
-    pub async fn save_sources(&self, dto: SourcesConfigDto) -> Result<(), Error> {
-        let mut revision = self.revisions.borrow().sources.clone();
-        if revision.is_none() {
-            self.fetch_server_config().await;
-            revision = self.revisions.borrow().sources.clone();
-        }
+    /// Returns the revision paired with the exact configuration delivered to the form.
+    pub fn sources_revision_for(&self, config: &Rc<AppConfigDto>) -> Option<String> {
+        self.server_config.borrow().as_ref().filter(|current| Rc::ptr_eq(current, config))?;
+        self.revisions.borrow().sources.clone()
+    }
+
+    pub fn playlist_scope_for(&self, config: &Rc<AppConfigDto>) -> Option<String> {
+        self.server_config.borrow().as_ref().filter(|current| Rc::ptr_eq(current, config))?;
+        self.revisions.borrow().playlist_scope.clone()
+    }
+
+    pub async fn save_sources(&self, dto: SourcesConfigDto, revision: Option<String>) -> Result<Option<String>, Error> {
         let Some(revision) = revision else {
             return Err(Error::PreconditionRequired(
                 "Missing source revision. Reload configuration and retry.".to_string(),
@@ -468,11 +473,8 @@ impl ConfigService {
         .await
         {
             Ok(response) => {
-                if let Some(rev) = response.headers.get(HEADER_CONFIG_SOURCES_REVISION) {
-                    self.revisions.borrow_mut().sources = Some(rev.clone());
-                }
                 self.event_service.set_config_change_message_blocked(false);
-                Ok(())
+                Ok(response.headers.get(HEADER_CONFIG_SOURCES_REVISION).cloned())
             }
             Err(err) => {
                 self.event_service.set_config_change_message_blocked(false);

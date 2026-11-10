@@ -256,6 +256,11 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
                 .collect::<Vec<DropDownOption>>()
         });
 
+    let stale_target = form_state
+        .form
+        .target_id
+        .as_ref()
+        .is_some_and(|name| !filtered_targets.iter().any(|target| &target.name == name));
     let kind_options = use_memo(form_state.form.kind.clone(), |kind| {
         vec![
             DropDownOption {
@@ -296,7 +301,7 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
         let translate = translate.clone();
         Callback::from(move |_: String| {
             let form = form_state.data().clone();
-            if existing_id.is_none() && form.target_id.is_none() {
+            if stale_target || (existing_id.is_none() && form.target_id.is_none()) {
                 services.toastr.error(translate.t("MESSAGES.RECORDING.NO_TARGET"));
                 return;
             }
@@ -480,6 +485,9 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
                 }) }
                 { edit_field_bool!(form_state, translate.t("LABEL.RECORDING_FORM_ENABLED"), enabled, RuleFormAction::Enabled) }
             </div>
+            { if stale_target {
+                html! { <p role="alert">{translate.t("MESSAGES.RECORDING.NO_TARGET")}</p> }
+            } else { Html::default() } }
             <div class="tp__rule-form__toolbar tp__form-page__toolbar tp__form-page__toolbar--right">
                 <TextButton
                     class="secondary"
@@ -493,6 +501,7 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
                     name="rule_save"
                     icon="Save"
                     title={ translate.t("LABEL.RECORDING_FORM_SAVE") }
+                    disabled={stale_target}
                     onclick={on_save}
                 />
             </div>

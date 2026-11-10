@@ -27,9 +27,12 @@ macro_rules! create_player_api_for_cluster {
             ExtractAcceptHeader(accept): ExtractAcceptHeader,
             axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
             axum::extract::Query(query): axum::extract::Query<shared::model::PlaylistContentQuery>,
+            headers: axum::http::HeaderMap,
             axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
         ) -> impl IntoResponse + Send {
-            playlist_content(accept.clone(), &app_state, &playlist_req, $cluster, query.explorer).await.into_response()
+            playlist_content(accept, &app_state, &headers, &playlist_req, $cluster, query.explorer)
+                .await
+                .into_response()
         }
     };
 }

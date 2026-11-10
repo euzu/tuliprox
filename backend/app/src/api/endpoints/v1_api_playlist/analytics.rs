@@ -4,13 +4,16 @@ use crate::{
 };
 use axum::{
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use chrono::{DateTime, Local, TimeZone};
 use cron::Schedule;
-use shared::model::{ScheduleTaskType, TargetAnalyticsEntryDto, TargetAnalyticsResponseDto, TargetType};
+use shared::{
+    model::{ScheduleTaskType, TargetAnalyticsEntryDto, TargetAnalyticsResponseDto, TargetType},
+    utils::HEADER_PLAYLIST_SCOPE_REVISION,
+};
 use std::{str::FromStr, sync::Arc};
 use tokio_util::io::ReaderStream;
 
@@ -53,11 +56,12 @@ pub(crate) fn parse_playlist_schedule_next_runs<'a, Z: TimeZone>(
         .collect()
 }
 
-pub(super) async fn playlist_analytics(State(app_state): State<Arc<AppState>>) -> Json<TargetAnalyticsResponseDto> {
-    let targets: Vec<Arc<ConfigTarget>> = {
-        let sources = app_state.app_config.sources.load();
-        sources.sources.iter().flat_map(|source| &source.targets).cloned().collect()
-    };
+pub(super) async fn playlist_analytics(
+    State(app_state): State<Arc<AppState>>,
+) -> ([(&'static str, String); 1], Json<TargetAnalyticsResponseDto>) {
+    let sources = app_state.app_config.sources.load_full();
+    let revision = sources.playlist_update_scope().revision();
+    let targets: Vec<Arc<ConfigTarget>> = sources.sources.iter().flat_map(|source| &source.targets).cloned().collect();
     let config = app_state.app_config.config.load_full();
 
     let now = Local::now();
@@ -103,15 +107,19 @@ pub(super) async fn playlist_analytics(State(app_state): State<Arc<AppState>>) -
         });
     }
 
-    Json(TargetAnalyticsResponseDto { targets: entries })
+    ([(HEADER_PLAYLIST_SCOPE_REVISION, revision)], Json(TargetAnalyticsResponseDto { targets: entries }))
 }
 
 pub(super) async fn playlist_analytics_unmapped_csv(
     State(app_state): State<Arc<AppState>>,
     Path(target_id): Path<u16>,
+    headers: HeaderMap,
 ) -> Response {
     let (target_name, storage_path) = {
-        let sources = app_state.app_config.sources.load();
+        let sources = match app_state.playlist_sources_for_request(&headers) {
+            Ok(sources) => sources,
+            Err(status) => return status.into_response(),
+        };
         let Some(target) = sources.get_target_by_id(target_id) else {
             return StatusCode::NOT_FOUND.into_response();
         };
