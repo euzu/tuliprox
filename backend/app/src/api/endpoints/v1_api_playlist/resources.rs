@@ -6,7 +6,7 @@ use crate::{
         model::AppState,
     },
     iptv::stalker::client::validate_public_playable_url,
-    model::{AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigInputUpdateQuality},
+    model::{ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigInputUpdateQuality, SourcesConfig},
     processing::processor::re_resolve_stalker_url,
 };
 use axum::response::IntoResponse;
@@ -80,7 +80,7 @@ pub(super) fn resolve_provider_url_with_input(input: &ConfigInput, url: &str) ->
 }
 
 pub(super) fn resolve_provider_url_for_request(
-    app_config: &AppConfig,
+    sources: &SourcesConfig,
     playlist_request: &PlaylistRequest,
     url: &str,
 ) -> String {
@@ -89,14 +89,17 @@ pub(super) fn resolve_provider_url_for_request(
     }
 
     match playlist_request {
-        PlaylistRequest::Input(input_name) => app_config
+        PlaylistRequest::Input(input_name) => sources
             .get_input_by_name(&input_name.intern())
             .map_or_else(|| url.to_string(), |input| resolve_provider_url_with_input(input.as_ref(), url)),
-        PlaylistRequest::Target(target_id) => app_config
+        PlaylistRequest::Target(target_id) => sources
             .get_target_by_id(*target_id)
-            .and_then(|target| app_config.get_inputs_for_target(&target.name))
-            .and_then(|inputs| {
-                let mut matches = inputs.into_iter().filter(|input| input.get_resolve_provider(url).is_some());
+            .and_then(|target| sources.get_source_inputs_by_target_by_name(&target.name))
+            .and_then(|input_names| {
+                let mut matches = sources
+                    .inputs
+                    .iter()
+                    .filter(|input| input_names.contains(&input.name) && input.get_resolve_provider(url).is_some());
                 let first = matches.next()?;
                 if matches.next().is_some() {
                     return None;
@@ -234,14 +237,30 @@ async fn stalker_resource_response(
 
 pub(super) async fn playlist_resolve_url(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Json(request): axum::extract::Json<PlaylistUrlResolveRequest>,
 ) -> impl IntoResponse + Send {
     match request {
         PlaylistUrlResolveRequest::Webplayer { target_id, virtual_id, cluster } => {
+            let sources = match app_state.playlist_sources_for_request(&headers) {
+                Ok(sources) => sources,
+                Err(status) => return status.into_response(),
+            };
+            if sources.get_target_by_id(target_id).is_none() {
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            }
             playlist_webplayer(axum::extract::State(app_state), target_id, virtual_id, cluster).into_response()
         }
         PlaylistUrlResolveRequest::Provider { playlist_request, url } => {
-            resolve_provider_url_for_request(&app_state.app_config, &playlist_request, &url).into_response()
+            let sources = if matches!(playlist_request, PlaylistRequest::Target(_)) {
+                match app_state.playlist_sources_for_request(&headers) {
+                    Ok(sources) => sources,
+                    Err(status) => return status.into_response(),
+                }
+            } else {
+                app_state.app_config.sources.load_full()
+            };
+            resolve_provider_url_for_request(&sources, &playlist_request, &url).into_response()
         }
     }
 }

@@ -669,6 +669,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let is_dirty = use_state(|| false);
     // Monotonic edit revision; a save only clears is_dirty when no edit happened while it was in flight
     let edit_revision = use_mut_ref(|| 0u64);
+    let saved_edit_revision = use_mut_ref(|| 0u64);
+    let source_revision = use_mut_ref(|| None::<String>);
     // Delete mode toggle
     let delete_mode = use_state(|| false);
     let cursor_grabbing = use_state(|| false);
@@ -755,10 +757,14 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let force_update = force_update.clone();
         let initialized_from_playlist = initialized_from_playlist.clone();
+        let services = services.clone();
+        let edit_revision = edit_revision.clone();
+        let saved_edit_revision = saved_edit_revision.clone();
+        let source_revision = source_revision.clone();
         use_effect_with(
             (playlists.sources.clone(), config_ctx.config.clone(), is_local_mode, *initialized_from_playlist),
             move |(sources, app_config, local_mode, initialized)| {
-                if !(*local_mode && *initialized) {
+                if !(*local_mode && *initialized) && *edit_revision.borrow() == *saved_edit_revision.borrow() {
                     if let Some(entries) = sources.as_ref() {
                         let mut current_id = 1;
                         let mut gen_blocks = Vec::new();
@@ -913,6 +919,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             editor_state.next_id = current_id;
                         }
                         force_update.set(*force_update + 1);
+                        *source_revision.borrow_mut() =
+                            app_config.as_ref().and_then(|config| services.config.sources_revision_for(config));
                         initialized_from_playlist.set(true);
                     }
                 }
@@ -1230,6 +1238,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let translate = translate.clone();
         let is_dirty = is_dirty.clone();
         let edit_revision = edit_revision.clone();
+        let saved_edit_revision = saved_edit_revision.clone();
+        let source_revision = source_revision.clone();
         Callback::from(move |()| {
             let base_sources = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
             let editor_state = editor_state_ref.borrow();
@@ -1248,9 +1258,14 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             let is_dirty = is_dirty.clone();
             let edit_revision = edit_revision.clone();
             let saved_revision = *edit_revision.borrow();
+            let saved_edit_revision = saved_edit_revision.clone();
+            let source_revision = source_revision.clone();
+            let revision = source_revision.borrow().clone();
             wasm_bindgen_futures::spawn_local(async move {
-                match services.config.save_sources(sources_config).await {
-                    Ok(()) => {
+                match services.config.save_sources(sources_config, revision).await {
+                    Ok(revision) => {
+                        *saved_edit_revision.borrow_mut() = saved_revision;
+                        *source_revision.borrow_mut() = revision;
                         // Preserve the dirty flag if the editor changed while the save was in flight
                         if *edit_revision.borrow() == saved_revision {
                             is_dirty.set(false);

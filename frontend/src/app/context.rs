@@ -15,6 +15,7 @@ type SingleSource = (Vec<Rc<InputRow>>, Vec<Rc<ConfigTargetDto>>);
 #[derive(Clone, PartialEq)]
 pub struct PlaylistContext {
     pub sources: Rc<Option<Rc<Vec<SingleSource>>>>,
+    pub revision: Option<String>,
 }
 
 #[derive(Clone)]
@@ -22,6 +23,7 @@ pub struct PlaylistExplorerContext {
     pub playlist: UseStateHandle<Option<Rc<UiPlaylistCategories>>>,
     pub playlist_request: UseStateHandle<Option<PlaylistRequest>>,
     pub error: UseStateHandle<Option<String>>,
+    pub target_name: UseStateHandle<Option<String>>,
 }
 
 // Yew 0.22 changed UseStateHandle::PartialEq to compare by handle identity instead of value.

@@ -135,6 +135,49 @@ fn assert_run_state(ctx: &PlaylistProcessingContext<CollectSink>, state: Playlis
 }
 
 #[tokio::test]
+async fn manual_update_scope_change_before_processing_writes_no_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let ctx = library_context(temp.path(), ProcessingOrder::default()).await;
+    let expected = ctx.config.sources.load().playlist_update_scope();
+    let mut changed = (*ctx.config.sources.load_full()).clone();
+    let targets = &mut changed.sources[0].targets;
+    Arc::make_mut(&mut targets[0]).id = 21;
+    Arc::make_mut(&mut targets[1]).id = 20;
+    let run_id: PlaylistUpdateRunId = "stale-scope".into();
+    exec_processing(
+        ProcessingRun::for_run(
+            run_id.clone(),
+            ctx.client.clone(),
+            ctx.config.clone(),
+            Arc::new(ProcessTargets {
+                enabled: true,
+                inputs: vec![2, 3],
+                targets: vec![20],
+                target_names: vec!["selected".into()],
+            }),
+            ctx.events.clone(),
+        )
+        .with_expected_scope(Some(expected))
+        .with_update_guard(UpdateGuard::new())
+        .with_bootstrap({
+            let config = ctx.config.clone();
+            let changed = Arc::new(changed);
+            move || {
+                config.sources.store(Arc::clone(&changed));
+                std::future::ready(())
+            }
+        }),
+    )
+    .await;
+    assert!(!temp.path().join("selected.m3u").exists());
+    assert!(!temp.path().join("unselected.m3u").exists());
+    let events = ctx.events.0.lock().unwrap();
+    assert!(matches!(events.as_slice(), [EventMessage::PlaylistUpdate(summary)]
+        if summary.state == PlaylistUpdateState::Failure && summary.run_id.as_ref() == Some(&run_id)
+            && summary.error.as_deref() == Some("Playlist update scope changed while the request was queued")));
+}
+
+#[tokio::test]
 async fn manual_update_library_empty_rescan_persists_zero_to_zero_and_nonzero_to_zero_with_companion() {
     for disk in [false, true] {
         for previous_population in [false, true] {

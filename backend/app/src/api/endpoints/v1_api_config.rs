@@ -13,7 +13,7 @@ use crate::{
     iptv::xtream::{get_xtream_stream_url_base, xtream_login},
     model::{
         recording_reload_outcome, validate_library_paths_from_dto, ApiProxyConfig, InputSource, RecordingReloadOutcome,
-        UserPlan,
+        SourcesConfig, UserPlan,
     },
     utils::request::download_text_content,
 };
@@ -28,12 +28,12 @@ use shared::{
     error::TuliproxError,
     model::{
         permission::{Permission, PermissionSet},
-        ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigDto, ConfigTargetDto, InputFetchMethod, PlansConfigDto,
-        SourcesConfigDto, XtreamLoginRequest,
+        ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigDto, ConfigTargetDto, ConfigType, EventMessage,
+        InputFetchMethod, PlansConfigDto, PlaylistUpdateScopeDto, SourcesConfigDto, XtreamLoginRequest,
     },
     utils::{
         parse_provider_scheme_url_parts, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
-        HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH, PROVIDER_SCHEME_PREFIX,
+        HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH, HEADER_PLAYLIST_SCOPE_REVISION, PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{collections::HashMap, path::Path, sync::Arc};
@@ -609,6 +609,7 @@ async fn save_config_sources(
             return internal_server_error!();
         }
     };
+    app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Sources));
     response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_SOURCES_REVISION, &updated_revision)
 }
 
@@ -734,6 +735,30 @@ async fn save_config_api_proxy_config(
     response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_API_PROXY_REVISION, &updated_revision)
 }
 
+/// Compare before permission filtering, using the same batch promotion as the runtime.
+fn matches_playlist_scope(displayed: &SourcesConfigDto, loaded: &PlaylistUpdateScopeDto) -> bool {
+    let Ok(sources) = SourcesConfig::try_from(displayed) else { return false };
+    let displayed_scope = sources.playlist_update_scope();
+    if displayed_scope == *loaded {
+        return true;
+    }
+    if displayed_scope.sources != loaded.sources || !displayed.inputs.iter().any(|input| input.input_type.is_batch()) {
+        return false;
+    }
+
+    // Startup assigns sequential IDs after expanding batches. Reloads and the editor
+    // expand batches after assigning IDs, so also compare the startup allocation.
+    let mut displayed = displayed.clone();
+    let ids = displayed.inputs.iter_mut().flat_map(|input| {
+        std::iter::once(&mut input.id).chain(input.aliases.iter_mut().flatten().map(|alias| &mut alias.id))
+    });
+    for (index, id) in ids.enumerate() {
+        let Ok(assigned) = u16::try_from(index + 1) else { return false };
+        *id = assigned;
+    }
+    SourcesConfig::try_from(&displayed).is_ok_and(|sources| sources.playlist_update_scope() == *loaded)
+}
+
 async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<PermissionSet>) -> axum::response::Response {
     let (config_file_path, sources_file_path, api_proxy_file_path) = {
         let paths = app_state.app_config.paths.load();
@@ -747,6 +772,7 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
             return internal_server_error!();
         }
     };
+    let _sources_lock = app_state.app_config.file_locks.read_lock(Path::new(&sources_file_path)).await;
     let sources_revision = match read_file_revision(&sources_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
@@ -794,8 +820,18 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
                 error!("Failed to prepare users: {err}");
                 internal_server_error!()
             } else {
+                let loaded_scope = app_state.app_config.sources.load().playlist_update_scope();
+                let scope_matches = matches_playlist_scope(&app_config.sources, &loaded_scope);
                 filter_app_config_by_permissions(&mut app_config, permissions);
-                let response = axum::response::Json(app_config).into_response();
+                let has_visible_targets = app_config.sources.sources.iter().any(|source| !source.targets.is_empty());
+                let mut response = axum::response::Json(app_config).into_response();
+                if scope_matches && has_visible_targets {
+                    response = response_with_revision_header(
+                        response,
+                        HEADER_PLAYLIST_SCOPE_REVISION,
+                        &loaded_scope.revision(),
+                    );
+                }
                 let response = response_with_revision_header(response, HEADER_CONFIG_MAIN_REVISION, &main_revision);
                 let response =
                     response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
@@ -1655,14 +1691,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().to_string_lossy().to_string();
         let sources_file = temp_dir.path().join("source.yml");
-        let input_dto = shared::model::ConfigInputDto {
-            name: "input1".into(),
-            url: "http://example.com/playlist.m3u".to_string(),
-            ..Default::default()
-        };
         let curation: shared::model::CurationConfigDto = serde_json::from_value(serde_json::json!({"enabled": false, "catalog_selection": "curated", "tmdb": {"api": {"access_token": "discovery-test-token"}, "trending": [{"kind": "movie", "time_window": "week", "limit": 37, "create_xtream_category": false}]}})).unwrap();
         let initial_sources = SourcesConfigDto {
-            inputs: vec![input_dto.clone()],
+            inputs: vec![shared::model::ConfigInputDto {
+                name: "input1".into(),
+                url: "http://example.com/playlist.m3u".to_string(),
+                ..Default::default()
+            }],
             sources: vec![shared::model::ConfigSourceDto {
                 inputs: vec!["input1".into()],
                 targets: vec![shared::model::ConfigTargetDto {
@@ -1683,20 +1718,12 @@ mod tests {
             ..crate::model::Config::default()
         };
         let app_state = create_test_app_state(test_config);
-        app_state.app_config.paths.store(Arc::new(shared::model::ConfigPaths {
-            home_path: config_path.clone(),
-            config_path: config_path.clone(),
-            storage_path: config_path.clone(),
-            config_file_path: String::new(),
-            sources_file_path: sources_file.to_string_lossy().to_string(),
-            mapping_file_path: None,
-            mapping_files_used: None,
-            template_file_path: None,
-            template_files_used: None,
-            failover_file_path: None,
-            api_proxy_file_path: String::new(),
-            custom_stream_response_path: None,
-        }));
+        let mut paths = (*app_state.app_config.paths.load_full()).clone();
+        paths.home_path.clone_from(&config_path);
+        paths.config_path.clone_from(&config_path);
+        paths.storage_path = config_path;
+        paths.sources_file_path = sources_file.to_string_lossy().into_owned();
+        app_state.app_config.paths.store(Arc::new(paths));
         super::ConfigFile::load_sources(&app_state).await.unwrap();
 
         tuliprox_repository::save_target_bouquet(
@@ -1714,35 +1741,41 @@ mod tests {
         .await
         .unwrap();
 
-        let updated_sources = SourcesConfigDto {
-            inputs: vec![input_dto],
-            sources: vec![shared::model::ConfigSourceDto {
-                inputs: vec!["input1".into()],
-                targets: vec![shared::model::ConfigTargetDto {
-                    id: 1,
-                    name: "target_renamed".to_string(),
-                    curation: Some(curation.clone()),
-                    output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto::default())],
-                    ..Default::default()
-                }],
-            }],
-            ..Default::default()
-        };
+        let mut updated_sources = initial_sources;
+        updated_sources.sources[0].targets[0].name = "target_renamed".to_string();
 
+        let mut events = app_state.event_manager.get_event_channel();
+        let previous_scope = app_state.app_config.sources.load().playlist_update_scope().revision();
         let rev = super::read_file_revision(sources_file.to_str().unwrap()).await.unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_IF_MATCH, HeaderValue::from_str(&rev).unwrap());
 
         let save_future = super::save_config_sources(
             axum::extract::State(Arc::clone(&app_state)),
-            headers,
-            axum::Json(updated_sources),
+            headers.clone(),
+            axum::Json(updated_sources.clone()),
         );
         let response = tokio::time::timeout(Duration::from_secs(5), save_future)
             .await
             .expect("save_config_sources must not deadlock");
 
         assert_eq!(response.into_response().status(), StatusCode::OK);
+        let source_change = |event| matches!(event, super::EventMessage::ConfigChange(super::ConfigType::Sources));
+        assert_eq!(
+            std::iter::from_fn(|| events.try_recv().ok()).filter(|event| source_change(event.clone())).count(),
+            1,
+        );
+        let mut stale_scope = HeaderMap::new();
+        stale_scope.insert(HEADER_IF_MATCH, HeaderValue::from_str(&previous_scope).unwrap());
+        assert_eq!(app_state.playlist_sources_for_request(&stale_scope).err(), Some(StatusCode::PRECONDITION_FAILED),);
+        let rejected = super::save_config_sources(
+            axum::extract::State(Arc::clone(&app_state)),
+            headers,
+            axum::Json(updated_sources),
+        )
+        .await;
+        assert_eq!(rejected.into_response().status(), StatusCode::CONFLICT);
+        assert!(!std::iter::from_fn(|| events.try_recv().ok()).any(source_change));
         assert!(!tuliprox_repository::target_bouquet_exists(temp_dir.path(), "target_1").await);
         assert!(!tuliprox_repository::target_bouquet_exists(temp_dir.path(), "target_renamed").await);
         let runtime_sources = app_state.app_config.sources.load();
@@ -1754,6 +1787,77 @@ mod tests {
         let saved: SourcesConfigDto =
             serde_saphyr::from_str(&tokio::fs::read_to_string(&sources_file).await.unwrap()).unwrap();
         assert_eq!(saved.sources[0].targets[0].curation.as_ref(), Some(&curation));
+    }
+
+    #[tokio::test]
+    async fn config_scope_revision_requires_matching_inputs_and_membership() {
+        use axum::body::to_bytes;
+        use shared::utils::HEADER_PLAYLIST_SCOPE_REVISION;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let config_path = dir.path().join("config.yml");
+        let sources_path = dir.path().join("source.yml");
+        let batch_path = dir.path().join("batch.csv");
+        tokio::fs::write(&config_path, "api:\n  host: 127.0.0.1\n  port: 8901\n").await.unwrap();
+        tokio::fs::write(
+            &batch_path,
+            "#name;url;max_connections;priority;enabled\naccount;http://example.com/batch.m3u;1;0;true\n",
+        )
+        .await
+        .unwrap();
+        let displayed = serde_json::json!({
+            "inputs": [
+                {"name": "batch", "type": "m3u_batch", "url": format!("batch://{}", batch_path.display())},
+                {"name": "a", "type": "m3u", "url": "http://example.com/a.m3u"},
+                {"name": "b", "type": "m3u", "url": "http://example.com/b.m3u"}
+            ],
+            "sources": [{"inputs": ["batch", "a"], "targets": [{
+                "name": "target", "filter": "Name ~ \".*\"", "output": [{"type": "m3u", "filename": "target.m3u"}]
+            }]}]
+        });
+        tokio::fs::write(&sources_path, displayed.to_string()).await.unwrap();
+        let app = crate::api::model::create_test_app_state(crate::model::Config::default());
+        let mut paths = (*app.app_config.paths.load_full()).clone();
+        paths.home_path.clone_from(&root);
+        paths.config_path.clone_from(&root);
+        paths.storage_path = root;
+        paths.config_file_path = config_path.to_string_lossy().into_owned();
+        paths.sources_file_path = sources_path.to_string_lossy().into_owned();
+        paths.api_proxy_file_path = dir.path().join("api-proxy.yml").to_string_lossy().into_owned();
+        let initial = crate::config_loader::read_initial_app_config(&mut paths, true, false, false).await.unwrap();
+        app.app_config.paths.store(Arc::new(paths));
+        app.app_config.sources.store(initial.sources.load_full());
+
+        let revision = || app.app_config.sources.load().playlist_update_scope().revision();
+        let startup_revision = revision();
+        let response = super::get_config_common(&app, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[HEADER_PLAYLIST_SCOPE_REVISION], startup_revision);
+
+        super::ConfigFile::load_sources(&app).await.unwrap();
+        let reloaded_revision = revision();
+        assert_ne!(startup_revision, reloaded_revision, "fixture must cover both batch ID allocations");
+        let permissions = Some(PermissionSet::from(Permission::PlaylistRead));
+        let response = super::get_config_common(&app, permissions).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[HEADER_PLAYLIST_SCOPE_REVISION], reloaded_revision);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: AppConfigDto = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.sources.inputs.len(), 0);
+        assert_eq!(body.sources.sources[0].targets[0].name, "target");
+
+        let mut reordered = displayed.clone();
+        reordered["inputs"].as_array_mut().unwrap().swap(1, 2);
+        let mut reassigned = displayed;
+        reassigned["sources"][0]["inputs"][1] = serde_json::json!("b");
+        for changed in [reordered, reassigned] {
+            tokio::fs::write(&sources_path, changed.to_string()).await.unwrap();
+            let response = super::get_config_common(&app, permissions).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(HEADER_PLAYLIST_SCOPE_REVISION));
+            assert!(response.headers().contains_key(HEADER_CONFIG_SOURCES_REVISION));
+        }
     }
 
     #[tokio::test]

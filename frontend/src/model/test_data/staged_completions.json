@@ -4,6 +4,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 8,
         "target": "staged",
         "message": "Input 'staged' cluster 'live' rejected: current=100 candidate=1 threshold=95 quality=1; retaining previous cluster"
@@ -11,6 +12,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 8,
         "state": "Partial",
         "input_telemetry": {
@@ -48,6 +50,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 7,
         "state": "Partial",
         "input_telemetry": {
@@ -87,6 +90,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 9,
         "state": "Failure",
         "input_telemetry": {
@@ -127,6 +131,7 @@
     "completed": {
       "run_id": "staged-completion-run",
       "execution_order": 1,
+      "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
       "state": "Failure"
     },
     "persisted_input_result": {
@@ -139,6 +144,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 8,
         "state": "Success",
         "input_telemetry": {
@@ -176,6 +182,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 7,
         "state": "Success",
         "input_telemetry": {
@@ -215,6 +222,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 9,
         "state": "Failure",
         "input_telemetry": {
@@ -255,6 +263,7 @@
     "completed": {
       "run_id": "staged-completion-run",
       "execution_order": 1,
+      "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
       "state": "Failure"
     },
     "persisted_input_result": {
@@ -267,6 +276,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 8,
         "state": "Failure",
         "input_telemetry": {
@@ -301,6 +311,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 7,
         "state": "Failure",
         "input_telemetry": {
@@ -340,6 +351,7 @@
       {
         "run_id": "staged-completion-run",
         "execution_order": 1,
+        "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
         "input_id": 9,
         "state": "Failure",
         "input_telemetry": {
@@ -380,6 +392,7 @@
     "completed": {
       "run_id": "staged-completion-run",
       "execution_order": 1,
+      "scope_revision": "\"c3e9eb6a647a08404e1e97a1d54b61382107f4d7c9c403e93afd1aa2c9194c3e\"",
       "state": "Failure"
     },
     "persisted_input_result": {

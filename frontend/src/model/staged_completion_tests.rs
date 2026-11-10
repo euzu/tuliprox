@@ -22,6 +22,14 @@ struct StagedTrace {
     persisted_input_result: PersistedPlaylistUpdateInputResult,
 }
 
+impl StagedTrace {
+    fn card_statuses(&self, connection_context: WebSocketConnectionContext) -> Rc<PlaylistUpdateCardStatuses> {
+        let revision = self.completed.scope_revision.as_deref().expect("staged trace includes the run revision");
+        Rc::new(PlaylistUpdateCardStatuses::for_connection(connection_context))
+            .reduce(PlaylistUpdateCardStatusAction::ResetScope { connection_context, revision: Rc::from(revision) })
+    }
+}
+
 fn traces() -> Vec<StagedTrace> {
     let traces: Vec<_> = serde_json::from_str(include_str!("test_data/staged_completions.json")).unwrap();
     assert_eq!(traces.len(), 3, "processing fixture must cover Partial, Success and Failure");
@@ -56,7 +64,7 @@ fn playlist_update_status_pipeline_transparency_reload_restores_running_target_r
         let sources = sources();
         let status = PlaylistUpdateStatusDto::default();
         let cards = build_input_update_card_models(&sources, &status);
-        let mut state = Rc::new(PlaylistUpdateCardStatuses::for_connection(connection));
+        let mut state = trace.card_statuses(connection);
         state = state.reduce(PlaylistUpdateCardStatusAction::RestoreActive {
             connection_context: connection,
             progress: vec![own.clone()],
@@ -132,6 +140,8 @@ fn playlist_update_status_reload_restores_updating_but_never_overwrites_live_or_
 #[test]
 fn playlist_update_status_pipeline_transparency_real_staged_trace_keeps_own_result_after_global_failure_and_reload() {
     for trace in traces() {
+        let connection = WebSocketConnectionContext::new(1, true);
+        let mut state = trace.card_statuses(connection);
         let expected = match trace.persisted_input_result.state {
             PlaylistUpdateState::Success => InputUpdateCardStatus::Success,
             PlaylistUpdateState::Partial => InputUpdateCardStatus::Partial,
@@ -148,8 +158,6 @@ fn playlist_update_status_pipeline_transparency_real_staged_trace_keeps_own_resu
             ..PlaylistUpdateStatusDto::default()
         };
         let cards = build_input_update_card_models(&sources, &persisted);
-        let connection = WebSocketConnectionContext::new(1, true);
-        let mut state = Rc::new(PlaylistUpdateCardStatuses::for_connection(connection));
         for progress in trace.progress {
             state = state.reduce(PlaylistUpdateCardStatusAction::Progress { connection_context: connection, progress });
         }
@@ -200,7 +208,7 @@ fn playlist_update_status_pipeline_transparency_unknown_completion_still_uses_gl
     let trace =
         traces().into_iter().find(|trace| trace.persisted_input_result.state == PlaylistUpdateState::Partial).unwrap();
     let connection = WebSocketConnectionContext::new(1, true);
-    let mut state = Rc::new(PlaylistUpdateCardStatuses::for_connection(connection));
+    let mut state = trace.card_statuses(connection);
     let mut observed = false;
     for progress in trace.progress.into_iter().filter(|event| event.input_id != Some(8) || event.state.is_none()) {
         observed |= progress.input_id == Some(8);

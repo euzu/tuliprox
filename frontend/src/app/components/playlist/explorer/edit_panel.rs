@@ -10,7 +10,7 @@ use crate::{
             recording::target_name_for_id,
             IconButton, RadioButtonGroup, TextButton,
         },
-        context::{ConfigContext, PlaylistExplorerContext},
+        context::{ConfigContext, PlaylistContext, PlaylistExplorerContext},
     },
     generate_form_reducer,
     hooks::use_service_context,
@@ -1018,6 +1018,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
     let services = use_service_context();
     let explorer_ctx = use_context::<PlaylistExplorerContext>();
     let config_ctx = use_context::<ConfigContext>();
+    let playlist_scope = use_context::<PlaylistContext>().and_then(|ctx| ctx.revision);
 
     let Some(ref item) = props.item else {
         return html! {};
@@ -1064,6 +1065,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
         let field_errors = field_errors.clone();
         let translate = translate.clone();
 
+        let playlist_scope = playlist_scope.clone();
         use_effect_with((*active_scope, item.virtual_id, item.input_name.clone()), move |(scope, _, _)| {
             let services = services.clone();
             let item = item.clone();
@@ -1087,6 +1089,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
             deltas.set(FieldDeltas::default());
             field_errors.set(HashMap::new());
 
+            let revision = playlist_scope.clone();
             spawn_local(async move {
                 let mut failed = false;
 
@@ -1094,7 +1097,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                 let mut series_props: Option<SeriesStreamProperties> = None;
                 if kind == OverrideItemKind::Series {
                     if let Some(req) = explorer_ctx.as_ref().and_then(|c| c.playlist_request.as_ref()) {
-                        series_props = services.playlist.get_series_info(&item, req).await;
+                        series_props = services.playlist.get_series_info(&item, req, revision.as_deref()).await;
                     }
                 }
 
@@ -1235,19 +1238,20 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
             let translate = translate.clone();
             let config_ctx = config_ctx.clone();
             let item = item.clone();
+            let revision = playlist_scope.clone();
 
             spawn_local(async move {
                 let mut triggered = false;
                 if let Some(tid) = target_id {
-                    if services.playlist.update_target_by_id(tid).await.is_ok() {
-                        triggered = true;
+                    if let Some(revision) = revision {
+                        triggered = services.playlist.update_target_ids(&[tid], Some(&revision)).await.is_ok();
                     }
                 } else if let Some(cfg) = config_ctx.as_ref().and_then(|c| c.config.as_ref()) {
                     if let Some(input) = cfg.sources.inputs.iter().find(|i| i.name.as_ref() == item.input_name.as_ref())
                     {
                         if services
                             .playlist
-                            .update_input(&[], input.id, InputUpdateAction::Provider(InputRefreshPolicy::NORMAL))
+                            .update_input(&[], input.id, InputUpdateAction::Provider(InputRefreshPolicy::NORMAL), None)
                             .await
                             .is_ok()
                         {

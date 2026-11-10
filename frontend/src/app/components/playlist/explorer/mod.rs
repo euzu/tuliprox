@@ -23,7 +23,7 @@ use crate::{
             DropDownOption, DropDownSelection, IconButton, NoContent, PluginActionDialog, PluginActionMenuItems,
             PluginActionRequest, PluginSlot, Search, Select, SplitButton, SplitPane, TextButton,
         },
-        context::{ConfigContext, FailoverGroupsNavigation, PlaylistExplorerContext},
+        context::{ConfigContext, FailoverGroupsNavigation, PlaylistContext, PlaylistExplorerContext},
     },
     hooks::{use_clipboard_copy, use_service_context},
     html_if,
@@ -223,11 +223,17 @@ pub fn level_after_search(current: &ExplorerLevel) -> ExplorerLevel {
     }
 }
 
+#[derive(Properties, PartialEq)]
+pub struct PlaylistExplorerProps {
+    pub stale_target: bool,
+}
+
 #[component]
-pub fn PlaylistExplorer() -> Html {
+pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     let explorer_ctx = use_context::<PlaylistExplorerContext>();
     let failover_navigation = use_context::<FailoverGroupsNavigation>();
     let cfg_ctx = use_context::<ConfigContext>();
+    let playlist_scope = use_context::<PlaylistContext>().and_then(|ctx| ctx.revision);
     let dialog_ctx = use_context::<DialogService>();
     let translate = use_translation();
 
@@ -295,8 +301,20 @@ pub fn PlaylistExplorer() -> Html {
     let plugin_action = use_state(|| None::<(PluginActionRequest, Value)>);
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
+    let popup_scope = use_state(|| None::<String>);
+    let popup_invalid = props.stale_target || (is_target_view && *popup_scope != playlist_scope);
+    let menu_open = *popup_is_open && !popup_invalid;
     let copy_to_clipboard = use_clipboard_copy();
     let is_mobile = use_state(is_mobile_viewport);
+
+    {
+        let popup_is_open = popup_is_open.clone();
+        use_effect_with(popup_invalid, move |&invalid| {
+            if invalid {
+                popup_is_open.set(false);
+            }
+        });
+    }
 
     // Keep mobile state in sync on resize, and close context/dropdown menus on viewport change.
     // The listener is registered once, so it reads the current values through refs that every render
@@ -572,25 +590,23 @@ pub fn PlaylistExplorer() -> Html {
     };
 
     // Popup actions
-    let handle_popup_onclick = {
+    let handle_episode_popup_onclick = {
         let set_selected_channel = selected_channel.clone();
         let set_anchor_ref = popup_anchor_ref.clone();
         let set_is_open = popup_is_open.clone();
-        Callback::from(move |(dto, event): (Rc<UiPlaylistItem>, MouseEvent)| {
+        let set_popup_scope = popup_scope.clone();
+        let revision = playlist_scope.clone();
+        let stale_target = props.stale_target;
+        Callback::from(move |(dto, event): (ChannelSelection, MouseEvent)| {
             event.prevent_default();
             event.stop_propagation();
+            if stale_target || (is_target_view && revision.is_none()) {
+                return;
+            }
             if let Some(target) = event.target_dyn_into::<web_sys::Element>() {
-                set_selected_channel.set(Some(ChannelSelection {
-                    virtual_id: VirtualId::new(dto.virtual_id),
-                    cluster: dto.xtream_cluster,
-                    downloadable: dto.xtream_cluster == XtreamCluster::Video,
-                    url: dto.url.to_string(),
-                    title: dto.title.to_string(),
-                    input_name: dto.input_name.to_string(),
-                    input_stream_id: dto.input_stream_id.to_string(),
-                    plugin_context: plugin_channel_context(&dto),
-                }));
+                set_selected_channel.set(Some(dto));
                 set_anchor_ref.set(Some(target));
+                set_popup_scope.set(revision.clone());
                 set_is_open.set(true);
             }
         })
@@ -601,6 +617,9 @@ pub fn PlaylistExplorer() -> Html {
         let selected_channel = selected_channel.clone();
         let set_is_open = popup_is_open.clone();
         Callback::from(move |request: PluginActionRequest| {
+            if !menu_open {
+                return;
+            }
             if let Some(selection) = selected_channel.as_ref() {
                 let context = if request.slot == PluginSlotDto::ChannelDetailPanel {
                     json!({ "channel": selection.plugin_context.clone() })
@@ -618,20 +637,21 @@ pub fn PlaylistExplorer() -> Html {
         Callback::from(move |()| plugin_action.set(None))
     };
 
-    let handle_episode_popup_onclick = {
-        let set_selected_channel = selected_channel.clone();
-        let set_anchor_ref = popup_anchor_ref.clone();
-        let set_is_open = popup_is_open.clone();
-        Callback::from(move |(dto, event): (ChannelSelection, MouseEvent)| {
-            event.prevent_default();
-            event.stop_propagation();
-            if let Some(target) = event.target_dyn_into::<web_sys::Element>() {
-                set_selected_channel.set(Some(dto));
-                set_anchor_ref.set(Some(target));
-                set_is_open.set(true);
-            }
-        })
-    };
+    let handle_popup_onclick = handle_episode_popup_onclick.reform(|(dto, event): (Rc<UiPlaylistItem>, MouseEvent)| {
+        (
+            ChannelSelection {
+                virtual_id: VirtualId::new(dto.virtual_id),
+                cluster: dto.xtream_cluster,
+                downloadable: dto.xtream_cluster == XtreamCluster::Video,
+                url: dto.url.to_string(),
+                title: dto.title.to_string(),
+                input_name: dto.input_name.to_string(),
+                input_stream_id: dto.input_stream_id.to_string(),
+                plugin_context: plugin_channel_context(&dto),
+            },
+            event,
+        )
+    });
 
     let handle_popup_close = {
         let set_is_open = popup_is_open.clone();
@@ -650,8 +670,12 @@ pub fn PlaylistExplorer() -> Html {
         let copy_to_clipboard = copy_to_clipboard.clone();
         let config = config_ctx.config.clone();
         let failover_navigation = failover_navigation.clone();
+        let popup_scope = (*popup_scope).clone();
 
         Callback::from(move |(name, _): (String, _)| {
+            if !menu_open {
+                return;
+            }
             if let Ok(action) = ExplorerAction::from_str(&name) {
                 match action {
                     ExplorerAction::OpenFailoverGroup | ExplorerAction::AddToFailoverGroup => {
@@ -687,6 +711,7 @@ pub fn PlaylistExplorer() -> Html {
                                 let cluster = dto.cluster;
                                 let translate_clone = translate_clone.clone();
                                 let target_id = *target_id;
+                                let Some(revision) = popup_scope.clone() else { return };
                                 let services_clone = services.clone();
                                 spawn_local(async move {
                                     let request = PlaylistUrlResolveRequest::Webplayer {
@@ -694,7 +719,9 @@ pub fn PlaylistExplorer() -> Html {
                                         virtual_id: virtual_id.get(),
                                         cluster,
                                     };
-                                    if let Some(url) = services.playlist.resolve_url(request).await {
+                                    if let Some(url) =
+                                        services.playlist.resolve_url_scoped(request, Some(&revision)).await
+                                    {
                                         copy_to_clipboard.emit(url);
                                         services_clone.toastr.success(
                                             translate_clone.t("MESSAGES.PLAYLIST.WEBPLAYER_URL_COPY_TO_CLIPBOARD"),
@@ -711,38 +738,41 @@ pub fn PlaylistExplorer() -> Html {
                     ExplorerAction::CopyLinkProviderUrl => {
                         if let Some(dto) = &*selected_channel {
                             let url = dto.url.clone();
-                            if url.is_empty() {
-                                if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
-                                    let copy_to_clipboard = copy_to_clipboard.clone();
-                                    let services = services.clone();
-                                    let virtual_id = dto.virtual_id;
-                                    let playlist_request = playlist_request.clone();
-                                    spawn_local(async move {
-                                        if let Some(pli) =
-                                            services.playlist.get_episode(virtual_id.get(), &playlist_request).await
-                                        {
-                                            let url = pli.url.to_string();
-                                            let request = PlaylistUrlResolveRequest::Provider {
-                                                playlist_request,
-                                                url: url.clone(),
-                                            };
-                                            let resolved = services.playlist.resolve_url(request).await.unwrap_or(url);
-                                            copy_to_clipboard.emit(resolved);
-                                        }
-                                    });
-                                }
-                            } else if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
+                            if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
                                 let copy_to_clipboard = copy_to_clipboard.clone();
                                 let services = services.clone();
+                                let translate = translate_clone.clone();
+                                let virtual_id = dto.virtual_id;
                                 let playlist_request = playlist_request.clone();
+                                let revision = popup_scope.clone();
                                 spawn_local(async move {
+                                    let url = if url.is_empty() {
+                                        let Some(episode) = services
+                                            .playlist
+                                            .get_episode(virtual_id.get(), &playlist_request, revision.as_deref())
+                                            .await
+                                        else {
+                                            services
+                                                .toastr
+                                                .error(translate.t("MESSAGES.FAILED_TO_RETRIEVE_PROVIDER_URL"));
+                                            return;
+                                        };
+                                        episode.url.to_string()
+                                    } else {
+                                        url
+                                    };
                                     let request =
                                         PlaylistUrlResolveRequest::Provider { playlist_request, url: url.clone() };
-                                    let resolved =
-                                        services.playlist.resolve_url(request).await.unwrap_or_else(|| url.clone());
-                                    copy_to_clipboard.emit(resolved);
+                                    let scope = if is_target_view { revision.as_deref() } else { None };
+                                    match services.playlist.resolve_url_scoped(request, scope).await {
+                                        Some(resolved) => copy_to_clipboard.emit(resolved),
+                                        None if !is_target_view => copy_to_clipboard.emit(url),
+                                        None => services
+                                            .toastr
+                                            .error(translate.t("MESSAGES.FAILED_TO_RETRIEVE_PROVIDER_URL")),
+                                    }
                                 });
-                            } else {
+                            } else if !url.is_empty() {
                                 copy_to_clipboard.emit(url);
                             }
                         }
@@ -879,8 +909,10 @@ pub fn PlaylistExplorer() -> Html {
         let current_level = current_level.clone();
         let services = service_ctx.clone();
         let ctx = context.clone();
+        let playlist_scope = playlist_scope.clone();
 
         Callback::from(move |dto: Rc<UiPlaylistItem>| {
+            let revision = playlist_scope.clone();
             let current_level = current_level.clone();
             let services = services.clone();
             let ctx = ctx.clone();
@@ -888,7 +920,9 @@ pub fn PlaylistExplorer() -> Html {
             spawn_local(async move {
                 let mut handled = false;
                 if let Some(playlist_request) = ctx.playlist_request.as_ref() {
-                    if let Some(props) = services.playlist.get_series_info(&dto, playlist_request).await {
+                    if let Some(props) =
+                        services.playlist.get_series_info(&dto, playlist_request, revision.as_deref()).await
+                    {
                         handled = true;
                         current_level.set(ExplorerLevel::SeriesEpisodes(dto.clone(), Some(Box::new(props))));
                     }
@@ -1703,7 +1737,7 @@ pub fn PlaylistExplorer() -> Html {
 
             // POPUP CONTEXT MENU
             <PopupMenu
-                is_open={*popup_is_open}
+                is_open={menu_open}
                 anchor_ref={(*popup_anchor_ref).clone()}
                 placement={popup_placement}
                 gap={popup_in_card.then_some(CARD_POPUP_GAP_PX)}

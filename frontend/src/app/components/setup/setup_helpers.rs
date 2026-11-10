@@ -159,7 +159,7 @@ pub fn build_setup_app_config(
     for form in modified_forms {
         match form {
             ConfigForm::ApiProxy(_, api_proxy) => app_config.api_proxy = Some(api_proxy),
-            ConfigForm::Panel(_, _) => {}
+            ConfigForm::Panel(..) => {}
             other => modified_main_forms.push(other),
         }
     }
@@ -202,7 +202,7 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
             ConfigForm::FailoverGroups(_, failover_groups_cfg) => {
                 config.failover_groups = (!failover_groups_cfg.is_default()).then_some(failover_groups_cfg);
             }
-            ConfigForm::Panel(_, _) => {}
+            ConfigForm::Panel(..) => {}
             ConfigForm::ApiProxy(_, _) => {}
         }
     }

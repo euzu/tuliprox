@@ -59,6 +59,8 @@ pub struct PlaylistUpdateRunStateEvent {
     pub run_id: Option<PlaylistUpdateRunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_order: Option<PlaylistUpdateRunOrder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_revision: Option<String>,
     pub state: PlaylistUpdateState,
     /// Names of the targets the run processed. Empty when the run processed none or the sender does not
     /// report them.
@@ -73,7 +75,13 @@ impl PlaylistUpdateRunStateEvent {
         execution_order: PlaylistUpdateRunOrder,
         state: PlaylistUpdateState,
     ) -> Self {
-        Self { run_id: Some(run_id), execution_order: Some(execution_order), state, targets: Vec::new() }
+        Self {
+            run_id: Some(run_id),
+            execution_order: Some(execution_order),
+            scope_revision: None,
+            state,
+            targets: Vec::new(),
+        }
     }
 
     #[must_use]
@@ -88,7 +96,7 @@ impl PlaylistUpdateRunStateEvent {
 
     #[must_use]
     pub const fn uncorrelated(state: PlaylistUpdateState) -> Self {
-        Self { run_id: None, execution_order: None, state, targets: Vec::new() }
+        Self { run_id: None, execution_order: None, scope_revision: None, state, targets: Vec::new() }
     }
 }
 
@@ -106,6 +114,8 @@ impl<'de> Deserialize<'de> for PlaylistUpdateRunStateEvent {
                 run_id: Option<PlaylistUpdateRunId>,
                 #[serde(default)]
                 execution_order: Option<PlaylistUpdateRunOrder>,
+                #[serde(default)]
+                scope_revision: Option<String>,
                 state: PlaylistUpdateState,
                 #[serde(default)]
                 targets: Vec<String>,
@@ -114,8 +124,8 @@ impl<'de> Deserialize<'de> for PlaylistUpdateRunStateEvent {
 
         Ok(match CompatiblePayload::deserialize(deserializer)? {
             CompatiblePayload::Legacy(state) => Self::uncorrelated(state),
-            CompatiblePayload::Correlated { run_id, execution_order, state, targets } => {
-                Self { run_id, execution_order, state, targets }
+            CompatiblePayload::Correlated { run_id, execution_order, scope_revision, state, targets } => {
+                Self { run_id, execution_order, scope_revision, state, targets }
             }
         })
     }

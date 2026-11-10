@@ -154,7 +154,7 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
             ConfigForm::FailoverGroups(_, failover_groups_cfg) => {
                 config.failover_groups = (!failover_groups_cfg.is_default()).then_some(failover_groups_cfg);
             }
-            ConfigForm::Panel(_, _) => {}
+            ConfigForm::Panel(..) => {}
             ConfigForm::ApiProxy(_, _) => {}
         }
     }

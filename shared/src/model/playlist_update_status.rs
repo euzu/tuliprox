@@ -107,6 +107,49 @@ pub struct PlaylistUpdateStatusDto {
     pub active_updates: Vec<PlaylistUpdateProgressEvent>,
 }
 
+/// Runtime identity and source membership for the update view. No account data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistUpdateScopeDto {
+    pub inputs: Vec<PlaylistUpdateInputDto>,
+    pub sources: Vec<PlaylistUpdateSourceDto>,
+}
+
+impl PlaylistUpdateScopeDto {
+    #[must_use]
+    pub fn revision(&self) -> String {
+        let bytes = serde_json::to_vec(self).expect("playlist update scope contains only serializable fields");
+        format!("\"{}\"", blake3::hash(&bytes).to_hex())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistUpdateInputDto {
+    pub id: u16,
+    pub name: String,
+    pub input_type: super::InputType,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistUpdateSourceDto {
+    pub inputs: Vec<String>,
+    pub targets: Vec<PlaylistUpdateTargetDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistUpdateTargetDto {
+    pub id: u16,
+    pub name: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistUpdateViewSnapshotDto {
+    pub status: PlaylistUpdateStatusDto,
+    pub scope: PlaylistUpdateScopeDto,
+    pub revision: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -88,6 +88,7 @@ fn normalized_trace(
             {
                 assert_eq!(progress.run_id, summary.run_id);
                 assert_eq!(progress.execution_order, summary.execution_order);
+                assert_eq!(progress.scope_revision, summary.scope_revision);
                 let mut progress = progress.clone();
                 // Only the globally allocated test-run order is normalized. All
                 // input identities, states, messages and telemetry remain exact.
@@ -104,7 +105,12 @@ fn normalized_trace(
     assert!(persisted.timestamp > 0);
     serde_json::json!({
         "progress": progress,
-        "completed": {"run_id": summary.run_id, "execution_order": 1, "state": summary.state},
+        "completed": {
+            "run_id": summary.run_id,
+            "execution_order": 1,
+            "scope_revision": summary.scope_revision,
+            "state": summary.state
+        },
         "persisted_input_result": {"state": persisted.state, "timestamp": 1}
     })
 }

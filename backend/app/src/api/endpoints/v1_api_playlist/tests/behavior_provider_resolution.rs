@@ -6,14 +6,14 @@ use crate::model::{
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{header, Request, StatusCode},
     Router,
 };
 use shared::{
     foundation::Filter,
     model::{
         provider_saturation::build_group_lookup, ConfigPaths, ConfigProviderDto, InputType, PlaylistRequest,
-        ProcessingOrder, XtreamCluster,
+        PlaylistUrlResolveRequest, ProcessingOrder, XtreamCluster,
     },
     utils::Internable,
 };
@@ -38,7 +38,7 @@ fn resolve_provider_url_for_input_request_rewrites_provider_scheme() {
     let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
     let app_config = test_app_config(input, source);
     let resolved = resolve_provider_url_for_request(
-        &app_config,
+        &app_config.sources.load(),
         &PlaylistRequest::Input("input".to_string()),
         "provider://demo/live/user/pass/1359.ts",
     );
@@ -46,8 +46,8 @@ fn resolve_provider_url_for_input_request_rewrites_provider_scheme() {
     assert_eq!(resolved, "http://provider.example/live/user/pass/1359.ts");
 }
 
-#[test]
-fn resolve_provider_url_for_target_request_rewrites_provider_scheme() {
+#[tokio::test]
+async fn resolve_provider_url_for_target_rejects_reused_id_with_stale_scope() {
     let provider = ConfigProvider::from(&ConfigProviderDto {
         name: "demo".intern(),
         urls: vec!["http://provider.example".intern()],
@@ -81,13 +81,46 @@ fn resolve_provider_url_for_target_request_rewrites_provider_scheme() {
     });
     let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![target] };
     let app_config = test_app_config(input, source);
-    let resolved = resolve_provider_url_for_request(
-        &app_config,
-        &PlaylistRequest::Target(11),
-        "provider://demo/live/user/pass/1359.ts",
-    );
+    let original = app_config.sources.load_full();
+    let scope = original.playlist_update_scope().revision();
+    let app_state = test_app_state(Arc::new(app_config));
+    let router = super::super::v1_api_playlist_register_protected(Router::new()).with_state(Arc::clone(&app_state));
+    let request = |scope: &str| {
+        let body = serde_json::to_vec(&PlaylistUrlResolveRequest::Provider {
+            playlist_request: PlaylistRequest::Target(11),
+            url: "provider://demo/stream.ts".into(),
+        })
+        .unwrap();
+        Request::post("/playlist/resolve_url")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::IF_MATCH, scope)
+            .body(Body::from(body))
+            .unwrap()
+    };
 
-    assert_eq!(resolved, "http://provider.example/live/user/pass/1359.ts");
+    let response = router.clone().oneshot(request(&scope)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(axum::body::to_bytes(response.into_body(), 1024).await.unwrap(), "http://provider.example/stream.ts");
+
+    let mut replacement = original.as_ref().clone();
+    Arc::make_mut(&mut replacement.sources[0].targets[0]).name = "replacement".into();
+    Arc::make_mut(&mut replacement.inputs[0]).provider_configs =
+        Some(vec![Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "demo".intern(),
+            urls: vec!["http://other.example".intern()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
+            dns: None,
+        }))]);
+    let current_scope = replacement.playlist_update_scope().revision();
+    app_state.app_config.sources.store(Arc::new(replacement));
+
+    let stale = router.clone().oneshot(request(&scope)).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::PRECONDITION_FAILED);
+    assert!(axum::body::to_bytes(stale.into_body(), 1024).await.unwrap().is_empty());
+
+    let current = router.oneshot(request(&current_scope)).await.unwrap();
+    assert_eq!(current.status(), StatusCode::OK);
+    assert_eq!(axum::body::to_bytes(current.into_body(), 1024).await.unwrap(), "http://other.example/stream.ts");
 }
 
 #[test]
@@ -107,8 +140,11 @@ fn resolve_provider_url_passthrough_for_unresolved_provider_input_request() {
     let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
     let app_config = test_app_config(input, source);
     let original = "provider://unknown/live/user/pass/1359.ts";
-    let resolved =
-        resolve_provider_url_for_request(&app_config, &PlaylistRequest::Input("input".to_string()), original);
+    let resolved = resolve_provider_url_for_request(
+        &app_config.sources.load(),
+        &PlaylistRequest::Input("input".to_string()),
+        original,
+    );
 
     assert_eq!(resolved, original);
 }
@@ -149,7 +185,7 @@ fn resolve_provider_url_passthrough_for_unresolved_provider_target_request() {
     let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![target] };
     let app_config = test_app_config(input, source);
     let original = "provider://unknown/live/user/pass/1359.ts";
-    let resolved = resolve_provider_url_for_request(&app_config, &PlaylistRequest::Target(11), original);
+    let resolved = resolve_provider_url_for_request(&app_config.sources.load(), &PlaylistRequest::Target(11), original);
 
     assert_eq!(resolved, original);
 }
@@ -240,7 +276,7 @@ fn resolve_provider_url_passthrough_for_ambiguous_target_request() {
     };
 
     let original = "provider://shared/live/user/pass/1359.ts";
-    let resolved = resolve_provider_url_for_request(&app_config, &PlaylistRequest::Target(11), original);
+    let resolved = resolve_provider_url_for_request(&app_config.sources.load(), &PlaylistRequest::Target(11), original);
 
     assert_eq!(resolved, original);
 }

@@ -126,7 +126,7 @@ fn playlist_update_view_configured_cards_keep_identity_order_context_and_capabil
         let state = InputUpdateCardInteractionState::from_model(card);
         assert_eq!(state.controls.selected_target_ids, [20, 3]);
         assert_eq!(state.controls.policy, InputRefreshPolicy::NORMAL);
-        assert_eq!(can_start_update(&state, card, true), card.capabilities.rebuilds_targets());
+        assert_eq!(can_start_update(&state, card, true), input_type.is_batch() || !expected_modes.is_empty());
         assert!(!can_start_update(&state, card, false));
         assert_eq!(InputUpdateCardRuntime::default().status(), InputUpdateCardStatus::Ready);
     }

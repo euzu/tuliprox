@@ -2671,6 +2671,8 @@
       "ACTIVE_POPULATION": "Active population",
       "BASELINE": "Previous population",
       "BULK_BUSY": "Another playlist update is already running or queued. The bulk update was not started.",
+      "BATCH_TARGET_DESCRIPTION": "Rebuild the selected outputs with all required inputs using the regular update policy.",
+      "SCOPE_LOAD_FAILED": "Could not load the current update targets. Retry to enable per-input updates.",
       "BULK_ONLY_DESCRIPTION": "Single-input updates are not available for this input. Use ‘Update all inputs’.",
       "CACHE_BYPASSED_FORCE": "Bypassed by Force",
       "CACHE_BYPASSED_REFRESH": "Bypassed by Refresh",

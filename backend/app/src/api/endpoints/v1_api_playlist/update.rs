@@ -1,13 +1,19 @@
 use super::{error::QUEUE_BUSY_MESSAGE, ManualUpdateEnqueueError, PLAYLIST_UPDATE_STATUS_READ_CONCURRENCY};
 use crate::{
     api::{
-        auth_middleware::{check_permission, VerifiedClaims},
+        auth_middleware::{authenticate, check_permission, effective_permissions, rejection_for, VerifiedClaims},
         model::AppState,
     },
+    auth::AuthBearer,
     model::{ProcessTargets, SourcesConfig},
 };
-use axum::response::IntoResponse;
+use axum::{
+    extract::{Query, State},
+    http::{header::IF_MATCH, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
 use log::{debug, error};
+use serde::Deserialize;
 use serde_json::json;
 use shared::{
     error::TuliproxError,
@@ -15,7 +21,8 @@ use shared::{
         permission::Permission, InputPlaylistUpdateStatusDto, InputType, InputUpdateAction, InputUpdateCapabilities,
         InputUpdateRequest, OperationRunAccepted, PersistedPlaylistUpdateClusterState,
         PersistedPlaylistUpdateClusterStatusDto, PersistedPlaylistUpdateInputResult, PlaylistUpdateRequestDto,
-        PlaylistUpdateRequestPayload, PlaylistUpdateRunId, PlaylistUpdateState, PlaylistUpdateStatusDto, XtreamCluster,
+        PlaylistUpdateRequestPayload, PlaylistUpdateRunId, PlaylistUpdateScopeDto, PlaylistUpdateState,
+        PlaylistUpdateStatusDto, PlaylistUpdateViewSnapshotDto, XtreamCluster,
     },
     utils::sanitize_sensitive_info,
 };
@@ -25,19 +32,26 @@ pub(in crate::api) fn enqueue_manual_playlist_update(
     sender: &tokio::sync::mpsc::Sender<crate::api::model::ManualPlaylistUpdateRequest>,
     targets: Arc<ProcessTargets>,
     input_action: Option<InputUpdateRequest>,
+    expected_scope: Option<PlaylistUpdateScopeDto>,
 ) -> Result<PlaylistUpdateRunId, ManualUpdateEnqueueError> {
     let permit = sender.try_reserve().map_err(|error| match error {
         tokio::sync::mpsc::error::TrySendError::Full(()) => ManualUpdateEnqueueError::Busy,
         tokio::sync::mpsc::error::TrySendError::Closed(()) => ManualUpdateEnqueueError::Unavailable,
     })?;
     let run_id = PlaylistUpdateRunId::generate();
-    permit.send(crate::api::model::ManualPlaylistUpdateRequest { run_id: run_id.clone(), targets, input_action });
+    permit.send(crate::api::model::ManualPlaylistUpdateRequest {
+        run_id: run_id.clone(),
+        targets,
+        input_action,
+        expected_scope,
+    });
     Ok(run_id)
 }
 
 pub(super) async fn playlist_update(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     claims: Option<axum::Extension<VerifiedClaims>>,
+    headers: HeaderMap,
     axum::extract::Json(payload): axum::extract::Json<PlaylistUpdateRequestPayload>,
 ) -> impl axum::response::IntoResponse + Send {
     let request = payload.into_request();
@@ -62,7 +76,18 @@ pub(super) async fn playlist_update(
             }
         }
     }
-    let process_targets = resolve_manual_playlist_update_targets(&app_state.app_config.sources.load(), &request);
+    let sources = app_state.app_config.sources.load_full();
+    let expected_scope = if let Some(revision) = headers.get(IF_MATCH) {
+        let scope = sources.playlist_update_scope();
+        if revision.to_str().ok() != Some(scope.revision().as_str()) {
+            return (StatusCode::PRECONDITION_FAILED, axum::Json(json!({"error": "Playlist update scope changed"})))
+                .into_response();
+        }
+        Some(scope)
+    } else {
+        None
+    };
+    let process_targets = resolve_manual_playlist_update_targets(&sources, &request);
     match process_targets {
         Ok(valid_targets) => {
             let valid_targets = Arc::new(valid_targets);
@@ -70,6 +95,7 @@ pub(super) async fn playlist_update(
                 &app_state.playlist_updates.manual_update_sender,
                 valid_targets,
                 input_action,
+                expected_scope,
             ) {
                 Ok(run_id) => {
                     (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted::playlist_update(run_id)))
@@ -168,8 +194,73 @@ pub(super) async fn read_playlist_update_input_status(
 pub(super) async fn playlist_update_status(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> Result<axum::Json<PlaylistUpdateStatusDto>, axum::http::StatusCode> {
+    let sources = app_state.app_config.sources.load_full();
+    let revision = sources.playlist_update_scope().revision();
+    playlist_update_status_for_sources(&app_state, &sources, &revision).await.map(axum::Json)
+}
+
+#[derive(Deserialize)]
+pub(super) struct PlaylistUpdateStatusQuery {
+    #[serde(default)]
+    include_scope: bool,
+}
+
+pub(super) async fn playlist_update_status_response(
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<PlaylistUpdateStatusQuery>,
+) -> Result<Response, StatusCode> {
+    if !query.include_scope {
+        return playlist_update_status(State(app_state)).await.map(IntoResponse::into_response);
+    }
+    playlist_update_view_snapshot(&app_state, true).await
+}
+
+pub(super) async fn playlist_update_status_protected(
+    State(app_state): State<Arc<AppState>>,
+    AuthBearer(token): AuthBearer,
+    Query(query): Query<PlaylistUpdateStatusQuery>,
+) -> Response {
+    let claims = match authenticate(&app_state, &token).await {
+        Ok(claims) => claims,
+        Err(error) => return rejection_for(error),
+    };
+    if !query.include_scope {
+        if let Err(error) = check_permission::<{ Permission::PlaylistRead as u32 }>(&app_state, &claims, None) {
+            return rejection_for(error);
+        }
+        return playlist_update_status(State(app_state)).await.into_response();
+    }
+    if let Err(error) = check_permission::<{ Permission::SourceRead as u32 }>(&app_state, &claims, None) {
+        return rejection_for(error);
+    }
+    let can_read_status = effective_permissions(&app_state, &claims).contains(Permission::PlaylistRead);
+    if !can_read_status {
+        if let Err(error) = check_permission::<{ Permission::PlaylistWrite as u32 }>(&app_state, &claims, None) {
+            return rejection_for(error);
+        }
+    }
+    playlist_update_view_snapshot(&app_state, can_read_status).await.into_response()
+}
+
+async fn playlist_update_view_snapshot(app_state: &AppState, can_read_status: bool) -> Result<Response, StatusCode> {
+    let sources = app_state.app_config.sources.load_full();
+    let scope = sources.playlist_update_scope();
+    let revision = scope.revision();
+    let status = if can_read_status {
+        playlist_update_status_for_sources(app_state, &sources, &revision).await?
+    } else {
+        PlaylistUpdateStatusDto::default()
+    };
+    Ok(axum::Json(PlaylistUpdateViewSnapshotDto { status, scope, revision }).into_response())
+}
+
+async fn playlist_update_status_for_sources(
+    app_state: &AppState,
+    sources: &SourcesConfig,
+    scope_revision: &str,
+) -> Result<PlaylistUpdateStatusDto, StatusCode> {
     let storage_dir = app_state.app_config.config.load().storage_dir.clone();
-    let inputs = app_state.app_config.sources.load().inputs.clone();
+    let inputs = sources.inputs.clone();
     let status_reads = futures::stream::iter(inputs.into_iter().map(|input| {
         let storage_dir = storage_dir.clone();
         let input_name = input.name.clone();
@@ -240,7 +331,8 @@ pub(super) async fn playlist_update_status(
         .event_manager
         .playlist_update_snapshot()
         .into_iter()
+        .filter(|event| event.scope_revision.as_deref().is_none_or(|revision| revision == scope_revision))
         .filter(|event| event.input_id.is_some_and(|id| statuses.iter().any(|status| status.input_id == id)))
         .collect();
-    Ok(axum::Json(PlaylistUpdateStatusDto { inputs: statuses, active_updates }))
+    Ok(PlaylistUpdateStatusDto { inputs: statuses, active_updates })
 }

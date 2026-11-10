@@ -498,9 +498,7 @@ impl WebSocketService {
                 event_service.broadcast(EventMessage::ServerStatus(Rc::new(status)));
             }
             ProtocolMessage::ConfigChangeResponse(config_type) => {
-                if !event_service.is_config_change_message_blocked() {
-                    event_service.broadcast(EventMessage::ConfigChange(config_type));
-                }
+                event_service.broadcast(EventMessage::ConfigChange(config_type));
             }
             ProtocolMessage::ServerError(error) => {
                 event_service.broadcast(EventMessage::ServerError(error));

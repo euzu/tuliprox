@@ -14,8 +14,8 @@ use crate::{
 use gloo_timers::callback::Interval;
 use log::error;
 use shared::{
-    model::{Permission, TargetType},
-    utils::current_time_secs,
+    model::{ConfigType, Permission, TargetType},
+    utils::{current_time_secs, HEADER_PLAYLIST_SCOPE_REVISION},
 };
 use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
@@ -26,8 +26,10 @@ pub fn PlaylistStatsView() -> Html {
     let translate = use_translation();
     let services = use_service_context();
 
-    let user_selected_target_id = use_state(|| None::<u16>);
-    let targets = use_state(Rc::<Vec<Rc<UiTargetAnalyticsEntry>>>::default);
+    let selected_target_name = use_state(|| None::<String>);
+    let analytics = use_state(|| (Rc::<Vec<Rc<UiTargetAnalyticsEntry>>>::default(), None::<String>));
+    let request_generation = use_mut_ref(|| 0u64);
+    let (targets, scope_revision) = &*analytics;
     let is_loading = use_state(|| true);
     let is_updating = use_state(|| false);
     let now = use_state(current_time_secs);
@@ -36,19 +38,31 @@ pub fn PlaylistStatsView() -> Html {
 
     // Data reloader: updates targets and now timestamp without resetting user's selection
     let reload_data = {
-        let (targets, is_loading, services, now) = (targets.clone(), is_loading.clone(), services.clone(), now.clone());
+        let (analytics, is_loading, services, now) =
+            (analytics.clone(), is_loading.clone(), services.clone(), now.clone());
         Callback::from(move |()| {
-            let (targets, is_loading, services, now) =
-                (targets.clone(), is_loading.clone(), services.clone(), now.clone());
+            let (analytics, is_loading, services, now) =
+                (analytics.clone(), is_loading.clone(), services.clone(), now.clone());
+            let request_generation = request_generation.clone();
+            let generation = {
+                let mut current = request_generation.borrow_mut();
+                *current += 1;
+                *current
+            };
             spawn_local(async move {
+                let result = services.playlist.get_target_analytics().await;
+                if generation != *request_generation.borrow() {
+                    return;
+                }
                 now.set(current_time_secs());
-                match services.playlist.get_target_analytics().await {
-                    Ok(Some(resp)) => {
-                        let ui_items: Vec<Rc<UiTargetAnalyticsEntry>> =
-                            resp.targets.into_iter().map(UiTargetAnalyticsEntry::from).map(Rc::new).collect();
-                        targets.set(Rc::new(ui_items));
+                match result {
+                    Ok(resp) => {
+                        if let Some(body) = resp.body {
+                            let items =
+                                body.targets.into_iter().map(UiTargetAnalyticsEntry::from).map(Rc::new).collect();
+                            analytics.set((Rc::new(items), resp.headers.get(HEADER_PLAYLIST_SCOPE_REVISION).cloned()));
+                        }
                     }
-                    Ok(None) => targets.set(Rc::default()),
                     Err(err) => error!("Failed to fetch target analytics: {err}"),
                 }
                 is_loading.set(false);
@@ -73,7 +87,9 @@ pub fn PlaylistStatsView() -> Html {
         use_effect_with((), move |()| {
             let services_cleanup = services.clone();
             let sub_id = services.event.subscribe(move |msg| match msg {
-                EventMessage::PlaylistUpdate(_) | EventMessage::WebSocketStatus(true) => {
+                EventMessage::PlaylistUpdate(_)
+                | EventMessage::WebSocketStatus(true)
+                | EventMessage::ConfigChange(ConfigType::Sources) => {
                     reload_data.emit(());
                 }
                 _ => {}
@@ -83,25 +99,27 @@ pub fn PlaylistStatsView() -> Html {
     }
 
     // Derive effective target at render time
-    let effective_target = derive_effective_target(*user_selected_target_id, &targets);
+    let effective_target = derive_effective_target(selected_target_name.as_deref(), targets);
     let effective_target_id = effective_target.map(|t| t.target_id);
 
     // "Update now" handler
     let handle_update_now = {
         let (is_updating, services, translate, reload_data) =
             (is_updating.clone(), services.clone(), translate.clone(), reload_data.clone());
+        let scope_revision = scope_revision.clone();
         Callback::from(move |_| {
-            let Some(target_id) = effective_target_id else { return };
+            let (Some(target_id), Some(revision)) = (effective_target_id, scope_revision.clone()) else { return };
             is_updating.set(true);
             let (is_updating, services, translate, reload_data) =
                 (is_updating.clone(), services.clone(), translate.clone(), reload_data.clone());
             spawn_local(async move {
-                match services.playlist.update_target_by_id(target_id).await {
+                match services.playlist.update_target_ids(&[target_id], Some(&revision)).await {
                     Ok(_) => {
                         services.toastr.success(translate.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS"));
                         reload_data.emit(());
                     }
                     Err(err) => {
+                        reload_data.emit(());
                         error!("Failed to trigger playlist update: {err}");
                         services.toastr.error(translate.t("MESSAGES.PLAYLIST_UPDATE.FAIL"));
                     }
@@ -115,11 +133,15 @@ pub fn PlaylistStatsView() -> Html {
     let handle_export_csv = {
         let (services, translate) = (services.clone(), translate.clone());
         let target_name = effective_target.map_or_else(|| "export".to_string(), |t| t.name.clone());
+        let scope_revision = scope_revision.clone();
+        let reload_data = reload_data.clone();
         Callback::from(move |()| {
-            let Some(target_id) = effective_target_id else { return };
+            let (Some(target_id), Some(revision)) = (effective_target_id, scope_revision.clone()) else { return };
+            let reload_data = reload_data.clone();
             let (services, translate, target_name) = (services.clone(), translate.clone(), target_name.clone());
             spawn_local(async move {
-                if let Err(err) = services.playlist.download_unmapped_csv(target_id, &target_name).await {
+                if let Err(err) = services.playlist.download_unmapped_csv(target_id, &target_name, &revision).await {
+                    reload_data.emit(());
                     error!("Failed to download unmapped CSV: {err}");
                     services.toastr.error(translate.t("LABEL.PLAYLIST_STATS_EXPORT_FAILED"));
                 }
@@ -127,20 +149,23 @@ pub fn PlaylistStatsView() -> Html {
         })
     };
 
-    let on_target_select = {
-        let user_selected_target_id = user_selected_target_id.clone();
-        Callback::from(move |(_, selection): (String, DropDownSelection)| {
-            if let DropDownSelection::Single(id_str) = selection {
-                if let Ok(id) = id_str.parse::<u16>() {
-                    user_selected_target_id.set(Some(id));
-                }
+    let on_table_select_target = {
+        let targets = targets.clone();
+        Callback::from(move |id: u16| {
+            if let Some(target) = targets.iter().find(|target| target.target_id == id) {
+                selected_target_name.set(Some(target.name.clone()));
             }
         })
     };
-
-    let on_table_select_target = {
-        let user_selected_target_id = user_selected_target_id.clone();
-        Callback::from(move |id: u16| user_selected_target_id.set(Some(id)))
+    let on_target_select = {
+        let select = on_table_select_target.clone();
+        Callback::from(move |(_, selection): (String, DropDownSelection)| {
+            if let DropDownSelection::Single(id) = selection {
+                if let Ok(id) = id.parse() {
+                    select.emit(id);
+                }
+            }
+        })
     };
 
     let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.PLAYLIST_STATS")]));
@@ -190,7 +215,7 @@ pub fn PlaylistStatsView() -> Html {
                             name="playlist_stats_update_now"
                             icon="Refresh"
                             title={translate.t("LABEL.PLAYLIST_STATS_UPDATE_NOW")}
-                            disabled={*is_updating || effective_target_id.is_none()}
+                            disabled={*is_updating || effective_target_id.is_none() || scope_revision.is_none()}
                             onclick={handle_update_now}
                         />
                     })}
@@ -235,7 +260,7 @@ pub fn PlaylistStatsView() -> Html {
                 Html::default()
             }}
             <TargetsTable
-                targets={(*targets).clone()}
+                targets={targets.clone()}
                 selected_target_id={effective_target_id}
                 on_select={on_table_select_target}
                 now={*now}

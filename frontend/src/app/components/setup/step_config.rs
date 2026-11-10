@@ -77,7 +77,7 @@ pub fn ConfigStep(props: &ConfigStepProps) -> Html {
                 ConfigForm::Proxy(_, _) => setup_ctx.config_forms.slots.proxy.as_ref(),
                 ConfigForm::IpCheck(_, _) => setup_ctx.config_forms.slots.ipcheck.as_ref(),
                 ConfigForm::Mcp(_, _) => setup_ctx.config_forms.slots.mcp.as_ref(),
-                ConfigForm::Panel(_, _) => setup_ctx.config_forms.slots.panel.as_ref(),
+                ConfigForm::Panel(..) => setup_ctx.config_forms.slots.panel.as_ref(),
                 ConfigForm::Library(_, _) => setup_ctx.config_forms.slots.library.as_ref(),
                 ConfigForm::FailoverGroups(_, _) => setup_ctx.config_forms.slots.failover_groups.as_ref(),
             };

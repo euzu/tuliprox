@@ -80,6 +80,21 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Pair an ID-based UI request with the same loaded source snapshot used to resolve it.
+    pub(crate) fn playlist_sources_for_request(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<Arc<crate::model::SourcesConfig>, axum::http::StatusCode> {
+        let sources = self.app_config.sources.load_full();
+        if headers
+            .get(axum::http::header::IF_MATCH)
+            .is_some_and(|revision| revision.to_str().ok() != Some(sources.playlist_update_scope().revision().as_str()))
+        {
+            return Err(axum::http::StatusCode::PRECONDITION_FAILED);
+        }
+        Ok(sources)
+    }
+
     /// The configured input, unless it is in maintenance: for code that would contact its provider.
     pub fn contactable_input(&self, input_name: &Arc<str>) -> Option<Arc<crate::model::ConfigInput>> {
         self.app_config.get_input_by_name(input_name).filter(|input| !self.maintenance.is_in_maintenance(&input.name))
