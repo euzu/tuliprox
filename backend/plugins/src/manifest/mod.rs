@@ -380,7 +380,7 @@ impl Manifest {
     /// `TuliproxError::Plugin` for malformed YAML, or listing **every**
     /// violated constraint, one per line.
     pub(crate) fn parse(text: &str, dir_name: &str) -> Result<Self, TuliproxError> {
-        let raw: raw::RawManifest = serde_saphyr::from_str(text)
+        let raw: raw::RawManifest = shared::utils::yaml_from_str(text)
             .map_err(|err| TuliproxError::Plugin(format!("invalid manifest.yml in `{dir_name}`: {err}")))?;
         validate::build(raw, dir_name).map_err(|errors| {
             let lines = errors.iter().fold(String::new(), |mut lines, error| {

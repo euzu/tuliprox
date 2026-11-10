@@ -314,6 +314,8 @@ fn parse_document(content: &[u8], owner: &SettingsOwner) -> Result<UserSettingsE
         budget: serde_saphyr::budget! { max_depth: 16, max_aliases: 0, max_events: 100_000, max_documents: 1 },
         duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
         merge_keys: serde_saphyr::MergeKeyPolicy::Error,
+        // Unquoted `.inf`/`.nan` stay strings, as in every other file Tuliprox reads.
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::AsString,
     };
     let document = serde_saphyr::from_slice_with_options(content, options).map_err(|_| SettingsError::Invalid)?;
     let result = UserSettingsEntity { document };

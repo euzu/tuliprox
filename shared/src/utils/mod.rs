@@ -16,6 +16,7 @@ mod size_utils;
 mod string_interner;
 mod string_utils;
 mod time_utils;
+mod yaml;
 
 pub mod constants;
 
@@ -38,6 +39,7 @@ pub use self::{
     string_interner::*,
     string_utils::*,
     time_utils::*,
+    yaml::{yaml_from_reader, yaml_from_slice, yaml_from_str, yaml_options},
 };
 use std::fmt::Display;
 

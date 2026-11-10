@@ -291,7 +291,7 @@ pub fn apply_scalar_edits(original_text: &str, edits: Vec<TextEdit>) -> Result<S
 }
 
 pub fn parse_and_validate_patched_text(patched_text: &str, expected: &SourcesConfigDto) -> Result<(), TuliproxError> {
-    let mut reparsed: SourcesConfigDto = serde_saphyr::from_str(patched_text)
+    let mut reparsed: SourcesConfigDto = shared::utils::yaml_from_str(patched_text)
         .map_err(|err| TuliproxError::Config(format!("patched source.yml failed to parse: {err}")))?;
     let mut expected = expected.clone();
 
@@ -324,7 +324,7 @@ fn normalize_computed_source_fields(dto: &mut SourcesConfigDto) {
 }
 
 pub fn parse_patch_document(text: &str) -> Result<SourcePatchDocument, TuliproxError> {
-    serde_saphyr::from_str(text)
+    shared::utils::yaml_from_str(text)
         .map_err(|err| TuliproxError::Config(format!("source.yml patch: projection parse failed: {err}")))
 }
 
@@ -821,7 +821,7 @@ mod tests {
                 for newline in ["\n", "\r\n"] {
                     let original = alias_layout_fixture(indent, style, newline);
                     let doc = parse_patch_document(&original).expect("projection");
-                    let before: SourcesConfigDto = serde_saphyr::from_str(&original).expect("original config");
+                    let before: SourcesConfigDto = shared::utils::yaml_from_str(&original).expect("original config");
                     let aliases = &doc.inputs[0].value.aliases.as_ref().expect("aliases").value;
                     let suffix_start = original.find("  # panel settings").expect("panel comment");
                     let prefix = &original[..original.find("aliases:").expect("aliases")];
@@ -903,7 +903,7 @@ mod tests {
             .replace("  # panel settings", "  max_connections: 1\n  exp_date: 1788779143\n  # panel settings")
             .replace("  aliases:\n", "  # aliases:\n  # - {name: disabled-old, url: provider://example}\n  aliases:\n");
         let doc = parse_patch_document(&original).expect("projection");
-        let mut expected: SourcesConfigDto = serde_saphyr::from_str(&original).expect("config");
+        let mut expected: SourcesConfigDto = shared::utils::yaml_from_str(&original).expect("config");
         expected.inputs[0].aliases = None;
         let edits = build_alias_removal_edits(&original, &doc, "provider", &["older", "newer"]).expect("remove");
         let result = apply_scalar_edits(&original, edits).expect("apply");
@@ -916,7 +916,7 @@ mod tests {
     fn alias_layout_add_and_sort_handle_missing_final_newline() {
         let original = "sources: []\ninputs:\n- name: provider\n  url: provider://example\n  aliases:\n  - {name: older, url: provider://example}\n  - {name: newer, url: provider://example}";
         let doc = parse_patch_document(original).expect("projection");
-        let mut expected: SourcesConfigDto = serde_saphyr::from_str(original).expect("config");
+        let mut expected: SourcesConfigDto = shared::utils::yaml_from_str(original).expect("config");
         expected.inputs[0].aliases.as_mut().expect("aliases").reverse();
         let sort = build_alias_sort_edit(original, &doc, "provider", &["newer", "older"]).expect("sort").expect("edit");
         let sorted = apply_scalar_edits(original, vec![sort]).expect("apply sort");
@@ -960,7 +960,7 @@ mod tests {
 
     #[test]
     fn projection_parses_fixture() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         assert_eq!(doc.inputs.len(), 1);
         assert_eq!(doc.inputs[0].value.name.value, "provider");
         assert!(doc.inputs[0].value.enabled.is_some());
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn span_byte_ranges_are_valid() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let name_range = span_byte_range(&doc.inputs[0].value.name).expect("byte range");
         assert_eq!(&FIXTURE[name_range.clone()], "provider");
 
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn existing_scalar_replacement_preserves_surrounding_bytes() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let enabled_range =
             span_byte_range(doc.inputs[0].value.enabled.as_ref().expect("enabled")).expect("byte range");
 
@@ -997,7 +997,7 @@ mod tests {
 
     #[test]
     fn missing_exp_date_insertion_preserves_all_existing_bytes() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let input = &doc.inputs[0].value;
 
         let password_range = span_byte_range(input.password.as_ref().expect("password")).expect("byte range");
@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn alias_exp_date_insertion() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let aliases = doc.inputs[0].value.aliases.as_ref().expect("aliases");
         let alias = &aliases.value[0].value;
 
@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn inline_comment_after_scalar_survives_replacement() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let enabled_range =
             span_byte_range(doc.inputs[0].value.enabled.as_ref().expect("enabled")).expect("byte range");
 
@@ -1052,7 +1052,7 @@ mod tests {
     #[test]
     fn crlf_preservation() {
         let crlf_fixture = FIXTURE.replace('\n', "\r\n");
-        let doc: SourcePatchDocument = serde_saphyr::from_str(&crlf_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(&crlf_fixture).expect("projection parses");
         let enabled_range =
             span_byte_range(doc.inputs[0].value.enabled.as_ref().expect("enabled")).expect("byte range");
 
@@ -1067,7 +1067,7 @@ mod tests {
     #[test]
     fn unicode_before_span_does_not_corrupt_offsets() {
         let unicode_fixture = "# Ünïcödé tëst 🎉\ninputs:\n  - name: über-input\n    exp_date: 12345\n";
-        let doc: SourcePatchDocument = serde_saphyr::from_str(unicode_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(unicode_fixture).expect("projection parses");
         let exp_range = span_byte_range(doc.inputs[0].value.exp_date.as_ref().expect("exp_date")).expect("byte range");
         assert_eq!(&unicode_fixture[exp_range.clone()], "12345");
 
@@ -1081,7 +1081,7 @@ mod tests {
     #[test]
     fn duplicate_input_names_fail_without_output() {
         let dup_fixture = "inputs:\n  - name: same\n    exp_date: 1\n  - name: same\n    exp_date: 2\n";
-        let doc: SourcePatchDocument = serde_saphyr::from_str(dup_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(dup_fixture).expect("projection parses");
         let names: Vec<&str> = doc.inputs.iter().map(|i| i.value.name.value.as_str()).collect();
         let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
         assert!(unique.len() < names.len(), "duplicate names detected");
@@ -1090,7 +1090,7 @@ mod tests {
     #[test]
     fn yaml_anchor_merge_target_fails() {
         let anchor_fixture = "defaults: &defaults\n  exp_date: 100\ninputs:\n  - name: test\n    <<: *defaults\n";
-        let doc: SourcePatchDocument = serde_saphyr::from_str(anchor_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(anchor_fixture).expect("projection parses");
         let input = &doc.inputs[0].value;
         if let Some(exp_date) = &input.exp_date {
             let result = span_byte_range(exp_date);
@@ -1112,7 +1112,7 @@ mod tests {
     #[test]
     fn flow_style_scalar_replacement_succeeds() {
         let flow_fixture = "inputs:\n  - {name: test, exp_date: 42}\n";
-        let doc: SourcePatchDocument = serde_saphyr::from_str(flow_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(flow_fixture).expect("projection parses");
         let exp_range = span_byte_range(doc.inputs[0].value.exp_date.as_ref().expect("exp_date")).expect("byte range");
         assert_eq!(&flow_fixture[exp_range.clone()], "42");
 
@@ -1136,11 +1136,11 @@ mod tests {
         ];
 
         for fixture in fixtures {
-            let doc: SourcePatchDocument = serde_saphyr::from_str(fixture).expect("projection parses");
+            let doc: SourcePatchDocument = shared::utils::yaml_from_str(fixture).expect("projection parses");
             let name_range = span_byte_range(&doc.inputs[0].value.name).expect("name span");
             let edit = build_field_insertion_edit(fixture, &name_range, "enabled", "false").expect("build edit");
             let patched = apply_scalar_edits(fixture, vec![edit]).expect("apply");
-            let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+            let reparsed: SourcePatchDocument = shared::utils::yaml_from_str(&patched).expect("reparse");
             let input = &reparsed.inputs[0].value;
 
             assert!(!input.enabled.as_ref().expect("enabled").value);
@@ -1154,7 +1154,7 @@ mod tests {
 
     #[test]
     fn quoted_values_survive_unchanged() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let aliases = doc.inputs[0].value.aliases.as_ref().expect("aliases");
         let alias = &aliases.value[0].value;
         let password_range = span_byte_range(alias.password.as_ref().expect("password")).expect("byte range");
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test]
     fn semantic_validation_rejects_mismatch() {
-        let mut expected: SourcesConfigDto = serde_saphyr::from_str(FIXTURE).expect("parse");
+        let mut expected: SourcesConfigDto = shared::utils::yaml_from_str(FIXTURE).expect("parse");
         expected.inputs[0].exp_date = Some(999);
 
         let result = parse_and_validate_patched_text(FIXTURE, &expected);
@@ -1180,14 +1180,14 @@ mod tests {
 
     #[test]
     fn semantic_validation_accepts_matching_text() {
-        let expected: SourcesConfigDto = serde_saphyr::from_str(FIXTURE).expect("parse");
+        let expected: SourcesConfigDto = shared::utils::yaml_from_str(FIXTURE).expect("parse");
         let result = parse_and_validate_patched_text(FIXTURE, &expected);
         assert!(result.is_ok());
     }
 
     #[test]
     fn templates_and_filter_placeholder_survive_patch() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let password_range =
             span_byte_range(doc.inputs[0].value.password.as_ref().expect("password")).expect("byte range");
         let anchor_end = line_end_offset(FIXTURE, password_range.end);
@@ -1207,7 +1207,7 @@ mod tests {
 
     #[test]
     fn add_alias_to_existing_list() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let new_alias = ConfigInputAliasDto {
             name: "provider-second".into(),
             url: "http://second.example".to_string(),
@@ -1246,7 +1246,7 @@ mod tests {
             "  - name: next\n",
             "    url: http://next.example\n",
         );
-        let doc: SourcePatchDocument = serde_saphyr::from_str(no_aliases_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(no_aliases_fixture).expect("projection parses");
         let new_alias = ConfigInputAliasDto {
             name: "solo-alias".into(),
             url: "http://alias.example".to_string(),
@@ -1264,7 +1264,7 @@ mod tests {
         assert!(patched.contains("    aliases:\n      - name: solo-alias"));
         assert!(patched.contains("        remove_expired: true"));
 
-        let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+        let reparsed: SourcePatchDocument = shared::utils::yaml_from_str(&patched).expect("reparse");
         assert_eq!(reparsed.inputs.len(), 2);
         let aliases = reparsed.inputs[0].value.aliases.as_ref().expect("aliases");
         assert_eq!(aliases.value.len(), 1);
@@ -1282,7 +1282,7 @@ mod tests {
             "  - name: next\n",
             "    url: http://next.example\n",
         );
-        let doc: SourcePatchDocument = serde_saphyr::from_str(fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(fixture).expect("projection parses");
         let new_alias = ConfigInputAliasDto {
             name: "provider-backup".into(),
             url: "http://backup.example".to_string(),
@@ -1298,7 +1298,7 @@ mod tests {
             patched.contains("aliases: # keep alias note\n      - name: provider-backup"),
             "unexpected patch:\n{patched}"
         );
-        let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+        let reparsed: SourcePatchDocument = shared::utils::yaml_from_str(&patched).expect("reparse");
         assert_eq!(reparsed.inputs.len(), 2);
         assert_eq!(reparsed.inputs[0].value.aliases.as_ref().expect("aliases").value.len(), 1);
     }
@@ -1317,7 +1317,7 @@ mod tests {
             "      - name: third\n",
             "        url: http://third.example\n",
         );
-        let doc: SourcePatchDocument = serde_saphyr::from_str(multi_alias_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(multi_alias_fixture).expect("projection parses");
 
         let edits = build_alias_removal_edits(multi_alias_fixture, &doc, "provider", &["second"]).expect("build edits");
         let patched = apply_scalar_edits(multi_alias_fixture, edits).expect("apply");
@@ -1343,7 +1343,7 @@ mod tests {
             "        url: http://newest.example\n",
             "        exp_date: 200\n",
         );
-        let doc: SourcePatchDocument = serde_saphyr::from_str(sort_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(sort_fixture).expect("projection parses");
 
         let edit = build_alias_sort_edit(sort_fixture, &doc, "provider", &["newest", "oldest"])
             .expect("build edit")
@@ -1373,13 +1373,13 @@ mod tests {
             "        name: newest\n",
             "        exp_date: 200\n",
         );
-        let doc: SourcePatchDocument = serde_saphyr::from_str(sort_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(sort_fixture).expect("projection parses");
 
         let edit = build_alias_sort_edit(sort_fixture, &doc, "provider", &["newest", "oldest"])
             .expect("build edit")
             .expect("edit present");
         let patched = apply_scalar_edits(sort_fixture, vec![edit]).expect("apply");
-        let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+        let reparsed: SourcePatchDocument = shared::utils::yaml_from_str(&patched).expect("reparse");
         let aliases = reparsed.inputs[0].value.aliases.as_ref().expect("aliases");
 
         assert_eq!(aliases.value[0].value.name.value, "newest");
@@ -1400,11 +1400,11 @@ mod tests {
             "      - url: http://keep.example\n",
             "        name: keep\n",
         );
-        let doc: SourcePatchDocument = serde_saphyr::from_str(fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(fixture).expect("projection parses");
 
         let edits = build_alias_removal_edits(fixture, &doc, "provider", &["remove"]).expect("build edits");
         let patched = apply_scalar_edits(fixture, edits).expect("apply");
-        let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+        let reparsed: SourcePatchDocument = shared::utils::yaml_from_str(&patched).expect("reparse");
         let aliases = reparsed.inputs[0].value.aliases.as_ref().expect("aliases");
 
         assert_eq!(aliases.value.len(), 1);
@@ -1415,7 +1415,7 @@ mod tests {
 
     #[test]
     fn alias_credentials_with_special_chars_serialize_correctly() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let new_alias = ConfigInputAliasDto {
             name: "provider-special".into(),
             url: "http://special.example".to_string(),
@@ -1427,7 +1427,7 @@ mod tests {
         let edit = build_alias_addition_edit(FIXTURE, &doc, "provider", &new_alias).expect("build edit");
         let patched = apply_scalar_edits(FIXTURE, vec![edit]).expect("apply");
 
-        let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+        let reparsed: SourcePatchDocument = shared::utils::yaml_from_str(&patched).expect("reparse");
         let input = find_input(&reparsed, "provider").expect("find input");
         let aliases = input.value.aliases.as_ref().expect("aliases");
         let special = aliases.value.iter().find(|a| a.value.name.value == "provider-special").expect("special alias");
@@ -1437,7 +1437,7 @@ mod tests {
 
     #[test]
     fn combined_add_and_sort_produces_valid_transaction() {
-        let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(FIXTURE).expect("projection parses");
         let new_alias = ConfigInputAliasDto {
             name: "provider-new".into(),
             url: "http://new.example".to_string(),
@@ -1448,7 +1448,7 @@ mod tests {
         let add_edit = build_alias_addition_edit(FIXTURE, &doc, "provider", &new_alias).expect("build add");
         let patched_after_add = apply_scalar_edits(FIXTURE, vec![add_edit]).expect("apply add");
 
-        let doc2: SourcePatchDocument = serde_saphyr::from_str(&patched_after_add).expect("reparse");
+        let doc2: SourcePatchDocument = shared::utils::yaml_from_str(&patched_after_add).expect("reparse");
         let sort_edit =
             build_alias_sort_edit(&patched_after_add, &doc2, "provider", &["provider-new", "provider-backup"])
                 .expect("build sort")
@@ -1463,7 +1463,7 @@ mod tests {
     fn add_alias_when_aliases_is_null_replaces_line_in_place() {
         let fixture =
             concat!("inputs:\n", "  - name: provider\n", "    url: http://main.example\n", "    aliases: null\n",);
-        let doc: SourcePatchDocument = serde_saphyr::from_str(fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(fixture).expect("projection parses");
         let new_alias = ConfigInputAliasDto {
             name: "provider-backup".into(),
             url: "http://backup.example".to_string(),
@@ -1485,7 +1485,7 @@ mod tests {
     #[test]
     fn add_alias_when_aliases_key_has_no_value_replaces_line_in_place() {
         let fixture = concat!("inputs:\n", "  - name: provider\n", "    url: http://main.example\n", "    aliases:\n",);
-        let doc: SourcePatchDocument = serde_saphyr::from_str(fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(fixture).expect("projection parses");
         let new_alias = ConfigInputAliasDto {
             name: "provider-backup".into(),
             url: "http://backup.example".to_string(),
@@ -1498,7 +1498,7 @@ mod tests {
         assert!(patched.contains("aliases:"));
         assert!(patched.contains("- name: provider-backup"));
         // Reparse must succeed and yield exactly one alias — guards against duplicate `aliases:` keys.
-        let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+        let reparsed: SourcePatchDocument = shared::utils::yaml_from_str(&patched).expect("reparse");
         let aliases = reparsed.inputs[0].value.aliases.as_ref().expect("aliases");
         assert_eq!(aliases.value.len(), 1);
     }
@@ -1515,7 +1515,7 @@ mod tests {
             "      - name: twin\n",
             "        url: http://second.example\n",
         );
-        let doc: SourcePatchDocument = serde_saphyr::from_str(fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(fixture).expect("projection parses");
 
         let err = find_input(&doc, "provider").expect_err("duplicate alias must be rejected");
         let msg = format!("{err:?}");
@@ -1538,7 +1538,7 @@ mod tests {
             "        url: http://newest.example\n",
             "        exp_date: 200\n",
         );
-        let doc: SourcePatchDocument = serde_saphyr::from_str(sort_fixture).expect("projection parses");
+        let doc: SourcePatchDocument = shared::utils::yaml_from_str(sort_fixture).expect("projection parses");
 
         let edit = build_alias_sort_edit(sort_fixture, &doc, "provider", &["newest", "oldest"])
             .expect("build edit")

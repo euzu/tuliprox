@@ -763,7 +763,7 @@ fn extract_schema_version(obj: &serde_json::Map<String, serde_json::Value>) -> R
 
 pub fn parse_input_override_file(yaml: &str) -> Result<(InputOverrideFile, Vec<FieldError>), OverrideParseError> {
     let value: serde_json::Value =
-        serde_saphyr::from_str(yaml).map_err(|e| OverrideParseError::Malformed(e.to_string()))?;
+        crate::utils::yaml_from_str(yaml).map_err(|e| OverrideParseError::Malformed(e.to_string()))?;
 
     let obj = value.as_object().ok_or_else(|| OverrideParseError::Malformed("expected mapping at root".to_string()))?;
 
@@ -806,7 +806,7 @@ pub fn parse_input_override_file(yaml: &str) -> Result<(InputOverrideFile, Vec<F
 
 pub fn parse_target_override_file(yaml: &str) -> Result<(TargetOverrideFile, Vec<FieldError>), OverrideParseError> {
     let value: serde_json::Value =
-        serde_saphyr::from_str(yaml).map_err(|e| OverrideParseError::Malformed(e.to_string()))?;
+        crate::utils::yaml_from_str(yaml).map_err(|e| OverrideParseError::Malformed(e.to_string()))?;
 
     let obj = value.as_object().ok_or_else(|| OverrideParseError::Malformed("expected mapping at root".to_string()))?;
 
