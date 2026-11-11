@@ -1071,7 +1071,11 @@ mod tests {
 
         // Archive request on group_vid must NOT failover to solis; solis does not support archive,
         // and korath is exhausted, so archive reservation fails and returns false to keep waiting.
-        let archive_path = format!("/timeshift/viewer/secret/{}.m3u8?utc=1700000000&lutc=1700003600", env.group_vid);
+        // Inside korath's 7-day archive window, so korath is ranked and the capacity check decides.
+        let archive_end = chrono::Utc::now().timestamp();
+        let archive_start = archive_end - 3600;
+        let archive_path =
+            format!("/timeshift/viewer/secret/{}.m3u8?utc={archive_start}&lutc={archive_end}", env.group_vid);
         let archive_reserved = try_reserve_hls_virtual_entry_origin_account_for_redirect(
             &env.app_state,
             &fingerprint,

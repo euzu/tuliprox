@@ -317,6 +317,14 @@ async fn hls_entry_healthy_first_member_makes_exactly_one_manifest_request() {
 }
 
 async fn spawn_mock_master_origin(child_status: StatusCode) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    spawn_mock_master_origin_with_cookie(child_status, None).await
+}
+
+/// Master origin; with `cookie`, the master sets it and the child answers 403 without it.
+async fn spawn_mock_master_origin_with_cookie(
+    child_status: StatusCode,
+    cookie: Option<&'static str>,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("binds");
     let addr = listener.local_addr().expect("address");
@@ -333,8 +341,9 @@ async fn spawn_mock_master_origin(child_status: StatusCode) -> (SocketAddr, toki
                 request.extend_from_slice(&buf[..n]);
             }
             let req_str = String::from_utf8_lossy(&request);
+            let has_cookie = cookie.is_none_or(|c| req_str.to_ascii_lowercase().contains(&format!("cookie: {c}")));
             if req_str.contains("child.m3u8") {
-                if child_status == StatusCode::OK {
+                if child_status == StatusCode::OK && has_cookie {
                     let body = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\nseg1.ts\n";
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -343,14 +352,16 @@ async fn spawn_mock_master_origin(child_status: StatusCode) -> (SocketAddr, toki
                     );
                     let _ = socket.write_all(resp.as_bytes()).await;
                 } else {
-                    let resp = format!("HTTP/1.1 {child_status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    let status = if has_cookie { child_status } else { StatusCode::FORBIDDEN };
+                    let resp = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     let _ = socket.write_all(resp.as_bytes()).await;
                 }
                 let _ = socket.shutdown().await;
             } else {
                 let body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nchild.m3u8\n";
+                let set_cookie = cookie.map(|c| format!("Set-Cookie: {c}; Path=/\r\n")).unwrap_or_default();
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n{set_cookie}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -383,6 +394,26 @@ async fn hls_entry_master_with_child_followed_and_delivered() {
 
     let body = GroupPlaybackEnv::response_text(response).await;
     assert!(body.contains("#EXT-X-STREAM-INF"), "master playlist delivered to client: {body}");
+}
+
+#[tokio::test]
+async fn hls_entry_master_cookie_is_forwarded_to_same_origin_variant_probe() {
+    let (addr, _task) = spawn_mock_master_origin_with_cookie(StatusCode::OK, Some("tok=abc")).await;
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().m3u("solis").build().await;
+
+    let target_path =
+        crate::repository::get_target_storage_path(&env.app_state.app_config.config.load(), &env.target.name)
+            .expect("target storage path");
+    let mut group = (*env.group_record).clone();
+    group.members[0].url = Arc::from(format!("http://{addr}/master.m3u8"));
+    tuliprox_repository::FailoverGroupStore::write(&target_path, &[group], &[], None)
+        .expect("write group with master url");
+    env.app_state.playlists.bump_failover_group_generation(&env.target.name);
+
+    let response = env.get_hls_manifest(env.group_vid).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(env.bound_member_input("viewer").await, "solis");
+    assert_eq!(env.origin_hits("korath"), 0);
 }
 
 #[tokio::test]
