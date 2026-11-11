@@ -24,21 +24,19 @@ pub async fn get_target_id_mapping(
     let target_id_mapping_file = get_target_id_mapping_file(target_path);
     let file_lock = cfg.file_locks.write_lock(&target_id_mapping_file).await;
     let mapping_path = target_id_mapping_file.clone();
-    let mapping =
-        tokio::task::spawn_blocking(move || TargetIdMapping::new(&mapping_path, use_memory_cache)).await.map_err(
-            |err| TuliproxError::Config(format!("spawn_blocking failed while creating TargetIdMapping: {err}")),
-        )??;
-
-    Ok((mapping, file_lock))
+    tokio::task::spawn_blocking(move || {
+        let mapping = TargetIdMapping::new(&mapping_path, use_memory_cache)?;
+        Ok((mapping, file_lock))
+    })
+    .await
+    .map_err(|err| TuliproxError::Config(format!("spawn_blocking failed while creating TargetIdMapping: {err}")))?
 }
 
 async fn load_target_id_mapping_as_tree(
-    app_config: &AppConfig,
     target_path: &Path,
     target: &ConfigTarget,
 ) -> Result<BPlusTree<VirtualId, VirtualIdRecord>, TuliproxError> {
     let target_id_mapping_file = get_target_id_mapping_file(target_path);
-    let _file_lock = app_config.file_locks.read_lock(&target_id_mapping_file).await;
 
     // Move B+Tree load to spawn_blocking to avoid blocking tokio runtime
     let path_clone = target_id_mapping_file.clone();
@@ -95,17 +93,6 @@ async fn load_xtream_playlist_as_tree(
             xtream_path.display()
         ))),
     }
-}
-
-async fn load_id_mapping_target_storage(
-    app_config: &AppConfig,
-    target: &ConfigTarget,
-) -> Result<BPlusTree<VirtualId, VirtualIdRecord>, TuliproxError> {
-    let config = app_config.config.load();
-    let target_path = get_target_storage_path(&config, target.name.as_str())
-        .ok_or_else(|| TuliproxError::Config(format!("Could not find path for target {}", target.name)))?;
-
-    load_target_id_mapping_as_tree(app_config, &target_path, target).await
 }
 
 pub async fn load_xtream_target_storage(
@@ -165,8 +152,10 @@ fn target_cache_reload_error(target: &ConfigTarget, component: &str, error: impl
     ))
 }
 
+/// Load the cache while the caller holds the target's mapping write lock.
 pub(super) async fn load_target_memory_cache_snapshot(
     app_config: &AppConfig,
+    target_path: &Path,
     target: &ConfigTarget,
     mode: TargetPersistenceMode,
 ) -> Result<TargetPlaylistStorage, TuliproxError> {
@@ -177,7 +166,7 @@ pub(super) async fn load_target_memory_cache_snapshot(
     if matches!(mode, TargetPersistenceMode::FailCacheReloadAt(TargetCacheReloadStage::IdMapping)) {
         return Err(target_cache_reload_error(target, "ID mapping", "injected reload failure"));
     }
-    let id_mapping = load_id_mapping_target_storage(app_config, target)
+    let id_mapping = load_target_id_mapping_as_tree(target_path, target)
         .await
         .map_err(|error| target_cache_reload_error(target, "ID mapping", error))?;
 

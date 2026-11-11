@@ -10,6 +10,7 @@ pub struct ManualPlaylistUpdateRequest {
     pub targets: Arc<ProcessTargets>,
     pub input_action: Option<shared::model::InputUpdateRequest>,
     pub expected_scope: Option<PlaylistUpdateScopeDto>,
+    pub replace_target_contents: bool,
 }
 
 /// What starts, serializes and narrows playlist updates.

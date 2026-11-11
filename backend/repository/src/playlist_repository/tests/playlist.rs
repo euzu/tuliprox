@@ -7,7 +7,7 @@ fn target_empty_playlist_without_force_authorization_remains_rejected() {
         trakt: None,
         filter: None,
     })]);
-    let error = validate_target_playlist_persistence(&target, true, TargetPlaylistPersistOptions::default())
+    let error = validate_target_playlist_persistence(&target, true, &TargetPlaylistPersistOptions::default())
         .expect_err("unauthorized empty target must remain rejected");
     assert!(error.to_string().contains("Refusing to persist empty playlist"));
 }

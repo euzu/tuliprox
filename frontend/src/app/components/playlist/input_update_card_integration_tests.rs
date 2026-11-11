@@ -16,9 +16,9 @@ const INPUTS: [(u16, InputType, &[&str]); 11] = [
     (41, InputType::M3u, &["normal", "refresh", "force"]),
     (7, InputType::Xtream, &["normal", "refresh", "force"]),
     (19, InputType::Stalker, &["normal", "refresh", "force"]),
-    (3, InputType::M3uBatch, &[]),
-    (11, InputType::XtreamBatch, &[]),
-    (2, InputType::StalkerBatch, &[]),
+    (3, InputType::M3uBatch, &["normal", "refresh", "force"]),
+    (11, InputType::XtreamBatch, &["normal", "refresh", "force"]),
+    (2, InputType::StalkerBatch, &["normal", "refresh", "force"]),
     (33, InputType::Staged, &[]),
     (15, InputType::Library, &["rescan"]),
     (4, InputType::Plex, &["normal", "refresh"]),
@@ -126,7 +126,7 @@ fn playlist_update_view_configured_cards_keep_identity_order_context_and_capabil
         let state = InputUpdateCardInteractionState::from_model(card);
         assert_eq!(state.controls.selected_target_ids, [20, 3]);
         assert_eq!(state.controls.policy, InputRefreshPolicy::NORMAL);
-        assert_eq!(can_start_update(&state, card, true), input_type.is_batch() || !expected_modes.is_empty());
+        assert_eq!(can_start_update(&state, card, true), !expected_modes.is_empty());
         assert!(!can_start_update(&state, card, false));
         assert_eq!(InputUpdateCardRuntime::default().status(), InputUpdateCardStatus::Ready);
     }

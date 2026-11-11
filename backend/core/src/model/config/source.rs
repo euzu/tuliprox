@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 use shared::{
     error::TuliproxError,
     model::{
-        provider_saturation::build_group_lookup, ConfigProviderDto, ConfigSourceDto, DnsPrefer, DnsScheme, InputType,
+        provider_saturation::build_group_lookup, ConfigProviderDto, ConfigSourceDto, DnsPrefer, DnsScheme,
         OnConnectErrorPolicy, OnResolveErrorPolicy, PatternTemplate, PlaylistUpdateInputDto, PlaylistUpdateScopeDto,
         PlaylistUpdateSourceDto, PlaylistUpdateTargetDto, ProviderUrlSelectionPolicy, SourcesConfigDto,
     },
@@ -509,20 +509,11 @@ impl SourcesConfig {
         let inputs = self
             .inputs
             .iter()
-            .map(|input| {
-                let input_type = match (input.input_type, input.t_batch_url.is_some()) {
-                    (_, _) if input.staged.is_some() => InputType::Staged,
-                    (InputType::M3u, true) => InputType::M3uBatch,
-                    (InputType::Xtream, true) => InputType::XtreamBatch,
-                    (InputType::Stalker, true) => InputType::StalkerBatch,
-                    (kind, _) => kind,
-                };
-                PlaylistUpdateInputDto {
-                    id: input.id,
-                    name: input.name.to_string(),
-                    input_type,
-                    enabled: input.enabled,
-                }
+            .map(|input| PlaylistUpdateInputDto {
+                id: input.id,
+                name: input.name.to_string(),
+                input_type: input.playlist_update_input_type(),
+                enabled: input.enabled,
             })
             .collect();
         let sources = self
@@ -537,6 +528,7 @@ impl SourcesConfig {
                         id: target.id,
                         name: target.name.clone(),
                         enabled: target.enabled,
+                        xtream_only: target.is_xtream_only(),
                     })
                     .collect(),
             })

@@ -15,6 +15,7 @@ mod episode;
 mod input;
 mod persist;
 mod publication;
+mod replacement;
 mod target;
 #[cfg(test)]
 use episode::{
@@ -36,8 +37,8 @@ pub use input::{
 use persist::persist_playlist_with_mode;
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub use persist::{
-    load_input_media_server_playlist, persist_input_media_server_playlist, persist_playlist, persist_playlist_views,
-    persist_playlist_views_with_groups,
+    load_input_media_server_playlist, persist_input_media_server_playlist, persist_ordinary_playlist_views,
+    persist_playlist, persist_playlist_views, persist_playlist_views_with_groups, persist_playlist_views_with_outputs,
 };
 #[cfg(test)]
 use publication::TargetCacheReloadStage;
@@ -45,4 +46,6 @@ use publication::TargetCacheReloadStage;
 pub use publication::{
     InputPlaylistPersistOptions, LibraryEmptyPublication, PlaylistPublicationPlan, TargetPlaylistPersistOptions,
 };
+pub(crate) use replacement::OrdinaryPublication;
+pub use replacement::{StagePluginOutputs, StagedPluginOutput, TargetReplacementDeadline};
 pub use target::{get_target_id_mapping, load_m3u_target_storage, load_xtream_target_storage};

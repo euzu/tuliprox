@@ -138,7 +138,11 @@ fn assert_run_state(ctx: &PlaylistProcessingContext<CollectSink>, state: Playlis
 async fn manual_update_scope_change_before_processing_writes_no_target() {
     let temp = tempfile::tempdir().unwrap();
     let ctx = library_context(temp.path(), ProcessingOrder::default()).await;
+    let mut sources = (*ctx.config.sources.load_full()).clone();
+    Arc::make_mut(&mut sources.inputs[1]).inline_batch = true;
+    ctx.config.sources.store(Arc::new(sources));
     let expected = ctx.config.sources.load().playlist_update_scope();
+    assert_eq!(expected.inputs[1].input_type, InputType::M3uBatch);
     let mut changed = (*ctx.config.sources.load_full()).clone();
     let targets = &mut changed.sources[0].targets;
     Arc::make_mut(&mut targets[0]).id = 21;
@@ -158,6 +162,11 @@ async fn manual_update_scope_change_before_processing_writes_no_target() {
             ctx.events.clone(),
         )
         .with_expected_scope(Some(expected))
+        .with_manual_input_update(Some(InputUpdateRequest {
+            input_id: 3,
+            action: InputUpdateAction::Provider(InputRefreshPolicy::NORMAL),
+        }))
+        .with_replace_target_contents(true)
         .with_update_guard(UpdateGuard::new())
         .with_bootstrap({
             let config = ctx.config.clone();
@@ -175,6 +184,446 @@ async fn manual_update_scope_change_before_processing_writes_no_target() {
     assert!(matches!(events.as_slice(), [EventMessage::PlaylistUpdate(summary)]
         if summary.state == PlaylistUpdateState::Failure && summary.run_id.as_ref() == Some(&run_id)
             && summary.error.as_deref() == Some("Playlist update scope changed while the request was queued")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn replace_target_contents_deadline_releases_permit_after_prior_commit() {
+    check_replacement_timeout(true).await;
+}
+
+fn ordinary_update_fixture(root: &Path, target: &Arc<ConfigTarget>) -> PlaylistProcessingContext<CollectSink> {
+    let ctx = processing_context_with_events(root, CollectSink::default());
+    let source = root.join("input.m3u");
+    std::fs::write(&source, "#EXTM3U\n#EXTINF:-1,Current stream\nhttps://example.test/live.ts\n").unwrap();
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "input".intern(),
+        input_type: InputType::M3u,
+        enabled: true,
+        url: source.to_string_lossy().into_owned(),
+        ..ConfigInput::default()
+    });
+    install_source(&ctx, &input, target);
+    ctx
+}
+
+#[tokio::test(start_paused = true)]
+async fn ordinary_update_timeout_drains_the_m3u_cache_publication() {
+    use tuliprox_repository::{get_target_id_mapping_file, get_target_storage_path, load_m3u_target_storage};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut target = xtream_target(true);
+    Arc::make_mut(&mut target).output = vec![TargetOutput::M3u(M3uTargetOutput {
+        filename: Some("published.m3u".into()),
+        include_type_in_url: false,
+        mask_redirect_url: false,
+        filter: None,
+    })];
+    let ctx = ordinary_update_fixture(directory.path(), &target);
+    let state = Arc::new(PlaylistStorageState::new());
+    let cache_reader = state.data.read().await;
+    let guard = UpdateGuard::new();
+    let run = ProcessingRun::for_run(
+        "ordinary-publication-timeout".into(),
+        ctx.client.clone(),
+        ctx.config.clone(),
+        ctx.user_targets.clone(),
+        ctx.events.clone(),
+    )
+    .with_playlist_state(state.clone())
+    .with_update_guard(guard.clone());
+    let mut worker = tokio::spawn(exec_processing(run));
+    let started = std::time::Instant::now();
+    while state.failover_group_generation(&target.name) == 0 {
+        assert!(
+            !worker.is_finished() && started.elapsed() < Duration::from_secs(20),
+            "ordinary writer must reach cache publication"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert!(std::fs::read_to_string(directory.path().join("published.m3u")).unwrap().contains("Current stream"));
+    assert!(cache_reader.get(&target.name).is_none());
+    let target_path = get_target_storage_path(&ctx.config.config.load(), &target.name).unwrap();
+    let mapping = get_target_id_mapping_file(&target_path);
+    assert!(ctx.config.file_locks.try_write_lock(&mapping).await.is_err());
+
+    tokio::time::advance(Duration::from_secs(3601)).await;
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut worker).await.is_err());
+    assert!(guard.try_playlist().is_none());
+    assert!(ctx.config.file_locks.try_write_lock(&mapping).await.is_err());
+    drop(cache_reader);
+    worker.await.unwrap();
+    assert!(guard.try_playlist().is_some());
+    assert!(ctx.config.file_locks.try_write_lock(&mapping).await.is_ok());
+    let on_disk = load_m3u_target_storage(&ctx.config, &target).await.unwrap();
+    let cache = state.data.read().await;
+    let stored = cache.get(&target.name).unwrap();
+    assert_eq!(stored.m3u.as_ref().unwrap().len(), on_disk.len());
+    assert_eq!(on_disk.len(), 1);
+    assert_eq!(stored.id_mapping.as_ref().unwrap().len(), 1);
+    assert!(ctx.events.0.lock().unwrap().iter().any(
+        |event| matches!(event, EventMessage::PlaylistUpdate(summary) if summary.state == PlaylistUpdateState::Failure)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn ordinary_update_timeout_cancels_the_initial_xtream_output_lock_wait() {
+    use tuliprox_repository::{
+        get_target_id_mapping_file, get_target_storage_path, xtream_category_view_lock_path, xtream_get_file_path,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let target = xtream_target(true);
+    let ctx = ordinary_update_fixture(directory.path(), &target);
+    let config = ctx.config.config.load_full();
+    let storage = xtream_get_storage_path(&config, &target.name).unwrap();
+    let category_lock = xtream_category_view_lock_path(&storage);
+    let mapping = get_target_id_mapping_file(&get_target_storage_path(&config, &target.name).unwrap());
+    let locks = &ctx.config.file_locks;
+    let reader = locks.read_lock(&category_lock).await;
+    let state = Arc::new(PlaylistStorageState::new());
+    let guard = UpdateGuard::new();
+    let run = ProcessingRun::for_run(
+        "ordinary-blocked-output".into(),
+        ctx.client.clone(),
+        ctx.config.clone(),
+        ctx.user_targets.clone(),
+        ctx.events.clone(),
+    )
+    .with_playlist_state(state.clone())
+    .with_update_guard(guard.clone());
+    let worker = tokio::spawn(exec_processing(run));
+    let started = std::time::Instant::now();
+    loop {
+        // An additional reader queues behind the writer once it requests the view lock.
+        let probe = locks.read_lock(&category_lock);
+        tokio::pin!(probe);
+        if futures::poll!(probe).is_pending() {
+            break;
+        }
+        assert!(!worker.is_finished() && started.elapsed() < Duration::from_secs(20));
+        tokio::task::yield_now().await;
+    }
+    assert!(locks.try_write_lock(&mapping).await.is_err());
+    tokio::time::advance(Duration::from_secs(3601)).await;
+    tokio::time::timeout(Duration::from_secs(1), worker).await.expect("initial lock wait must cancel").unwrap();
+    assert!(guard.try_playlist().is_some());
+    assert!(locks.try_write_lock(&mapping).await.is_ok());
+    drop(reader);
+    assert!(!xtream_get_file_path(&storage, XtreamCluster::Live).exists());
+    assert_eq!(state.failover_group_generation(&target.name), 0);
+    assert!(state.data.read().await.get(&target.name).is_none());
+}
+
+#[derive(Clone)]
+struct PausedOutputPlugin {
+    entered: Arc<tokio::sync::Semaphore>,
+    resume: Arc<tokio::sync::Semaphore>,
+}
+
+impl PluginHost for PausedOutputPlugin {
+    async fn render_output(
+        &self,
+        _plugin: &str,
+        _ctx: &HookCtx<'_>,
+        request: &shared::model::PluginOutputRequest<'_>,
+        _items: &[&PlaylistItem],
+    ) -> Result<(), String> {
+        self.entered.add_permits(1);
+        self.resume.acquire().await.unwrap().forget();
+        tokio::fs::write(request.path, b"plugin output").await.map_err(|error| error.to_string())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ordinary_update_timeout_drains_plugin_publication() {
+    use tuliprox_core::model::PluginTargetOutput;
+    use tuliprox_repository::{get_target_id_mapping_file, get_target_storage_path};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut target = xtream_target(false);
+    Arc::make_mut(&mut target).output = vec![TargetOutput::Plugin(PluginTargetOutput {
+        plugin: "fixture".into(),
+        format: None,
+        filename: Some("streams.txt".into()),
+        plugin_config: serde_json::Map::new(),
+        filter: None,
+    })];
+    let ctx = ordinary_update_fixture(directory.path(), &target);
+    let target_path = get_target_storage_path(&ctx.config.config.load(), &target.name).unwrap();
+    let mapping = get_target_id_mapping_file(&target_path);
+    let guard = UpdateGuard::new();
+    let plugin = PausedOutputPlugin {
+        entered: Arc::new(tokio::sync::Semaphore::new(0)),
+        resume: Arc::new(tokio::sync::Semaphore::new(0)),
+    };
+    let run = ProcessingRun::for_run(
+        "ordinary-plugin-timeout".into(),
+        ctx.client.clone(),
+        ctx.config.clone(),
+        ctx.user_targets.clone(),
+        ctx.events.clone(),
+    )
+    .with_plugins(plugin.clone())
+    .with_update_guard(guard.clone());
+    let mut worker = tokio::spawn(exec_processing(run));
+    let started = std::time::Instant::now();
+    while plugin.entered.try_acquire().is_err() {
+        assert!(!worker.is_finished() && started.elapsed() < Duration::from_secs(20));
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(3601)).await;
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut worker).await.is_err());
+    assert!(guard.try_playlist().is_none());
+    assert!(ctx.config.file_locks.try_write_lock(&mapping).await.is_err());
+    plugin.resume.add_permits(1);
+    worker.await.unwrap();
+    assert!(guard.try_playlist().is_some());
+    assert_eq!(std::fs::read(target_path.join("streams.txt")).unwrap(), b"plugin output");
+}
+
+#[tokio::test(start_paused = true)]
+async fn replace_target_contents_deadline_fails_without_a_publication() { check_replacement_timeout(false).await; }
+
+async fn check_replacement_timeout(publish_first: bool) {
+    use tuliprox_repository::{get_target_id_mapping_file, get_target_storage_path, xtream_category_view_lock_path};
+
+    let temp = tempfile::tempdir().unwrap();
+    let server = TestXtreamServer::start([2, 2, 2]);
+    let ctx = processing_context_with_events(temp.path(), CollectSink::default());
+    let mut config = (*ctx.config.config.load_full()).clone();
+    config.process_parallel = false;
+    ctx.config.config.store(Arc::new(config));
+    let input = test_input(&server.base_url, ConfigInputUpdateQualityDto::default(), 3600, &[]);
+    let mut alpha = xtream_target(true);
+    Arc::make_mut(&mut alpha).filter = get_filter("Type = live", None).unwrap().into();
+    let named_target = |name: &str, id| Arc::new(ConfigTarget { name: name.to_owned(), id, ..alpha.as_ref().clone() });
+    let beta = named_target("waiting-target", 2);
+    let gamma = named_target("later-target", 3);
+    let unselected = named_target("unselected-target", 4);
+    let cache = Arc::new(PlaylistStorageState::new());
+    seed_baseline(&ctx, &input).await;
+    seed_valid_cluster_cache(&ctx, &input).await;
+    for target in [&alpha, &beta, &gamma, &unselected] {
+        seed_xtream_target(&ctx, target, &cache).await;
+    }
+    install_source(&ctx, &input, &alpha);
+    let mut sources = (*ctx.config.sources.load_full()).clone();
+    sources.sources.push(ConfigSource {
+        inputs: vec![input.name.clone()],
+        targets: vec![beta.clone(), gamma.clone(), unselected.clone()],
+    });
+    let scope = sources.playlist_update_scope();
+    let revision = scope.revision();
+    ctx.config.sources.store(Arc::new(sources));
+
+    let config = ctx.config.config.load_full();
+    let storage = xtream_get_storage_path(&config, &beta.name).unwrap();
+    let mapping = get_target_id_mapping_file(&get_target_storage_path(&config, &beta.name).unwrap());
+    let locks = &ctx.config.file_locks;
+    let blocked = locks.read_lock(&xtream_category_view_lock_path(&storage)).await;
+    let guard = UpdateGuard::new();
+    let run = |run_id: PlaylistUpdateRunId, selected: &[&Arc<ConfigTarget>]| {
+        ProcessingRun::for_run(
+            run_id,
+            ctx.client.clone(),
+            ctx.config.clone(),
+            Arc::new(ProcessTargets {
+                enabled: true,
+                inputs: vec![input.id],
+                targets: selected.iter().map(|target| target.id).collect(),
+                target_names: selected.iter().map(|target| target.name.clone()).collect(),
+            }),
+            ctx.events.clone(),
+        )
+        .with_expected_scope(Some(scope.clone()))
+        .with_playlist_state(cache.clone())
+        .with_replace_target_contents(true)
+        .with_update_guard(guard.clone())
+    };
+    let run_id: PlaylistUpdateRunId = "replacement-timeout".into();
+    let selected: &[&Arc<ConfigTarget>] = if publish_first { &[&alpha, &beta, &gamma] } else { &[&beta] };
+    let worker = tokio::spawn(exec_processing(run(run_id.clone(), selected)));
+
+    let started = std::time::Instant::now();
+    while locks.try_write_lock(&mapping).await.is_ok() {
+        assert!(
+            !worker.is_finished() && started.elapsed() < Duration::from_secs(30),
+            "waiting target must enter staging"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert!(guard.try_playlist().is_none());
+    assert_target_counts(&ctx.config, &alpha, if publish_first { [2, 0, 0] } else { [2, 2, 2] }).await;
+    tokio::time::advance(Duration::from_secs(3601)).await;
+    tokio::time::timeout(Duration::from_secs(1), worker).await.expect("blocked target must be cancelled").unwrap();
+    assert!(guard.try_playlist().is_some(), "terminal run must release the global playlist permit");
+    drop(blocked);
+    for target in [&beta, &gamma, &unselected] {
+        assert_target_counts(&ctx.config, target, [2, 2, 2]).await;
+    }
+
+    let events = std::mem::take(&mut *ctx.events.0.lock().unwrap());
+    assert_replacement_timeout_events(
+        &events,
+        &run_id,
+        input.id,
+        &revision,
+        publish_first.then_some(alpha.name.as_str()),
+    );
+
+    let retry_id: PlaylistUpdateRunId = "replacement-retry".into();
+    exec_processing(run(retry_id.clone(), &[&beta])).await;
+    assert_target_counts(&ctx.config, &beta, [2, 0, 0]).await;
+    assert!(ctx.events.0.lock().unwrap().iter().any(|event| matches!(event, EventMessage::PlaylistUpdate(summary)
+        if summary.run_id.as_ref() == Some(&retry_id) && summary.state == PlaylistUpdateState::Success
+            && summary.processed_targets().eq([beta.name.as_str()]))));
+    assert!(server.finish().is_empty(), "valid cache should not make upstream requests");
+}
+
+fn assert_replacement_timeout_events(
+    events: &[EventMessage],
+    run_id: &PlaylistUpdateRunId,
+    input_id: u16,
+    revision: &str,
+    expected_published: Option<&str>,
+) {
+    let summaries: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            EventMessage::PlaylistUpdate(summary) => Some(summary),
+            _ => None,
+        })
+        .collect();
+    let expected_state =
+        if expected_published.is_some() { PlaylistUpdateState::Partial } else { PlaylistUpdateState::Failure };
+    assert!(matches!(summaries.as_slice(), [summary]
+        if summary.state == expected_state && summary.run_id.as_ref() == Some(run_id)
+            && summary.processed_targets().eq(expected_published)
+            && summary.error.as_deref() == Some("Playlist processing timed out after 3600 secs")));
+    let reasons: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            EventMessage::PlaylistUpdateProgress(progress) if progress.failure_reason.is_some() => Some(progress),
+            _ => None,
+        })
+        .collect();
+    let timed_out_targets =
+        if expected_published.is_some() { "'waiting-target', 'later-target'" } else { "'waiting-target'" };
+    let timeout = format!(
+        "Target replacement did not finish for {timed_out_targets}: Playlist processing timed out after 3600 secs"
+    );
+    assert!(matches!(reasons.as_slice(), [progress]
+    if progress.run_id.as_ref() == Some(run_id)
+        && progress.execution_order == summaries[0].execution_order
+        && progress.scope_revision.as_deref() == Some(revision)
+        && progress.input_id == Some(input_id)
+        && progress.failure_reason.as_deref() == Some(timeout.as_str())));
+    assert!(matches!(events.last(), Some(EventMessage::PlaylistUpdate(_))));
+}
+
+#[tokio::test]
+async fn replace_target_contents_reports_a_publication_error_with_its_original_reason() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = TestXtreamServer::start([2, 2, 2]);
+    let ctx = processing_context_with_events(temp.path(), CollectSink::default());
+    let input = test_input(&server.base_url, ConfigInputUpdateQualityDto::default(), 3600, &[]);
+    let target = xtream_target(true);
+    let cache = Arc::new(PlaylistStorageState::new());
+    seed_baseline(&ctx, &input).await;
+    seed_valid_cluster_cache(&ctx, &input).await;
+    seed_xtream_target(&ctx, &target, &cache).await;
+    install_source(&ctx, &input, &target);
+    let storage = xtream_get_storage_path(&ctx.config.config.load(), &target.name).unwrap();
+    let categories = get_vod_cat_collection_path(&storage);
+    let original = tokio::fs::read(&categories).await.unwrap();
+    tokio::fs::remove_file(&categories).await.unwrap();
+    tokio::fs::create_dir(&categories).await.unwrap();
+
+    let run_id: PlaylistUpdateRunId = "publication-error".into();
+    let scope = ctx.config.sources.load().playlist_update_scope();
+    exec_processing(
+        ProcessingRun::for_run(
+            run_id.clone(),
+            ctx.client.clone(),
+            ctx.config.clone(),
+            Arc::new(ProcessTargets {
+                enabled: true,
+                inputs: vec![input.id],
+                targets: vec![target.id],
+                target_names: vec![target.name.clone()],
+            }),
+            ctx.events.clone(),
+        )
+        .with_expected_scope(Some(scope))
+        .with_playlist_state(cache)
+        .with_replace_target_contents(true),
+    )
+    .await;
+
+    tokio::fs::remove_dir(&categories).await.unwrap();
+    tokio::fs::write(&categories, original).await.unwrap();
+    assert_target_counts(&ctx.config, &target, [2, 2, 2]).await;
+    assert_eq!(server.finish(), Vec::<String>::new());
+    let events = ctx.events.0.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(event, EventMessage::PlaylistUpdate(summary)
+        if summary.run_id.as_ref() == Some(&run_id) && summary.state == PlaylistUpdateState::Failure
+            && summary.processed_targets().next().is_none())));
+    assert!(events.iter().any(|event| matches!(event, EventMessage::PlaylistUpdateProgress(progress)
+        if progress.run_id.as_ref() == Some(&run_id) && progress.target == target.name
+            && progress.failure_reason.as_deref().is_some_and(|reason| reason.contains("Target artifact is not a file")))));
+}
+
+#[tokio::test]
+async fn replace_target_contents_delivers_a_parallel_failure_before_the_timeout_terminal() {
+    use crate::processor::playlist::target::{record_target_replacement_failure, report_target_replacement_details};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut ctx = processing_context_with_events(temp.path(), CollectSink::default());
+    let input = test_input("http://127.0.0.1:1", ConfigInputUpdateQualityDto::default(), 0, &[]);
+    let target = xtream_target(false);
+    let targets: Vec<_> = ["A", "B", "C"]
+        .into_iter()
+        .zip(1..)
+        .map(|(name, id)| Arc::new(ConfigTarget { name: name.into(), id, ..(*target).clone() }))
+        .collect();
+    ctx.config.sources.store(Arc::new(SourcesConfig {
+        inputs: vec![input.clone()],
+        sources: vec![ConfigSource { inputs: vec![input.name.clone()], targets }],
+        ..SourcesConfig::default()
+    }));
+    ctx.publication_deadline =
+        Some(Arc::new(TargetReplacementDeadline::new(tokio::time::Instant::now() + Duration::from_secs(1))));
+    let ctx = Arc::new(ctx);
+    let (recorded, failure_ready) = tokio::sync::oneshot::channel();
+    let (resume, released) = tokio::sync::oneshot::channel();
+    let worker = tokio::spawn({
+        let ctx = ctx.clone();
+        async move {
+            record_target_replacement_failure(&ctx, "B", std::iter::once(input.id), "Target artifact is not a file");
+            recorded.send(()).unwrap();
+            released.await.unwrap();
+        }
+    });
+    failure_ready.await.unwrap();
+    assert_eq!(ctx.events.0.lock().unwrap().len(), 0, "the finalizer only records the outcome");
+    report_target_replacement_details(&ctx, Some((&["A".into()], "Playlist processing timed out")));
+    let mut summary =
+        PlaylistUpdateSummary::for_run(ctx.run_id.clone(), ctx.execution_order, PlaylistUpdateState::Partial);
+    summary.stats = vec![SourceStats { inputs: Vec::new(), targets: vec![TargetStats::success("A")] }];
+    ctx.events.emit(EventMessage::PlaylistUpdate(summary));
+    resume.send(()).unwrap();
+    worker.await.unwrap();
+
+    let events = ctx.events.0.lock().unwrap();
+    assert!(matches!(events.as_slice(), [
+        EventMessage::PlaylistUpdateProgress(failure),
+        EventMessage::PlaylistUpdateProgress(timeout),
+        EventMessage::PlaylistUpdate(summary),
+    ] if failure.target == "B" && timeout.target == "C"
+        && failure.failure_reason.as_deref() == Some("Target 'B' replacement failed: Target artifact is not a file")
+        && timeout.failure_reason.as_deref() == Some("Target replacement did not finish for 'C': Playlist processing timed out")
+        && summary.state == PlaylistUpdateState::Partial && summary.processed_targets().eq(["A"])));
 }
 
 #[tokio::test]

@@ -228,7 +228,7 @@ impl ConfigTargetDto {
 
         if strm_cnt > 0 && xtream_cnt == 0 && m3u_cnt == 0 {
             return Err(TuliproxError::ConfigTarget(format!(
-                "strm output is only permitted when used in combination with xtream or m3u output: {}",
+                "STRM output is only permitted when used in combination with Xtream or M3U output: {}",
                 self.name
             )));
         }

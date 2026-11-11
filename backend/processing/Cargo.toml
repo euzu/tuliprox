@@ -46,6 +46,7 @@ tokio-util = { workspace = true, features = ["io", "io-util"] }
 
 [dev-dependencies]
 tuliprox-iptv = { workspace = true, features = ["test-support"] }
+tuliprox-repository = { workspace = true, features = ["test-support"] }
 rand.workspace = true
 rcgen.workspace = true
 rmp-serde.workspace = true

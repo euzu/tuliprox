@@ -27,6 +27,9 @@ use shared::{
 use std::{collections::HashMap, rc::Rc};
 use yew::{platform::spawn_local, prelude::*};
 
+#[path = "update_card_layout.rs"]
+mod update_card_layout;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PlaylistUpdateBulkOutcome {
     Accepted { run_id: Option<PlaylistUpdateRunId>, input_ids: Vec<u16> },
@@ -404,6 +407,11 @@ pub fn PlaylistUpdateView() -> Html {
 
     let library_progress_view = visible_library_progress(library_progress.as_ref());
 
+    let cards_grid = use_node_ref();
+    update_card_layout::use_update_card_layout(
+        cards_grid.clone(),
+        input_update_run_views.iter().map(|view| view.input_id).collect(),
+    );
     html! {
       <div class="tp__playlist-update-view">
          <Breadcrumbs items={&*breadcrumbs}/>
@@ -443,7 +451,7 @@ pub fn PlaylistUpdateView() -> Html {
              Html::default()
          }}
          <div class="tp__playlist-update-view__cards">
-         <div class="tp__playlist-update-view__cards-grid">
+         <div ref={cards_grid} class="tp__playlist-update-view__cards-grid">
             {for input_update_run_views.into_iter().map(|view| view.with_library_catalog(library_catalog.as_ref())).filter_map(|view| {
                 let input_id = view.input_id;
                 input_update_cards_by_id.get(&input_id).map(|model| html! {
@@ -604,7 +612,7 @@ mod tests {
         let cards = build_input_update_card_models(&sources, &Default::default());
         let scope = playlist_update_bulk_scope(&sources, &cards);
         assert_eq!(scope.visible_input_ids, [41, 7, 3]);
-        assert_eq!(cards[2].capabilities, shared::model::InputUpdateCapabilities::BulkOnly);
+        assert!(cards[2].capabilities.supports(InputRefreshPolicy::FORCE));
         let context = connection(1);
         let mut state = Rc::new(PlaylistUpdateCardStatuses::for_connection(context));
         state = state.reduce(PlaylistUpdateCardStatusAction::Accepted(PlaylistUpdateAcceptedScope {

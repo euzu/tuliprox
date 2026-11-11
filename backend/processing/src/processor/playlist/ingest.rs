@@ -133,6 +133,8 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     pub partial_refresh: Arc<std::sync::atomic::AtomicBool>,
     /// Completed, nonfatal quality decisions that make only the overall run partial.
     pub had_quality_rejections: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) replace_target_contents: bool,
+    pub(super) publication_deadline: Option<Arc<TargetReplacementDeadline>>,
     /// Optional request-local behavior for one manually selected input.
     pub input_refresh: Option<InputRefreshOverride>,
     pub(crate) library_update_mode: LibraryUpdateMode,
@@ -170,6 +172,8 @@ impl PlaylistProcessingContext<shared::model::NoopSink> {
             stalker_refresh_mode: StalkerRefreshMode::Complete,
             partial_refresh: Arc::default(),
             had_quality_rejections: Arc::default(),
+            replace_target_contents: false,
+            publication_deadline: None,
             input_refresh: None,
             library_update_mode: LibraryUpdateMode::ExistingCatalog,
             maintenance: None,

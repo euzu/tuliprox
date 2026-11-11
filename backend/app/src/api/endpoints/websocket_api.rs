@@ -832,7 +832,7 @@ mod tests {
         let mut summary = PlaylistUpdateSummary::for_run(
             PlaylistUpdateRunId::from("websocket-run"),
             PlaylistUpdateRunOrder::from(30),
-            PlaylistUpdateState::Success,
+            PlaylistUpdateState::Partial,
         );
         summary.stats = vec![
             SourceStats {
@@ -845,7 +845,7 @@ mod tests {
         let ProtocolMessage::PlaylistUpdateResponse(terminal) = mapped.0 else {
             panic!("expected playlist update terminal response");
         };
-        assert_eq!(terminal.targets, vec!["Main TV".to_string(), "Kids".to_string(), "Sport".to_string()]);
+        assert_eq!(terminal.targets, ["Main TV", "Sport"]);
 
         let bare = to_protocol_message(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
             PlaylistUpdateState::Success,

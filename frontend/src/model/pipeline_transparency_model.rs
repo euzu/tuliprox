@@ -32,19 +32,22 @@ pub struct InputUpdateRunView {
     /// Structured details safe for localized presentation.
     pub localized_progress_details: Vec<PlaylistUpdateProgressDetail>,
     /// Why the input failed or completed partially, credentials already masked by the server.
-    pub failure_reason: Option<String>,
+    pub failure_reasons: Vec<String>,
+    pub published_targets: Vec<String>,
     pub cluster_results: Vec<InputClusterRunView>,
     pub target_results: Vec<TargetRunView>,
 }
 
 impl InputUpdateRunView {
-    /// The card badge: the run while it is queued or updating, afterwards this input's own result. A target
-    /// that failed for another input does not mark this input as failed.
+    /// Show a running update or a terminal failure assigned to this card. Otherwise use the input result.
     #[must_use]
     pub const fn card_status(&self) -> InputUpdateCardStatus {
         match (self.overall_state, self.input_state) {
             (InputUpdateCardStatus::Queued | InputUpdateCardStatus::Updating, _)
             | (_, InputUpdateCardStatus::Ready) => self.overall_state,
+            (InputUpdateCardStatus::Partial | InputUpdateCardStatus::Failed, _) if !self.failure_reasons.is_empty() => {
+                self.overall_state
+            }
             (_, input_state) => input_state,
         }
     }
@@ -172,6 +175,14 @@ pub fn build_input_update_run_views(
                     pipeline: target_config_by_id.get(&target.id).map(|config| target_pipeline(config)),
                 })
                 .collect();
+            let published_targets = runtime.run_id().map_or_else(Vec::new, |run_id| {
+                statuses
+                    .published_targets(run_id)
+                    .iter()
+                    .filter(|name| card.targets.iter().any(|target| target.name == **name))
+                    .cloned()
+                    .collect()
+            });
 
             InputUpdateRunView {
                 library_catalog: None,
@@ -190,7 +201,8 @@ pub fn build_input_update_run_views(
                 last_update_at: card.last_update_at,
                 progress_details: runtime.details().to_vec(),
                 localized_progress_details: runtime.localized_details().to_vec(),
-                failure_reason: runtime.failure_reason().map(str::to_string),
+                failure_reasons: runtime.failure_reasons().to_vec(),
+                published_targets,
                 cluster_results,
                 target_results,
             }
@@ -371,6 +383,54 @@ mod tests {
 
     fn input(id: u16, name: &str, input_type: InputType) -> ConfigInputDto {
         ConfigInputDto { id, name: name.intern(), input_type, enabled: true, ..ConfigInputDto::default() }
+    }
+
+    #[test]
+    fn replacement_timeout_details_keep_published_targets_and_ignore_older_runs() {
+        let involved = input(7, "involved", InputType::Xtream);
+        let unrelated = input(8, "unrelated", InputType::Xtream);
+        let cards = vec![card(&involved, &[(1, "A"), (2, "B"), (3, "C")], None), card(&unrelated, &[(4, "D")], None)];
+        let sources = SourcesConfigDto { inputs: vec![involved, unrelated], ..Default::default() };
+        let connection_context = WebSocketConnectionContext::new(1, true);
+        let state = Rc::new(PlaylistUpdateCardStatuses::for_connection(connection_context))
+            .reduce(PlaylistUpdateCardStatusAction::ResetScope { connection_context, revision: Rc::from("scope") });
+        let timeout = "Target replacement did not finish for 'B', 'C': Playlist processing timed out";
+        let progress = |run: &str, order: u64, revision: &str, message: &str| {
+            let mut progress = PlaylistUpdateProgressEvent::for_run_input(run.into(), order.into(), 7, "B, C", message)
+                .with_failure_reason(Some(message.into()));
+            progress.scope_revision = Some(revision.into());
+            PlaylistUpdateCardStatusAction::Progress { connection_context, progress }
+        };
+        let complete = |run: &str, order: u64, state, published: &str| PlaylistUpdateCardStatusAction::Completed {
+            connection_context,
+            completed: PlaylistUpdateRunStateEvent {
+                run_id: Some(run.into()),
+                execution_order: Some(order.into()),
+                scope_revision: Some("scope".into()),
+                state,
+                targets: vec![published.to_owned()],
+            },
+        };
+        let project = |state: &PlaylistUpdateCardStatuses| {
+            build_input_update_run_views(&sources, &cards, state, &PlaylistUpdateStatusDto::default())
+        };
+        let state = state.reduce(progress("first", 1, "scope", timeout));
+        let state = state.reduce(complete("first", 1, PlaylistUpdateState::Partial, "A"));
+        let views = project(&state);
+        assert_eq!(views[0].overall_state, InputUpdateCardStatus::Partial);
+        assert_eq!(views[0].published_targets, ["A"]);
+        assert_eq!(views[0].failure_reasons, [timeout]);
+        assert!(views[1].published_targets.is_empty() && views[1].failure_reasons.is_empty());
+
+        let mut retry = PlaylistUpdateProgressEvent::for_run_input("retry".into(), 2.into(), 7, "B", "retry");
+        retry.scope_revision = Some("scope".into());
+        let state = state.reduce(PlaylistUpdateCardStatusAction::Progress { connection_context, progress: retry });
+        let state = state.reduce(progress("first", 1, "scope", timeout));
+        let state = state.reduce(progress("stale-scope", 3, "old-scope", timeout));
+        let state = state.reduce(complete("retry", 2, PlaylistUpdateState::Success, "B"));
+        let views = project(&state);
+        assert_eq!(views[0].published_targets, ["B"]);
+        assert_eq!(views[0].failure_reasons, Vec::<String>::new());
     }
 
     #[test]
@@ -721,6 +781,11 @@ mod tests {
             assert_eq!(view.input_state, InputUpdateCardStatus::Success);
             assert_eq!(view.overall_state, InputUpdateCardStatus::Failed);
             assert_eq!(view.card_status(), InputUpdateCardStatus::Success, "the card shows its own input");
+            let local_failure = InputUpdateRunView {
+                failure_reasons: vec!["Target 'selected' replacement failed".into()],
+                ..view.clone()
+            };
+            assert_eq!(local_failure.card_status(), InputUpdateCardStatus::Failed);
             for running in [InputUpdateCardStatus::Queued, InputUpdateCardStatus::Updating] {
                 let busy = InputUpdateRunView { overall_state: running, ..view.clone() };
                 assert_eq!(busy.card_status(), running, "a running update shows the run");
@@ -890,7 +955,7 @@ mod tests {
             capabilities: InputUpdateCapabilities::for_input(input),
             targets: targets
                 .iter()
-                .map(|(id, name)| InputUpdateCardTarget { id: *id, name: (*name).to_string() })
+                .map(|(id, name)| InputUpdateCardTarget { id: *id, name: (*name).to_string(), enabled: true })
                 .collect(),
             last_update_at,
         }

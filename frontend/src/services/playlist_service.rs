@@ -11,12 +11,12 @@ use log::error;
 use shared::{
     model::{
         EpgChannel, EpgChannelFilter, EpgGridRequest, EpgGridRow, EpgGroupInfo, EpgGroupsRequest, EpgSearchResultDto,
-        EpgTv, FieldError, InputRefreshOverride, OperationRunAccepted, OverrideConflictDto, OverrideDiscardRequest,
-        OverrideFieldErrorsDto, OverrideFileDto, OverrideItemKind, OverrideOrphansDto, OverrideProvenanceDto,
-        OverrideRevisionDto, OverrideSaveRequest, OverrideScopeDto, PlaylistEpgRequest, PlaylistRequest,
-        PlaylistUpdateRequestDto, PlaylistUpdateViewSnapshotDto, PlaylistUrlResolveRequest, SeriesStreamProperties,
-        StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto, UiPlaylistCategories,
-        UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
+        EpgTv, FieldError, InputRefreshOverride, InputRefreshPolicy, OperationRunAccepted, OverrideConflictDto,
+        OverrideDiscardRequest, OverrideFieldErrorsDto, OverrideFileDto, OverrideItemKind, OverrideOrphansDto,
+        OverrideProvenanceDto, OverrideRevisionDto, OverrideSaveRequest, OverrideScopeDto, PlaylistEpgRequest,
+        PlaylistRequest, PlaylistUpdateRequestDto, PlaylistUpdateViewSnapshotDto, PlaylistUrlResolveRequest,
+        SeriesStreamProperties, StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto,
+        UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
     utils::{concat_path_leading_slash, HEADER_IF_MATCH, HEADER_PLAYLIST_SCOPE_REVISION},
 };
@@ -109,6 +109,18 @@ impl PlaylistService {
     ) -> Result<OperationRunAccepted, Error> {
         let request = build_target_id_update_request(target_ids)?;
         self.submit_update_request_with_revision(&request, revision).await
+    }
+
+    pub async fn replace_target_contents(
+        &self,
+        target_ids: &[u16],
+        provider_input_id: u16,
+        policy: InputRefreshPolicy,
+        revision: &str,
+    ) -> Result<OperationRunAccepted, Error> {
+        let request =
+            build_replacement_update_request(target_ids, InputRefreshOverride { input_id: provider_input_id, policy })?;
+        self.submit_update_request_with_revision(&request, Some(revision)).await
     }
 
     pub async fn update_all_inputs(&self) -> Result<OperationRunAccepted, Error> {
@@ -498,7 +510,7 @@ fn build_playlist_update_request(targets: &[&str]) -> PlaylistUpdateRequestDto {
         targets: targets.iter().map(|target| (*target).to_string()).collect(),
         target_ids: None,
         input_refresh: None,
-        input_action: None,
+        ..PlaylistUpdateRequestDto::default()
     }
 }
 
@@ -512,6 +524,16 @@ fn build_target_id_update_request(target_ids: &[u16]) -> Result<PlaylistUpdateRe
         target_ids: Some(target_ids.iter().copied().collect::<indexmap::IndexSet<_>>().into_iter().collect()),
         ..PlaylistUpdateRequestDto::default()
     })
+}
+
+fn build_replacement_update_request(
+    target_ids: &[u16],
+    input_refresh: InputRefreshOverride,
+) -> Result<PlaylistUpdateRequestDto, Error> {
+    let mut request = build_target_id_update_request(target_ids)?;
+    request.replace_target_contents = true;
+    request.input_refresh = Some(input_refresh);
+    Ok(request)
 }
 
 fn build_manual_input_update_request(
@@ -538,7 +560,7 @@ fn build_input_playlist_update_request(
         targets: Vec::new(),
         target_ids: Some(target_ids.to_vec()),
         input_refresh: Some(input_refresh),
-        input_action: None,
+        ..PlaylistUpdateRequestDto::default()
     }
 }
 
@@ -667,6 +689,17 @@ mod tests {
                 // including when no single-input policy is offered by this capability.
                 assert_eq!(build_playlist_update_bulk_request(), Default::default());
             }
+        }
+    }
+
+    #[test]
+    fn playlist_update_replacement_preserves_the_selected_policy() {
+        for policy in [InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE] {
+            let refresh = InputRefreshOverride { input_id: 7, policy };
+            let request = super::build_replacement_update_request(&[30, 20], refresh).unwrap();
+            assert!(request.replace_target_contents);
+            assert_eq!(request.target_ids, Some(vec![30, 20]));
+            assert_eq!(request.input_refresh, Some(refresh));
         }
     }
 

@@ -262,7 +262,7 @@ fn strm_with_username_requires_m3u_or_xtream_output() {
 
     let err = target.prepare(1, None, None).expect_err("STRM username without stream output should fail");
 
-    assert!(err.to_string().contains("xtream or m3u output"));
+    assert!(err.to_string().contains("Xtream or M3U output"));
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn strm_without_username_requires_m3u_or_xtream_output() {
 
     let err = target.prepare(1, None, None).expect_err("STRM without stream output should fail");
 
-    assert!(err.to_string().contains("xtream or m3u output"));
+    assert!(err.to_string().contains("Xtream or M3U output"));
 }
 
 #[test]

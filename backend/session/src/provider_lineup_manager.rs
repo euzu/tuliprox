@@ -1340,6 +1340,7 @@ mod tests {
             staged: None,
             exp_date: None,
             t_batch_url: None,
+            inline_batch: false,
             panel_api: None,
             provider_configs: None,
             playback_provider: None,

@@ -751,6 +751,8 @@ async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() 
             stalker_refresh_mode: StalkerRefreshMode::Complete,
             partial_refresh: Arc::default(),
             had_quality_rejections: Arc::default(),
+            replace_target_contents: false,
+            publication_deadline: None,
             input_refresh: None,
             library_update_mode: crate::processor::playlist::LibraryUpdateMode::default(),
             maintenance: None,

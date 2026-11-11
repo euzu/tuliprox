@@ -5,7 +5,7 @@ use super::{
     },
     *,
 };
-use shared::model::ItemOverride;
+use shared::{model::ItemOverride, utils::sanitize_sensitive_info};
 
 pub(crate) fn join_arc_strs(values: &[Arc<str>], separator: &str) -> String {
     let mut result = String::new();
@@ -205,6 +205,95 @@ pub(crate) async fn wait_for_target_finalizer_slot(
     }
 }
 
+pub(super) fn record_target_replacement_failure<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
+    target_name: &str,
+    inputs: impl Iterator<Item = u16>,
+    reason: &str,
+) -> TuliproxError {
+    let message = replacement_failure_message(target_name, reason);
+    if let Some(deadline) = &ctx.publication_deadline {
+        // The run coordinator sends these details before its terminal frame.
+        // Finalizers can be cancelled independently of that event.
+        deadline.record_target_failure(target_name, reason);
+    } else {
+        emit_replacement_failure(ctx, target_name, inputs, &message);
+    }
+    TuliproxError::RepositoryPlaylist(message)
+}
+
+fn replacement_failure_message(target: &str, reason: &str) -> String {
+    sanitize_sensitive_info(&format!("Target '{target}' replacement failed: {reason}")).into_owned()
+}
+
+fn emit_replacement_failure<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
+    target: &str,
+    inputs: impl Iterator<Item = u16>,
+    message: &str,
+) {
+    for input_id in inputs {
+        ctx.events.emit(EventMessage::PlaylistUpdateProgress(
+            PlaylistUpdateProgressEvent::for_run_input(
+                ctx.run_id.clone(),
+                ctx.execution_order,
+                input_id,
+                target,
+                message,
+            )
+            .with_failure_reason(Some(message.to_owned())),
+        ));
+    }
+}
+
+pub(super) fn report_target_replacement_details<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
+    timeout: Option<(&[String], &str)>,
+) {
+    let Some(deadline) = &ctx.publication_deadline else { return };
+    let failures = deadline.take_target_failures();
+    if failures.is_empty() && timeout.is_none() {
+        return;
+    }
+    let sources = ctx.config.sources.load();
+    let mut targets_by_input = std::collections::BTreeMap::<u16, Vec<&str>>::new();
+    for source in &sources.sources {
+        let inputs = || {
+            source
+                .inputs
+                .iter()
+                .filter_map(|name| sources.get_input_by_name(name))
+                .filter(|input| is_input_enabled(input, &ctx.user_targets))
+                .map(|input| input.id)
+        };
+        for target in source.targets.iter().filter(|target| {
+            is_target_enabled(target, &ctx.user_targets)
+                && timeout.is_none_or(|(published, _)| !published.contains(&target.name))
+        }) {
+            if let Some(reason) = failures.get(&target.name) {
+                emit_replacement_failure(
+                    ctx,
+                    &target.name,
+                    inputs(),
+                    &replacement_failure_message(&target.name, reason),
+                );
+            } else if timeout.is_some() {
+                for input_id in inputs() {
+                    targets_by_input.entry(input_id).or_default().push(&target.name);
+                }
+            }
+        }
+    }
+    if let Some((_, reason)) = timeout {
+        for (input_id, targets) in targets_by_input {
+            let description = format!("'{}'", targets.join("', '"));
+            let message = format!("Target replacement did not finish for {description}: {reason}");
+            let message = sanitize_sensitive_info(&message);
+            emit_replacement_failure(ctx, &targets.join(", "), std::iter::once(input_id), &message);
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments, reason = "input_plugins joins the existing per-run inputs")]
 pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
@@ -264,13 +353,14 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                             record_target_overrides_status(ctx, &target.name, Some(&overrides)).await;
                             target_stats.push(TargetStats::success_with_processing(&target.name, processing));
                         }
-                        Err(mut target_errors) => {
+                        Err(target_errors) => {
                             target_stats.push(TargetStats::failure_with_processing(&target.name, processing));
-                            errors.append(&mut target_errors);
+                            record_target_job_errors(ctx, &target.name, playlists, errors, target_errors);
                         }
                     }
                 }
-                Err(mut target_errors) => {
+                Err(target_errors) => {
+                    record_target_job_errors(ctx, &target.name, playlists, errors, target_errors);
                     record_failed_target_analytics(
                         &ctx.config.config.load_full(),
                         &target.name,
@@ -279,7 +369,6 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                     )
                     .await;
                     target_stats.push(TargetStats::failure(&target.name));
-                    errors.append(&mut target_errors);
                 }
             }
         }
@@ -293,6 +382,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
     let mut completion_receivers: Vec<watch::Receiver<bool>> = Vec::with_capacity(targets.len());
     let mut tasks = JoinSet::new();
     let mut results = Vec::with_capacity(targets.len());
+    let input_ids: Arc<[u16]> = playlists.iter().map(|playlist| playlist.input.id).collect();
 
     for (index, target) in targets.iter().enumerate() {
         wait_for_target_finalizer_slot(&mut tasks, &mut results, errors).await;
@@ -325,6 +415,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                 let overrides = Arc::clone(&prepared.overrides);
                 let task_ctx = Arc::clone(ctx);
                 let target_name = target.name.clone();
+                let input_ids = Arc::clone(&input_ids);
                 tasks.spawn(async move {
                     for mut predecessor in predecessors {
                         if !*predecessor.borrow() {
@@ -332,35 +423,29 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                         }
                     }
                     let finalized =
-                        std::panic::AssertUnwindSafe(finalize_prepared_target(task_ctx, prepared)).catch_unwind().await;
-                    completion.send_replace(true);
-                    match finalized {
-                        Ok((result, errors, finalize_report)) => {
-                            let mut processing = processing;
-                            processing.plugins.merge(finalize_report);
-                            TargetJobResult {
-                                index,
-                                name: target_name,
-                                result,
-                                errors,
-                                processing,
-                                overrides: Some(overrides),
-                            }
-                        }
-                        Err(_) => TargetJobResult {
-                            index,
-                            name: target_name.clone(),
-                            result: Err(vec![TuliproxError::RepositoryPlaylist(format!(
+                        std::panic::AssertUnwindSafe(finalize_prepared_target(Arc::clone(&task_ctx), prepared))
+                            .catch_unwind()
+                            .await;
+                    let (result, errors, finalize_report) = finalized.unwrap_or_else(|_| {
+                        (
+                            Err(vec![TuliproxError::RepositoryPlaylist(format!(
                                 "Target '{target_name}' finalization panicked"
                             ))]),
-                            errors: Vec::new(),
-                            processing,
-                            overrides: Some(overrides),
-                        },
-                    }
+                            Vec::new(),
+                            PluginRunReport::default(),
+                        )
+                    });
+                    let result = result.map_err(|errors| {
+                        target_job_errors(&task_ctx, &target_name, input_ids.iter().copied(), errors)
+                    });
+                    let mut processing = processing;
+                    processing.plugins.merge(finalize_report);
+                    completion.send_replace(true);
+                    TargetJobResult { index, name: target_name, result, errors, processing, overrides: Some(overrides) }
                 });
             }
             Err(target_errors) => {
+                let target_errors = target_job_errors(ctx, &target.name, input_ids.iter().copied(), target_errors);
                 completion.send_replace(true);
                 record_failed_target_analytics(
                     &ctx.config.config.load_full(),
@@ -394,13 +479,42 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                 record_target_overrides_status(ctx, &target_result.name, target_result.overrides.as_deref()).await;
                 target_stats.push(TargetStats::success_with_processing(&target_result.name, target_result.processing));
             }
-            Err(mut target_errors) => {
+            Err(target_errors) => {
                 target_stats.push(TargetStats::failure_with_processing(&target_result.name, target_result.processing));
-                errors.append(&mut target_errors);
+                errors.extend(target_errors);
             }
         }
     }
     target_stats
+}
+
+fn record_target_job_errors<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
+    target_name: &str,
+    playlists: &[FetchedPlaylist<'_>],
+    errors: &mut Vec<TuliproxError>,
+    target_errors: Vec<TuliproxError>,
+) {
+    errors.extend(target_job_errors(
+        ctx,
+        target_name,
+        playlists.iter().map(|playlist| playlist.input.id),
+        target_errors,
+    ));
+}
+
+fn target_job_errors<E: EventSink, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
+    target_name: &str,
+    inputs: impl Iterator<Item = u16>,
+    target_errors: Vec<TuliproxError>,
+) -> Vec<TuliproxError> {
+    if ctx.replace_target_contents {
+        let reason = target_errors.iter().map(TuliproxError::message).collect::<Vec<_>>().join(", ");
+        vec![record_target_replacement_failure(ctx, target_name, inputs, &reason)]
+    } else {
+        target_errors
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -498,6 +612,7 @@ pub(crate) async fn prepare_playlist_for_target<
     let mut new_epg = vec![];
     let mut new_playlist: Vec<PlaylistGroup> = vec![];
     let mut aggregate_outcome = PipelineOutcome::default();
+    let previous_error_count = errors.len();
     let mut has_empty_library = false;
     let mut all_inputs_empty = !playlists.is_empty();
     let mut only_library_inputs = true;
@@ -638,6 +753,15 @@ pub(crate) async fn prepare_playlist_for_target<
     step.tick("filter rename map + epg");
     log_memory_snapshot(format!("target '{}' after_filter_rename_map_epg", target.name).as_str());
     step.stop("Preparing playlist");
+    if ctx.replace_target_contents {
+        let target_errors = errors.split_off(previous_error_count);
+        if !target_errors.is_empty() {
+            return Err(target_errors);
+        }
+        if aggregate_outcome.plugins.hooks.iter().any(|hook| hook.errors > 0) {
+            return Err(vec![TuliproxError::Plugin("A target processing plugin failed".to_string())]);
+        }
+    }
     Ok(PreparedTarget {
         library_empty: match (has_empty_library, all_inputs_empty && only_library_inputs) {
             (true, true) => tuliprox_repository::LibraryEmptyPublication::CompleteTarget,
@@ -1203,7 +1327,10 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
     }
 
     let library_empty = prepared.library_empty.for_filtered_playlist(&new_playlist);
-    if new_playlist.is_empty() && prepared.accepted_empty_clusters.is_empty() && !library_empty.replaces_empty_target()
+    if !ctx.replace_target_contents
+        && new_playlist.is_empty()
+        && prepared.accepted_empty_clusters.is_empty()
+        && !library_empty.replaces_empty_target()
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
@@ -1222,8 +1349,17 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
         };
     let mut views = prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await;
     views.failover_groups = pending_failover_groups;
+    if ctx.replace_target_contents {
+        if !errors.is_empty() {
+            return (Err(errors), Vec::new());
+        }
+        if let Some(reason) = views.curation_failure {
+            return (Err(vec![TuliproxError::RepositoryPlaylist(reason.to_string())]), errors);
+        }
+    }
 
-    if views.base.is_empty()
+    if !ctx.replace_target_contents
+        && views.base.is_empty()
         && views.xtream.is_none()
         && views.publication_plan == PlaylistPublicationPlan::Ordinary
         && prepared.accepted_empty_clusters.is_empty()
@@ -1291,6 +1427,9 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
         }
         None => None,
     };
+    if ctx.replace_target_contents && report.hooks.iter().any(|hook| hook.errors > 0) {
+        return (Err(vec![TuliproxError::Plugin("A target finalization plugin failed".to_string())]), errors);
+    }
     drop(locked_map);
     retain_epg_referenced_by_groups(&finalized_base, &mut new_epg);
 
@@ -1330,25 +1469,68 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
         flatten_tvguide(new_epg)
     };
     let library_empty = library_empty.for_filtered_playlist(&finalized_base);
-    let result = persist_playlist_views_with_groups(
-        &ctx.config,
-        &mut finalized_base,
-        finalized_xtream.as_deref_mut(),
-        merged_epg.as_ref(),
-        target,
-        ctx.playlist_state.as_ref(),
-        TargetPlaylistPersistOptions {
-            accepted_empty_clusters: prepared.accepted_empty_clusters,
-            library_empty,
-            publication_plan: views.publication_plan,
-        },
-        &mut views.failover_groups,
-    )
-    .await;
-    // `type: plugin` outputs (plan §7 *Output providers*): the repository has no
-    // plugin seam, so they render here, each failing on its own.
-    let result =
-        super::plugin_output::persist_plugin_outputs(&ctx.plugins, &ctx.config, target, &finalized_base, result).await;
+    let stage_plugins =
+        |playlist: &[PlaylistGroup], target_dir: &std::path::Path| -> futures::future::BoxFuture<'_, _> {
+            Box::pin(super::plugin_output::stage_replacement_outputs(
+                ctx.plugins.clone(),
+                target.clone(),
+                playlist.to_vec(),
+                target_dir.to_path_buf(),
+            ))
+        };
+    let options = TargetPlaylistPersistOptions {
+        accepted_empty_clusters: prepared.accepted_empty_clusters,
+        replace_target_contents: ctx.replace_target_contents,
+        replacement_deadline: ctx.publication_deadline.clone().filter(|_| ctx.replace_target_contents),
+        library_empty,
+        publication_plan: views.publication_plan,
+    };
+    let result = if let Some(deadline) = ctx.publication_deadline.as_ref().filter(|_| !ctx.replace_target_contents) {
+        let (plugins, app_config, plugin_target) = (ctx.plugins.clone(), ctx.config.clone(), target.clone());
+        let (published_views, result) = persist_ordinary_playlist_views(
+            &ctx.config,
+            (finalized_base, finalized_xtream),
+            merged_epg,
+            target,
+            ctx.playlist_state.as_ref(),
+            options,
+            views.failover_groups,
+            deadline,
+            move |playlist, result| async move {
+                let result = super::plugin_output::persist_plugin_outputs(
+                    &plugins,
+                    &app_config,
+                    &plugin_target,
+                    &playlist,
+                    result,
+                )
+                .await;
+                (playlist, result)
+            },
+        )
+        .await;
+        (finalized_base, finalized_xtream) = published_views;
+        result
+    } else {
+        let result = persist_playlist_views_with_outputs(
+            &ctx.config,
+            &mut finalized_base,
+            finalized_xtream.as_deref_mut(),
+            merged_epg.as_ref(),
+            target,
+            ctx.playlist_state.as_ref(),
+            options,
+            &mut views.failover_groups,
+            Some(&stage_plugins),
+        )
+        .await;
+        if ctx.replace_target_contents {
+            result
+        } else {
+            super::plugin_output::persist_plugin_outputs(&ctx.plugins, &ctx.config, target, &finalized_base, result)
+                .await
+        }
+    };
     let outcome = if result.is_ok() { TargetAnalyticsOutcome::Published } else { TargetAnalyticsOutcome::Failed };
     persist_target_analytics(&config, &target.name, analytics_dto, &unmapped_csv, outcome).await;
     let watch_playlist = target_watch_view(&finalized_base, finalized_xtream.as_deref());
@@ -1662,6 +1844,7 @@ pub(crate) struct TargetPlaylistViews {
     pub(crate) base: Vec<PlaylistGroup>,
     pub(crate) xtream: Option<Vec<PlaylistGroup>>,
     pub(crate) publication_plan: PlaylistPublicationPlan,
+    curation_failure: Option<&'static str>,
     pub(crate) failover_groups: FailoverGroupBatch,
 }
 
@@ -1694,6 +1877,7 @@ pub(crate) fn build_curated_playlist_views(
             has_xtream_output && !config.include_xtream_base_categories,
             appearance_filter_configured,
         ),
+        curation_failure: None,
         failover_groups: FailoverGroupBatch::default(),
     }
 }
@@ -1709,6 +1893,7 @@ pub(crate) async fn prepare_target_playlist_views(
             base: playlist,
             xtream: None,
             publication_plan: PlaylistPublicationPlan::Ordinary,
+            curation_failure: None,
             failover_groups: FailoverGroupBatch::default(),
         };
     };
@@ -1728,6 +1913,7 @@ pub(super) fn curation_playlist_views(
             base: playlist,
             xtream: None,
             publication_plan: PlaylistPublicationPlan::Ordinary,
+            curation_failure: None,
             failover_groups: FailoverGroupBatch::default(),
         },
         CurationRunOutcome::Failed(failure) => {
@@ -1737,6 +1923,7 @@ pub(super) fn curation_playlist_views(
                 base: playlist,
                 xtream: None,
                 publication_plan: PlaylistPublicationPlan::Ordinary,
+                curation_failure: Some("Target curation did not complete"),
                 failover_groups: FailoverGroupBatch::default(),
             }
         }

@@ -33,6 +33,7 @@ pub(in crate::api) fn enqueue_manual_playlist_update(
     targets: Arc<ProcessTargets>,
     input_action: Option<InputUpdateRequest>,
     expected_scope: Option<PlaylistUpdateScopeDto>,
+    replace_target_contents: bool,
 ) -> Result<PlaylistUpdateRunId, ManualUpdateEnqueueError> {
     let permit = sender.try_reserve().map_err(|error| match error {
         tokio::sync::mpsc::error::TrySendError::Full(()) => ManualUpdateEnqueueError::Busy,
@@ -44,6 +45,7 @@ pub(in crate::api) fn enqueue_manual_playlist_update(
         targets,
         input_action,
         expected_scope,
+        replace_target_contents,
     });
     Ok(run_id)
 }
@@ -77,6 +79,9 @@ pub(super) async fn playlist_update(
         }
     }
     let sources = app_state.app_config.sources.load_full();
+    let batch_action = input_action.is_some_and(|action| {
+        sources.inputs.iter().any(|input| input.id == action.input_id && input.playlist_update_input_type().is_batch())
+    });
     let expected_scope = if let Some(revision) = headers.get(IF_MATCH) {
         let scope = sources.playlist_update_scope();
         if revision.to_str().ok() != Some(scope.revision().as_str()) {
@@ -84,6 +89,18 @@ pub(super) async fn playlist_update(
                 .into_response();
         }
         Some(scope)
+    } else if request.replace_target_contents {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            axum::Json(json!({"error": "Replacing target contents requires If-Match"})),
+        )
+            .into_response();
+    } else if batch_action {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            axum::Json(json!({"error": "Manual batch updates require If-Match"})),
+        )
+            .into_response();
     } else {
         None
     };
@@ -96,6 +113,7 @@ pub(super) async fn playlist_update(
                 valid_targets,
                 input_action,
                 expected_scope,
+                request.replace_target_contents,
             ) {
                 Ok(run_id) => {
                     (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted::playlist_update(run_id)))
@@ -124,18 +142,26 @@ pub(in crate::api) fn resolve_manual_playlist_update_targets(
 ) -> Result<ProcessTargets, TuliproxError> {
     let manual_action =
         request.manual_input_update().map_err(|error| TuliproxError::ConfigSource(error.to_string()))?;
+    if request.replace_target_contents {
+        if request.target_ids.as_ref().is_none_or(Vec::is_empty) {
+            return Err(TuliproxError::ConfigSource("Replacing target contents requires explicit target IDs"));
+        }
+        if !matches!(manual_action.map(|manual| manual.action), Some(InputUpdateAction::Provider(_))) {
+            return Err(TuliproxError::ConfigSource("Replacing target contents requires a provider update policy"));
+        }
+    }
     let manual_input = if let Some(manual) = manual_action {
         let input = sources
             .inputs
             .iter()
             .find(|input| input.id == manual.input_id)
             .ok_or_else(|| TuliproxError::ConfigSource(format!("No input found for id {}", manual.input_id)))?;
-        if !InputUpdateCapabilities::for_input_type(input.input_type, input.enabled).supports_action(manual.action) {
+        let input_type = input.playlist_update_input_type();
+        if !InputUpdateCapabilities::for_input_type(input_type, input.enabled).supports_action(manual.action) {
             return Err(TuliproxError::ConfigSource("Manual action is not supported for this input".to_string()));
         }
-        // Only the additive action wire form requires IDs. Legacy input_refresh
-        // requests retain the existing name resolution, including empty = all.
-        if request.input_action.is_some() && request.target_ids.is_none() {
+        // Legacy non-batch input_refresh requests retain the existing name resolution.
+        if (request.input_action.is_some() || input_type.is_batch()) && request.target_ids.is_none() {
             return Err(TuliproxError::ConfigSource("Manual input actions require explicit target IDs".to_string()));
         }
         Some(input)
@@ -169,6 +195,12 @@ pub(in crate::api) fn resolve_manual_playlist_update_targets(
             })
         }) {
             return Err(TuliproxError::ConfigSource("Target does not belong to the selected input".to_string()));
+        }
+        if request.replace_target_contents && !target.enabled {
+            return Err(TuliproxError::ConfigSource(format!(
+                "Target '{}' must be active to replace its contents",
+                target.name
+            )));
         }
         targets.push(target.id);
         target_names.push(target.name.clone());

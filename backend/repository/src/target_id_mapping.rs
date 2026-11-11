@@ -46,7 +46,7 @@ impl VirtualIdRecord {
 }
 
 /// Helper to get UUID index path from primary path
-fn get_uuid_index_path(path: &Path) -> PathBuf { path.with_extension("uuid.db") }
+pub(crate) fn get_uuid_index_path(path: &Path) -> PathBuf { path.with_extension("uuid.db") }
 
 /// Ensure B+tree file exists, creating empty if needed
 fn ensure_tree_file<K, V>(path: &Path) -> std::io::Result<()>
@@ -72,6 +72,7 @@ pub struct TargetIdMapping {
     pending_virtual_id_upserts: HashMap<VirtualId, VirtualIdRecord>,
     pending_uuid_upserts: HashMap<UUIDType, u32>,
     path: PathBuf,
+    persist_on_drop: bool,
 }
 
 impl TargetIdMapping {
@@ -140,8 +141,12 @@ impl TargetIdMapping {
             pending_virtual_id_upserts: HashMap::new(),
             pending_uuid_upserts: HashMap::new(),
             path: path.to_path_buf(),
+            persist_on_drop: true,
         })
     }
+
+    /// A staged mapping only persists explicitly before publication.
+    pub(crate) fn require_explicit_persist(&mut self) { self.persist_on_drop = false; }
 
     pub fn get_and_update_virtual_id(
         &mut self,
@@ -298,7 +303,7 @@ impl TargetIdMapping {
 
 impl Drop for TargetIdMapping {
     fn drop(&mut self) {
-        if self.has_pending_changes() {
+        if self.persist_on_drop && self.has_pending_changes() {
             if let Err(err) = self.persist() {
                 error!("Failed to persist target id mapping {} err:{err}", self.path.display());
             }

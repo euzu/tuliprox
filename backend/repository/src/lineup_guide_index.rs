@@ -289,11 +289,23 @@ pub async fn lineup_guide_index_write(
     path: &Path,
     carry_over: Option<LineupGuideCarryOver>,
 ) -> Result<(), TuliproxError> {
+    lineup_guide_index_write_tracked(file_locks, playlist, view, path, carry_over, None).await
+}
+
+pub(crate) async fn lineup_guide_index_write_tracked(
+    file_locks: &FileLockManager,
+    playlist: &[PlaylistGroup],
+    view: LineupGuideView,
+    path: &Path,
+    carry_over: Option<LineupGuideCarryOver>,
+    publication: Option<&crate::playlist_repository::OrdinaryPublication>,
+) -> Result<(), TuliproxError> {
     let mut rows = playlist_rows(playlist, view);
     if let Some(carry_over) = carry_over {
         rows.extend(carry_over.rows);
     }
     let file_lock = file_locks.write_lock(path).await;
+    crate::playlist_repository::OrdinaryPublication::begin(publication)?;
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let _guard = file_lock;
@@ -314,12 +326,40 @@ pub async fn lineup_guide_index_write(
     .map_err(|err| TuliproxError::RepositoryPlaylist(format!("Lineup guide index write task failed: {err}")))?
 }
 
+pub(crate) async fn stage_lineup_guide_index(
+    playlist: &[PlaylistGroup],
+    view: LineupGuideView,
+    published: &Path,
+    token: uuid::fmt::Simple,
+) -> Result<crate::xtream_repository::target_publish::TargetFileReplacement, TuliproxError> {
+    use crate::xtream_repository::target_publish::{write_target_staging, TargetFileReplacement};
+    let path = published.with_file_name(format!(".lineup-replace-{token}.db"));
+    let artifact = TargetFileReplacement::database(published, &path, token)
+        .map_err(|err| TuliproxError::RepositoryPlaylist(format!("Failed to reserve lineup guide index: {err}")))?;
+    let rows = playlist_rows(playlist, view);
+    let (artifact, _) = write_target_staging(artifact, move || {
+        tree_from_rows(rows)
+            .store(&path)
+            .map_err(|err| TuliproxError::RepositoryPlaylist(format!("Failed to stage lineup guide index: {err}")))
+    })
+    .await?;
+    Ok(artifact)
+}
+
 /// Removes the indexes at `paths`, so they cannot describe a playlist they were not built for.
 ///
 /// A missing file is fine: it is what a reader expects before the first persistence step, and
 /// what a failed write leaves behind. Every target persistence step asks for this, so the common
 /// case of no index at all costs one blocking hop for the existence checks and takes no lock.
 pub async fn lineup_guide_index_remove(file_locks: &FileLockManager, paths: &[PathBuf]) -> Result<(), TuliproxError> {
+    lineup_guide_index_remove_tracked(file_locks, paths, None).await
+}
+
+pub(crate) async fn lineup_guide_index_remove_tracked(
+    file_locks: &FileLockManager,
+    paths: &[PathBuf],
+    publication: Option<&crate::playlist_repository::OrdinaryPublication>,
+) -> Result<(), TuliproxError> {
     let candidates = paths.to_vec();
     let existing = tokio::task::spawn_blocking(move || {
         // An unanswerable existence check is treated as "exists", so the removal is still tried.
@@ -330,6 +370,7 @@ pub async fn lineup_guide_index_remove(file_locks: &FileLockManager, paths: &[Pa
 
     for path in existing {
         let _guard = file_locks.write_lock(&path).await;
+        crate::playlist_repository::OrdinaryPublication::begin(publication)?;
         match tokio::fs::remove_file(&path).await {
             Err(err) if err.kind() != io::ErrorKind::NotFound => {
                 return Err(TuliproxError::RepositoryPlaylist(format!(

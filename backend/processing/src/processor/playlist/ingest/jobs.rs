@@ -1,7 +1,7 @@
 use super::{
-    acquisition::InputAcquisition, download_input, is_input_enabled, is_target_enabled, join_arc_strs, process_targets,
-    target_waiting_message, with_sequential_group, InputCompletionFacts, InputRunOutcome, PlaylistProcessingContext,
-    XmltvEpgProvider,
+    super::target::record_target_replacement_failure, acquisition::InputAcquisition, download_input, is_input_enabled,
+    is_target_enabled, join_arc_strs, process_targets, target_waiting_message, with_sequential_group,
+    InputCompletionFacts, InputRunOutcome, PlaylistProcessingContext, XmltvEpgProvider,
 };
 use crate::{fetched_playlist::FetchedPlaylist, metadata_sink::MetadataUpdateSink, parser::xmltv::TVGuide};
 use futures::{FutureExt, StreamExt};
@@ -302,9 +302,13 @@ pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUp
         let process_parallel = ctx.config.config.load().process_parallel;
         let mut disabled_inputs: Vec<Arc<str>> = vec![];
         let mut enabled_inputs = Vec::with_capacity(source.inputs.len());
+        let mut replacement_blockers = Vec::new();
         for (index, input_name) in source.inputs.iter().enumerate() {
             let Some(input) = sources.get_input_by_name(input_name) else {
                 error!("Input {input_name} referenced by source {source_idx} does not exist");
+                if ctx.replace_target_contents {
+                    replacement_blockers.push(format!("missing input '{input_name}'"));
+                }
                 continue;
             };
             if is_input_enabled(input, &ctx.user_targets) {
@@ -343,6 +347,16 @@ pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUp
         for mut result in job_results {
             super::super::input_status::persist_input_job_result(&ctx, &result).await;
             report_input_job_completion(&ctx.events, &ctx.run_id, ctx.execution_order, &result);
+            if ctx.replace_target_contents && result.update_state() != PlaylistUpdateState::Success {
+                let reason = if result.had_quality_rejections {
+                    "quality policy rejected the update".to_string()
+                } else if result.state == InputJobState::Pending {
+                    "update is incomplete".to_string()
+                } else {
+                    input_failure_reason(&result.errors).unwrap_or_else(|| "update failed".to_string())
+                };
+                replacement_blockers.push(format!("input '{}': {reason}", result.input_name));
+            }
             errors.append(&mut result.errors);
             input_stats.insert(result.input_name.clone(), result.stat);
             if result.state == InputJobState::Ready {
@@ -366,7 +380,23 @@ pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUp
                 join_arc_strs(&disabled_inputs, ", ")
             );
         }
-        if source_downloaded {
+        if ctx.replace_target_contents && (!replacement_blockers.is_empty() || source_playlists.is_empty()) {
+            if replacement_blockers.is_empty() {
+                replacement_blockers.push("no usable inputs".to_string());
+            }
+            for target in source.targets.iter().filter(|target| is_target_enabled(target, &ctx.user_targets)) {
+                errors.insert(
+                    0,
+                    record_target_replacement_failure(
+                        &ctx,
+                        &target.name,
+                        enabled_inputs.iter().map(|(_, input)| input.id),
+                        &replacement_blockers.join(", "),
+                    ),
+                );
+                target_stats.push(TargetStats::failure(&target.name));
+            }
+        } else if source_downloaded {
             if !blockers.is_empty() {
                 for target in source.targets.iter().filter(|target| is_target_enabled(target, &ctx.user_targets)) {
                     for input_name in &blockers {
@@ -514,6 +544,8 @@ impl<E: EventSink + Clone, M: MetadataUpdateSink, P: PluginHost> Clone for Playl
             stalker_refresh_mode: self.stalker_refresh_mode,
             partial_refresh: Arc::clone(&self.partial_refresh),
             had_quality_rejections: Arc::clone(&self.had_quality_rejections),
+            replace_target_contents: self.replace_target_contents,
+            publication_deadline: self.publication_deadline.clone(),
             input_refresh: self.input_refresh,
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance.clone(),

@@ -82,6 +82,8 @@ fn test_processing_context(
         stalker_refresh_mode: StalkerRefreshMode::Complete,
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        replace_target_contents: false,
+        publication_deadline: None,
         maintenance: None,
         input_refresh: None,
         library_update_mode: LibraryUpdateMode::ExistingCatalog,

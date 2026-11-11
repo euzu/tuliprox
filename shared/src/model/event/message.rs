@@ -455,9 +455,13 @@ pub struct PlaylistUpdateSummary {
 }
 
 impl PlaylistUpdateSummary {
-    /// Names of the targets the run processed, in report order.
+    /// Names of successfully published targets, in report order.
     pub fn processed_targets(&self) -> impl Iterator<Item = &str> {
-        self.stats.iter().flat_map(|source| source.targets.iter()).map(|target| target.name.as_str())
+        self.stats
+            .iter()
+            .flat_map(|source| &source.targets)
+            .filter(|target| target.success)
+            .map(|target| target.name.as_str())
     }
 
     /// A summary carrying only an outcome - the timeout and panic paths,

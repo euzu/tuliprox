@@ -4,6 +4,8 @@
   --update-card-spacing: 20px;
   --update-action-width: 220px;
   --update-control-gap: 12px;
+  --replace-on-surface: #142749;
+  --replace-on-border: #3f6fae;
   container: update-view / inline-size;
   display: flex;
   flex-flow: column;
@@ -14,7 +16,9 @@
   padding: var(--padding-default) 0;
   box-sizing: border-box;
   max-width: 100%;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 
   &__header {
     display: flex;
@@ -39,14 +43,9 @@
 
   &__cards {
     container: update-list / inline-size;
-    flex: 1 1 auto;
+    flex: none;
     box-sizing: border-box;
     width: 100%;
-    min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
-    overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
   }
 
   &__cards-grid {
@@ -59,6 +58,7 @@
   &__input-card {
     box-sizing: border-box;
     padding: var(--update-card-spacing);
+    min-block-size: var(--closed-card-height, auto);
     max-width: 100%;
     min-width: 0;
   }
@@ -71,6 +71,7 @@
 
   &__input-card-header {
     display: flex;
+    flex-shrink: 0;
     align-items: flex-start;
     justify-content: space-between;
     flex-wrap: wrap;
@@ -96,8 +97,13 @@
     text-transform: capitalize;
   }
 
+  &__input-card-header > &__pipeline-status {
+    margin-inline-start: auto;
+  }
+
   &__input-card-body {
     container: update-card / inline-size;
+    flex: 1 1 auto;
     min-width: 0;
   }
 
@@ -256,11 +262,27 @@
     --text-button-active-border-color: var(--input-focus-border-color);
     --text-button-active-color: var(--theme-brand-text);
     --text-button-active-hover-color: var(--theme-brand-text);
+  }
+
+  &__target-toggle.tp__text-button,
+  &__no-targets-badge {
     min-height: 2rem;
     padding: var(--padding-micro) var(--padding-small);
     border-radius: var(--border-radius);
     font-size: var(--font-size-norm);
     font-weight: normal;
+  }
+
+  &__no-targets-badge {
+    display: inline-flex;
+    align-items: center;
+    box-sizing: border-box;
+    max-width: 100%;
+    min-width: 0;
+    border: 1px solid var(--error-color);
+    background-color: var(--error-background-color);
+    color: var(--error-color);
+    overflow-wrap: anywhere;
   }
 
   &__target-toggle {
@@ -283,6 +305,10 @@
   &__action-area,
   &__policy-control {
     min-width: 0;
+  }
+
+  &__action-area {
+    margin-block-start: var(--update-action-offset, 0px);
   }
 
   &__policy-select,
@@ -315,7 +341,6 @@
 
   &__policy-description {
     margin: 10px 0 0;
-    min-height: 2lh;
     color: var(--modest-text-color);
     font-size: var(--font-size-sm);
     line-height: 1.5;
@@ -326,11 +351,67 @@
     }
   }
 
+  &__replace-option {
+    position: relative;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    min-height: 64px;
+    margin-block-start: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    transition: background-color 140ms ease, border-color 140ms ease;
+
+    &:has(input:checked) {
+      background-color: var(--replace-on-surface);
+      border-color: var(--replace-on-border);
+    }
+
+    &:hover:has(input:enabled) {
+      border-color: var(--input-focus-border-color);
+    }
+
+    &:has(input:disabled) {
+      .tp__playlist-update-view__replace-label { color: var(--modest-text-color); }
+      .tp__playlist-update-view__replace-copy::before { cursor: default; }
+    }
+
+    .tp__toggle-switch { z-index: 1; }
+  }
+
+  &__replace-copy::before {
+    position: absolute;
+    inset: 0;
+    content: "";
+    cursor: pointer;
+  }
+
+  &__replace-label,
+  &__replace-help {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+
+  &__replace-label {
+    font-size: 14px;
+    font-weight: bold;
+    line-height: 20px;
+  }
+
+  &__replace-help {
+    margin-block-start: 2px;
+    color: var(--modest-text-color);
+    font-size: 12px;
+    line-height: 18px;
+  }
+
   &__update-details {
-    margin-block-start: 16px;
+    margin-block-start: 14px;
     min-width: 0;
     border-block-start: 1px solid var(--border-color);
-
     summary {
       width: fit-content;
       padding-block: max(var(--padding-default), 0.75rem);
@@ -351,6 +432,11 @@
     min-width: 0;
     font-size: 15px;
     line-height: 1.4;
+
+    &:focus-visible {
+      outline: 2px solid var(--input-focus-border-color);
+      outline-offset: -2px;
+    }
 
     > * { width: 100%; min-width: 0; box-sizing: border-box; }
     dl { margin: 0; }
@@ -499,6 +585,11 @@
   &__last-update {
     color: var(--text-color);
   }
+}
+
+body[data-theme="bright"] .tp__playlist-update-view {
+  --replace-on-surface: #eaf2ff;
+  --replace-on-border: #6992d2;
 }
 
 @container update-list (min-width: 1100px) {

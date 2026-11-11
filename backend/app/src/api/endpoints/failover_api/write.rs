@@ -135,7 +135,13 @@ fn apply_response(state: &AppState, target_name: &str) -> ApiResult<OperationRun
     let request = PlaylistUpdateRequestDto { targets: vec![target.name.clone()], ..Default::default() };
     let targets = resolve_manual_playlist_update_targets(&state.app_config.sources.load(), &request)
         .map_err(|err| error_response(StatusCode::BAD_REQUEST, err))?;
-    match enqueue_manual_playlist_update(&state.playlist_updates.manual_update_sender, Arc::new(targets), None, None) {
+    match enqueue_manual_playlist_update(
+        &state.playlist_updates.manual_update_sender,
+        Arc::new(targets),
+        None,
+        None,
+        false,
+    ) {
         Ok(run_id) => Ok(OperationRunAccepted::playlist_update(run_id)),
         Err(ManualUpdateEnqueueError::Busy) => Err(error_response(StatusCode::CONFLICT, QUEUE_BUSY_MESSAGE)),
         Err(ManualUpdateEnqueueError::Unavailable) => {

@@ -10,8 +10,8 @@ use axum::{
 use serde_json::json;
 use shared::{
     model::{
-        InputRefreshOverride, InputRefreshPolicy, InputType, OperationRunAccepted,
-        PersistedPlaylistUpdateClusterSnapshot, PersistedPlaylistUpdateClusterState,
+        InputRefreshOverride, InputRefreshPolicy, InputType, InputUpdateAction, InputUpdateRequest,
+        OperationRunAccepted, PersistedPlaylistUpdateClusterSnapshot, PersistedPlaylistUpdateClusterState,
         PersistedPlaylistUpdateQualityDecision, PersistedPlaylistUpdateQualitySnapshot,
         PersistedPlaylistUpdateTechnicalState, PlaylistUpdateDataSource, PlaylistUpdateRequestDto,
         PlaylistUpdateRequestPayload, PlaylistUpdateStatusDto, PlaylistUpdateViewSnapshotDto, XtreamCluster,
@@ -69,6 +69,7 @@ async fn manual_update_scope_rejects_reused_target_ids_before_queueing() {
     let bodies = [
         r#"{"targets":[],"target_ids":[1]}"#,
         r#"{"targets":[],"target_ids":[1],"input_refresh":{"input_id":3,"policy":{"cache":"respect","quality":"enforce"}}}"#,
+        r#"{"target_ids":[1],"input_action":{"input_id":2,"action":{"kind":"provider","policy":{"cache":"bypass","quality":"enforce"}}}}"#,
     ];
     for body in bodies {
         assert_eq!(routes.clone().oneshot(request(body)).await.unwrap().status(), StatusCode::ACCEPTED);
@@ -97,9 +98,9 @@ fn manual_update_capabilities_reject_unsupported_actions_and_keep_all_required_i
         (InputType::Library, 1),
         (InputType::Jellyfin, 2),
         (InputType::Emby, 2),
-        (InputType::M3uBatch, 0),
-        (InputType::XtreamBatch, 0),
-        (InputType::StalkerBatch, 0),
+        (InputType::M3uBatch, 3),
+        (InputType::XtreamBatch, 3),
+        (InputType::StalkerBatch, 3),
         (InputType::Staged, 0),
     ] {
         for enabled in [false, true] {
@@ -285,6 +286,7 @@ async fn manual_update_run_target_ids_and_refresh_override_keep_the_accepted_que
             target_ids: Some(vec![4, 1]),
             input_refresh: Some(input_refresh),
             input_action: None,
+            replace_target_contents: false,
         })),
     )
     .await
@@ -336,18 +338,25 @@ async fn manual_update_target_ids_reject_unknown_empty_and_ambiguous_selections(
             }),
             ..PlaylistUpdateRequestDto::default()
         },
-        PlaylistUpdateRequestDto { targets: Vec::new(), target_ids: Some(vec![99]), input_refresh, input_action: None },
+        PlaylistUpdateRequestDto {
+            targets: Vec::new(),
+            target_ids: Some(vec![99]),
+            input_refresh,
+            ..Default::default()
+        },
         PlaylistUpdateRequestDto {
             targets: Vec::new(),
             target_ids: Some(Vec::new()),
             input_refresh,
             input_action: None,
+            replace_target_contents: false,
         },
         PlaylistUpdateRequestDto {
             targets: vec!["known-target".to_string()],
             target_ids: Some(vec![1]),
             input_refresh,
             input_action: None,
+            replace_target_contents: false,
         },
     ];
 
@@ -390,6 +399,7 @@ async fn manual_update_target_ids_preserve_named_legacy_and_empty_bulk_requests(
             target_ids: None,
             input_refresh: None,
             input_action: None,
+            replace_target_contents: false,
         }),
         PlaylistUpdateRequestPayload::LegacyTargets(vec!["shared-name".to_string()]),
         PlaylistUpdateRequestPayload::Current(PlaylistUpdateRequestDto {
@@ -397,6 +407,7 @@ async fn manual_update_target_ids_preserve_named_legacy_and_empty_bulk_requests(
             target_ids: None,
             input_refresh: None,
             input_action: None,
+            replace_target_contents: false,
         }),
     ];
 
@@ -701,4 +712,138 @@ async fn playlist_update_status_reader_runs_off_the_async_worker() {
 async fn playlist_update_status_reader_join_failure_returns_server_error_not_empty_status() {
     let result = super::super::read_playlist_update_input_status(|| panic!("simulated status reader failure")).await;
     assert_eq!(result.unwrap_err(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one protected router fixture covers rejected and accepted requests")]
+async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targets() {
+    use crate::{
+        auth::create_jwt_web_user,
+        model::{M3uTargetOutput, StrmTargetOutput, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput},
+    };
+    use shared::model::{Permission, StrmTargetOutputDto, UserId, WebAuthConfigDto, WebUiConfigDto};
+
+    let mut eligible = playlist_update_target(1, "eligible");
+    Arc::make_mut(&mut eligible).output.push(TargetOutput::Xtream(XtreamTargetOutput {
+        flags: XtreamTargetFlagsSet::new(),
+        trakt: None,
+        filter: None,
+    }));
+    let mut m3u = playlist_update_target(2, "m3u");
+    let m3u_output = TargetOutput::M3u(M3uTargetOutput {
+        filename: None,
+        include_type_in_url: false,
+        mask_redirect_url: false,
+        filter: None,
+    });
+    Arc::make_mut(&mut m3u).output.push(m3u_output.clone());
+    let mut mixed = eligible.clone();
+    Arc::make_mut(&mut mixed).id = 3;
+    Arc::make_mut(&mut mixed).name = "mixed".into();
+    Arc::make_mut(&mut mixed).output.push(m3u_output.clone());
+    let mut strm = playlist_update_target(4, "strm");
+    Arc::make_mut(&mut strm).output.extend([
+        m3u_output,
+        TargetOutput::Strm(StrmTargetOutput::from(&StrmTargetOutputDto {
+            directory: "fixture-strm".into(),
+            ..Default::default()
+        })),
+    ]);
+    let mut disabled = playlist_update_target(5, "disabled");
+    Arc::make_mut(&mut disabled).enabled = false;
+    let foreign = playlist_update_target(6, "foreign");
+    let input = Arc::new(ConfigInput {
+        id: 4,
+        name: "provider".intern(),
+        input_type: InputType::M3u,
+        enabled: true,
+        ..Default::default()
+    });
+    let config = Arc::new(test_app_config(
+        input.clone(),
+        ConfigSource { inputs: vec![input.name.clone()], targets: vec![eligible, m3u, mixed, strm, disabled] },
+    ));
+    let mut sources = (*config.sources.load_full()).clone();
+    for (id, input_type) in [(7, InputType::M3uBatch), (8, InputType::XtreamBatch), (9, InputType::StalkerBatch)] {
+        let name = format!("batch-{id}").intern();
+        sources.sources[0].inputs.push(name.clone());
+        sources.inputs.push(Arc::new(ConfigInput { id, name, input_type, enabled: true, ..Default::default() }));
+    }
+    sources.sources.push(ConfigSource { inputs: Vec::new(), targets: vec![foreign] });
+    config.sources.store(Arc::new(sources));
+    let auth =
+        WebAuthConfigDto { issuer: "local-fixture".into(), secret: "fixture signing key".into(), ..Default::default() };
+    let web = crate::model::WebUiConfig::from(&WebUiConfigDto { auth: Some(auth), ..Default::default() });
+    let token = |name, permission: Permission| {
+        create_jwt_web_user(web.auth.as_ref().unwrap(), name, permission.into(), 0, UserId::web(name)).unwrap()
+    };
+    let writer = token("writer", Permission::PlaylistWrite);
+    let reader = token("reader", Permission::PlaylistRead);
+    config.config.store(Arc::new(Config { web_ui: Some(web), ..Config::default() }));
+    let revision = config.sources.load().playlist_update_scope().revision();
+    let (sender, mut queue) = mpsc::channel(1);
+    let app = test_app_state_with_manual_update_sender(config, sender);
+    let router = super::super::v1_api_playlist_register_with_permissions(Router::new(), &app).with_state(app);
+    let post = |token: &str, scope: Option<&str>, body: serde_json::Value| {
+        let mut request = Request::post("/playlist/update")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"));
+        if let Some(scope) = scope {
+            request = request.header("if-match", scope);
+        }
+        router.clone().oneshot(request.body(Body::from(body.to_string())).unwrap())
+    };
+    let valid = json!({"target_ids":[2,4,1,3],"replace_target_contents":true,
+        "input_refresh":{"input_id":4,"policy":{"cache":"respect","quality":"enforce"}}});
+    for (token, scope, body, status) in [
+        (&reader, Some(revision.as_str()), valid.clone(), StatusCode::FORBIDDEN),
+        (&writer, None, valid.clone(), StatusCode::PRECONDITION_REQUIRED),
+        (&writer, Some("\"stale\""), valid.clone(), StatusCode::PRECONDITION_FAILED),
+        (&writer, Some(&revision), json!({"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (&writer, Some(&revision), json!({"target_ids":[],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (&writer, Some(&revision), json!({"target_ids":[1],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (
+            &writer,
+            Some(&revision),
+            json!({"target_ids":[5],"replace_target_contents":true,
+            "input_refresh":{"input_id":4,"policy":{"cache":"respect","quality":"enforce"}}}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            &writer,
+            Some(&revision),
+            json!({"target_ids":[6],"replace_target_contents":true,
+            "input_refresh":{"input_id":4,"policy":{"cache":"respect","quality":"enforce"}}}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            &writer,
+            Some(&revision),
+            json!({"target_ids":[1],"replace_target_contents":true,
+            "input_refresh":{"input_id":4,"policy":{"cache":"respect","quality":"bypass"}}}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(post(token, scope, body).await.unwrap().status(), status);
+        assert!(queue.try_recv().is_err());
+    }
+    for input_id in [4, 7, 8, 9] {
+        for policy in [InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE] {
+            let body = json!({"target_ids":[2,4,1,3],"replace_target_contents":true,
+                "input_refresh":{"input_id":input_id,"policy":policy}});
+            assert_eq!(post(&writer, Some(&revision), body).await.unwrap().status(), StatusCode::ACCEPTED);
+            let accepted = queue.try_recv().unwrap();
+            assert_eq!(accepted.targets.targets, [2, 4, 1, 3]);
+            assert!(accepted.replace_target_contents);
+            assert_eq!(accepted.expected_scope.unwrap().revision(), revision);
+            assert_eq!(
+                accepted.input_action,
+                Some(InputUpdateRequest { input_id, action: InputUpdateAction::Provider(policy) })
+            );
+        }
+    }
+
+    let ordinary = json!({"target_ids":[3],"replace_target_contents":false});
+    assert_eq!(post(&writer, None, ordinary).await.unwrap().status(), StatusCode::ACCEPTED);
+    assert!(!queue.try_recv().unwrap().replace_target_contents);
 }

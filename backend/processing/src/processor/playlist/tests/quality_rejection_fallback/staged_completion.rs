@@ -69,7 +69,10 @@ async fn staged_run_context(root: &Path, base_url: &str) -> (PlaylistProcessingC
 fn normalized_trace(
     events: &[EventMessage],
     persisted: shared::model::PersistedPlaylistUpdateInputResult,
+    root: &Path,
 ) -> serde_json::Value {
+    let missing_file = root.join("missing.m3u");
+    let missing_file = missing_file.to_string_lossy();
     let summary = events
         .iter()
         .find_map(|event| match event {
@@ -96,7 +99,7 @@ fn normalized_trace(
                 // The failure reason names a per-run temporary path; keep only its stable part.
                 progress.failure_reason = progress
                     .failure_reason
-                    .map(|reason| reason.split("/tmp/").next().unwrap_or_default().trim_end().to_string());
+                    .map(|reason| reason.strip_suffix(missing_file.as_ref()).unwrap_or(&reason).trim_end().to_string());
                 Some(progress)
             }
             _ => None,
@@ -165,7 +168,7 @@ async fn playlist_update_status_staged_reporter_trace_matches_persistence_before
             emitted.iter().position(|event| matches!(event, EventMessage::PlaylistUpdate(_))).unwrap();
         assert!(own_index < parent_index && parent_index < completed_index);
         assert_eq!(input_completions(&ctx.events, 9)[0].state, Some(PlaylistUpdateState::Failure));
-        traces.push(normalized_trace(&emitted, persisted.last_input_update.unwrap()));
+        traces.push(normalized_trace(&emitted, persisted.last_input_update.unwrap(), temp.path()));
         assert_eq!(server.finish().iter().filter(|action| action.as_str() == "get_live_streams").count(), 1);
     }
     let actual = serde_json::Value::Array(traces);

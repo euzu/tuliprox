@@ -9,6 +9,68 @@ use shared::model::{ClusterFlags, XtreamCluster};
 use std::fs;
 use tempfile::tempdir;
 
+#[test]
+fn cancelled_target_staging_removes_files_after_the_blocking_writer_finishes() {
+    use crate::{
+        xtream_repository::target_publish::{write_target_staging, TargetFileReplacement},
+        BPlusTree,
+    };
+    use shared::error::TuliproxError;
+
+    let directory = tempdir().unwrap();
+    let published = directory.path().join("live.db");
+    let staging = directory.path().join(".live-staged.db");
+    let index = get_file_path_for_db_index(&staging);
+    let categories = directory.path().join(".live-staged.json");
+    let mut original = BPlusTree::<u32, u32>::new();
+    original.insert(1, 1);
+    original.store_with_index(&published, |value| *value).unwrap();
+    let published_index = get_file_path_for_db_index(&published);
+    let original_files = [fs::read(&published).unwrap(), fs::read(&published_index).unwrap()];
+    let file_names = || {
+        fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let original_names = file_names();
+    let token = uuid::Uuid::new_v4().simple();
+    let artifacts = [
+        TargetFileReplacement::database(&published, &staging, token).unwrap(),
+        TargetFileReplacement::new(&published_index, Some(&index), token),
+        TargetFileReplacement::new(&directory.path().join("categories.json"), Some(&categories), token),
+    ];
+    let runtime = tokio::runtime::Builder::new_current_thread().max_blocking_threads(1).build().unwrap();
+    runtime.block_on(async {
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (written, completed_write) = tokio::sync::oneshot::channel();
+        let (resume, can_write) = std::sync::mpsc::channel();
+        let task = tokio::spawn(write_target_staging(artifacts, {
+            let (staging, categories) = (staging.clone(), categories.clone());
+            move || {
+                entered.send(()).unwrap();
+                can_write.recv().unwrap();
+                fs::write(categories, "[]").unwrap();
+                let mut tree = BPlusTree::<u32, u32>::new();
+                tree.insert(2, 2);
+                tree.store_with_index(&staging, |value| *value).unwrap();
+                written.send(()).unwrap();
+                Ok::<_, TuliproxError>(())
+            }
+        }));
+        started.await.unwrap();
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        resume.send(()).unwrap();
+        completed_write.await.unwrap();
+        // The only blocking thread runs this after dropping the detached writer's output.
+        tokio::task::spawn_blocking(|| {}).await.unwrap();
+    });
+    assert_eq!([fs::read(published).unwrap(), fs::read(published_index).unwrap()], original_files);
+    assert!(!staging.exists() && !index.exists() && !categories.exists());
+    assert_eq!(file_names(), original_names);
+}
+
 #[tokio::test]
 async fn target_force_empty_failures_restore_database_index_and_categories() -> Result<(), Box<dyn std::error::Error>> {
     for failure in [

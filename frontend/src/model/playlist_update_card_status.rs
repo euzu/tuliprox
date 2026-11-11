@@ -57,7 +57,7 @@ pub struct InputUpdateCardRuntime {
     action_status: InputUpdateCardStatus,
     details: Vec<String>,
     localized_details: Vec<PlaylistUpdateProgressDetail>,
-    failure_reason: Option<String>,
+    failure_reasons: Vec<String>,
     run_id: Option<PlaylistUpdateRunId>,
     execution_order: Option<PlaylistUpdateRunOrder>,
     refresh_policy: Option<InputRefreshPolicy>,
@@ -72,7 +72,7 @@ impl Default for InputUpdateCardRuntime {
             action_status: InputUpdateCardStatus::Ready,
             details: Vec::new(),
             localized_details: Vec::new(),
-            failure_reason: None,
+            failure_reasons: Vec::new(),
             run_id: None,
             execution_order: None,
             refresh_policy: None,
@@ -95,9 +95,9 @@ impl InputUpdateCardRuntime {
     #[must_use]
     pub fn localized_details(&self) -> &[PlaylistUpdateProgressDetail] { &self.localized_details }
 
-    /// Why the input failed or completed partially in this run, credentials already masked by the server.
+    /// Distinct failure reasons for this input and run, already redacted by the server.
     #[must_use]
-    pub fn failure_reason(&self) -> Option<&str> { self.failure_reason.as_deref() }
+    pub fn failure_reasons(&self) -> &[String] { &self.failure_reasons }
 
     /// Stable identity of the run that currently determines this card's status.
     #[must_use]
@@ -143,7 +143,7 @@ struct InputDetails {
     execution_order: PlaylistUpdateRunOrder,
     lines: Vec<String>,
     localized_lines: Vec<PlaylistUpdateProgressDetail>,
-    failure_reason: Option<String>,
+    failure_reasons: Vec<String>,
     input_telemetry: Option<PlaylistUpdateInputTelemetry>,
 }
 
@@ -155,6 +155,7 @@ struct PlaylistUpdateRunRuntime {
     observed_input_ids: IndexSet<u16>,
     input_states: IndexMap<u16, PlaylistUpdateState>,
     terminal: Option<PlaylistUpdateState>,
+    published_targets: Vec<String>,
     refresh_policy_by_input_id: IndexMap<u16, InputRefreshPolicy>,
 }
 
@@ -167,6 +168,7 @@ impl PlaylistUpdateRunRuntime {
             observed_input_ids: IndexSet::new(),
             input_states: IndexMap::new(),
             terminal: None,
+            published_targets: Vec::new(),
             refresh_policy_by_input_id: IndexMap::new(),
         }
     }
@@ -257,12 +259,16 @@ impl PlaylistUpdateCardStatuses {
             action_status,
             details: details.map_or_else(Vec::new, |details| details.lines.clone()),
             localized_details: details.map_or_else(Vec::new, |details| details.localized_lines.clone()),
-            failure_reason: details.and_then(|details| details.failure_reason.clone()),
+            failure_reasons: details.map_or_else(Vec::new, |details| details.failure_reasons.clone()),
             run_id,
             execution_order,
             refresh_policy,
             input_telemetry: details.and_then(|details| details.input_telemetry.clone()),
         }
+    }
+
+    pub(super) fn published_targets(&self, run_id: &PlaylistUpdateRunId) -> &[String] {
+        self.runs.get(run_id).map_or(&[], |run| run.published_targets.as_slice())
     }
 
     fn effective_run_for_input(&self, input_id: u16) -> Option<EffectiveInputRun<'_>> {
@@ -404,7 +410,7 @@ impl PlaylistUpdateCardStatuses {
                     execution_order,
                     lines: Vec::new(),
                     localized_lines: Vec::new(),
-                    failure_reason: None,
+                    failure_reasons: Vec::new(),
                     input_telemetry: None,
                     library_scan_result: None,
                 };
@@ -418,7 +424,7 @@ impl PlaylistUpdateCardStatuses {
                         execution_order,
                         lines: Vec::new(),
                         localized_lines: Vec::new(),
-                        failure_reason: None,
+                        failure_reasons: Vec::new(),
                         input_telemetry: None,
                         library_scan_result: None,
                     },
@@ -548,8 +554,11 @@ impl PlaylistUpdateCardStatuses {
                         details.localized_lines.remove(0);
                     }
                 }
-                if failure_reason.is_some() {
-                    details.failure_reason = failure_reason;
+                if let Some(reason) = failure_reason.filter(|reason| !details.failure_reasons.contains(reason)) {
+                    details.failure_reasons.push(reason);
+                    if details.failure_reasons.len() > MAX_CARD_DETAIL_LINES {
+                        details.failure_reasons.remove(0);
+                    }
                 }
                 if let Some(input_telemetry) = input_telemetry {
                     details.input_telemetry = Some(input_telemetry);
@@ -586,6 +595,7 @@ impl PlaylistUpdateCardStatuses {
             let was_known = run.accepted || !run.observed_input_ids.is_empty();
             if run.terminal.is_none() {
                 run.terminal = Some(completed.state);
+                run.published_targets = completed.targets;
             }
             (
                 run.execution_order,
@@ -804,7 +814,11 @@ mod tests {
             }),
             targets: target_ids
                 .iter()
-                .map(|target_id| InputUpdateCardTarget { id: *target_id, name: format!("target-{target_id}") })
+                .map(|target_id| InputUpdateCardTarget {
+                    id: *target_id,
+                    name: format!("target-{target_id}"),
+                    enabled: true,
+                })
                 .collect(),
             last_update_at: None,
         }
@@ -969,7 +983,7 @@ mod tests {
                 action_status: InputUpdateCardStatus::Updating,
                 details: vec!["r1 provider acquisition".into(), "r1 input completed".into()],
                 localized_details: vec![PlaylistUpdateProgressDetail::InputCompletedSuccessfully],
-                failure_reason: None,
+                failure_reasons: Vec::new(),
                 run_id: Some(run_id("r1")),
                 execution_order: Some(execution_order(1)),
                 refresh_policy: Some(InputRefreshPolicy::FORCE),
@@ -1013,7 +1027,7 @@ mod tests {
                 action_status: InputUpdateCardStatus::Updating,
                 details: vec!["r2 cache acquisition".into()],
                 localized_details: Vec::new(),
-                failure_reason: None,
+                failure_reasons: Vec::new(),
                 run_id: Some(run_id("r2")),
                 execution_order: Some(execution_order(2)),
                 refresh_policy: Some(InputRefreshPolicy::NORMAL),
@@ -1068,8 +1082,11 @@ mod tests {
             ..SourcesConfigDto::default()
         };
         let cards = vec![card(7, &[1]), card(8, &[])];
-        let local_controls =
-            InputUpdateCardState { selected_target_ids: Vec::new(), policy: InputRefreshPolicy::FORCE };
+        let local_controls = InputUpdateCardState {
+            selected_target_ids: Vec::new(),
+            policy: InputRefreshPolicy::FORCE,
+            replace_target_contents: false,
+        };
 
         assert_eq!(
             playlist_update_bulk_scope(&sources, &cards),
@@ -1146,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn playlist_update_bulk_includes_enabled_update_only_cards_in_configuration_order() {
+    fn playlist_update_bulk_includes_enabled_batch_cards_in_configuration_order() {
         let sources = SourcesConfigDto {
             inputs: vec![
                 input(30, "m3u-batch", InputType::M3uBatch),
@@ -1160,7 +1177,7 @@ mod tests {
             ..SourcesConfigDto::default()
         };
         let cards = build_input_update_card_models(&sources, &Default::default());
-        assert!(cards.iter().all(|card| card.capabilities == InputUpdateCapabilities::BulkOnly));
+        assert!(cards.iter().all(|card| card.capabilities.supports(InputRefreshPolicy::FORCE)));
         assert_eq!(
             playlist_update_bulk_scope(&sources, &cards),
             PlaylistUpdateBulkScope { can_submit: true, visible_input_ids: vec![30, 10, 20] }
@@ -1497,7 +1514,33 @@ mod tests {
 
         let runtime = state.for_input(7);
         assert_eq!(runtime.localized_details(), [PlaylistUpdateProgressDetail::InputFailed]);
-        assert_eq!(runtime.failure_reason(), Some("every Invidious instance refuses the video API"));
+        assert_eq!(runtime.failure_reasons(), ["every Invidious instance refuses the video API"]);
+    }
+
+    #[test]
+    fn replacement_failure_reasons_survive_timeout_and_partial_terminal_event() {
+        let publication = "Target 'failed-target' replacement failed: could not publish target files";
+        let timeout = "Target replacement did not finish for 'waiting-target': Playlist processing timed out";
+        let state = reduce(statuses(), accepted("timeout", &[7, 8]));
+        let state = reduce(state, input_completed("timeout", 1, 7, PlaylistUpdateState::Success, "input ready"));
+        let failure = |target: &str, reason: &str| PlaylistUpdateCardStatusAction::Progress {
+            connection_context: connection(1),
+            progress: PlaylistUpdateProgressEvent::for_run_input(
+                run_id("timeout"),
+                execution_order(1),
+                7,
+                target,
+                reason,
+            )
+            .with_failure_reason(Some(reason.to_string())),
+        };
+        let state = reduce(state, failure("failed-target", publication));
+        let state = reduce(state, failure("waiting-target", timeout));
+        let state = reduce(state, completed("timeout", 1, PlaylistUpdateState::Partial));
+        assert_eq!(state.for_input(7).failure_reasons(), [publication, timeout]);
+        assert_eq!(state.for_input(8).failure_reasons(), Vec::<String>::new());
+        let next = reduce(state, progress("retry", 2, 7, "retry started"));
+        assert_eq!(next.for_input(7).failure_reasons(), Vec::<String>::new());
     }
 
     #[test]

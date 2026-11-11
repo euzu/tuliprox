@@ -1,4 +1,5 @@
-use crate::xtream_write_playlist;
+use super::replacement::{OrdinaryPublication, TargetReplacementDeadline};
+use crate::xtream_repository::target_publish::{xtream_write_playlist_with_mode, TargetEmptyReplacementMode};
 use shared::{
     error::TuliproxError,
     model::{ClusterFlags, PlaylistGroup, XtreamCluster},
@@ -10,7 +11,7 @@ pub(super) fn playlist_has_items(playlist: &[PlaylistGroup]) -> bool {
     playlist.iter().any(|group| !group.channels.is_empty())
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) enum TargetPersistenceMode {
     #[default]
     Persist,
@@ -18,6 +19,8 @@ pub(super) enum TargetPersistenceMode {
     FailCacheReloadAt(TargetCacheReloadStage),
     #[cfg(test)]
     FailEmptyReplacementAt(crate::TargetEmptyReplacementFailure),
+    #[cfg(test)]
+    PauseDuringReplacement(crate::xtream_repository::target_publish::TargetEmptyPublicationHook),
 }
 
 #[cfg(test)]
@@ -163,9 +166,11 @@ impl PlaylistPublicationPlan {
 }
 
 /// Target persistence behavior authorized by successful input and curation results, not by Quality inference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TargetPlaylistPersistOptions {
     pub accepted_empty_clusters: ClusterFlags,
+    pub replace_target_contents: bool,
+    pub replacement_deadline: Option<Arc<TargetReplacementDeadline>>,
     pub library_empty: LibraryEmptyPublication,
     pub publication_plan: PlaylistPublicationPlan,
 }
@@ -174,6 +179,8 @@ impl Default for TargetPlaylistPersistOptions {
     fn default() -> Self {
         Self {
             accepted_empty_clusters: ClusterFlags::empty(),
+            replace_target_contents: false,
+            replacement_deadline: None,
             library_empty: LibraryEmptyPublication::None,
             publication_plan: PlaylistPublicationPlan::Ordinary,
         }
@@ -183,8 +190,11 @@ impl Default for TargetPlaylistPersistOptions {
 pub(super) fn validate_target_playlist_persistence(
     target: &ConfigTarget,
     playlist_is_empty: bool,
-    options: TargetPlaylistPersistOptions,
+    options: &TargetPlaylistPersistOptions,
 ) -> Result<(), TuliproxError> {
+    if options.replace_target_contents {
+        return Ok(());
+    }
     if !playlist_is_empty
         || options.library_empty.replaces_empty_target()
         || options.publication_plan.allows_any_empty_output()
@@ -227,9 +237,9 @@ pub(super) fn prepare_target_output_playlists(
 pub(super) fn validate_force_empty_output_filters(
     target: &ConfigTarget,
     prepared_outputs: &[Option<Vec<PlaylistGroup>>],
-    options: TargetPlaylistPersistOptions,
+    options: &TargetPlaylistPersistOptions,
 ) -> Result<(), TuliproxError> {
-    if options.accepted_empty_clusters.is_empty() {
+    if options.replace_target_contents || options.accepted_empty_clusters.is_empty() {
         return Ok(());
     }
 
@@ -262,6 +272,7 @@ pub(super) async fn persist_xtream_target_playlist(
     playlist: &mut [PlaylistGroup],
     accepted_empty_clusters: ClusterFlags,
     mode: TargetPersistenceMode,
+    publication: Option<&OrdinaryPublication>,
 ) -> Result<(), TuliproxError> {
     #[cfg(test)]
     if let TargetPersistenceMode::FailEmptyReplacementAt(failure) = mode {
@@ -277,5 +288,13 @@ pub(super) async fn persist_xtream_target_playlist(
     #[cfg(not(test))]
     let _ = mode;
 
-    xtream_write_playlist(app_config, target, playlist, accepted_empty_clusters).await
+    xtream_write_playlist_with_mode(
+        app_config,
+        target,
+        playlist,
+        accepted_empty_clusters,
+        TargetEmptyReplacementMode::Persist,
+        publication,
+    )
+    .await
 }

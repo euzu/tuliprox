@@ -100,7 +100,7 @@ mod input_refresh;
 mod paths;
 mod publish;
 mod read;
-mod target_publish;
+pub(crate) mod target_publish;
 
 #[cfg(test)]
 use self::details::preserve_details_with_injected_operation_failure;
@@ -150,15 +150,15 @@ pub use self::{
     input_refresh::{persist_input_xtream_playlist_cluster_to_disk, persist_input_xtream_playlist_clusters_to_disk},
     paths::{
         ensure_xtream_storage_path, get_collection_path, get_live_cat_collection_path, get_series_cat_collection_path,
-        get_vod_cat_collection_path, xtream_cluster_category_collection, xtream_get_collection_path,
-        xtream_get_file_path, xtream_get_storage_path,
+        get_vod_cat_collection_path, xtream_category_view_lock_path, xtream_cluster_category_collection,
+        xtream_get_collection_path, xtream_get_file_path, xtream_get_storage_path,
     },
     read::{
         count_input_xtream_cluster, iter_raw_xtream_input_playlist, iter_raw_xtream_target_playlist,
         load_input_xtream_playlist, persist_input_xtream_playlist,
         persist_input_xtream_playlist_with_empty_replacements, playlist_iter_to_stream,
         xtream_get_epg_file_path_for_target, xtream_get_item_for_stream_id, xtream_get_playlist_categories,
-        xtream_load_rewrite_playlist,
+        xtream_load_rewrite_playlist, xtream_read_playlist_categories,
     },
     target_publish::{write_playlist_batch_item_upsert, write_playlist_item_update, xtream_write_playlist},
 };
