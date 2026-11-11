@@ -123,6 +123,89 @@ fn m3u_test_target(name: &str, filename: &str) -> Arc<ConfigTarget> {
 }
 
 #[tokio::test]
+async fn replacement_rejects_an_unindexed_strm_hard_link_and_retires_the_indexed_name() {
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let mut target = m3u_test_target("selected", "catalog.m3u");
+    Arc::make_mut(&mut target).output.push(TargetOutput::Strm(StrmTargetOutput::from(&StrmTargetOutputDto {
+        directory: "strm".into(),
+        flat: true,
+        ..Default::default()
+    })));
+    let mut old = target_group(XtreamCluster::Live, 1, "old");
+    old.channels[0].header.url = "https://example.test/old".intern();
+    persist_playlist(&app, &mut [old], None, &target, None, TargetPlaylistPersistOptions::default()).await.unwrap();
+    let indexed = directory.path().join("strm/old.strm");
+    let alias = directory.path().join("strm/alias.strm");
+    let previous = fs::read(&indexed).unwrap();
+    fs::hard_link(&indexed, &alias).unwrap();
+    let mut candidate = target_group(XtreamCluster::Live, 2, "alias");
+    candidate.channels[0].header.url = "https://example.test/new".intern();
+    let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+    let errors = persist_playlist(&app, &mut [candidate], None, &target, None, replacement.clone()).await.unwrap_err();
+    assert!(errors.iter().any(|error| error.to_string().contains("Unmanaged STRM file already exists")));
+    assert_eq!(fs::read(&indexed).unwrap(), previous);
+    assert_eq!(fs::read(&alias).unwrap(), previous);
+
+    persist_playlist(&app, &mut [], None, &target, None, replacement).await.unwrap();
+    assert!(!indexed.exists());
+    assert_eq!(fs::read(alias).unwrap(), previous);
+}
+
+#[tokio::test]
+async fn replacement_waits_for_ordinary_strm_to_finish_updating_ownership() {
+    use crate::{storage::TARGET_EXPORT_LOCK, strm_repository::write_strm_playlist};
+    use std::time::Duration;
+
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let output =
+        StrmTargetOutput::from(&StrmTargetOutputDto { directory: "strm".into(), flat: true, ..Default::default() });
+    let mut selected = m3u_test_target("selected", "selected.m3u");
+    Arc::make_mut(&mut selected).output.push(TargetOutput::Strm(output.clone()));
+    let mut other = m3u_test_target("other", "other.m3u");
+    Arc::make_mut(&mut other).id = 2;
+    Arc::make_mut(&mut other).output.push(TargetOutput::Strm(output.clone()));
+    app.sources.store(Arc::new(SourcesConfig {
+        sources: vec![ConfigSource { inputs: vec![], targets: vec![selected.clone(), other.clone()] }],
+        ..Default::default()
+    }));
+    let mut old = target_group(XtreamCluster::Live, 1, "shared");
+    old.channels[0].header.url = "https://example.test/old".intern();
+    persist_playlist(&app, &mut [old.clone()], None, &selected, None, TargetPlaylistPersistOptions::default())
+        .await
+        .unwrap();
+
+    let other_index = strm_get_file_paths(&hash_string_as_hex("strm"), &directory.path().join("other"));
+    let index_lock = app.file_locks.write_lock(&other_index).await;
+    let ordinary = tokio::spawn({
+        let (app, old) = (app.clone(), old.clone());
+        async move { write_strm_playlist(&app, &other, &output, &mut [old], false).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while app.file_locks.try_write_lock(Path::new(TARGET_EXPORT_LOCK)).await.is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ordinary writer holds the export lock while waiting for its index");
+    ordinary.abort();
+    assert!(ordinary.await.unwrap_err().is_cancelled());
+    assert!(app.file_locks.try_write_lock(Path::new(TARGET_EXPORT_LOCK)).await.is_err());
+
+    old.channels[0].header.url = "https://example.test/changed".intern();
+    let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+    let mut candidate = [old];
+    let replacing = persist_playlist(&app, &mut candidate, None, &selected, None, replacement);
+    tokio::pin!(replacing);
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut replacing).await.is_err());
+    drop(index_lock);
+    let errors = tokio::time::timeout(Duration::from_secs(5), replacing).await.unwrap().unwrap_err();
+    assert!(errors.iter().any(|error| error.to_string().contains("also managed by another target")));
+    assert_eq!(fs::read_to_string(directory.path().join("strm/shared.strm")).unwrap(), "https://example.test/old");
+}
+
+#[tokio::test]
 async fn replacement_keeps_exports_available_and_preserves_a_concurrently_created_strm_file() {
     use crate::{
         m3u_repository::stage_m3u_playlist,

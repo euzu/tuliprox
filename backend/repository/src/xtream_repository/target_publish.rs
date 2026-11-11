@@ -11,10 +11,13 @@ use super::{
 };
 #[cfg(windows)]
 use super::{encode_windows_path, sync_published_file_parent};
+#[cfg(not(unix))]
+use crate::storage::existing_file_identity;
 use crate::{
     bplustree::{get_file_path_for_db_index, BPlusTree, BPlusTreeStagingArtifacts, BPlusTreeUpdate, IndexSnapshot},
     error_macros::cant_write_result,
     playlist_backend::PlaylistKey,
+    storage::FileIdentity,
     storage_const,
 };
 use indexmap::IndexMap;
@@ -154,15 +157,73 @@ pub(crate) struct TargetFileReplacement {
     staging: Option<PathBuf>,
     staging_database: Option<BPlusTreeStagingArtifacts>,
     backup: PathBuf,
-    previous_present: bool,
+    previous: Option<PublishedTargetFile>,
     backup_created: bool,
     published_changed: bool,
+    installed: Option<PublishedTargetFile>,
     expected_previous: Option<ExpectedTargetFile>,
 }
 
 enum ExpectedTargetFile {
     Missing,
     Digest(blake3::Hash),
+    Identity(FileIdentity),
+}
+
+/// Record the identity and metadata of the file a prepared publication may replace.
+#[derive(PartialEq, Eq)]
+struct PublishedTargetFile {
+    identity: FileIdentity,
+    length: u64,
+    modified: std::time::SystemTime,
+    permissions: fs::Permissions,
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+impl PublishedTargetFile {
+    fn read(path: &Path) -> io::Result<Option<Self>> {
+        let metadata = match path.symlink_metadata() {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Err(io::Error::other(format!("Target artifact is not a file: {}", path.display()))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        #[cfg(unix)]
+        let identity = (metadata.dev(), metadata.ino());
+        #[cfg(not(unix))]
+        let identity = existing_file_identity(path)?.ok_or(io::ErrorKind::NotFound)?;
+        Self::from_metadata(&metadata, identity).map(Some)
+    }
+
+    fn from_metadata(metadata: &fs::Metadata, identity: FileIdentity) -> io::Result<Self> {
+        Ok(Self {
+            identity,
+            length: metadata.len(),
+            modified: metadata.modified()?,
+            permissions: metadata.permissions(),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+
+    fn matches_open_file(&self, file: &File) -> io::Result<bool> {
+        let metadata = file.metadata()?;
+        #[cfg(unix)]
+        let identity = (metadata.dev(), metadata.ino());
+        #[cfg(windows)]
+        let identity = crate::storage::windows_file_identity(file)?;
+        #[cfg(not(any(unix, windows)))]
+        let identity = self.identity.clone();
+        Ok(*self == Self::from_metadata(&metadata, identity)?)
+    }
+
+    fn same_file_after_rename(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && self.length == other.length
+            && self.modified == other.modified
+            && self.permissions == other.permissions
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,9 +304,10 @@ impl TargetFileReplacement {
             staging: staging.map(Path::to_path_buf),
             staging_database: None,
             backup: published.with_file_name(format!(".force-empty-backup-{token}-{}", Uuid::new_v4().simple())),
-            previous_present: false,
+            previous: None,
             backup_created: false,
             published_changed: false,
+            installed: None,
             expected_previous: None,
         }
     }
@@ -261,29 +323,54 @@ impl TargetFileReplacement {
         self.expected_previous = Some(digest.map_or(ExpectedTargetFile::Missing, ExpectedTargetFile::Digest));
     }
 
-    fn validate_previous_file(&self) -> io::Result<bool> {
-        let exists = match self.published.symlink_metadata() {
-            Ok(metadata) if metadata.is_file() => true,
-            Ok(_) => {
-                return Err(io::Error::other(format!("Target artifact is not a file: {}", self.published.display())));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error),
-        };
-        let unchanged = match self.expected_previous {
-            Some(ExpectedTargetFile::Missing) => !exists,
+    pub(crate) fn expect_previous_identity(&mut self, identity: Option<FileIdentity>) {
+        self.expected_previous = Some(identity.map_or(ExpectedTargetFile::Missing, ExpectedTargetFile::Identity));
+    }
+
+    pub(crate) fn expects_existing_file(&self) -> bool {
+        matches!(self.expected_previous, Some(ExpectedTargetFile::Digest(_) | ExpectedTargetFile::Identity(_)))
+    }
+
+    /// Keep staged content private while replacing an existing export. Its permissions are restored before commit.
+    pub(crate) fn create_staged_export(&self) -> io::Result<File> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if self.expects_existing_file() {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(self.staging_path())
+    }
+
+    fn changed_since(&self, phase: &str) -> io::Error {
+        io::Error::other(format!("Target artifact changed after {phase}: {}", self.published.display()))
+    }
+
+    fn validate_previous_file(&self) -> io::Result<Option<PublishedTargetFile>> {
+        let previous = PublishedTargetFile::read(&self.published)?;
+        let unchanged = match &self.expected_previous {
+            Some(ExpectedTargetFile::Missing) => previous.is_none(),
             Some(ExpectedTargetFile::Digest(digest)) => {
-                exists && crate::storage::file_digest(&self.published)? == digest
+                previous.is_some() && crate::storage::file_digest(&self.published)? == *digest
+            }
+            Some(ExpectedTargetFile::Identity(identity)) => {
+                previous.as_ref().is_some_and(|file| &file.identity == identity)
             }
             None => true,
         };
         if !unchanged {
-            return Err(io::Error::other(format!(
-                "Target artifact changed after staging: {}",
-                self.published.display()
-            )));
+            return Err(self.changed_since("staging"));
         }
-        Ok(exists)
+        Ok(previous)
+    }
+
+    fn revalidate_destination(&self) -> io::Result<()> {
+        if PublishedTargetFile::read(&self.published)? == self.previous {
+            Ok(())
+        } else {
+            Err(self.changed_since("preparation"))
+        }
     }
 
     pub(crate) fn database(published: &Path, staging: &Path, token: uuid::fmt::Simple) -> io::Result<Self> {
@@ -349,6 +436,12 @@ fn rollback_target_file_replacements(
     for replacement in replacements.iter_mut().rev() {
         if !replacement.published_changed {
             continue;
+        }
+        if move_mode == TargetFileMoveMode::PreserveDestination {
+            if let Err(error) = replacement.revalidate_installed_file() {
+                errors.push(error.to_string());
+                continue;
+            }
         }
         if replacement.backup_created {
             let mode = if replacement.staging.is_some() { TargetFileMoveMode::ReplaceDestination } else { move_mode };
@@ -438,6 +531,79 @@ fn check_safe_file_moves(directory: &Path, move_file: impl Fn(&Path, &Path) -> i
 #[cfg(all(test, unix))]
 mod file_move_checks {
     use super::*;
+    use crate::storage::existing_file_identity;
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn replacement_preserves_export_permissions_before_and_after_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let published = directory.path().join("private.strm");
+        fs::write(&published, "original").unwrap();
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o600)).unwrap();
+        let token = Uuid::new_v4().simple();
+        let mut file = TargetFileReplacement::staged_file(&published, token);
+        file.expect_previous_identity(existing_file_identity(&published).unwrap());
+        file.create_staged_export().unwrap().write_all(b"replacement").unwrap();
+        assert_eq!(fs::metadata(file.staging_path()).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // Simulate a writer that generated a staged file with the normal umask.
+        fs::set_permissions(file.staging_path(), fs::Permissions::from_mode(0o644)).unwrap();
+        publish_target_file_replacements(&mut [file], &TargetEmptyReplacementMode::Persist).unwrap();
+        assert_eq!(fs::read_to_string(&published).unwrap(), "replacement");
+        assert_eq!(fs::metadata(published).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn an_in_place_edit_cannot_change_a_prepared_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let published = directory.path().join("catalog.strm");
+        fs::write(&published, "original").unwrap();
+        let file = TargetFileReplacement::staged_file(&published, Uuid::new_v4().simple());
+        fs::write(file.staging_path(), "replacement").unwrap();
+        let mut files = [file];
+        prepare_target_file_replacements(&mut files).unwrap();
+        fs::write(&published, "updated independently").unwrap();
+        assert_eq!(fs::read_to_string(&files[0].backup).unwrap(), "original");
+        let error =
+            publish_prepared_target_file_replacements(&mut files, &TargetEmptyReplacementMode::Persist).unwrap_err();
+        assert!(error.to_string().contains("changed after preparation"));
+        drop(files);
+        assert_eq!(fs::read_to_string(published).unwrap(), "updated independently");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_concurrent_rename_prevents_replacement_and_removal_and_rolls_back_other_exports() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.m3u");
+        let second = directory.path().join("second.strm");
+        let foreign = directory.path().join("foreign");
+        for remove in [false, true] {
+            fs::write(&first, "first original").unwrap();
+            fs::write(&second, "second original").unwrap();
+            let token = Uuid::new_v4().simple();
+            let first_file = TargetFileReplacement::staged_file(&first, token);
+            fs::write(first_file.staging_path(), "first replacement").unwrap();
+            let second_file = if remove {
+                TargetFileReplacement::new(&second, None, token)
+            } else {
+                let staged = TargetFileReplacement::staged_file(&second, token);
+                fs::write(staged.staging_path(), "second replacement").unwrap();
+                staged
+            };
+            let mut files = [first_file, second_file];
+            prepare_target_file_replacements(&mut files).unwrap();
+            fs::write(&foreign, "foreign replacement").unwrap();
+            fs::rename(&foreign, &second).unwrap();
+            let error = publish_prepared_target_file_replacements(&mut files, &TargetEmptyReplacementMode::Persist)
+                .unwrap_err();
+            assert!(error.to_string().contains("changed after preparation"));
+            drop(files);
+            assert_eq!(fs::read_to_string(&first).unwrap(), "first original");
+            assert_eq!(fs::read_to_string(&second).unwrap(), "foreign replacement");
+            assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+        }
+    }
 
     #[test]
     fn unsupported_file_move_reports_export_directory_and_leaves_published_file_alone() {
@@ -475,34 +641,53 @@ pub(crate) fn sync_staged_target_files(replacements: &[TargetFileReplacement]) -
 /// Save the previous contents while leaving the published paths available to readers.
 pub(crate) fn prepare_target_file_replacements(replacements: &mut [TargetFileReplacement]) -> io::Result<()> {
     validate_target_file_replacements(replacements)?;
-    for replacement in replacements.iter_mut().filter(|entry| entry.previous_present && entry.staging.is_some()) {
-        replacement.back_up_published_file()?;
+    for replacement in replacements {
+        if let Some(previous) = &replacement.previous {
+            replacement.back_up_published_file(previous)?;
+            replacement.backup_created = true;
+            replacement.revalidate_destination()?;
+        }
     }
     Ok(())
 }
 
 impl TargetFileReplacement {
-    /// Link the live file when possible and copy it on filesystems without hard links.
-    fn back_up_published_file(&mut self) -> io::Result<()> {
-        match fs::hard_link(&self.published, &self.backup) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Err(error),
-            Err(_) => {
-                let parent = tuliprox_core::utils::parent_or_dot(&self.backup);
-                let mut copy = tempfile::NamedTempFile::new_in(parent)?;
-                let mut source = File::open(&self.published)?;
-                let metadata = source.metadata()?;
-                io::copy(&mut source, copy.as_file_mut())?;
-                copy.as_file().set_permissions(metadata.permissions())?;
-                if let Ok(modified) = metadata.modified() {
-                    copy.as_file().set_times(fs::FileTimes::new().set_modified(modified))?;
-                }
-                copy.as_file().sync_all()?;
-                copy.persist_noclobber(&self.backup).map_err(|error| error.error)?;
+    /// Copy into a separate inode so in-place edits of the live file cannot alter the rollback contents.
+    fn back_up_published_file(&self, previous: &PublishedTargetFile) -> io::Result<()> {
+        let parent = tuliprox_core::utils::parent_or_dot(&self.backup);
+        let mut copy = tempfile::NamedTempFile::new_in(parent)?;
+        let mut source = File::open(&self.published)?;
+        if !previous.matches_open_file(&source)? {
+            return Err(self.changed_since("preparation"));
+        }
+        io::copy(&mut source, copy.as_file_mut())?;
+        copy.as_file().set_permissions(previous.permissions.clone())?;
+        copy.as_file().set_times(fs::FileTimes::new().set_modified(previous.modified))?;
+        copy.as_file().sync_all()?;
+        if let Some(staging) = &self.staging {
+            let staged = File::open(staging)?;
+            if staged.metadata()?.permissions() != previous.permissions {
+                staged.set_permissions(previous.permissions.clone())?;
+                staged.sync_all()?;
             }
         }
-        self.backup_created = true;
+        copy.persist_noclobber(&self.backup).map_err(|error| error.error)?;
         Ok(())
+    }
+
+    /// A rollback can only withdraw the file this transaction installed.
+    fn revalidate_installed_file(&self) -> io::Result<()> {
+        let current = PublishedTargetFile::read(&self.published)?;
+        let unchanged = match (&self.installed, current) {
+            (Some(installed), Some(current)) => installed.same_file_after_rename(&current),
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            Ok(())
+        } else {
+            Err(self.changed_since("publication"))
+        }
     }
 
     fn remove_backup(&mut self) {
@@ -534,10 +719,8 @@ fn validate_target_file_replacements(replacements: &mut [TargetFileReplacement])
         let identity = std::fs::canonicalize(parent)?.join(replacement.published.file_name().ok_or_else(|| {
             io::Error::other(format!("Target artifact has no filename: {}", replacement.published.display()))
         })?);
-        replacement.previous_present = replacement.validate_previous_file()?;
-        let existing_alias = replacement.previous_present
-            && crate::storage::existing_file_identity(&replacement.published)?
-                .is_some_and(|file| !published_files.insert(file));
+        replacement.previous = replacement.validate_previous_file()?;
+        let existing_alias = replacement.previous.as_ref().is_some_and(|file| !published_files.insert(&file.identity));
         if !published_paths.insert(identity) || existing_alias {
             return Err(io::Error::other(format!(
                 "Target artifact configured more than once: {}",
@@ -567,7 +750,7 @@ fn publish_target_files(
     let publication = (|| -> io::Result<()> {
         // Ordinary M3U exports retain their existing rename behavior on mounts such as s3fs.
         if move_mode == TargetFileMoveMode::ReplaceDestination {
-            for replacement in replacements.iter_mut().filter(|entry| entry.previous_present) {
+            for replacement in replacements.iter_mut().filter(|entry| entry.previous.is_some()) {
                 move_target_file_platform(&replacement.published, &replacement.backup, move_mode)?;
                 replacement.backup_created = true;
                 replacement.published_changed = true;
@@ -583,6 +766,12 @@ fn publish_target_files(
         for (index, replacement) in replacements.iter_mut().filter(|entry| entry.staging.is_some()).enumerate() {
             let destination_mode =
                 if replacement.backup_created { TargetFileMoveMode::ReplaceDestination } else { move_mode };
+            if move_mode == TargetFileMoveMode::PreserveDestination {
+                replacement.installed = PublishedTargetFile::read(replacement.staging_path())?;
+                if replacement.previous.is_some() {
+                    replacement.revalidate_destination()?;
+                }
+            }
             move_target_file_platform(replacement.staging_path(), &replacement.published, destination_mode)?;
             replacement.published_changed = true;
             #[cfg(test)]
@@ -597,10 +786,10 @@ fn publish_target_files(
         // Retire files that have no replacement only after every staged file is in place.
         for replacement in replacements
             .iter_mut()
-            .filter(|entry| entry.staging.is_none() && entry.previous_present && !entry.published_changed)
+            .filter(|entry| entry.staging.is_none() && entry.previous.is_some() && !entry.published_changed)
         {
-            move_target_file_platform(&replacement.published, &replacement.backup, move_mode)?;
-            replacement.backup_created = true;
+            replacement.revalidate_destination()?;
+            fs::remove_file(&replacement.published)?;
             replacement.published_changed = true;
         }
         sync_parents()

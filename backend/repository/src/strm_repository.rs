@@ -1,5 +1,8 @@
 use crate::{
-    storage::{ensure_target_storage_path, existing_file_identity, get_target_storage_path, FileIdentity},
+    storage::{
+        ensure_target_storage_path, existing_file_identity, get_target_storage_path, lock_regular_target_exports,
+        FileIdentity,
+    },
     storage_const,
     xtream_repository::target_publish::TargetFileReplacement,
 };
@@ -774,6 +777,7 @@ fn strip_tmdb_markers(s: &str) -> String {
     result
 }
 
+/// Write a regular STRM export and finish its index and cleanup under the shared export lock.
 pub async fn write_strm_playlist(
     app_config: &AppConfig,
     target: &ConfigTarget,
@@ -797,9 +801,39 @@ pub async fn write_strm_playlist(
         .map_err(TuliproxError::Config)?;
     let strm_index_path =
         strm_index_path(target_output, &ensure_target_storage_path(&config, target.name.as_str()).await?);
+    let (app_config, target, target_output) = (app_config.clone(), target.clone(), target_output.clone());
+    let strm_files = prepare_strm_files(new_playlist, &target_output);
+    let ownership = lock_regular_target_exports(&app_config).await;
+    // Keep the lock with the writer if its caller is cancelled during filesystem I/O.
+    tokio::spawn(async move {
+        let _ownership = ownership;
+        write_strm_files(
+            &app_config,
+            &target,
+            &target_output,
+            &root_path,
+            &strm_index_path,
+            user_and_server_info,
+            strm_files,
+        )
+        .await
+    })
+    .await
+    .map_err(|error| TuliproxError::Config(format!("Failed to join STRM export: {error}")))?
+}
+
+async fn write_strm_files(
+    app_config: &AppConfig,
+    target: &ConfigTarget,
+    target_output: &StrmTargetOutput,
+    root_path: &Path,
+    strm_index_path: &Path,
+    user_and_server_info: Option<(Arc<ProxyUserCredentials>, ApiProxyServerInfo)>,
+    strm_files: Vec<StrmFile>,
+) -> Result<(), TuliproxError> {
     let existing_strm = {
-        let _file_lock = app_config.file_locks.read_lock(&strm_index_path).await;
-        read_strm_file_index(&strm_index_path).await.unwrap_or_else(|_| HashSet::with_capacity(4096))
+        let _file_lock = app_config.file_locks.read_lock(strm_index_path).await;
+        read_strm_file_index(strm_index_path).await.unwrap_or_else(|_| HashSet::with_capacity(4096))
     };
     let mut processed_strm: HashSet<String> = HashSet::with_capacity(existing_strm.len());
 
@@ -814,11 +848,9 @@ pub async fn write_strm_playlist(
 
     let mut failed = vec![];
 
-    prepare_strm_output_directory(&root_path).await?;
+    prepare_strm_output_directory(root_path).await?;
 
     let mut input_by_name: HashMap<Arc<str>, Option<Arc<ConfigInput>>> = HashMap::new();
-
-    let strm_files = prepare_strm_files(new_playlist, target_output);
 
     for strm_file in strm_files {
         // file paths
@@ -826,10 +858,10 @@ pub async fn write_strm_playlist(
         let file_path =
             output_path.join(format!("{}.strm", truncate_string(&strm_file.file_name, MAX_STRM_FILE_STEM_LEN)));
 
-        let relative_file_path = get_relative_path_str(&file_path, &root_path);
+        let relative_file_path = get_relative_path_str(&file_path, root_path);
 
         let (target_relative_file_path, target_file_path) = get_target_strm_file_path(
-            &root_path,
+            root_path,
             &enriched_strm,
             &relative_file_path,
             file_path,
@@ -873,13 +905,13 @@ pub async fn write_strm_playlist(
         processed_strm.insert(target_relative_file_path);
     }
 
-    if let Err(err) = write_strm_index_file(app_config, &processed_strm, &strm_index_path).await {
+    if let Err(err) = write_strm_index_file(app_config, &processed_strm, strm_index_path).await {
         failed.push(err);
     }
 
     if let Err(err) = cleanup_strm_output_directory(
         target_output.flags.contains(StrmTargetFlags::Cleanup),
-        &root_path,
+        root_path,
         &existing_strm,
         &processed_strm,
     )
@@ -979,12 +1011,12 @@ fn other_target_strm_files(
     target: &ConfigTarget,
     root: &Path,
     index: &Path,
-) -> std::io::Result<HashSet<StrmFileKey>> {
+) -> std::io::Result<HashMap<StrmFileKey, HashSet<PathBuf>>> {
     let root_identity = existing_file_identity(root)?;
     let root_ancestors = root.ancestors().map(existing_file_identity).collect::<std::io::Result<HashSet<_>>>()?;
     let index_identity = existing_file_identity(index)?;
     let sources = app.sources.load();
-    let mut files = HashSet::new();
+    let mut files: HashMap<_, HashSet<_>> = HashMap::new();
     for other in sources.sources.iter().flat_map(|source| &source.targets).filter(|other| other.name != target.name) {
         let Some(storage) = get_target_storage_path(config, &other.name) else { continue };
         for output in &other.output {
@@ -1020,13 +1052,14 @@ fn other_target_strm_files(
             }
             for relative in read_replacement_strm_index(&other_index)? {
                 let path = managed_strm_path(&other_root, &relative, false)?;
-                files.insert(StrmFileKey::for_path(&path)?);
+                files.entry(StrmFileKey::for_path(&path)?).or_default().insert(path);
             }
         }
     }
     Ok(files)
 }
 
+/// Stage owned STRM paths. The caller holds the export lock through publication.
 pub(crate) async fn stage_strm_playlist(
     app: &Arc<AppConfig>,
     target: &ConfigTarget,
@@ -1048,6 +1081,7 @@ pub(crate) async fn stage_strm_playlist(
         move || -> Result<_, TuliproxError> {
             let error = |message: String| TuliproxError::Config(format!("Failed to stage STRM output: {message}"));
             let io_error = |err: std::io::Error| error(err.to_string());
+            let index_identity = existing_file_identity(&index).map_err(io_error)?;
             let existing = read_replacement_strm_index(&index).map_err(io_error)?;
             std::fs::create_dir_all(&root).map_err(io_error)?;
             let root = root.canonicalize().map_err(io_error)?;
@@ -1056,11 +1090,10 @@ pub(crate) async fn stage_strm_playlist(
                 .iter()
                 .map(|relative| {
                     let path = managed_strm_path(&root, relative, false)?;
-                    Ok((StrmFileKey::for_path(&path)?, path))
+                    Ok((relative.as_str(), (StrmFileKey::for_path(&path)?, path)))
                 })
-                .collect::<std::io::Result<Vec<_>>>()
+                .collect::<std::io::Result<HashMap<_, _>>>()
                 .map_err(io_error)?;
-            let existing_keys: HashSet<_> = existing_files.iter().map(|(key, _)| key).collect();
             let enriched = existing
                 .iter()
                 .filter(|path| strm_contains_tmdb_marker(path))
@@ -1068,7 +1101,6 @@ pub(crate) async fn stage_strm_playlist(
                 .collect();
             let mut input_by_name = HashMap::new();
             let mut processed = std::collections::BTreeSet::new();
-            let mut processed_files = HashSet::new();
             let mut files = Vec::new();
             for entry in entries {
                 let path = truncate_filename(&root.join(&entry.dir_path), 255)
@@ -1078,20 +1110,21 @@ pub(crate) async fn stage_strm_playlist(
                     get_target_strm_file_path(&root, &enriched, &relative, path, entry.strm_info.tmdb_id);
                 let published = managed_strm_path(&root, &relative, true).map_err(io_error)?;
                 let key = StrmFileKey::for_path(&published).map_err(io_error)?;
-                let shared_file = shared.contains(&key);
-                let owned_file = matches!(key, StrmFileKey::Existing(_)) && existing_keys.contains(&key);
-                if !shared_file && !owned_file && published.symlink_metadata().is_ok() {
+                let shared_paths = shared.get(&key);
+                let owned_file = matches!(key, StrmFileKey::Existing(_))
+                    && existing_files.get(relative.as_str()).is_some_and(|(indexed, _)| *indexed == key);
+                let shared_path = shared_paths.is_some_and(|paths| paths.contains(&published));
+                if !shared_path && !owned_file && published.symlink_metadata().is_ok() {
                     return Err(error(format!("Unmanaged STRM file already exists: {}", published.display())));
                 }
-                if !processed_files.insert(key) {
+                if !processed.insert(relative) {
                     return Err(error(format!("Duplicate STRM output: {}", published.display())));
                 }
-                processed.insert(relative);
                 let url =
                     resolve_strm_file_url(&app, &mut input_by_name, &target, credentials.as_ref(), &entry.strm_info)
                         .map_err(error)?;
                 let (bytes, _) = build_strm_content(&output, &url);
-                if shared_file {
+                if shared_paths.is_some() {
                     if published.symlink_metadata().is_ok_and(|metadata| metadata.is_file())
                         && std::fs::read(&published).is_ok_and(|current| current == bytes)
                     {
@@ -1100,20 +1133,26 @@ pub(crate) async fn stage_strm_playlist(
                     return Err(error(format!("STRM file is also managed by another target: {}", published.display())));
                 }
                 let mut file = TargetFileReplacement::staged_file(&published, token);
-                if !owned_file {
-                    file.expect_previous_file(None);
-                }
-                std::fs::write(file.staging_path(), bytes).map_err(io_error)?;
+                file.expect_previous_identity(match key {
+                    StrmFileKey::Existing(identity) => Some(identity),
+                    StrmFileKey::Missing(_) => None,
+                });
+                file.create_staged_export().and_then(|mut staging| staging.write_all(&bytes)).map_err(io_error)?;
                 set_strm_file_timestamp(file.staging_path(), entry.strm_info.get_file_ts());
                 files.push(file);
             }
-            for (key, path) in existing_files {
-                if matches!(key, StrmFileKey::Existing(_)) && !shared.contains(&key) && !processed_files.contains(&key)
-                {
-                    files.push(TargetFileReplacement::new(&path, None, token));
+            for (relative, (key, path)) in existing_files {
+                if processed.contains(relative) || shared.contains_key(&key) {
+                    continue;
+                }
+                if let StrmFileKey::Existing(identity) = key {
+                    let mut removal = TargetFileReplacement::new(&path, None, token);
+                    removal.expect_previous_identity(Some(identity));
+                    files.push(removal);
                 }
             }
-            let file = TargetFileReplacement::staged_file(&index, token);
+            let mut file = TargetFileReplacement::staged_file(&index, token);
+            file.expect_previous_identity(index_identity);
             let mut writer = std::io::BufWriter::new(std::fs::File::create(file.staging_path()).map_err(io_error)?);
             for relative in processed {
                 writeln!(writer, "{relative}").map_err(io_error)?;
@@ -1131,7 +1170,7 @@ pub(crate) async fn stage_strm_playlist(
 async fn write_strm_index_file(
     cfg: &AppConfig,
     entries: &HashSet<String>,
-    index_file_path: &PathBuf,
+    index_file_path: &Path,
 ) -> Result<(), String> {
     let _file_lock = cfg.file_locks.write_lock(index_file_path).await;
     let file = File::create(index_file_path)

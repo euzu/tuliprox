@@ -9,6 +9,7 @@ use crate::{
     lineup_guide_index::stage_lineup_guide_index,
     lineup_guide_index_view, m3u_get_epg_file_path_for_target, m3u_get_file_path_for_db, m3u_lineup_guide_index_path,
     m3u_repository::stage_m3u_playlist,
+    storage::lock_target_exports,
     strm_repository::stage_strm_playlist,
     target_id_mapping::get_uuid_index_path,
     xtream_category_view_lock_path, xtream_get_epg_file_path_for_target, xtream_lineup_guide_index_path,
@@ -232,7 +233,7 @@ impl TargetReplacement {
             TargetOutput::Strm(_) => true,
             _ => false,
         }) {
-            self.export_ownership_lock = Some(app.file_locks.write_lock(Path::new(".target-export-replacement")).await);
+            self.export_ownership_lock = Some(lock_target_exports(app).await);
         }
         for (output, filtered) in target.output.iter().zip(prepared) {
             let source = match output {
@@ -357,7 +358,7 @@ impl TargetReplacement {
             locks.push(app.file_locks.write_lock(&path).await);
         }
         // Back up live files before taking the cache lock shared by every target.
-        let mut replacement = tokio::task::spawn_blocking(move || {
+        let replacement = tokio::task::spawn_blocking(move || {
             let mut replacement = replacement;
             prepare_target_file_replacements(&mut replacement.files)?;
             Ok::<_, io::Error>(replacement)
@@ -372,13 +373,14 @@ impl TargetReplacement {
         };
         let target_name = target.name.clone();
         let state = state.cloned();
+        let Self { mut files, export_ownership_lock, .. } = replacement;
         // The same task owns every guard until both disk publication and cache swap are complete.
         tokio::task::spawn_blocking(move || {
             let mut publication = deadline.as_deref().map(TargetReplacementDeadline::try_begin).transpose()?;
             let result = (|| {
-                let _guards = (mapping_lock, category_view, locks, groups);
+                let _guards = (mapping_lock, category_view, locks, groups, export_ownership_lock);
                 let cache = new_cache;
-                publish_prepared_target_file_replacements(&mut replacement.files, &mode)?;
+                publish_prepared_target_file_replacements(&mut files, &mode)?;
                 if let Some((mut cache, storage)) = cache {
                     cache.insert(target_name.clone(), storage);
                 }

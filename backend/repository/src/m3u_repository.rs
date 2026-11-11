@@ -7,7 +7,7 @@ use crate::{
     playlist_repository::get_input_m3u_playlist_file_path,
     storage::{
         build_input_storage_path, existing_file_identity, file_digest, get_input_storage_path, get_target_storage_path,
-        FileIdentity,
+        lock_regular_target_exports, FileIdentity,
     },
     storage_const,
     strm_repository::target_manages_strm_file,
@@ -160,6 +160,7 @@ fn conflicting_export_target(
     Ok(None)
 }
 
+/// Check export ownership and record the existing M3U path identity for replacement.
 async fn checked_m3u_text_paths(
     app: &AppConfig,
     config: Arc<Config>,
@@ -184,9 +185,7 @@ async fn checked_m3u_text_paths(
                     filename.display()
                 )));
             }
-            if candidate.file.is_none() {
-                main.expect_previous_file(None);
-            }
+            main.expect_previous_identity(candidate.file);
         }
         let path = provider_m3u_filename(&filename);
         let read_error = |err| cant_read_result!(RepositoryM3u, "provider export", &path, err);
@@ -283,14 +282,24 @@ fn provider_export_state(
 async fn write_m3u_text_file<F>(
     m3u_filename: &Path,
     m3u_playlist: &[M3uPlaylistItem],
+    private_staging: bool,
     mut build_line: F,
 ) -> Result<(), TuliproxError>
 where
     F: FnMut(&M3uPlaylistItem) -> Result<String, TuliproxError>,
 {
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    if private_staging {
+        options.create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+    } else {
+        options.create(true).truncate(true);
+    }
     let file = await_playlist_write!(
         RepositoryM3u,
-        fs::File::create(m3u_filename),
+        options.open(m3u_filename),
         "Can't write m3u plain playlist {} - {}",
         m3u_filename.display()
     );
@@ -339,7 +348,7 @@ where
     F: FnMut(&M3uPlaylistItem) -> Result<String, TuliproxError>,
 {
     let tmp_path = temp_m3u_filename(m3u_filename);
-    write_m3u_text_file(&tmp_path, m3u_playlist, build_line).await?;
+    write_m3u_text_file(&tmp_path, m3u_playlist, false, build_line).await?;
     await_playlist_write!(
         RepositoryM3u,
         fs::rename(&tmp_path, m3u_filename),
@@ -491,16 +500,21 @@ pub async fn m3u_write_playlist(
     let m3u_path = m3u_get_file_path_for_db(target_path);
     let m3u_playlist = m3u_items(new_playlist);
 
+    let ownership = if target_output.filename.is_some() { Some(lock_regular_target_exports(cfg).await) } else { None };
     let file_lock = cfg.file_locks.write_lock(&m3u_path).await;
-
-    persist_m3u_playlist_as_text(cfg, target, target_output, &m3u_path, &m3u_playlist).await?;
-
+    let (cfg, target, target_output) = (cfg.clone(), target.clone(), target_output.clone());
     let m3u_path_clone = m3u_path.clone();
 
-    // Move all B+Tree building and I/O to spawn_blocking
-    task::spawn_blocking(move || -> Result<(), TuliproxError> {
-        let _guard = file_lock;
-        store_m3u_tree(&m3u_path_clone, m3u_playlist).map(|_| ())
+    // Keep both locks with the writer across text export and database publication.
+    tokio::spawn(async move {
+        let guards = (ownership, file_lock);
+        persist_m3u_playlist_as_text(&cfg, &target, &target_output, &m3u_path_clone, &m3u_playlist).await?;
+        task::spawn_blocking(move || {
+            let _guards = guards;
+            store_m3u_tree(&m3u_path_clone, m3u_playlist).map(|_| ())
+        })
+        .await
+        .map_err(|err| TuliproxError::RepositoryM3u(format!("Failed to join M3U database writer: {err}")))?
     })
     .await
     .map_err(|err| {
@@ -548,7 +562,9 @@ async fn stage_m3u_text_exports(
             };
             let mut provider = TargetFileReplacement::staged_file(&path, token);
             provider.expect_previous_file(digest);
-            write_m3u_text_file(provider.staging_path(), items, |item| Ok(item.to_m3u(target_options, false))).await?;
+            let private = ownership == ProviderExportOwnership::Verify && provider.expects_existing_file();
+            write_m3u_text_file(provider.staging_path(), items, private, |item| Ok(item.to_m3u(target_options, false)))
+                .await?;
             let staged_path = provider.staging_path().to_path_buf();
             let digest = task::spawn_blocking(move || file_digest(&staged_path))
                 .await
@@ -564,7 +580,8 @@ async fn stage_m3u_text_exports(
         }
     }
 
-    write_m3u_text_file(text.staging_path(), items, |item| {
+    let private = ownership == ProviderExportOwnership::Verify && text.expects_existing_file();
+    write_m3u_text_file(text.staging_path(), items, private, |item| {
         if provider_inputs.is_empty() {
             Ok(item.to_m3u(target_options, false))
         } else {
