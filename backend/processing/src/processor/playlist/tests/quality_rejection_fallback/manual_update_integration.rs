@@ -192,6 +192,76 @@ async fn replace_target_contents_deadline_releases_permit_after_prior_commit() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn ordinary_update_timeout_drains_the_m3u_cache_publication() {
+    use tuliprox_repository::{get_target_id_mapping_file, get_target_storage_path, load_m3u_target_storage};
+
+    let directory = tempfile::tempdir().unwrap();
+    let ctx = processing_context_with_events(directory.path(), CollectSink::default());
+    let source = directory.path().join("input.m3u");
+    std::fs::write(&source, "#EXTM3U\n#EXTINF:-1,Current stream\nhttps://example.test/live.ts\n").unwrap();
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "input".intern(),
+        input_type: InputType::M3u,
+        enabled: true,
+        url: source.to_string_lossy().into_owned(),
+        ..ConfigInput::default()
+    });
+    let mut target = xtream_target(true);
+    Arc::make_mut(&mut target).output = vec![TargetOutput::M3u(M3uTargetOutput {
+        filename: Some("published.m3u".into()),
+        include_type_in_url: false,
+        mask_redirect_url: false,
+        filter: None,
+    })];
+    install_source(&ctx, &input, &target);
+    let state = Arc::new(PlaylistStorageState::new());
+    let cache_reader = state.data.read().await;
+    let guard = UpdateGuard::new();
+    let run = ProcessingRun::for_run(
+        "ordinary-publication-timeout".into(),
+        ctx.client.clone(),
+        ctx.config.clone(),
+        ctx.user_targets.clone(),
+        ctx.events.clone(),
+    )
+    .with_playlist_state(state.clone())
+    .with_update_guard(guard.clone());
+    let mut worker = tokio::spawn(exec_processing(run));
+    let started = std::time::Instant::now();
+    while state.failover_group_generation(&target.name) == 0 {
+        assert!(
+            !worker.is_finished() && started.elapsed() < Duration::from_secs(20),
+            "ordinary writer must reach cache publication"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert!(std::fs::read_to_string(directory.path().join("published.m3u")).unwrap().contains("Current stream"));
+    assert!(cache_reader.get(&target.name).is_none());
+    let target_path = get_target_storage_path(&ctx.config.config.load(), &target.name).unwrap();
+    let mapping = get_target_id_mapping_file(&target_path);
+    assert!(ctx.config.file_locks.try_write_lock(&mapping).await.is_err());
+
+    tokio::time::advance(Duration::from_secs(3601)).await;
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut worker).await.is_err());
+    assert!(guard.try_playlist().is_none());
+    assert!(ctx.config.file_locks.try_write_lock(&mapping).await.is_err());
+    drop(cache_reader);
+    worker.await.unwrap();
+    assert!(guard.try_playlist().is_some());
+    assert!(ctx.config.file_locks.try_write_lock(&mapping).await.is_ok());
+    let on_disk = load_m3u_target_storage(&ctx.config, &target).await.unwrap();
+    let cache = state.data.read().await;
+    let stored = cache.get(&target.name).unwrap();
+    assert_eq!(stored.m3u.as_ref().unwrap().len(), on_disk.len());
+    assert_eq!(on_disk.len(), 1);
+    assert_eq!(stored.id_mapping.as_ref().unwrap().len(), 1);
+    assert!(ctx.events.0.lock().unwrap().iter().any(
+        |event| matches!(event, EventMessage::PlaylistUpdate(summary) if summary.state == PlaylistUpdateState::Failure)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
 async fn replace_target_contents_deadline_fails_without_a_publication() { check_replacement_timeout(false).await; }
 
 async fn check_replacement_timeout(publish_first: bool) {
@@ -401,7 +471,7 @@ async fn replace_target_contents_delivers_a_parallel_failure_before_the_timeout_
         sources: vec![ConfigSource { inputs: vec![input.name.clone()], targets }],
         ..SourcesConfig::default()
     }));
-    ctx.replacement_deadline =
+    ctx.publication_deadline =
         Some(Arc::new(TargetReplacementDeadline::new(tokio::time::Instant::now() + Duration::from_secs(1))));
     let ctx = Arc::new(ctx);
     let (recorded, failure_ready) = tokio::sync::oneshot::channel();

@@ -545,7 +545,7 @@ impl<E: EventSink + Clone, M: MetadataUpdateSink, P: PluginHost> Clone for Playl
             partial_refresh: Arc::clone(&self.partial_refresh),
             had_quality_rejections: Arc::clone(&self.had_quality_rejections),
             replace_target_contents: self.replace_target_contents,
-            replacement_deadline: self.replacement_deadline.clone(),
+            publication_deadline: self.publication_deadline.clone(),
             input_refresh: self.input_refresh,
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance.clone(),

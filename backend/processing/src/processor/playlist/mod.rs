@@ -63,9 +63,9 @@ use tuliprox_curation::{
     SelectorOutcome,
 };
 use tuliprox_repository::{
-    persist_playlist_views_with_outputs, CategoryKey, FailoverGroupBatch, FailoverGroupMeta, MemoryPlaylistSource,
-    PlaylistPublicationPlan, PlaylistSource, PlaylistStorageState, TargetPlaylistPersistOptions,
-    TargetReplacementDeadline,
+    persist_ordinary_playlist_views, persist_playlist_views_with_outputs, CategoryKey, FailoverGroupBatch,
+    FailoverGroupMeta, MemoryPlaylistSource, PlaylistPublicationPlan, PlaylistSource, PlaylistStorageState,
+    TargetPlaylistPersistOptions, TargetReplacementDeadline,
 };
 use tuliprox_session::ActiveProviderManager;
 
@@ -517,7 +517,7 @@ pub async fn exec_processing<
     log_memory_snapshot("exec_processing start");
 
     let deadline = tokio::time::Instant::now() + max_update_duration;
-    let replacement_deadline = replace_target_contents.then(|| Arc::new(TargetReplacementDeadline::new(deadline)));
+    let publication_deadline = Arc::new(TargetReplacementDeadline::new(deadline));
 
     // Initialize Context
     let ctx = PlaylistProcessingContext {
@@ -545,7 +545,7 @@ pub async fn exec_processing<
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         replace_target_contents,
-        replacement_deadline: replacement_deadline.clone(),
+        publication_deadline: Some(publication_deadline.clone()),
         input_refresh,
         library_update_mode,
         maintenance,
@@ -556,11 +556,8 @@ pub async fn exec_processing<
     let start_time = Instant::now();
     let operation =
         std::panic::AssertUnwindSafe(manual_update::process_manual_update(&ctx, update_guard.as_ref())).catch_unwind();
-    let process_result = match replacement_deadline {
-        Some(deadline) => deadline.run(operation).await,
-        None => tokio::time::timeout_at(deadline, operation).await.map_err(|_| Vec::new()),
-    };
-    if process_result.is_ok() {
+    let process_result = publication_deadline.run(operation).await;
+    if replace_target_contents && process_result.is_ok() {
         target::report_target_replacement_details(&ctx, None);
     }
     let (stats, errors) = match process_result {
@@ -580,7 +577,7 @@ pub async fn exec_processing<
             let state =
                 if published_targets.is_empty() { PlaylistUpdateState::Failure } else { PlaylistUpdateState::Partial };
             let mut summary = PlaylistUpdateSummary::for_run(run_id, execution_order, state);
-            if ctx.replacement_deadline.is_some() {
+            if replace_target_contents {
                 target::report_target_replacement_details(&ctx, Some((&published_targets, &reason)));
                 summary.error = Some(reason);
                 summary.stats = published_targets_by_source(&app_config, &published_targets);

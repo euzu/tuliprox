@@ -46,7 +46,7 @@ struct PublicationState {
     failed_publications: Vec<(String, String)>,
 }
 
-/// Coordinates the processing deadline with the irreversible part of each target publication.
+/// Coordinates the processing deadline with target publications that have begun writing.
 #[derive(Debug)]
 pub struct TargetReplacementDeadline {
     at: Instant,
@@ -98,14 +98,28 @@ impl TargetReplacementDeadline {
         }
     }
 
-    /// Cancel pending processing at the deadline, then wait only for active commits.
-    /// On timeout, return the names of targets that successfully published.
+    /// Let an ordinary target finish its writes, mapping, and cache publication once it starts.
+    /// Pending work still respects the deadline and never starts after it expires.
+    pub(super) async fn publish_ordinary<F>(self: &Arc<Self>, operation: F) -> io::Result<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let deadline = Arc::clone(self);
+        tokio::spawn(async move {
+            let _publication = deadline.try_begin()?;
+            Ok(operation.await)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    /// Wait for started publications before reporting the end of processing.
+    /// At the deadline, cancel pending processing and return successfully replaced targets.
     pub async fn run<F: std::future::Future>(&self, operation: F) -> Result<F::Output, Vec<String>> {
         let result = timeout_at(self.at, operation).await;
-        match result {
-            Ok(output) => Ok(output),
-            Err(_) => Err(self.close_and_drain().await),
-        }
+        let published = self.close_and_drain().await;
+        result.map_err(|_| published)
     }
 }
 

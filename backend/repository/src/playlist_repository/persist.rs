@@ -5,7 +5,7 @@ use super::{
         persist_xtream_target_playlist, playlist_has_items, prepare_target_output_playlists,
         validate_force_empty_output_filters, validate_target_playlist_persistence, TargetPersistenceMode,
     },
-    replacement::{StagePluginOutputs, TargetReplacement},
+    replacement::{StagePluginOutputs, TargetReplacement, TargetReplacementDeadline},
     target::load_target_memory_cache_snapshot,
     PlaylistStorageState, TargetPlaylistPersistOptions,
 };
@@ -28,7 +28,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tuliprox_core::model::{AppConfig, Config, ConfigTarget, Epg, TargetOutput};
+use tuliprox_core::{
+    model::{AppConfig, Config, ConfigTarget, Epg, TargetOutput},
+    utils::FileWriteGuard,
+};
 
 pub async fn persist_playlist(
     app_config: &Arc<AppConfig>,
@@ -122,6 +125,61 @@ pub async fn persist_playlist_views_with_outputs(
         stage_plugins,
     )
     .await
+}
+
+type PlaylistViews = (Vec<PlaylistGroup>, Option<Vec<PlaylistGroup>>);
+
+/// Publish owned ordinary views in a task that the update deadline can drain.
+/// Waiting for the target's mapping lock is still cancellable.
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_ordinary_playlist_views(
+    app_config: &Arc<AppConfig>,
+    mut views: PlaylistViews,
+    epg: Option<Epg>,
+    target: &ConfigTarget,
+    playlist_state: Option<&Arc<PlaylistStorageState>>,
+    options: TargetPlaylistPersistOptions,
+    mut failover_groups: FailoverGroupBatch,
+    deadline: &Arc<TargetReplacementDeadline>,
+) -> (PlaylistViews, Result<(), Vec<TuliproxError>>) {
+    let playlist_is_empty =
+        !playlist_has_items(&views.0) && views.1.as_deref().is_none_or(|playlist| !playlist_has_items(playlist));
+    if let Err(error) = validate_target_playlist_persistence(target, playlist_is_empty, &options) {
+        return (views, Err(vec![error]));
+    }
+    let locked = match lock_target_for_publication(app_config, target, false).await {
+        Ok(locked) => locked,
+        Err(error) => return (views, Err(vec![error])),
+    };
+    let (app_config, target, playlist_state) = (Arc::clone(app_config), target.clone(), playlist_state.cloned());
+    match deadline
+        .publish_ordinary(async move {
+            let result = persist_locked_playlist_views(
+                &app_config,
+                &mut views.0,
+                views.1.as_deref_mut(),
+                epg.as_ref(),
+                &target,
+                playlist_state.as_ref(),
+                options,
+                TargetPersistenceMode::Persist,
+                &mut failover_groups,
+                None,
+                locked,
+            )
+            .await;
+            (views, result)
+        })
+        .await
+    {
+        Ok(completed) => completed,
+        Err(error) => (
+            (Vec::new(), None),
+            Err(vec![TuliproxError::RepositoryPlaylist(format!(
+                "Failed to complete ordinary target publication: {error}",
+            ))]),
+        ),
+    }
 }
 
 pub(super) async fn persist_playlist_with_mode(
@@ -232,11 +290,36 @@ fn build_failover_group_records(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+struct LockedTargetPublication {
+    config: Arc<Config>,
+    path: PathBuf,
+    mapping: TargetIdMapping,
+    mapping_lock: FileWriteGuard,
+    replacement: Option<TargetReplacement>,
+}
+
+async fn lock_target_for_publication(
+    app_config: &AppConfig,
+    target: &ConfigTarget,
+    replace_target_contents: bool,
+) -> Result<LockedTargetPublication, TuliproxError> {
+    let config = app_config.config.load_full();
+    let path = ensure_target_storage_path(&config, &target.name).await?;
+    let (mapping, mapping_lock, replacement) = if replace_target_contents {
+        let (mapping, lock, replacement) = TargetReplacement::stage_mapping(app_config, &path, target).await?;
+        (mapping, lock, Some(replacement))
+    } else {
+        let (mapping, lock) = get_target_id_mapping(app_config, &path, target.use_memory_cache).await?;
+        (mapping, lock, None)
+    };
+    Ok(LockedTargetPublication { config, path, mapping, mapping_lock, replacement })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn persist_playlist_views_with_mode(
     app_config: &Arc<AppConfig>,
     base_playlist: &mut [PlaylistGroup],
-    mut xtream_playlist: Option<&mut [PlaylistGroup]>,
+    xtream_playlist: Option<&mut [PlaylistGroup]>,
     epg: Option<&Epg>,
     target: &ConfigTarget,
     playlist_state: Option<&Arc<PlaylistStorageState>>,
@@ -250,25 +333,48 @@ async fn persist_playlist_views_with_mode(
     if let Err(error) = validate_target_playlist_persistence(target, playlist_is_empty, &options) {
         return Err(vec![error]);
     }
+    let locked = lock_target_for_publication(app_config, target, options.replace_target_contents)
+        .await
+        .map_err(|error| vec![error])?;
+    persist_locked_playlist_views(
+        app_config,
+        base_playlist,
+        xtream_playlist,
+        epg,
+        target,
+        playlist_state,
+        options,
+        persistence_mode,
+        failover_groups,
+        stage_plugins,
+        locked,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn persist_locked_playlist_views(
+    app_config: &Arc<AppConfig>,
+    base_playlist: &mut [PlaylistGroup],
+    mut xtream_playlist: Option<&mut [PlaylistGroup]>,
+    epg: Option<&Epg>,
+    target: &ConfigTarget,
+    playlist_state: Option<&Arc<PlaylistStorageState>>,
+    options: TargetPlaylistPersistOptions,
+    persistence_mode: TargetPersistenceMode,
+    failover_groups: &mut FailoverGroupBatch,
+    stage_plugins: Option<&StagePluginOutputs<'_>>,
+    locked: LockedTargetPublication,
+) -> Result<(), Vec<TuliproxError>> {
+    let LockedTargetPublication {
+        config,
+        path: target_path,
+        mapping: mut target_id_mapping,
+        mapping_lock: file_lock,
+        replacement,
+    } = locked;
     let mut errors = vec![];
-    let config = &app_config.config.load();
-    let target_path = match ensure_target_storage_path(config, &target.name).await {
-        Ok(path) => path,
-        Err(err) => return Err(vec![err]),
-    };
-
-    let (mut target_id_mapping, file_lock, replacement) = if options.replace_target_contents {
-        match TargetReplacement::stage_mapping(app_config, &target_path, target).await {
-            Ok((mapping, lock, replacement)) => (mapping, lock, Some(replacement)),
-            Err(err) => return Err(vec![err]),
-        }
-    } else {
-        match get_target_id_mapping(app_config, &target_path, target.use_memory_cache).await {
-            Ok((mapping, lock)) => (mapping, lock, None),
-            Err(err) => return Err(vec![err]),
-        }
-    };
-
+    let config = &config;
     let mut source_ordinal = 0u32;
     prepare_target_playlist_for_persistence(base_playlist, target, &mut target_id_mapping, &mut source_ordinal);
     if let Some(xtream_view) = xtream_playlist.as_deref_mut() {
@@ -512,16 +618,13 @@ async fn persist_playlist_views_with_mode(
         staged_groups.discard();
     }
 
-    // Keep lock until all outputs are persisted to prevent concurrent writers
-    // from interleaving mapping and output state for the same target.
-    // We must release it before loading caches below (which may acquire read locks).
     drop(target_id_mapping);
-    drop(file_lock);
 
+    // A later update may only start after this target's disk state and cache agree.
     if errors.is_empty() && target.use_memory_cache {
         match playlist_state {
             Some(playlist_storage) => {
-                match load_target_memory_cache_snapshot(app_config, target, persistence_mode).await {
+                match load_target_memory_cache_snapshot(app_config, &target_path, target, persistence_mode).await {
                     Ok(storage) => playlist_storage.replace_target(&target.name, storage).await,
                     Err(error) => errors.push(error),
                 }
@@ -532,6 +635,7 @@ async fn persist_playlist_views_with_mode(
             ))),
         }
     }
+    drop(file_lock);
 
     if errors.is_empty() {
         Ok(())

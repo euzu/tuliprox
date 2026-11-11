@@ -212,7 +212,7 @@ pub(super) fn record_target_replacement_failure<E: EventSink, M: MetadataUpdateS
     reason: &str,
 ) -> TuliproxError {
     let message = replacement_failure_message(target_name, reason);
-    if let Some(deadline) = &ctx.replacement_deadline {
+    if let Some(deadline) = &ctx.publication_deadline {
         // The run coordinator sends these details before its terminal frame.
         // Finalizers can be cancelled independently of that event.
         deadline.record_target_failure(target_name, reason);
@@ -250,7 +250,7 @@ pub(super) fn report_target_replacement_details<E: EventSink, M: MetadataUpdateS
     ctx: &PlaylistProcessingContext<E, M, P>,
     timeout: Option<(&[String], &str)>,
 ) {
-    let Some(deadline) = &ctx.replacement_deadline else { return };
+    let Some(deadline) = &ctx.publication_deadline else { return };
     let failures = deadline.take_target_failures();
     if failures.is_empty() && timeout.is_none() {
         return;
@@ -1478,24 +1478,41 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
                 target_dir.to_path_buf(),
             ))
         };
-    let result = persist_playlist_views_with_outputs(
-        &ctx.config,
-        &mut finalized_base,
-        finalized_xtream.as_deref_mut(),
-        merged_epg.as_ref(),
-        target,
-        ctx.playlist_state.as_ref(),
-        TargetPlaylistPersistOptions {
-            accepted_empty_clusters: prepared.accepted_empty_clusters,
-            replace_target_contents: ctx.replace_target_contents,
-            replacement_deadline: ctx.replacement_deadline.clone(),
-            library_empty,
-            publication_plan: views.publication_plan,
-        },
-        &mut views.failover_groups,
-        Some(&stage_plugins),
-    )
-    .await;
+    let options = TargetPlaylistPersistOptions {
+        accepted_empty_clusters: prepared.accepted_empty_clusters,
+        replace_target_contents: ctx.replace_target_contents,
+        replacement_deadline: ctx.publication_deadline.clone().filter(|_| ctx.replace_target_contents),
+        library_empty,
+        publication_plan: views.publication_plan,
+    };
+    let result = if let Some(deadline) = ctx.publication_deadline.as_ref().filter(|_| !ctx.replace_target_contents) {
+        let (published_views, result) = persist_ordinary_playlist_views(
+            &ctx.config,
+            (finalized_base, finalized_xtream),
+            merged_epg,
+            target,
+            ctx.playlist_state.as_ref(),
+            options,
+            views.failover_groups,
+            deadline,
+        )
+        .await;
+        (finalized_base, finalized_xtream) = published_views;
+        result
+    } else {
+        persist_playlist_views_with_outputs(
+            &ctx.config,
+            &mut finalized_base,
+            finalized_xtream.as_deref_mut(),
+            merged_epg.as_ref(),
+            target,
+            ctx.playlist_state.as_ref(),
+            options,
+            &mut views.failover_groups,
+            Some(&stage_plugins),
+        )
+        .await
+    };
     // `type: plugin` outputs (plan §7 *Output providers*): the repository has no
     // plugin seam, so they render here, each failing on its own.
     let result = if ctx.replace_target_contents {

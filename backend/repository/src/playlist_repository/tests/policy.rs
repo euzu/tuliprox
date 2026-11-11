@@ -179,7 +179,7 @@ async fn replacement_waits_for_ordinary_strm_to_finish_updating_ownership() {
     let other_index = strm_get_file_paths(&hash_string_as_hex("strm"), &directory.path().join("other"));
     let index_lock = app.file_locks.write_lock(&other_index).await;
     let ordinary = tokio::spawn({
-        let (app, old) = (app.clone(), old.clone());
+        let (app, old, other) = (app.clone(), old.clone(), other.clone());
         async move { write_strm_playlist(&app, &other, &output, &mut [old], false).await }
     });
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -192,6 +192,28 @@ async fn replacement_waits_for_ordinary_strm_to_finish_updating_ownership() {
     ordinary.abort();
     assert!(ordinary.await.unwrap_err().is_cancelled());
     assert!(app.file_locks.try_write_lock(Path::new(TARGET_EXPORT_LOCK)).await.is_err());
+
+    let second_output = StrmTargetOutput::from(&StrmTargetOutputDto {
+        directory: "parallel-strm".into(),
+        flat: true,
+        ..Default::default()
+    });
+    let mut parallel = [old.clone()];
+    assert!(tokio::time::timeout(
+        Duration::from_millis(100),
+        write_strm_playlist(&app, &other, &second_output, &mut parallel, false),
+    )
+    .await
+    .is_err());
+    assert!(!directory.path().join("parallel-strm/shared.strm").exists());
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        write_strm_playlist(&app, &selected, &second_output, &mut parallel, false),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(directory.path().join("parallel-strm/shared.strm").is_file());
 
     old.channels[0].header.url = "https://example.test/changed".intern();
     let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
@@ -1104,6 +1126,41 @@ async fn replace_target_contents_deadline_waits_for_started_publication() {
         .unwrap()
         .all(|entry| { !entry.unwrap().file_name().to_string_lossy().contains("force-empty") }));
     eprintln!("AP11 S04 countercheck completed-publication={published:?} disk=[1, 0, 0] cache=new-live VOD-categories=[] remaining=[]");
+}
+
+#[tokio::test]
+async fn run_drains_an_ordinary_publication_after_processing_stops_early() {
+    use crate::TargetReplacementDeadline;
+    use std::time::Duration;
+    use tokio::{sync::oneshot, time::Instant};
+
+    let deadline = Arc::new(TargetReplacementDeadline::new(Instant::now() + Duration::from_secs(60)));
+    let (entered, entered_rx) = oneshot::channel();
+    let (finish, finish_rx) = oneshot::channel();
+    let (stopped, stopped_rx) = oneshot::channel();
+    let mut run = tokio::spawn(async move {
+        deadline
+            .run(async {
+                let publisher = deadline.clone();
+                let caller = tokio::spawn(async move {
+                    publisher
+                        .publish_ordinary(async {
+                            entered.send(()).unwrap();
+                            finish_rx.await.unwrap();
+                        })
+                        .await
+                });
+                entered_rx.await.unwrap();
+                caller.abort();
+                assert!(caller.await.unwrap_err().is_cancelled());
+                stopped.send(()).unwrap();
+            })
+            .await
+    });
+    stopped_rx.await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(20), &mut run).await.is_err());
+    finish.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), run).await.unwrap().unwrap().unwrap();
 }
 
 #[tokio::test]

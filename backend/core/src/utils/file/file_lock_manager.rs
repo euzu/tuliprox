@@ -222,7 +222,12 @@ fn normalize_path(path: &Path) -> PathBuf {
         env::current_dir().unwrap_or_else(|_| PathBuf::from("./")).join(path)
     };
 
-    base.clean()
+    let base = base.clean();
+    // Use the same lock before and after a writer creates the file, even when a parent is aliased.
+    base.ancestors()
+        .skip(1)
+        .find_map(|parent| Some(parent.canonicalize().ok()?.join(base.strip_prefix(parent).ok()?)))
+        .unwrap_or(base)
 }
 
 pub fn exec_file_lock_prune(app_config: &Arc<AppConfig>) {
@@ -241,6 +246,24 @@ pub fn exec_file_lock_prune(app_config: &Arc<AppConfig>) {
 mod tests {
     use super::{revision_is_missing, FileLockManager};
     use std::io;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_file_keeps_its_lock_when_opened_through_an_aliased_parent() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let actual = dir.path().join("actual");
+        std::fs::create_dir(&actual)?;
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&actual, &alias)?;
+        let locks = FileLockManager::new();
+        let path = alias.join("new.db");
+        let guard = locks.write_lock(&path).await;
+        std::fs::write(&path, b"data")?;
+        assert!(locks.try_write_lock(&actual.join("new.db")).await.is_err());
+        drop(guard);
+        assert!(locks.try_write_lock(&path).await.is_ok());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn changed_file_is_not_recorded_as_loaded_snapshot() -> Result<(), Box<dyn std::error::Error>> {

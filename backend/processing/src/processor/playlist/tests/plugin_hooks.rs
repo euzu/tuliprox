@@ -752,7 +752,7 @@ async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() 
             partial_refresh: Arc::default(),
             had_quality_rejections: Arc::default(),
             replace_target_contents: false,
-            replacement_deadline: None,
+            publication_deadline: None,
             input_refresh: None,
             library_update_mode: crate::processor::playlist::LibraryUpdateMode::default(),
             maintenance: None,

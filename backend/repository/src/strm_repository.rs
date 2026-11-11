@@ -799,14 +799,15 @@ pub async fn write_strm_playlist(
 
     let user_and_server_info = get_credentials_and_server_info(app_config, target_output.username.as_deref())
         .map_err(TuliproxError::Config)?;
-    let strm_index_path =
-        strm_index_path(target_output, &ensure_target_storage_path(&config, target.name.as_str()).await?);
+    let target_path = ensure_target_storage_path(&config, target.name.as_str()).await?;
+    let strm_index_path = strm_index_path(target_output, &target_path);
     let (app_config, target, target_output) = (app_config.clone(), target.clone(), target_output.clone());
     let strm_files = prepare_strm_files(new_playlist, &target_output);
+    let target_writer = app_config.file_locks.write_lock(&target_path.join(".strm-export")).await;
     let ownership = lock_regular_target_exports(&app_config).await;
     // Keep the lock with the writer if its caller is cancelled during filesystem I/O.
     tokio::spawn(async move {
-        let _ownership = ownership;
+        let _guards = (target_writer, ownership);
         write_strm_files(
             &app_config,
             &target,

@@ -244,7 +244,7 @@ fn processing_context_with_events<E: EventSink>(storage_dir: &Path, events: E) -
         partial_refresh: Arc::new(AtomicBool::new(false)),
         had_quality_rejections: Arc::new(AtomicBool::new(false)),
         replace_target_contents: false,
-        replacement_deadline: None,
+        publication_deadline: None,
         maintenance: None,
         plugins: shared::model::NoPlugins,
         override_status: None,

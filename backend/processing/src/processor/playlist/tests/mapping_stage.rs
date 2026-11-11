@@ -101,7 +101,7 @@ fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         replace_target_contents: false,
-        replacement_deadline: None,
+        publication_deadline: None,
         maintenance: None,
         plugins: shared::model::NoPlugins,
         override_status: None,
