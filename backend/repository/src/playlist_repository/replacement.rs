@@ -1,4 +1,6 @@
 use super::publication::playlist_has_items;
+#[cfg(unix)]
+use crate::xtream_repository::target_publish::check_target_replacement_filesystems;
 use crate::{
     ensure_xtream_storage_path,
     epg_group_index::{epg_group_channels_path, epg_groups_path},
@@ -333,6 +335,8 @@ impl TargetReplacement {
         // Complete staging I/O before acquiring the locks shared with readers.
         let (replacement, id_mapping, groups) = tokio::task::spawn_blocking(move || {
             let mapping_error = |error| Self::error(&mapping_name, error);
+            #[cfg(unix)]
+            check_target_replacement_filesystems(&self.files).map_err(mapping_error)?;
             mapping.persist().map_err(mapping_error)?;
             drop(mapping);
             let id_mapping =

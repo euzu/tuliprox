@@ -25,8 +25,6 @@ use shared::{
     model::{ClusterFlags, PlaylistGroup, XtreamCluster, XtreamPlaylistItem},
     utils::{get_u32_from_serde_value, sanitize_sensitive_info, Internable},
 };
-#[cfg(unix)]
-use std::fs;
 use std::{
     collections::HashMap,
     fs::File,
@@ -34,6 +32,8 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+#[cfg(unix)]
+use std::{collections::HashSet, fs, os::unix::fs::MetadataExt};
 use tuliprox_core::{
     model::{AppConfig, ConfigTarget},
     utils::{
@@ -335,15 +335,15 @@ fn cleanup_target_empty_staging(
     }
 }
 
-fn rollback_target_file_replacements(replacements: &mut [TargetFileReplacement]) -> io::Result<()> {
+fn rollback_target_file_replacements(
+    replacements: &mut [TargetFileReplacement],
+    move_mode: TargetFileMoveMode,
+) -> io::Result<()> {
     let mut errors = Vec::new();
     for replacement in replacements.iter_mut().rev() {
         if replacement.previous_moved {
-            let mode = if replacement.replacement_published {
-                TargetFileMoveMode::ReplaceDestination
-            } else {
-                TargetFileMoveMode::PreserveDestination
-            };
+            let mode =
+                if replacement.replacement_published { TargetFileMoveMode::ReplaceDestination } else { move_mode };
             if let Err(error) = move_target_file_platform(&replacement.backup, &replacement.published, mode) {
                 errors.push(format!(
                     "failed to restore {} from {}: {error}",
@@ -352,11 +352,7 @@ fn rollback_target_file_replacements(replacements: &mut [TargetFileReplacement])
                 ));
             }
         } else if replacement.replacement_published {
-            if let Err(error) = move_target_file_platform(
-                &replacement.published,
-                &replacement.backup,
-                TargetFileMoveMode::PreserveDestination,
-            ) {
+            if let Err(error) = move_target_file_platform(&replacement.published, &replacement.backup, move_mode) {
                 errors.push(format!(
                     "failed to withdraw replacement {} during rollback: {error}",
                     replacement.published.display()
@@ -383,6 +379,85 @@ pub(crate) fn publish_target_file_replacements(
     publish_synced_target_file_replacements(replacements, mode)
 }
 
+pub(crate) fn publish_ordinary_m3u_exports(replacements: &mut [TargetFileReplacement]) -> io::Result<()> {
+    sync_staged_target_files(replacements)?;
+    // Regular exports have historically renamed over their configured files.
+    publish_target_files(replacements, &TargetEmptyReplacementMode::Persist, TargetFileMoveMode::ReplaceDestination)
+}
+
+#[cfg(unix)]
+pub(crate) fn check_target_replacement_filesystems(replacements: &[TargetFileReplacement]) -> io::Result<()> {
+    let mut directories = HashSet::new();
+    let mut devices = HashSet::new();
+    for replacement in replacements {
+        let directory = tuliprox_core::utils::parent_or_dot(&replacement.published);
+        if directories.insert(directory) && devices.insert(directory.metadata()?.dev()) {
+            check_safe_file_moves(directory, |source, destination| {
+                move_target_file_platform(source, destination, TargetFileMoveMode::PreserveDestination)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn check_safe_file_moves(directory: &Path, move_file: impl Fn(&Path, &Path) -> io::Result<()>) -> io::Result<()> {
+    let result = (|| -> io::Result<()> {
+        let probe = tempfile::Builder::new().prefix(".target-replace-check-").tempdir_in(directory)?;
+        let staging = probe.path().join("staging");
+        let destination = probe.path().join("destination");
+        File::create_new(&staging)?;
+        // Check a free destination as well as a collision. A filesystem can
+        // reject a collision without implementing the move for a free path.
+        move_file(&staging, &destination)?;
+        File::create_new(&staging)?;
+        match move_file(&staging, &destination) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error),
+            Ok(()) => Err(io::Error::new(io::ErrorKind::Unsupported, "move overwrote an existing file")),
+        }
+    })();
+    result.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Cannot replace target contents in {}: the output filesystem must allow moving files without overwriting an existing destination ({error})",
+                directory.display(),
+            ),
+        )
+    })
+}
+
+#[cfg(all(test, unix))]
+mod file_move_checks {
+    use super::*;
+
+    #[test]
+    fn unsupported_file_move_reports_export_directory_and_leaves_published_file_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let published = directory.path().join("published.strm");
+        fs::write(&published, "previous catalog").unwrap();
+
+        let error = check_safe_file_moves(directory.path(), |_, _| Err(io::ErrorKind::Unsupported.into())).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains(&directory.path().display().to_string()));
+        assert!(error.to_string().contains("without overwriting an existing destination"));
+        assert_eq!(fs::read_to_string(published).unwrap(), "previous catalog");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn file_move_check_rejects_rename_that_overwrites_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let error =
+            check_safe_file_moves(directory.path(), |source, destination| fs::rename(source, destination)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("move overwrote an existing file"));
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+}
+
 pub(crate) fn sync_staged_target_files(replacements: &[TargetFileReplacement]) -> io::Result<()> {
     for staging in replacements.iter().filter_map(|replacement| replacement.staging.as_deref()) {
         File::open(staging)?.sync_all()?;
@@ -393,6 +468,14 @@ pub(crate) fn sync_staged_target_files(replacements: &[TargetFileReplacement]) -
 pub(crate) fn publish_synced_target_file_replacements(
     replacements: &mut [TargetFileReplacement],
     mode: &TargetEmptyReplacementMode,
+) -> io::Result<()> {
+    publish_target_files(replacements, mode, TargetFileMoveMode::PreserveDestination)
+}
+
+fn publish_target_files(
+    replacements: &mut [TargetFileReplacement],
+    mode: &TargetEmptyReplacementMode,
+    move_mode: TargetFileMoveMode,
 ) -> io::Result<()> {
     #[cfg(not(test))]
     let _ = &mode;
@@ -429,11 +512,7 @@ pub(crate) fn publish_synced_target_file_replacements(
     let publication = (|| -> io::Result<()> {
         for replacement in replacements.iter_mut() {
             if replacement.published.exists() {
-                move_target_file_platform(
-                    &replacement.published,
-                    &replacement.backup,
-                    TargetFileMoveMode::PreserveDestination,
-                )?;
+                move_target_file_platform(&replacement.published, &replacement.backup, move_mode)?;
                 replacement.previous_moved = true;
             }
         }
@@ -446,9 +525,7 @@ pub(crate) fn publish_synced_target_file_replacements(
 
         for (index, replacement) in replacements.iter_mut().enumerate() {
             if let Some(staging) = &replacement.staging {
-                // Old outputs have already been moved aside. A destination that exists now
-                // can alias an earlier entry on a case-insensitive volume.
-                move_target_file_platform(staging, &replacement.published, TargetFileMoveMode::PreserveDestination)?;
+                move_target_file_platform(staging, &replacement.published, move_mode)?;
                 replacement.replacement_published = true;
             }
             #[cfg(test)]
@@ -464,7 +541,7 @@ pub(crate) fn publish_synced_target_file_replacements(
     })();
 
     if let Err(publication_error) = publication {
-        let rollback_result = rollback_target_file_replacements(replacements);
+        let rollback_result = rollback_target_file_replacements(replacements, move_mode);
         let durability_result = sync_parents();
         return match (rollback_result, durability_result) {
             (Ok(()), Ok(())) => Err(publication_error),

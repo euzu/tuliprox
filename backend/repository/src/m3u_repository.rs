@@ -11,7 +11,7 @@ use crate::{
     },
     storage_const,
     xtream_repository::{
-        target_publish::{publish_target_file_replacements, TargetEmptyReplacementMode, TargetFileReplacement},
+        target_publish::{publish_ordinary_m3u_exports, TargetFileReplacement},
         CategoryKey,
     },
     LockedReceiverStream,
@@ -446,12 +446,10 @@ async fn persist_m3u_playlist_as_text(
             uuid::Uuid::new_v4().simple(),
         )
         .await?;
-        task::spawn_blocking(move || {
-            publish_target_file_replacements(&mut files, &TargetEmptyReplacementMode::Persist)
-        })
-        .await
-        .map_err(|err| cant_write_result!(RepositoryM3u, "text export", &m3u_filename, err))?
-        .map_err(|err| cant_write_result!(RepositoryM3u, "text export", &m3u_filename, err))?;
+        task::spawn_blocking(move || publish_ordinary_m3u_exports(&mut files))
+            .await
+            .map_err(|err| cant_write_result!(RepositoryM3u, "text export", &m3u_filename, err))?
+            .map_err(|err| cant_write_result!(RepositoryM3u, "text export", &m3u_filename, err))?;
     }
 
     Ok(())
