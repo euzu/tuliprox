@@ -927,6 +927,40 @@ fn read_replacement_strm_index(index: &Path) -> std::io::Result<HashSet<String>>
     }
 }
 
+/// Check the STRM indexes for a file inside one of the target's export directories.
+pub(crate) fn target_manages_strm_file(
+    config: &Config,
+    target: &ConfigTarget,
+    target_path: &Path,
+    file: &Path,
+    identity: &FileIdentity,
+) -> std::io::Result<bool> {
+    let mut ancestors = None;
+    for output in &target.output {
+        let TargetOutput::Strm(output) = output else { continue };
+        let Some(root) =
+            tuliprox_core::utils::get_file_path(&config.storage_dir, Some(PathBuf::from(&output.directory)))
+        else {
+            continue;
+        };
+        let Some(root_identity) = existing_file_identity(&root)? else { continue };
+        if ancestors.is_none() {
+            let parent = tuliprox_core::utils::parent_or_dot(file).canonicalize()?;
+            ancestors = Some(parent.ancestors().map(existing_file_identity).collect::<std::io::Result<HashSet<_>>>()?);
+        }
+        if !ancestors.as_ref().is_some_and(|ancestors| ancestors.contains(&Some(root_identity))) {
+            continue;
+        }
+        for relative in read_replacement_strm_index(&strm_index_path(output, target_path))? {
+            let indexed = managed_strm_path(&root, &relative, false)?;
+            if existing_file_identity(&indexed)?.as_ref() == Some(identity) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 #[derive(PartialEq, Eq, Hash)]
 enum StrmFileKey {
     Existing(FileIdentity),
@@ -1045,7 +1079,8 @@ pub(crate) async fn stage_strm_playlist(
                 let published = managed_strm_path(&root, &relative, true).map_err(io_error)?;
                 let key = StrmFileKey::for_path(&published).map_err(io_error)?;
                 let shared_file = shared.contains(&key);
-                if !shared_file && !existing_keys.contains(&key) && published.symlink_metadata().is_ok() {
+                let owned_file = matches!(key, StrmFileKey::Existing(_)) && existing_keys.contains(&key);
+                if !shared_file && !owned_file && published.symlink_metadata().is_ok() {
                     return Err(error(format!("Unmanaged STRM file already exists: {}", published.display())));
                 }
                 if !processed_files.insert(key) {
@@ -1064,7 +1099,10 @@ pub(crate) async fn stage_strm_playlist(
                     }
                     return Err(error(format!("STRM file is also managed by another target: {}", published.display())));
                 }
-                let file = TargetFileReplacement::staged_file(&published, token);
+                let mut file = TargetFileReplacement::staged_file(&published, token);
+                if !owned_file {
+                    file.expect_previous_file(None);
+                }
                 std::fs::write(file.staging_path(), bytes).map_err(io_error)?;
                 set_strm_file_timestamp(file.staging_path(), entry.strm_info.get_file_ts());
                 files.push(file);

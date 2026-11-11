@@ -13,8 +13,8 @@ use crate::{
     target_id_mapping::get_uuid_index_path,
     xtream_category_view_lock_path, xtream_get_epg_file_path_for_target, xtream_lineup_guide_index_path,
     xtream_repository::target_publish::{
-        publish_synced_target_file_replacements, stage_complete_xtream_playlist, sync_staged_target_files,
-        TargetEmptyReplacementMode, TargetFileReplacement,
+        prepare_target_file_replacements, publish_prepared_target_file_replacements, stage_complete_xtream_playlist,
+        sync_staged_target_files, TargetEmptyReplacementMode, TargetFileReplacement,
     },
     BPlusTree, FailoverGroupStagedPublication, LineupGuideView, PlaylistM3uStorage, PlaylistStorageState,
     PlaylistXtreamStorage, TargetIdMapping, TargetPlaylistStorage,
@@ -356,6 +356,15 @@ impl TargetReplacement {
         for path in lock_paths {
             locks.push(app.file_locks.write_lock(&path).await);
         }
+        // Back up live files before taking the cache lock shared by every target.
+        let mut replacement = tokio::task::spawn_blocking(move || {
+            let mut replacement = replacement;
+            prepare_target_file_replacements(&mut replacement.files)?;
+            Ok::<_, io::Error>(replacement)
+        })
+        .await
+        .map_err(|err| error(&err))?
+        .map_err(|err| error(&err))?;
         let new_cache = if let Some(data) = cache {
             Some((data.write_owned().await, TargetPlaylistStorage { xtream, m3u, id_mapping }))
         } else {
@@ -368,9 +377,8 @@ impl TargetReplacement {
             let mut publication = deadline.as_deref().map(TargetReplacementDeadline::try_begin).transpose()?;
             let result = (|| {
                 let _guards = (mapping_lock, category_view, locks, groups);
-                let mut replacement = replacement;
                 let cache = new_cache;
-                publish_synced_target_file_replacements(&mut replacement.files, &mode)?;
+                publish_prepared_target_file_replacements(&mut replacement.files, &mode)?;
                 if let Some((mut cache, storage)) = cache {
                     cache.insert(target_name.clone(), storage);
                 }

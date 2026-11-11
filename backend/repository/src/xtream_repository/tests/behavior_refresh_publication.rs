@@ -61,7 +61,7 @@ async fn target_force_empty_category_reader_waits_through_the_backup_window() ->
     });
 
     tokio::task::spawn_blocking(move || entered.wait()).await?;
-    let category_was_temporarily_backed_up = !category_path.exists();
+    let category_remained_available = category_path.is_file();
     let category_lock_path = target_category_lock_path(&category_path);
     let category_write_lock_was_held = app_config.file_locks.try_write_lock(&category_lock_path).await.is_err();
 
@@ -77,7 +77,7 @@ async fn target_force_empty_category_reader_waits_through_the_backup_window() ->
 
     tokio::task::spawn_blocking(move || resume.wait()).await?;
     writer.await??;
-    assert!(category_was_temporarily_backed_up, "failure hook must expose the internal backup window");
+    assert!(category_remained_available, "the live category file must stay available while its backup exists");
     assert!(category_write_lock_was_held, "writer must hold the target category lock during publication");
     assert_eq!(category_reader_state, "waiting", "the category reader must wait on the writer's category lock");
     let categories = category_read.await.expect("published VOD category catalog");

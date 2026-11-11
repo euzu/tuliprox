@@ -10,6 +10,7 @@ use crate::{
         FileIdentity,
     },
     storage_const,
+    strm_repository::target_manages_strm_file,
     xtream_repository::{
         target_publish::{publish_ordinary_m3u_exports, TargetFileReplacement},
         CategoryKey,
@@ -103,6 +104,7 @@ fn conflicting_export_target(
     config: &Config,
     target_name: &str,
     is_companion: bool,
+    replacement: bool,
 ) -> io::Result<Option<String>> {
     for source in &sources.sources {
         for target in &source.targets {
@@ -144,6 +146,14 @@ fn conflicting_export_target(
                 if target.plugin_outputs().any(|plugin| candidate.aliases(&storage.join(plugin.file_name()))) {
                     return Ok(Some(target.name.clone()));
                 }
+                if replacement
+                    && !same_target
+                    && candidate.file.as_ref().map_or(Ok(false), |identity| {
+                        target_manages_strm_file(config, target, storage, candidate.path, identity)
+                    })?
+                {
+                    return Ok(Some(target.name.clone()));
+                }
             }
         }
     }
@@ -156,35 +166,43 @@ async fn checked_m3u_text_paths(
     target: &ConfigTarget,
     filename: PathBuf,
     provider_active: bool,
-    check_main: bool,
-) -> Result<(PathBuf, Option<PathBuf>), TuliproxError> {
+    replacement: bool,
+    token: uuid::fmt::Simple,
+) -> Result<(TargetFileReplacement, Option<PathBuf>), TuliproxError> {
     let target_name = target.name.clone();
     let sources = app.sources.load_full();
     task::spawn_blocking(move || {
-        if check_main {
-            if let Some(owner) = M3uExportPath::new(&filename)
-                .and_then(|candidate| conflicting_export_target(&candidate, &sources, &config, &target_name, false))
-                .map_err(|err| cant_read_result!(RepositoryM3u, "text export", &filename, err))?
+        let mut main = TargetFileReplacement::staged_file(&filename, token);
+        if replacement {
+            let read_error = |err| cant_read_result!(RepositoryM3u, "text export", &filename, err);
+            let candidate = M3uExportPath::new(&filename).map_err(read_error)?;
+            if let Some(owner) = conflicting_export_target(&candidate, &sources, &config, &target_name, false, true)
+                .map_err(read_error)?
             {
                 return Err(TuliproxError::RepositoryM3u(format!(
                     "M3U export path {} is also used by target '{owner}'",
                     filename.display()
                 )));
             }
+            if candidate.file.is_none() {
+                main.expect_previous_file(None);
+            }
         }
         let path = provider_m3u_filename(&filename);
         let read_error = |err| cant_read_result!(RepositoryM3u, "provider export", &path, err);
         let candidate = M3uExportPath::new(&path).map_err(read_error)?;
         if candidate.file.is_none() && !provider_active {
-            return Ok((filename, None));
+            return Ok((main, None));
         }
-        match conflicting_export_target(&candidate, &sources, &config, &target_name, true).map_err(read_error)? {
+        match conflicting_export_target(&candidate, &sources, &config, &target_name, true, replacement)
+            .map_err(read_error)?
+        {
             Some(owner) if provider_active => Err(TuliproxError::RepositoryM3u(format!(
                 "Provider M3U export path {} is also used by target '{owner}'",
                 path.display()
             ))),
-            Some(_) => Ok((filename, None)),
-            None => Ok((filename, Some(path))),
+            Some(_) => Ok((main, None)),
+            None => Ok((main, Some(path))),
         }
     })
     .await
@@ -434,16 +452,16 @@ async fn persist_m3u_playlist_as_text(
     if provider_input_by_name.is_empty() {
         write_m3u_text_file_atomic(&m3u_filename, m3u_playlist, |m3u| Ok(m3u.to_m3u(target_options, false))).await?;
     } else {
-        let (m3u_filename, provider) =
-            checked_m3u_text_paths(app_config, cfg, target, m3u_filename, true, false).await?;
+        let token = uuid::Uuid::new_v4().simple();
+        let paths = checked_m3u_text_paths(app_config, cfg, target, m3u_filename.clone(), true, false, token).await?;
         let mut files = stage_m3u_text_exports(
-            (&m3u_filename, provider),
+            paths,
             database,
             m3u_playlist,
             target_options,
             &provider_input_by_name,
             ProviderExportOwnership::AdoptLegacy,
-            uuid::Uuid::new_v4().simple(),
+            token,
         )
         .await?;
         task::spawn_blocking(move || publish_ordinary_m3u_exports(&mut files))
@@ -493,7 +511,7 @@ pub async fn m3u_write_playlist(
 }
 
 async fn stage_m3u_text_exports(
-    (filename, provider_filename): (&Path, Option<PathBuf>),
+    (text, provider_filename): (TargetFileReplacement, Option<PathBuf>),
     database: &Path,
     items: &[M3uPlaylistItem],
     target_options: Option<&ConfigTargetOptions>,
@@ -546,7 +564,6 @@ async fn stage_m3u_text_exports(
         }
     }
 
-    let text = TargetFileReplacement::staged_file(filename, token);
     write_m3u_text_file(text.staging_path(), items, |item| {
         if provider_inputs.is_empty() {
             Ok(item.to_m3u(target_options, false))
@@ -582,7 +599,7 @@ pub(crate) async fn stage_m3u_playlist(
     ];
     let provider_inputs = m3u_provider_inputs(app, target);
     let text_paths = if let Some(filename) = m3u_text_filename(&config, output) {
-        Some(checked_m3u_text_paths(app, config, target, filename, !provider_inputs.is_empty(), true).await?)
+        Some(checked_m3u_text_paths(app, config, target, filename, !provider_inputs.is_empty(), true, token).await?)
     } else {
         None
     };
@@ -590,10 +607,10 @@ pub(crate) async fn stage_m3u_playlist(
     let items = m3u_items(playlist);
     // Let an in-flight text or database write finish before its file owners can drop.
     tokio::spawn(async move {
-        if let Some((filename, provider_filename)) = text_paths {
+        if let Some(paths) = text_paths {
             files.extend(
                 stage_m3u_text_exports(
-                    (&filename, provider_filename),
+                    paths,
                     &database,
                     &items,
                     target_options.as_ref(),

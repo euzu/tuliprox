@@ -123,6 +123,126 @@ fn m3u_test_target(name: &str, filename: &str) -> Arc<ConfigTarget> {
 }
 
 #[tokio::test]
+async fn replacement_keeps_exports_available_and_preserves_a_concurrently_created_strm_file() {
+    use crate::{
+        m3u_repository::stage_m3u_playlist,
+        strm_repository::stage_strm_playlist,
+        xtream_repository::target_publish::{
+            prepare_target_file_replacements, publish_prepared_target_file_replacements, sync_staged_target_files,
+            TargetEmptyReplacementMode,
+        },
+    };
+
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let mut target = m3u_test_target("selected", "catalog.m3u");
+    let strm =
+        StrmTargetOutput::from(&StrmTargetOutputDto { directory: "strm".into(), flat: true, ..Default::default() });
+    Arc::make_mut(&mut target).output.push(TargetOutput::Strm(strm.clone()));
+    let target_path = directory.path().join("selected");
+    let main = directory.path().join("catalog.m3u");
+    let old_file = directory.path().join("strm/old.strm");
+    let new_file = directory.path().join("strm/new.strm");
+
+    let mut old = target_group(XtreamCluster::Live, 1, "old");
+    old.channels[0].header.url = "https://example.test/old".intern();
+    persist_playlist(&app, &mut [old.clone()], None, &target, None, TargetPlaylistPersistOptions::default())
+        .await
+        .unwrap();
+    let previous_m3u = fs::read(&main).unwrap();
+    let previous_strm = fs::read(&old_file).unwrap();
+    let index = strm_get_file_paths(&hash_string_as_hex("strm"), &target_path);
+    old.channels[0].header.url = "https://example.test/changed".intern();
+    let mut new = target_group(XtreamCluster::Live, 2, "new");
+    new.channels[0].header.url = "https://example.test/new".intern();
+
+    for (before_preparation, previous_index) in [(true, "old.strm\nnew.strm\n"), (false, "old.strm\n")] {
+        // An indexed path whose file is already missing must also remain unclaimed.
+        fs::write(&index, previous_index).unwrap();
+        let token = uuid::Uuid::new_v4().simple();
+        let mut candidate = [old.clone(), new.clone()];
+        let (_, mut files) =
+            stage_m3u_playlist(&app, &target, target.get_m3u_output().unwrap(), &target_path, &candidate, token)
+                .await
+                .unwrap();
+        let (_, strm_files) =
+            stage_strm_playlist(&app, &target, &strm, &target_path, &mut candidate, token).await.unwrap();
+        files.extend(strm_files);
+        sync_staged_target_files(&files).unwrap();
+        if before_preparation {
+            fs::write(&new_file, "foreign").unwrap();
+            let error = prepare_target_file_replacements(&mut files).unwrap_err();
+            assert!(error.to_string().contains("changed after staging"));
+        } else {
+            prepare_target_file_replacements(&mut files).unwrap();
+            assert_eq!(fs::read(&main).unwrap(), previous_m3u);
+            assert_eq!(fs::read(&old_file).unwrap(), previous_strm);
+            fs::write(&new_file, "foreign").unwrap();
+            let error = publish_prepared_target_file_replacements(&mut files, &TargetEmptyReplacementMode::Persist)
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        }
+        drop(files);
+        assert_eq!(fs::read(&main).unwrap(), previous_m3u);
+        assert_eq!(fs::read(&old_file).unwrap(), previous_strm);
+        assert_eq!(fs::read_to_string(&new_file).unwrap(), "foreign");
+        assert_eq!(fs::read_to_string(&index).unwrap(), previous_index);
+        assert_eq!(fs::read_dir(directory.path().join("strm")).unwrap().count(), 2);
+        fs::remove_file(&new_file).unwrap();
+    }
+
+    let mut m3u = target.get_m3u_output().unwrap().clone();
+    m3u.filename = Some("strm/new.strm".into());
+    let token = uuid::Uuid::new_v4().simple();
+    let (_, mut files) = stage_m3u_playlist(&app, &target, &m3u, &target_path, &[new], token).await.unwrap();
+    fs::write(&new_file, "foreign").unwrap();
+    let error = prepare_target_file_replacements(&mut files).unwrap_err();
+    assert!(error.to_string().contains("changed after staging"));
+    assert_eq!(fs::read_to_string(new_file).unwrap(), "foreign");
+}
+
+#[tokio::test]
+async fn m3u_replacement_rejects_main_and_provider_paths_owned_by_strm() {
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let mut owner = m3u_test_target("other", "other.m3u");
+    Arc::make_mut(&mut owner).id = 2;
+    Arc::make_mut(&mut owner).output.push(TargetOutput::Strm(StrmTargetOutput::from(&StrmTargetOutputDto {
+        directory: "strm".into(),
+        flat: true,
+        ..Default::default()
+    })));
+    let mut old = target_group(XtreamCluster::Live, 1, "shared_provider");
+    old.channels[0].header.url = "https://example.test/shared".intern();
+    persist_playlist(&app, &mut [old], None, &owner, None, TargetPlaylistPersistOptions::default()).await.unwrap();
+    let strm_file = directory.path().join("strm/shared_provider.strm");
+    let previous = fs::read(&strm_file).unwrap();
+    let input = m3u_provider_input();
+
+    for (filename, artifact) in
+        [("strm/shared_provider.strm", "M3U export"), ("strm/shared.strm", "Provider M3U export")]
+    {
+        let selected = m3u_test_target("selected", filename);
+        app.sources.store(Arc::new(SourcesConfig {
+            sources: vec![
+                ConfigSource { inputs: vec![input.name.clone()], targets: vec![selected.clone()] },
+                ConfigSource { inputs: vec![], targets: vec![owner.clone()] },
+            ],
+            inputs: vec![Arc::new(input.clone())],
+            ..Default::default()
+        }));
+        let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+        let errors = persist_playlist(&app, &mut [], None, &selected, None, replacement).await.unwrap_err();
+        assert!(errors.iter().any(|error| {
+            let message = error.to_string();
+            message.contains(artifact) && message.contains("also used by target 'other'")
+        }));
+        assert_eq!(fs::read(&strm_file).unwrap(), previous);
+        assert!(!directory.path().join("selected/m3u/m3u.db").exists());
+    }
+}
+
+#[tokio::test]
 async fn ap12_m3u_replacement_rejects_main_paths_used_by_another_target() {
     let directory = tempdir().unwrap();
     let app = app_config_in(directory.path());
