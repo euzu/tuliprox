@@ -109,7 +109,7 @@ impl ConfigTargetDto {
 
         let mut m3u_cnt = 0;
         let mut xtream_cnt = 0;
-        let mut strm_uses_proxy = false;
+        let mut strm_cnt = 0;
         let mut hdhr_cnt = 0;
         let mut hdhomerun_needs_m3u = false;
         let mut hdhomerun_needs_xtream = false;
@@ -142,6 +142,7 @@ impl ConfigTargetDto {
                     });
                 }
                 TargetOutputDto::Strm(strm_output) => {
+                    strm_cnt += 1;
                     strm_output.directory = strm_output.directory.trim().to_string();
                     if strm_output.directory.trim().is_empty() {
                         return Err(TuliproxError::ConfigTarget(format!(
@@ -149,11 +150,9 @@ impl ConfigTargetDto {
                             self.name
                         )));
                     }
-                    strm_output.username = strm_output.username.take().and_then(|username| {
-                        let username = username.trim();
-                        (!username.is_empty()).then(|| username.to_owned())
-                    });
-                    strm_uses_proxy |= strm_output.username.is_some();
+                    if let Some(username) = &mut strm_output.username {
+                        *username = username.trim().to_string();
+                    }
                     // if strm_export_styles.contains(&strm_output.style) {
                     //     return Err(TuliproxError::ConfigTarget(format!("strm outputs with same export style are not allowed: {}", self.name)));
                     // }
@@ -227,9 +226,9 @@ impl ConfigTargetDto {
             return Err(TuliproxError::ConfigTarget(format!("Multiple output formats with same type : {}", self.name)));
         }
 
-        if strm_uses_proxy && xtream_cnt == 0 && m3u_cnt == 0 {
+        if strm_cnt > 0 && xtream_cnt == 0 && m3u_cnt == 0 {
             return Err(TuliproxError::ConfigTarget(format!(
-                "STRM output with a proxy username requires an Xtream or M3U output: {}",
+                "STRM output is only permitted when used in combination with Xtream or M3U output: {}",
                 self.name
             )));
         }

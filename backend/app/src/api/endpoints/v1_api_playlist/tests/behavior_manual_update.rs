@@ -740,12 +740,15 @@ async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targ
     let mut mixed = eligible.clone();
     Arc::make_mut(&mut mixed).id = 3;
     Arc::make_mut(&mut mixed).name = "mixed".into();
-    Arc::make_mut(&mut mixed).output.push(m3u_output);
+    Arc::make_mut(&mut mixed).output.push(m3u_output.clone());
     let mut strm = playlist_update_target(4, "strm");
-    Arc::make_mut(&mut strm).output.push(TargetOutput::Strm(StrmTargetOutput::from(&StrmTargetOutputDto {
-        directory: "fixture-strm".into(),
-        ..Default::default()
-    })));
+    Arc::make_mut(&mut strm).output.extend([
+        m3u_output,
+        TargetOutput::Strm(StrmTargetOutput::from(&StrmTargetOutputDto {
+            directory: "fixture-strm".into(),
+            ..Default::default()
+        })),
+    ]);
     let mut disabled = playlist_update_target(5, "disabled");
     Arc::make_mut(&mut disabled).enabled = false;
     let foreign = playlist_update_target(6, "foreign");
