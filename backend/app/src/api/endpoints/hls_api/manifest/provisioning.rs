@@ -190,9 +190,11 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
         VirtualId::new(virtual_id),
     )
     .await;
-    if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) = classified {
+    let (entry_group, prefer) = tuliprox_repository::FailoverGroupRecord::classify_entry_target(&classified, true);
+    if let Some(group) = entry_group {
         let playback = crate::api::api_utils::group_playback_settings(app_state, target);
         let req = crate::api::api_utils::GroupSelectionRequest {
+            prefer,
             lease: Some(PlaybackLeaseRef::new(session_owner, PlaybackKind::LiveHls)),
             allow_provider_grace: playback.allow_provider_grace,
             bypass_maintenance: user.is_recording_proxy_user(),
@@ -884,4 +886,45 @@ pub(in crate::api::endpoints::hls_api) async fn hls_provider_connections_exhaust
         server_path,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use shared::utils::Internable;
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn try_reserve_hls_virtual_entry_member_vid_uses_group_selection_with_prefer() {
+        // Solis has 0 connections available, Korath has 2.
+        let env = GroupPlaybackEnv::new(&["solis", "korath"]).max_connections("solis", 0).hls_cache().build().await;
+        let korath_member_vid = env.member_vid("korath");
+        let korath_member =
+            env.group_record.members.iter().find(|m| m.input_name.as_ref() == "korath").expect("korath member");
+        // Primary input for the target is solis
+        let solis_input = env.app_state.app_config.get_input_by_name(&"solis".intern()).expect("solis input");
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let fingerprint = Fingerprint::new("fp-viewer".to_string(), "127.0.0.1".to_string(), addr);
+        let (user, _) = env.app_state.app_config.get_target_for_username("viewer").expect("viewer user");
+
+        let stream_identity = HlsEntryStreamIdentity::new(korath_member_vid, korath_member.input_stream_id.as_ref())
+            .expect("stream identity");
+
+        // When passing korath's member_vid with target's primary input (solis),
+        // try_reserve_hls_virtual_entry_origin_account_for_redirect classifies the member target,
+        // uses group selection with prefer: Some(1) (korath), and succeeds even though solis has 0 connections.
+        let reserved = try_reserve_hls_virtual_entry_origin_account_for_redirect(
+            &env.app_state,
+            &fingerprint,
+            &user,
+            &env.target,
+            &solis_input,
+            &stream_identity,
+        )
+        .await;
+
+        assert!(reserved, "virtual entry reservation for member vid should succeed via group selection on korath");
+    }
 }

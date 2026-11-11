@@ -73,6 +73,22 @@ pub struct FailoverGroupRecord {
     pub orphaned: Vec<ChannelMemberRefDto>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupMemberLookupError {
+    Missing,
+    Ambiguous,
+}
+
+impl GroupMemberLookupError {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
 impl FailoverGroupRecord {
     /// Virtual id of the stored member that `member` refers to.
     #[must_use]
@@ -84,6 +100,39 @@ impl FailoverGroupRecord {
                     && stored.input_stream_id.as_ref() == member.stream_id.as_str()
             })
             .map(|stored| stored.member_vid)
+    }
+
+    /// Virtual id of the single member matching `(input_name, stream_id)`.
+    /// Fails with [`GroupMemberLookupError::Missing`] if no member matches, or
+    /// [`GroupMemberLookupError::Ambiguous`] if more than one member matches.
+    pub fn find_member_vid(&self, input_name: &str, stream_id: &str) -> Result<VirtualId, GroupMemberLookupError> {
+        let mut matching = self
+            .members
+            .iter()
+            .filter(|stored| stored.input_name.as_ref() == input_name && stored.input_stream_id.as_ref() == stream_id);
+        let Some(member) = matching.next() else {
+            return Err(GroupMemberLookupError::Missing);
+        };
+        if matching.next().is_some() {
+            return Err(GroupMemberLookupError::Ambiguous);
+        }
+        Ok(member.member_vid)
+    }
+
+    /// Classifies an entry stream target: for a group target, returns `(Some(group), None)`.
+    /// For a member target on a live entry, returns `(Some(group), Some(index))`.
+    /// For non-live or non-group targets, returns `(None, None)`.
+    pub fn classify_entry_target(
+        target: &crate::target_stream_item::ResolvedStreamTarget,
+        is_live: bool,
+    ) -> (Option<Arc<Self>>, Option<usize>) {
+        match target {
+            crate::target_stream_item::ResolvedStreamTarget::Group(group) => (Some(Arc::clone(group)), None),
+            crate::target_stream_item::ResolvedStreamTarget::Member { group, index } if is_live => {
+                (Some(Arc::clone(group)), Some(*index))
+            }
+            _ => (None, None),
+        }
     }
 }
 
@@ -676,3 +725,93 @@ impl FailoverGroupCache {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod member_lookup_tests {
+    use super::*;
+    use crate::target_stream_item::ResolvedStreamTarget;
+    use shared::model::{FailoverGroupOrigin, FailoverGroupPolicy, PlaylistItemType, VirtualId, XtreamCluster};
+
+    fn make_member(vid: u32, input: &str, stream_id: &str) -> GroupMember {
+        GroupMember {
+            member_vid: VirtualId::new(vid),
+            input_name: Arc::from(input),
+            provider_id: vid,
+            input_stream_id: Arc::from(stream_id),
+            url: Arc::from("http://example.com/live.m3u8"),
+            item_type: PlaylistItemType::Live,
+            cluster: XtreamCluster::Live,
+            title: Arc::from("Test"),
+            archive: None,
+            epg_channel_id: None,
+            additional_properties: None,
+            input_url: Arc::from(""),
+            upstream_user_agent: None,
+        }
+    }
+
+    fn make_group(members: Vec<GroupMember>) -> FailoverGroupRecord {
+        FailoverGroupRecord {
+            group_vid: VirtualId::new(10),
+            key: Arc::from("test"),
+            origin: FailoverGroupOrigin::Auto,
+            policy: FailoverGroupPolicy::default(),
+            members,
+            orphaned: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn find_member_vid_success() {
+        let group = make_group(vec![make_member(101, "input-a", "s-1"), make_member(102, "input-b", "s-2")]);
+        assert_eq!(group.find_member_vid("input-b", "s-2"), Ok(VirtualId::new(102)));
+    }
+
+    #[test]
+    fn find_member_vid_missing() {
+        let group = make_group(vec![make_member(101, "input-a", "s-1")]);
+        assert_eq!(group.find_member_vid("input-c", "s-1"), Err(GroupMemberLookupError::Missing));
+        assert_eq!(group.find_member_vid("input-a", "s-2"), Err(GroupMemberLookupError::Missing));
+    }
+
+    #[test]
+    fn find_member_vid_ambiguous() {
+        let group = make_group(vec![make_member(101, "input-a", "s-1"), make_member(102, "input-a", "s-1")]);
+        assert_eq!(group.find_member_vid("input-a", "s-1"), Err(GroupMemberLookupError::Ambiguous));
+    }
+
+    #[test]
+    fn classify_entry_target_group_and_member() {
+        let group = Arc::new(make_group(vec![make_member(101, "input-a", "s-1")]));
+        // Group target is classified for both live and archive
+        let (res_group, prefer) =
+            FailoverGroupRecord::classify_entry_target(&ResolvedStreamTarget::Group(Arc::clone(&group)), true);
+        assert_eq!(res_group, Some(Arc::clone(&group)));
+        assert_eq!(prefer, None);
+
+        let (res_group, prefer) =
+            FailoverGroupRecord::classify_entry_target(&ResolvedStreamTarget::Group(Arc::clone(&group)), false);
+        assert_eq!(res_group, Some(Arc::clone(&group)));
+        assert_eq!(prefer, None);
+
+        // Member target is only classified when is_live is true
+        let (res_group, prefer) = FailoverGroupRecord::classify_entry_target(
+            &ResolvedStreamTarget::Member { group: Arc::clone(&group), index: 0 },
+            true,
+        );
+        assert_eq!(res_group, Some(Arc::clone(&group)));
+        assert_eq!(prefer, Some(0));
+
+        let (res_group, prefer) = FailoverGroupRecord::classify_entry_target(
+            &ResolvedStreamTarget::Member { group: Arc::clone(&group), index: 0 },
+            false,
+        );
+        assert_eq!(res_group, None);
+        assert_eq!(prefer, None);
+
+        // Item target is never classified as group
+        let (res_group, prefer) = FailoverGroupRecord::classify_entry_target(&ResolvedStreamTarget::Item, true);
+        assert_eq!(res_group, None);
+        assert_eq!(prefer, None);
+    }
+}

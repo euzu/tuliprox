@@ -18,6 +18,7 @@ pub(super) struct HlsResourceEndpointContext<'a> {
 mod access;
 mod entry;
 mod fallback;
+mod group_start;
 mod legacy;
 mod registration;
 mod resources;
@@ -47,6 +48,8 @@ pub(super) use fallback::{
     hls_runtime_or_standalone_custom_tail_response, hls_transient_object_unavailable_response,
     hls_unpublished_lease_channel_unavailable_response,
 };
+#[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
+pub(super) use group_start::{build_hls_group_member_origin_url, resolve_checked_hls_group_entry, ProbedManifest};
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub(super) use legacy::{
     build_hls_manifest_request_headers, download_legacy_hls_manifest, ensure_hls_manifest_extension,

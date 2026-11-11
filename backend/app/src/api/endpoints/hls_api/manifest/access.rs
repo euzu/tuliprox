@@ -21,6 +21,7 @@ use tuliprox_hls::api::{
     HlsAccessContext, HlsAccessLease, HlsAccessLeaseId, HlsLeasePlaybackMode, HlsOriginSource,
     HlsRuntimeCustomTailReason, HlsSessionHandle, HlsTerminalFailedClosedReason, ProxySessionId,
 };
+use tuliprox_repository::target_stream_item::classify_virtual_id;
 
 pub(in crate::api::endpoints::hls_api) async fn mark_successful_canonical_manifest_activity(
     app_state: &Arc<AppState>,
@@ -73,6 +74,7 @@ pub(in crate::api::endpoints::hls_api) fn hls_cache_enabled_for_user(
     !user.is_recording_proxy_user() && hls_cache_enabled_for_target(app_state, target)
 }
 
+#[derive(Debug)]
 pub(in crate::api::endpoints::hls_api) struct HlsAccessManifestRequestContext {
     pub(in crate::api::endpoints::hls_api) input: Arc<ConfigInput>,
     pub(in crate::api::endpoints::hls_api) hls_url: String,
@@ -104,14 +106,42 @@ pub(in crate::api::endpoints::hls_api) async fn resolve_hls_playback_manifest_re
     {
         return Err(StatusCode::FORBIDDEN);
     }
-    let Some(channel) = get_stream_channel(app_state, &target, access_context.virtual_id).await else {
+    let playback_virtual_id = if access_context.archive_origin_url.is_none() {
+        let classified = classify_virtual_id(
+            &app_state.app_config,
+            &app_state.playlists,
+            &target,
+            VirtualId::new(access_context.virtual_id),
+        )
+        .await;
+        if let Some(group) = classified.group() {
+            match group.find_member_vid(input.name.as_ref(), access_context.stream_ref.as_str()) {
+                Ok(member_vid) => member_vid.get(),
+                Err(err) => {
+                    log::warn!(
+                        "HLS group member resolution failed: target={} virtual_id={} stream_ref={} input={} reason={}",
+                        target.name,
+                        access_context.virtual_id,
+                        access_context.stream_ref,
+                        input.name,
+                        err.as_str()
+                    );
+                    return Err(StatusCode::NOT_FOUND);
+                }
+            }
+        } else {
+            access_context.virtual_id
+        }
+    } else {
+        access_context.virtual_id
+    };
+    let Some(channel) = get_stream_channel(app_state, &target, playback_virtual_id).await else {
         return Err(StatusCode::NOT_FOUND);
     };
     let origin_playlist_url = if let Some(archive_url) = access_context.archive_origin_url.as_ref() {
         archive_url.clone()
     } else {
-        resolve_hls_origin_playlist_url(app_state, &target, &input, access_context.virtual_id, channel.url.as_ref())
-            .await?
+        resolve_hls_origin_playlist_url(app_state, &target, &input, playback_virtual_id, channel.url.as_ref()).await?
     };
     let Some(hls_cache_origin) = build_hls_origin_resolution(&input, &origin_playlist_url) else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -275,4 +305,187 @@ pub(in crate::api::endpoints::hls_api) async fn hls_proxy_manifest(
     )
     .await
     .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use axum::http::HeaderValue;
+    use shared::{model::VirtualId, utils::Internable};
+    use std::net::SocketAddr;
+    use tuliprox_hls::api::{HlsAccessContext, HlsAccessLeaseId, HlsPlaybackFamilyKey, ProxySessionId};
+
+    #[tokio::test]
+    async fn hls_manifest_request_context_resolves_selected_group_member_url_and_user_agent() {
+        let env = GroupPlaybackEnv::new(&["solis", "korath"]).hls_cache().build().await;
+        let korath_input = env.app_state.app_config.get_input_by_name(&"korath".intern()).expect("korath input");
+        let korath_member =
+            env.group_record.members.iter().find(|m| m.input_name.as_ref() == "korath").expect("korath member");
+
+        let target_path =
+            crate::repository::get_target_storage_path(&env.app_state.app_config.config.load(), &env.target.name)
+                .expect("target storage path");
+        let mut group = (*env.group_record).clone();
+        group.members[1].upstream_user_agent = Some(Arc::from("KorathAgent/1.0"));
+        tuliprox_repository::FailoverGroupStore::write(&target_path, &[group], &[], None)
+            .expect("write group with user agent");
+        env.app_state.playlists.bump_failover_group_generation(&env.target.name);
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let fingerprint = Fingerprint::new("fp-viewer".to_string(), "127.0.0.1".to_string(), addr);
+
+        let access_context = HlsAccessContext {
+            username: "viewer".to_string(),
+            user_session_token: "hls-session-token".to_string(),
+            proxy_session_id: ProxySessionId("proxy-session".to_string()),
+            input_id: korath_input.id,
+            stream_ref: korath_member.input_stream_id.to_string(),
+            virtual_id: env.group_vid,
+            known_bitrate_bps: None,
+            lease_id: HlsAccessLeaseId("access-lease".to_string()),
+            family_key: HlsPlaybackFamilyKey::new("viewer", fingerprint.key),
+            epg_reference_ts: None,
+            archive_origin_url: None,
+        };
+
+        let request_context =
+            resolve_hls_playback_manifest_request_context(&env.app_state, &access_context, &HeaderMap::new())
+                .await
+                .expect("manifest request context");
+
+        let korath_addr = env.origins.get("korath").expect("korath origin").addr;
+        assert!(
+            request_context.hls_url.contains(&korath_addr.to_string()),
+            "hls_url must point to selected member korath: {}",
+            request_context.hls_url
+        );
+        assert!(
+            request_context.hls_url.ends_with(&format!("/{}.m3u8", korath_member.provider_id)),
+            "hls_url must end with member provider_id path (/{}.m3u8): {}",
+            korath_member.provider_id,
+            request_context.hls_url
+        );
+        assert_eq!(
+            request_context.headers.get(axum::http::header::USER_AGENT),
+            Some(&HeaderValue::from_static("KorathAgent/1.0")),
+            "request_context headers must carry member upstream user agent"
+        );
+        // Original entry path preserves logical group VID
+        assert!(
+            request_context.original_hls_entry_path.contains(&env.group_vid.to_string()),
+            "entry path must preserve logical group virtual_id: {}",
+            request_context.original_hls_entry_path
+        );
+    }
+
+    #[tokio::test]
+    async fn hls_manifest_request_context_missing_group_member_fails_closed_404() {
+        let env = GroupPlaybackEnv::new(&["solis", "korath"]).hls_cache().build().await;
+        let korath_input = env.app_state.app_config.get_input_by_name(&"korath".intern()).expect("korath input");
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let fingerprint = Fingerprint::new("fp-viewer".to_string(), "127.0.0.1".to_string(), addr);
+
+        let access_context = HlsAccessContext {
+            username: "viewer".to_string(),
+            user_session_token: "hls-session-token".to_string(),
+            proxy_session_id: ProxySessionId("proxy-session".to_string()),
+            input_id: korath_input.id,
+            stream_ref: "nonexistent-stream-ref".to_string(),
+            virtual_id: env.group_vid,
+            known_bitrate_bps: None,
+            lease_id: HlsAccessLeaseId("access-lease".to_string()),
+            family_key: HlsPlaybackFamilyKey::new("viewer", fingerprint.key),
+            epg_reference_ts: None,
+            archive_origin_url: None,
+        };
+
+        let Err(err) =
+            resolve_hls_playback_manifest_request_context(&env.app_state, &access_context, &HeaderMap::new()).await
+        else {
+            panic!("missing member must fail closed with 404");
+        };
+
+        assert_eq!(err, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn hls_manifest_request_context_ambiguous_group_members_fails_closed_404() {
+        let env = GroupPlaybackEnv::new(&["solis", "korath"]).hls_cache().build().await;
+        let korath_input = env.app_state.app_config.get_input_by_name(&"korath".intern()).expect("korath input");
+        let korath_member =
+            env.group_record.members.iter().find(|m| m.input_name.as_ref() == "korath").expect("korath member");
+
+        let target_path =
+            crate::repository::get_target_storage_path(&env.app_state.app_config.config.load(), &env.target.name)
+                .expect("target storage path");
+        let mut group = (*env.group_record).clone();
+        let mut duplicate_member = korath_member.clone();
+        duplicate_member.member_vid = VirtualId::new(999);
+        group.members.push(duplicate_member);
+        tuliprox_repository::FailoverGroupStore::write(&target_path, &[group], &[], None)
+            .expect("write ambiguous group");
+        env.app_state.playlists.bump_failover_group_generation(&env.target.name);
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let fingerprint = Fingerprint::new("fp-viewer".to_string(), "127.0.0.1".to_string(), addr);
+
+        let access_context = HlsAccessContext {
+            username: "viewer".to_string(),
+            user_session_token: "hls-session-token".to_string(),
+            proxy_session_id: ProxySessionId("proxy-session".to_string()),
+            input_id: korath_input.id,
+            stream_ref: korath_member.input_stream_id.to_string(),
+            virtual_id: env.group_vid,
+            known_bitrate_bps: None,
+            lease_id: HlsAccessLeaseId("access-lease".to_string()),
+            family_key: HlsPlaybackFamilyKey::new("viewer", fingerprint.key),
+            epg_reference_ts: None,
+            archive_origin_url: None,
+        };
+
+        let Err(err) =
+            resolve_hls_playback_manifest_request_context(&env.app_state, &access_context, &HeaderMap::new()).await
+        else {
+            panic!("ambiguous member must fail closed with 404");
+        };
+
+        assert_eq!(err, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn hls_manifest_request_context_non_group_item_unchanged() {
+        let env = GroupPlaybackEnv::new(&["solis", "korath"]).hls_cache().build().await;
+        let solis_input = env.app_state.app_config.get_input_by_name(&"solis".intern()).expect("solis input");
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let fingerprint = Fingerprint::new("fp-viewer".to_string(), "127.0.0.1".to_string(), addr);
+
+        let access_context = HlsAccessContext {
+            username: "viewer".to_string(),
+            user_session_token: "hls-session-token".to_string(),
+            proxy_session_id: ProxySessionId("proxy-session".to_string()),
+            input_id: solis_input.id,
+            stream_ref: "101".to_string(),
+            virtual_id: env.plain_vid,
+            known_bitrate_bps: None,
+            lease_id: HlsAccessLeaseId("access-lease".to_string()),
+            family_key: HlsPlaybackFamilyKey::new("viewer", fingerprint.key),
+            epg_reference_ts: None,
+            archive_origin_url: None,
+        };
+
+        let request_context =
+            resolve_hls_playback_manifest_request_context(&env.app_state, &access_context, &HeaderMap::new())
+                .await
+                .expect("manifest request context for non-group item");
+
+        let solis_addr = env.origins.get("solis").expect("solis origin").addr;
+        assert!(
+            request_context.hls_url.contains(&solis_addr.to_string()),
+            "hls_url must point to non-group origin solis: {}",
+            request_context.hls_url
+        );
+    }
 }
