@@ -568,16 +568,19 @@ pub(in crate::api) async fn handle_hls_stream_request(
             .as_ref()
             .map_or_else(|| Arc::clone(&resolved.member.input_name), |cfg| Arc::clone(&cfg.name));
 
-        let Some(member_url) = super::group_start::build_hls_group_member_origin_url(
-            app_state,
-            target,
-            &resolved.input,
-            &resolved.member,
-            &allocated,
-            selected_provider_config.as_ref(),
-        )
-        .await
-        else {
+        let Some(member_url) = (if let Some(probed) = probed_manifest.as_ref() {
+            Some(probed.request_url.clone())
+        } else {
+            super::group_start::build_hls_group_member_origin_url(
+                app_state,
+                target,
+                &resolved.input,
+                &resolved.member,
+                &allocated,
+                selected_provider_config.as_ref(),
+            )
+            .await
+        }) else {
             return hls_panel_provisioning_or_status_response(
                 app_state,
                 user,

@@ -22,6 +22,7 @@ use url::Url;
 #[derive(Debug, Clone)]
 pub(in crate::api::endpoints::hls_api) struct ProbedManifest {
     pub content: String,
+    pub request_url: String,
     pub response_url: String,
     pub response_headers: HeaderMap,
     pub playlist_kind: HlsPlaylistKind,
@@ -182,7 +183,7 @@ pub(in crate::api::endpoints::hls_api) async fn probe_selected_manifest(
         .await
         .ok_or(FailureClass::Transport)?;
 
-        let source = InputSource::for_request_url(&resolved.input, initial_url);
+        let source = InputSource::for_request_url(&resolved.input, initial_url.clone());
         let (content, response_url, response_headers) =
             super::legacy::download_legacy_hls_manifest(app_state, &source, &headers)
                 .await
@@ -194,6 +195,7 @@ pub(in crate::api::endpoints::hls_api) async fn probe_selected_manifest(
                 if media_playlist_has_segments(&content) {
                     Ok(ProbedManifest {
                         content,
+                        request_url: initial_url,
                         response_url,
                         response_headers,
                         playlist_kind: HlsPlaylistKind::Media,
@@ -218,6 +220,7 @@ pub(in crate::api::endpoints::hls_api) async fn probe_selected_manifest(
                 {
                     Ok(ProbedManifest {
                         content,
+                        request_url: initial_url,
                         response_url,
                         response_headers,
                         playlist_kind: HlsPlaylistKind::Master,
