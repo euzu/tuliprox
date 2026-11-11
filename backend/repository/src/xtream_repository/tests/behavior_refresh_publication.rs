@@ -56,6 +56,7 @@ async fn target_force_empty_category_reader_waits_through_the_backup_window() ->
             &mut candidate,
             ClusterFlags::Vod,
             TargetEmptyReplacementMode::PauseDuringPublication(hook),
+            None,
         )
         .await
     });

@@ -168,6 +168,20 @@ pub async fn epg_write_for_target(
     output: &TargetOutput,
     playlist: Option<&[PlaylistGroup]>,
 ) -> Result<(), TuliproxError> {
+    epg_write_for_target_tracked(cfg, file_locks, target, target_path, epg, output, playlist, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn epg_write_for_target_tracked(
+    cfg: &Config,
+    file_locks: &FileLockManager,
+    target: &ConfigTarget,
+    target_path: &Path,
+    epg: Option<&Epg>,
+    output: &TargetOutput,
+    playlist: Option<&[PlaylistGroup]>,
+    publication: Option<&crate::playlist_repository::OrdinaryPublication>,
+) -> Result<(), TuliproxError> {
     if !output.target_type().supports_epg() {
         // Formats without EPG support are skipped here via the shared capability
         // table rather than a silent empty match arm.
@@ -203,6 +217,7 @@ pub async fn epg_write_for_target(
         // Acquired before the blocking task so the wait does not occupy a blocking thread; the guard
         // moves into the task and is released only after the db and its index are written.
         let file_lock = file_locks.write_lock(&epg_path).await;
+        crate::playlist_repository::OrdinaryPublication::begin(publication)?;
         tokio::task::spawn_blocking(move || {
             let _guard = file_lock;
             // The old index goes before the EPG db is replaced and the new one is published after

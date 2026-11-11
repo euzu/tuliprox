@@ -1,5 +1,5 @@
-use super::replacement::TargetReplacementDeadline;
-use crate::xtream_write_playlist;
+use super::replacement::{OrdinaryPublication, TargetReplacementDeadline};
+use crate::xtream_repository::target_publish::{xtream_write_playlist_with_mode, TargetEmptyReplacementMode};
 use shared::{
     error::TuliproxError,
     model::{ClusterFlags, PlaylistGroup, XtreamCluster},
@@ -239,7 +239,7 @@ pub(super) fn validate_force_empty_output_filters(
     prepared_outputs: &[Option<Vec<PlaylistGroup>>],
     options: &TargetPlaylistPersistOptions,
 ) -> Result<(), TuliproxError> {
-    if options.accepted_empty_clusters.is_empty() {
+    if options.replace_target_contents || options.accepted_empty_clusters.is_empty() {
         return Ok(());
     }
 
@@ -272,6 +272,7 @@ pub(super) async fn persist_xtream_target_playlist(
     playlist: &mut [PlaylistGroup],
     accepted_empty_clusters: ClusterFlags,
     mode: TargetPersistenceMode,
+    publication: Option<&OrdinaryPublication>,
 ) -> Result<(), TuliproxError> {
     #[cfg(test)]
     if let TargetPersistenceMode::FailEmptyReplacementAt(failure) = mode {
@@ -287,5 +288,13 @@ pub(super) async fn persist_xtream_target_playlist(
     #[cfg(not(test))]
     let _ = mode;
 
-    xtream_write_playlist(app_config, target, playlist, accepted_empty_clusters).await
+    xtream_write_playlist_with_mode(
+        app_config,
+        target,
+        playlist,
+        accepted_empty_clusters,
+        TargetEmptyReplacementMode::Persist,
+        publication,
+    )
+    .await
 }

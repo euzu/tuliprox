@@ -490,6 +490,19 @@ pub async fn m3u_write_playlist(
     new_playlist: &[PlaylistGroup],
     allow_empty_publication: bool,
 ) -> Result<(), TuliproxError> {
+    m3u_write_playlist_tracked(cfg, target, target_output, target_path, new_playlist, allow_empty_publication, None)
+        .await
+}
+
+pub(crate) async fn m3u_write_playlist_tracked(
+    cfg: &AppConfig,
+    target: &ConfigTarget,
+    target_output: &M3uTargetOutput,
+    target_path: &Path,
+    new_playlist: &[PlaylistGroup],
+    allow_empty_publication: bool,
+    publication: Option<&crate::playlist_repository::OrdinaryPublication>,
+) -> Result<(), TuliproxError> {
     if new_playlist.is_empty() && !allow_empty_publication {
         return Ok(());
     }
@@ -502,6 +515,7 @@ pub async fn m3u_write_playlist(
 
     let ownership = if target_output.filename.is_some() { Some(lock_regular_target_exports(cfg).await) } else { None };
     let file_lock = cfg.file_locks.write_lock(&m3u_path).await;
+    crate::playlist_repository::OrdinaryPublication::begin(publication)?;
     let (cfg, target, target_output) = (cfg.clone(), target.clone(), target_output.clone());
     let m3u_path_clone = m3u_path.clone();
 

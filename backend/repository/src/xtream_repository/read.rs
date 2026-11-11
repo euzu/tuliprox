@@ -568,6 +568,7 @@ pub async fn persist_input_xtream_playlist_with_empty_replacements(
             |item| ProviderId::new(item.provider_id),
             vec![(cluster, col.iter().map(Into::into).collect::<Vec<XtreamPlaylistItem>>())],
             replace_empty_clusters,
+            None,
         )
         .await
         {

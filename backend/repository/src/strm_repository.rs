@@ -785,6 +785,17 @@ pub async fn write_strm_playlist(
     new_playlist: &mut [PlaylistGroup],
     allow_empty_publication: bool,
 ) -> Result<(), TuliproxError> {
+    write_strm_playlist_tracked(app_config, target, target_output, new_playlist, allow_empty_publication, None).await
+}
+
+pub(crate) async fn write_strm_playlist_tracked(
+    app_config: &AppConfig,
+    target: &ConfigTarget,
+    target_output: &StrmTargetOutput,
+    new_playlist: &mut [PlaylistGroup],
+    allow_empty_publication: bool,
+    publication: Option<&crate::playlist_repository::OrdinaryPublication>,
+) -> Result<(), TuliproxError> {
     if new_playlist.is_empty() && !allow_empty_publication {
         return Ok(());
     }
@@ -805,9 +816,11 @@ pub async fn write_strm_playlist(
     let strm_files = prepare_strm_files(new_playlist, &target_output);
     let target_writer = app_config.file_locks.write_lock(&target_path.join(".strm-export")).await;
     let ownership = lock_regular_target_exports(&app_config).await;
+    let index_writer = app_config.file_locks.write_lock(&strm_index_path).await;
+    crate::playlist_repository::OrdinaryPublication::begin(publication)?;
     // Keep the lock with the writer if its caller is cancelled during filesystem I/O.
     tokio::spawn(async move {
-        let _guards = (target_writer, ownership);
+        let _guards = (target_writer, ownership, index_writer);
         write_strm_files(
             &app_config,
             &target,
@@ -832,10 +845,7 @@ async fn write_strm_files(
     user_and_server_info: Option<(Arc<ProxyUserCredentials>, ApiProxyServerInfo)>,
     strm_files: Vec<StrmFile>,
 ) -> Result<(), TuliproxError> {
-    let existing_strm = {
-        let _file_lock = app_config.file_locks.read_lock(strm_index_path).await;
-        read_strm_file_index(strm_index_path).await.unwrap_or_else(|_| HashSet::with_capacity(4096))
-    };
+    let existing_strm = read_strm_file_index(strm_index_path).await.unwrap_or_else(|_| HashSet::with_capacity(4096));
     let mut processed_strm: HashSet<String> = HashSet::with_capacity(existing_strm.len());
 
     // Build a lookup map: stripped_path -> enriched_path for all existing STRM paths
@@ -906,7 +916,7 @@ async fn write_strm_files(
         processed_strm.insert(target_relative_file_path);
     }
 
-    if let Err(err) = write_strm_index_file(app_config, &processed_strm, strm_index_path).await {
+    if let Err(err) = write_strm_index_file(&processed_strm, strm_index_path).await {
         failed.push(err);
     }
 
@@ -1168,12 +1178,7 @@ pub(crate) async fn stage_strm_playlist(
     Ok((index, files))
 }
 
-async fn write_strm_index_file(
-    cfg: &AppConfig,
-    entries: &HashSet<String>,
-    index_file_path: &Path,
-) -> Result<(), String> {
-    let _file_lock = cfg.file_locks.write_lock(index_file_path).await;
+async fn write_strm_index_file(entries: &HashSet<String>, index_file_path: &Path) -> Result<(), String> {
     let file = File::create(index_file_path)
         .await
         .map_err(|err| format!("Failed to create strm index file: {} {err}", index_file_path.display()))?;

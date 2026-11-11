@@ -46,5 +46,6 @@ use publication::TargetCacheReloadStage;
 pub use publication::{
     InputPlaylistPersistOptions, LibraryEmptyPublication, PlaylistPublicationPlan, TargetPlaylistPersistOptions,
 };
+pub(crate) use replacement::OrdinaryPublication;
 pub use replacement::{StagePluginOutputs, StagedPluginOutput, TargetReplacementDeadline};
 pub use target::{get_target_id_mapping, load_m3u_target_storage, load_xtream_target_storage};

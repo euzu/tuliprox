@@ -289,11 +289,23 @@ pub async fn lineup_guide_index_write(
     path: &Path,
     carry_over: Option<LineupGuideCarryOver>,
 ) -> Result<(), TuliproxError> {
+    lineup_guide_index_write_tracked(file_locks, playlist, view, path, carry_over, None).await
+}
+
+pub(crate) async fn lineup_guide_index_write_tracked(
+    file_locks: &FileLockManager,
+    playlist: &[PlaylistGroup],
+    view: LineupGuideView,
+    path: &Path,
+    carry_over: Option<LineupGuideCarryOver>,
+    publication: Option<&crate::playlist_repository::OrdinaryPublication>,
+) -> Result<(), TuliproxError> {
     let mut rows = playlist_rows(playlist, view);
     if let Some(carry_over) = carry_over {
         rows.extend(carry_over.rows);
     }
     let file_lock = file_locks.write_lock(path).await;
+    crate::playlist_repository::OrdinaryPublication::begin(publication)?;
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let _guard = file_lock;
@@ -340,6 +352,14 @@ pub(crate) async fn stage_lineup_guide_index(
 /// what a failed write leaves behind. Every target persistence step asks for this, so the common
 /// case of no index at all costs one blocking hop for the existence checks and takes no lock.
 pub async fn lineup_guide_index_remove(file_locks: &FileLockManager, paths: &[PathBuf]) -> Result<(), TuliproxError> {
+    lineup_guide_index_remove_tracked(file_locks, paths, None).await
+}
+
+pub(crate) async fn lineup_guide_index_remove_tracked(
+    file_locks: &FileLockManager,
+    paths: &[PathBuf],
+    publication: Option<&crate::playlist_repository::OrdinaryPublication>,
+) -> Result<(), TuliproxError> {
     let candidates = paths.to_vec();
     let existing = tokio::task::spawn_blocking(move || {
         // An unanswerable existence check is treated as "exists", so the removal is still tried.
@@ -350,6 +370,7 @@ pub async fn lineup_guide_index_remove(file_locks: &FileLockManager, paths: &[Pa
 
     for path in existing {
         let _guard = file_locks.write_lock(&path).await;
+        crate::playlist_repository::OrdinaryPublication::begin(publication)?;
         match tokio::fs::remove_file(&path).await {
             Err(err) if err.kind() != io::ErrorKind::NotFound => {
                 return Err(TuliproxError::RepositoryPlaylist(format!(

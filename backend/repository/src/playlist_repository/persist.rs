@@ -5,18 +5,23 @@ use super::{
         persist_xtream_target_playlist, playlist_has_items, prepare_target_output_playlists,
         validate_force_empty_output_filters, validate_target_playlist_persistence, TargetPersistenceMode,
     },
-    replacement::{StagePluginOutputs, TargetReplacement, TargetReplacementDeadline},
+    replacement::{OrdinaryPublication, StagePluginOutputs, TargetReplacement, TargetReplacementDeadline},
     target::load_target_memory_cache_snapshot,
     PlaylistStorageState, TargetPlaylistPersistOptions,
 };
 use crate::{
-    ensure_target_storage_path, epg_write_for_target, lineup_guide_index_carry_over, lineup_guide_index_remove,
-    lineup_guide_index_view, lineup_guide_index_write, load_input_local_library_playlist, m3u_lineup_guide_index_path,
-    m3u_write_playlist, persist_input_library_playlist, write_strm_playlist, xtream_get_file_path,
-    xtream_get_storage_path, xtream_lineup_guide_index_path,
-    xtream_repository::target_publish::TargetEmptyReplacementMode, FailoverGroupBatch, FailoverGroupRecord,
-    FailoverGroupStore, GroupMember, LineupGuideCarryOver, LineupGuideView, MemberArchive, PendingFailoverGroup,
-    TargetIdMapping,
+    ensure_target_storage_path,
+    epg_repository::epg_write_for_target_tracked,
+    lineup_guide_index::{lineup_guide_index_remove_tracked, lineup_guide_index_write_tracked},
+    lineup_guide_index_carry_over, lineup_guide_index_view, load_input_local_library_playlist,
+    m3u_lineup_guide_index_path,
+    m3u_repository::m3u_write_playlist_tracked,
+    persist_input_library_playlist,
+    strm_repository::write_strm_playlist_tracked,
+    xtream_get_file_path, xtream_get_storage_path, xtream_lineup_guide_index_path,
+    xtream_repository::target_publish::TargetEmptyReplacementMode,
+    FailoverGroupBatch, FailoverGroupRecord, FailoverGroupStore, GroupMember, LineupGuideCarryOver, LineupGuideView,
+    MemberArchive, PendingFailoverGroup, TargetIdMapping,
 };
 use log::warn;
 use shared::{
@@ -128,11 +133,11 @@ pub async fn persist_playlist_views_with_outputs(
 }
 
 type PlaylistViews = (Vec<PlaylistGroup>, Option<Vec<PlaylistGroup>>);
+type PublicationResult = Result<(), Vec<TuliproxError>>;
 
-/// Publish owned ordinary views in a task that the update deadline can drain.
-/// Waiting for the target's mapping lock is still cancellable.
+/// Publish ordinary views and plugin outputs with one deadline and target mapping guard.
 #[allow(clippy::too_many_arguments)]
-pub async fn persist_ordinary_playlist_views(
+pub async fn persist_ordinary_playlist_views<Plugins, F>(
     app_config: &Arc<AppConfig>,
     mut views: PlaylistViews,
     epg: Option<Epg>,
@@ -141,33 +146,50 @@ pub async fn persist_ordinary_playlist_views(
     options: TargetPlaylistPersistOptions,
     mut failover_groups: FailoverGroupBatch,
     deadline: &Arc<TargetReplacementDeadline>,
-) -> (PlaylistViews, Result<(), Vec<TuliproxError>>) {
+    publish_plugins: Plugins,
+) -> (PlaylistViews, PublicationResult)
+where
+    Plugins: FnOnce(Vec<PlaylistGroup>, PublicationResult) -> F + Send + 'static,
+    F: std::future::Future<Output = (Vec<PlaylistGroup>, PublicationResult)> + Send + 'static,
+{
     let playlist_is_empty =
         !playlist_has_items(&views.0) && views.1.as_deref().is_none_or(|playlist| !playlist_has_items(playlist));
-    if let Err(error) = validate_target_playlist_persistence(target, playlist_is_empty, &options) {
-        return (views, Err(vec![error]));
-    }
-    let locked = match lock_target_for_publication(app_config, target, false).await {
-        Ok(locked) => locked,
-        Err(error) => return (views, Err(vec![error])),
+    let locked = match validate_target_playlist_persistence(target, playlist_is_empty, &options) {
+        Ok(()) => lock_target_for_publication(app_config, target, false).await,
+        Err(error) => Err(error),
     };
     let (app_config, target, playlist_state) = (Arc::clone(app_config), target.clone(), playlist_state.cloned());
     match deadline
-        .publish_ordinary(async move {
-            let result = persist_locked_playlist_views(
-                &app_config,
-                &mut views.0,
-                views.1.as_deref_mut(),
-                epg.as_ref(),
-                &target,
-                playlist_state.as_ref(),
-                options,
-                TargetPersistenceMode::Persist,
-                &mut failover_groups,
-                None,
-                locked,
-            )
-            .await;
+        .publish_ordinary(move |publication| async move {
+            let _mapping_lock = locked.as_ref().ok().map(|locked| Arc::clone(&locked.mapping_lock));
+            let mut result = match locked {
+                Ok(locked) => {
+                    persist_locked_playlist_views(
+                        &app_config,
+                        &mut views.0,
+                        views.1.as_deref_mut(),
+                        epg.as_ref(),
+                        &target,
+                        playlist_state.as_ref(),
+                        options,
+                        TargetPersistenceMode::Persist,
+                        &mut failover_groups,
+                        None,
+                        locked,
+                        Some(&publication),
+                    )
+                    .await
+                }
+                Err(error) => Err(vec![error]),
+            };
+            if target.plugin_outputs().next().is_some() {
+                if let Err(error) = OrdinaryPublication::begin(Some(&publication)) {
+                    let mut errors = result.err().unwrap_or_default();
+                    errors.push(error);
+                    return (views, Err(errors));
+                }
+                (views.0, result) = publish_plugins(views.0, result).await;
+            }
             (views, result)
         })
         .await
@@ -294,7 +316,7 @@ struct LockedTargetPublication {
     config: Arc<Config>,
     path: PathBuf,
     mapping: TargetIdMapping,
-    mapping_lock: FileWriteGuard,
+    mapping_lock: Arc<FileWriteGuard>,
     replacement: Option<TargetReplacement>,
 }
 
@@ -312,7 +334,7 @@ async fn lock_target_for_publication(
         let (mapping, lock) = get_target_id_mapping(app_config, &path, target.use_memory_cache).await?;
         (mapping, lock, None)
     };
-    Ok(LockedTargetPublication { config, path, mapping, mapping_lock, replacement })
+    Ok(LockedTargetPublication { config, path, mapping, mapping_lock: Arc::new(mapping_lock), replacement })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -348,6 +370,7 @@ async fn persist_playlist_views_with_mode(
         failover_groups,
         stage_plugins,
         locked,
+        None,
     )
     .await
 }
@@ -365,6 +388,7 @@ async fn persist_locked_playlist_views(
     failover_groups: &mut FailoverGroupBatch,
     stage_plugins: Option<&StagePluginOutputs<'_>>,
     locked: LockedTargetPublication,
+    publication: Option<&OrdinaryPublication>,
 ) -> Result<(), Vec<TuliproxError>> {
     let LockedTargetPublication {
         config,
@@ -375,6 +399,10 @@ async fn persist_locked_playlist_views(
     } = locked;
     let mut errors = vec![];
     let config = &config;
+    if publication.is_some() {
+        // Dropping a job still waiting for its first output lock must not write its pending IDs.
+        target_id_mapping.require_explicit_persist();
+    }
     let mut source_ordinal = 0u32;
     prepare_target_playlist_for_persistence(base_playlist, target, &mut target_id_mapping, &mut source_ordinal);
     if let Some(xtream_view) = xtream_playlist.as_deref_mut() {
@@ -480,7 +508,7 @@ async fn persist_locked_playlist_views(
         .filter(|view| lineup_view != Some(*view))
         .filter_map(|view| lineup_guide_index_path(config, target, view, &target_path))
         .collect();
-    if let Err(err) = lineup_guide_index_remove(&app_config.file_locks, &outdated_indexes).await {
+    if let Err(err) = lineup_guide_index_remove_tracked(&app_config.file_locks, &outdated_indexes, publication).await {
         warn!("Outdated HDHomeRun guide index of target {} not removed: {err}", target.name);
     }
 
@@ -535,7 +563,9 @@ async fn persist_locked_playlist_views(
             _ => None,
         };
         if let Some((_, path, GuideIndexAction::Rebuild(_) | GuideIndexAction::Remove)) = &guide_index {
-            if let Err(err) = lineup_guide_index_remove(&app_config.file_locks, std::slice::from_ref(path)).await {
+            if let Err(err) =
+                lineup_guide_index_remove_tracked(&app_config.file_locks, std::slice::from_ref(path), publication).await
+            {
                 // The rebuild below still replaces it. Only if that fails too does the old index
                 // stay, which is why both failures are logged.
                 warn!("HDHomeRun guide index of target {} not removed: {err}", target.name);
@@ -544,14 +574,30 @@ async fn persist_locked_playlist_views(
 
         let result = match output {
             TargetOutput::Xtream(_xtream_output) => {
-                persist_xtream_target_playlist(app_config, target, pl, replace_empty_clusters, persistence_mode.clone())
-                    .await
+                persist_xtream_target_playlist(
+                    app_config,
+                    target,
+                    pl,
+                    replace_empty_clusters,
+                    persistence_mode.clone(),
+                    publication,
+                )
+                .await
             }
             TargetOutput::M3u(m3u_output) => {
-                m3u_write_playlist(app_config, target, m3u_output, &target_path, pl, allows_empty_base).await
+                m3u_write_playlist_tracked(
+                    app_config,
+                    target,
+                    m3u_output,
+                    &target_path,
+                    pl,
+                    allows_empty_base,
+                    publication,
+                )
+                .await
             }
             TargetOutput::Strm(strm_output) => {
-                write_strm_playlist(app_config, target, strm_output, pl, allows_empty_base).await
+                write_strm_playlist_tracked(app_config, target, strm_output, pl, allows_empty_base, publication).await
             }
             // Rendered afterwards by the processing crate, which owns the plugin host (plan §18
             // *W6a seam freeze*, output providers); like HdHomeRun there is nothing to persist here.
@@ -561,8 +607,15 @@ async fn persist_locked_playlist_views(
         match result {
             Ok(()) => {
                 if let Some((view, path, GuideIndexAction::Rebuild(carry_over))) = &mut guide_index {
-                    if let Err(err) =
-                        lineup_guide_index_write(&app_config.file_locks, pl, *view, path, carry_over.take()).await
+                    if let Err(err) = lineup_guide_index_write_tracked(
+                        &app_config.file_locks,
+                        pl,
+                        *view,
+                        path,
+                        carry_over.take(),
+                        publication,
+                    )
+                    .await
                     {
                         warn!(
                             "HDHomeRun guide index of target {} not written, tuners scan the playlist: {err}",
@@ -580,7 +633,7 @@ async fn persist_locked_playlist_views(
                 };
                 if !pl.is_empty() || allows_empty_output {
                     let epg_pl: &[PlaylistGroup] = pl;
-                    if let Err(err) = epg_write_for_target(
+                    if let Err(err) = epg_write_for_target_tracked(
                         config,
                         &app_config.file_locks,
                         target,
@@ -588,6 +641,7 @@ async fn persist_locked_playlist_views(
                         epg,
                         output,
                         Some(epg_pl),
+                        publication,
                     )
                     .await
                     {
@@ -599,6 +653,7 @@ async fn persist_locked_playlist_views(
         }
     }
 
+    OrdinaryPublication::begin(publication).map_err(|error| vec![error])?;
     if let Err(err) = target_id_mapping.persist() {
         errors.push(TuliproxError::Config(format!("{err}")));
     }

@@ -1486,6 +1486,7 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
         publication_plan: views.publication_plan,
     };
     let result = if let Some(deadline) = ctx.publication_deadline.as_ref().filter(|_| !ctx.replace_target_contents) {
+        let (plugins, app_config, plugin_target) = (ctx.plugins.clone(), ctx.config.clone(), target.clone());
         let (published_views, result) = persist_ordinary_playlist_views(
             &ctx.config,
             (finalized_base, finalized_xtream),
@@ -1495,12 +1496,23 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
             options,
             views.failover_groups,
             deadline,
+            move |playlist, result| async move {
+                let result = super::plugin_output::persist_plugin_outputs(
+                    &plugins,
+                    &app_config,
+                    &plugin_target,
+                    &playlist,
+                    result,
+                )
+                .await;
+                (playlist, result)
+            },
         )
         .await;
         (finalized_base, finalized_xtream) = published_views;
         result
     } else {
-        persist_playlist_views_with_outputs(
+        let result = persist_playlist_views_with_outputs(
             &ctx.config,
             &mut finalized_base,
             finalized_xtream.as_deref_mut(),
@@ -1511,14 +1523,13 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
             &mut views.failover_groups,
             Some(&stage_plugins),
         )
-        .await
-    };
-    // `type: plugin` outputs (plan §7 *Output providers*): the repository has no
-    // plugin seam, so they render here, each failing on its own.
-    let result = if ctx.replace_target_contents {
-        result
-    } else {
-        super::plugin_output::persist_plugin_outputs(&ctx.plugins, &ctx.config, target, &finalized_base, result).await
+        .await;
+        if ctx.replace_target_contents {
+            result
+        } else {
+            super::plugin_output::persist_plugin_outputs(&ctx.plugins, &ctx.config, target, &finalized_base, result)
+                .await
+        }
     };
     let outcome = if result.is_ok() { TargetAnalyticsOutcome::Published } else { TargetAnalyticsOutcome::Failed };
     persist_target_analytics(&config, &target.name, analytics_dto, &unmapped_csv, outcome).await;

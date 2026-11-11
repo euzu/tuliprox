@@ -25,7 +25,10 @@ use std::{
     collections::BTreeMap,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
 };
 use tokio::{
     sync::Notify,
@@ -41,6 +44,7 @@ use uuid::Uuid;
 struct PublicationState {
     closed: bool,
     active: usize,
+    ordinary_jobs: usize,
     published: Vec<String>,
     target_failures: BTreeMap<String, String>,
     failed_publications: Vec<(String, String)>,
@@ -52,10 +56,13 @@ pub struct TargetReplacementDeadline {
     at: Instant,
     publication: Mutex<PublicationState>,
     drained: Notify,
+    closed: Notify,
 }
 
 impl TargetReplacementDeadline {
-    pub fn new(at: Instant) -> Self { Self { at, publication: Mutex::default(), drained: Notify::new() } }
+    pub fn new(at: Instant) -> Self {
+        Self { at, publication: Mutex::default(), drained: Notify::new(), closed: Notify::new() }
+    }
 
     fn state(&self) -> MutexGuard<'_, PublicationState> {
         self.publication.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -77,19 +84,37 @@ impl TargetReplacementDeadline {
 
     fn try_begin(&self) -> io::Result<ActivePublication<'_>> {
         let mut state = self.state();
-        if state.closed || Instant::now() >= self.at {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "playlist update deadline expired before publication"));
-        }
+        self.check_open(&state)?;
         state.active += 1;
         Ok(ActivePublication { deadline: self, result: None })
     }
 
+    fn check_open(&self, state: &PublicationState) -> io::Result<()> {
+        if state.closed || Instant::now() >= self.at {
+            Err(Self::expired())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn expired() -> io::Error {
+        io::Error::new(io::ErrorKind::TimedOut, "playlist update deadline expired before publication")
+    }
+
+    async fn wait_until_closed(&self) {
+        let closed = self.closed.notified();
+        if !self.state().closed {
+            closed.await;
+        }
+    }
+
     async fn close_and_drain(&self) -> Vec<String> {
+        self.state().closed = true;
+        self.closed.notify_waiters();
         loop {
             {
                 let mut state = self.state();
-                state.closed = true;
-                if state.active == 0 {
+                if state.active == 0 && state.ordinary_jobs == 0 {
                     return std::mem::take(&mut state.published);
                 }
             }
@@ -98,17 +123,32 @@ impl TargetReplacementDeadline {
         }
     }
 
-    /// Let an ordinary target finish its writes, mapping, and cache publication once it starts.
-    /// Pending work still respects the deadline and never starts after it expires.
-    pub(super) async fn publish_ordinary<F>(self: &Arc<Self>, operation: F) -> io::Result<F::Output>
+    /// Cancel ordinary work still preparing when processing ends, and drain work already writing.
+    pub(super) async fn publish_ordinary<F, Job>(self: &Arc<Self>, operation: Job) -> io::Result<F::Output>
     where
+        Job: FnOnce(Arc<OrdinaryPublication>) -> F + Send + 'static,
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let deadline = Arc::clone(self);
+        let publication = {
+            let mut state = self.state();
+            self.check_open(&state)?;
+            state.ordinary_jobs += 1;
+            Arc::new(OrdinaryPublication { deadline: Arc::clone(self), started: AtomicBool::new(false) })
+        };
         tokio::spawn(async move {
-            let _publication = deadline.try_begin()?;
-            Ok(operation.await)
+            let future = operation(Arc::clone(&publication));
+            tokio::pin!(future);
+            tokio::select! {
+                result = &mut future => Ok(result),
+                () = publication.deadline.wait_until_closed() => {
+                    if publication.started.load(Ordering::Acquire) {
+                        Ok(future.await)
+                    } else {
+                        Err(Self::expired())
+                    }
+                }
+            }
         })
         .await
         .map_err(io::Error::other)?
@@ -120,6 +160,38 @@ impl TargetReplacementDeadline {
         let result = timeout_at(self.at, operation).await;
         let published = self.close_and_drain().await;
         result.map_err(|_| published)
+    }
+}
+
+pub(crate) struct OrdinaryPublication {
+    deadline: Arc<TargetReplacementDeadline>,
+    started: AtomicBool,
+}
+
+impl OrdinaryPublication {
+    /// Called with the writer's locks held immediately before its first live write.
+    pub(crate) fn begin(publication: Option<&Self>) -> Result<(), TuliproxError> {
+        if let Some(publication) = publication {
+            if !publication.started.load(Ordering::Acquire) {
+                let state = publication.deadline.state();
+                publication
+                    .deadline
+                    .check_open(&state)
+                    .map_err(|error| TuliproxError::RepositoryPlaylist(error.to_string()))?;
+                publication.started.store(true, Ordering::Release);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for OrdinaryPublication {
+    fn drop(&mut self) {
+        let mut state = self.deadline.state();
+        state.ordinary_jobs -= 1;
+        if state.closed && state.active == 0 && state.ordinary_jobs == 0 {
+            self.deadline.drained.notify_one();
+        }
     }
 }
 
@@ -137,7 +209,7 @@ impl Drop for ActivePublication<'_> {
             None => {}
         }
         state.active -= 1;
-        if state.closed && state.active == 0 {
+        if state.closed && state.active == 0 && state.ordinary_jobs == 0 {
             self.deadline.drained.notify_one();
         }
     }
@@ -326,7 +398,7 @@ impl TargetReplacement {
         outputs: StagedTargetViews,
         state: Option<&Arc<PlaylistStorageState>>,
         mut mapping: TargetIdMapping,
-        mapping_lock: FileWriteGuard,
+        mapping_lock: Arc<FileWriteGuard>,
         groups: FailoverGroupStagedPublication,
         mode: TargetEmptyReplacementMode,
         deadline: Option<Arc<TargetReplacementDeadline>>,

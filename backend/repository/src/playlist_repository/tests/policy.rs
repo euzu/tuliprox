@@ -189,9 +189,6 @@ async fn replacement_waits_for_ordinary_strm_to_finish_updating_ownership() {
     })
     .await
     .expect("ordinary writer holds the export lock while waiting for its index");
-    ordinary.abort();
-    assert!(ordinary.await.unwrap_err().is_cancelled());
-    assert!(app.file_locks.try_write_lock(Path::new(TARGET_EXPORT_LOCK)).await.is_err());
 
     let second_output = StrmTargetOutput::from(&StrmTargetOutputDto {
         directory: "parallel-strm".into(),
@@ -222,6 +219,7 @@ async fn replacement_waits_for_ordinary_strm_to_finish_updating_ownership() {
     tokio::pin!(replacing);
     assert!(tokio::time::timeout(Duration::from_millis(100), &mut replacing).await.is_err());
     drop(index_lock);
+    ordinary.await.unwrap().unwrap();
     let errors = tokio::time::timeout(Duration::from_secs(5), replacing).await.unwrap().unwrap_err();
     assert!(errors.iter().any(|error| error.to_string().contains("also managed by another target")));
     assert_eq!(fs::read_to_string(directory.path().join("strm/shared.strm")).unwrap(), "https://example.test/old");
@@ -533,6 +531,43 @@ fn target_force_empty_authorization_is_limited_to_xtream_outputs() {
     let error = validate_target_playlist_persistence(&mixed_target, true, &options)
         .expect_err("fully empty mixed output must fail before persistence");
     assert!(error.to_string().contains("non-Xtream outputs"));
+}
+
+#[tokio::test]
+async fn force_replacement_can_publish_empty_filtered_m3u_and_strm() {
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let vod_only = get_filter("Type = vod", None).unwrap();
+    let mut target = m3u_test_target("selected", "catalog.m3u");
+    let TargetOutput::M3u(m3u) = &mut Arc::make_mut(&mut target).output[0] else { unreachable!() };
+    m3u.filter = Some(vod_only.clone());
+    let mut strm =
+        StrmTargetOutput::from(&StrmTargetOutputDto { directory: "strm".into(), flat: true, ..Default::default() });
+    strm.filter = Some(vod_only);
+    Arc::make_mut(&mut target).output.push(TargetOutput::Strm(strm));
+    let mut prior = target_group(XtreamCluster::Video, 1, "old film");
+    prior.channels[0].header.url = "https://example.test/old-film".intern();
+    persist_playlist(&app, &mut [prior], None, &target, None, TargetPlaylistPersistOptions::default()).await.unwrap();
+    let m3u = directory.path().join("catalog.m3u");
+    let index = strm_get_file_paths(&hash_string_as_hex("strm"), &directory.path().join("selected"));
+    let previous = fs::read_to_string(&index).unwrap();
+    assert_ne!(previous, "");
+    assert!(fs::read_to_string(&m3u).unwrap().contains("old film"));
+
+    let mut live = [target_group(XtreamCluster::Live, 2, "current live")];
+    let force = TargetPlaylistPersistOptions { accepted_empty_clusters: ClusterFlags::Vod, ..Default::default() };
+    let errors = persist_playlist(&app, &mut live, None, &target, None, force.clone()).await.unwrap_err();
+    assert!(errors.iter().any(|error| error.to_string().contains("Refusing to publish force-empty M3U")));
+    assert_eq!(fs::read_to_string(&index).unwrap(), previous);
+    assert!(fs::read_to_string(&m3u).unwrap().contains("old film"));
+
+    let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..force };
+    persist_playlist(&app, &mut live, None, &target, None, replacement).await.unwrap();
+    assert_eq!(fs::read_to_string(m3u).unwrap(), "#EXTM3U\n");
+    assert_eq!(fs::read_to_string(index).unwrap(), "");
+    for path in previous.lines() {
+        assert!(!directory.path().join("strm").join(path).exists());
+    }
 }
 
 #[tokio::test]
@@ -1130,7 +1165,7 @@ async fn replace_target_contents_deadline_waits_for_started_publication() {
 
 #[tokio::test]
 async fn run_drains_an_ordinary_publication_after_processing_stops_early() {
-    use crate::TargetReplacementDeadline;
+    use crate::playlist_repository::{OrdinaryPublication, TargetReplacementDeadline};
     use std::time::Duration;
     use tokio::{sync::oneshot, time::Instant};
 
@@ -1144,7 +1179,8 @@ async fn run_drains_an_ordinary_publication_after_processing_stops_early() {
                 let publisher = deadline.clone();
                 let caller = tokio::spawn(async move {
                     publisher
-                        .publish_ordinary(async {
+                        .publish_ordinary(|publication| async move {
+                            OrdinaryPublication::begin(Some(&publication)).unwrap();
                             entered.send(()).unwrap();
                             finish_rx.await.unwrap();
                         })

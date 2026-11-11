@@ -17,6 +17,7 @@ use crate::{
     bplustree::{get_file_path_for_db_index, BPlusTree, BPlusTreeStagingArtifacts, BPlusTreeUpdate, IndexSnapshot},
     error_macros::cant_write_result,
     playlist_backend::PlaylistKey,
+    playlist_repository::OrdinaryPublication,
     storage::FileIdentity,
     storage_const,
 };
@@ -61,6 +62,7 @@ pub(super) async fn write_playlists_to_file<K, F>(
     key_of: F,
     collections: Vec<(XtreamCluster, Vec<XtreamPlaylistItem>)>,
     replace_empty_clusters: ClusterFlags,
+    publication: Option<&OrdinaryPublication>,
 ) -> Result<(), TuliproxError>
 where
     K: PlaylistKey,
@@ -74,6 +76,7 @@ where
 
         // Acquire FileLockManager lock (async, in-process coordination)
         let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+        OrdinaryPublication::begin(publication)?;
 
         // Move all B+Tree building and I/O to spawn_blocking
         // We take ownership of `playlist` here (no cloning needed)
@@ -910,10 +913,19 @@ async fn replace_target_xtream_cluster_with_empty(
     storage_path: &Path,
     cluster: XtreamCluster,
     mode: TargetEmptyReplacementMode,
+    publication: Option<&OrdinaryPublication>,
 ) -> Result<(), TuliproxError> {
     #[cfg(not(test))]
     let _ = &mode;
     let paths = TargetEmptyClusterPaths::new(storage_path, cluster);
+    let category_lock_path = target_category_lock_path(&paths.published_categories);
+    let mut lock_paths = [&paths.published_database, &category_lock_path];
+    lock_paths.sort_unstable();
+    let mut file_locks = Vec::with_capacity(lock_paths.len());
+    for path in lock_paths {
+        file_locks.push(app_config.file_locks.write_lock(path).await);
+    }
+    OrdinaryPublication::begin(publication)?;
     let staging_artifacts = BPlusTreeStagingArtifacts::new(&paths.published_database, &paths.staging_database)
         .map_err(|error| {
             TuliproxError::RepositoryXtream(format!("Failed to prepare empty {cluster} target: {error}"))
@@ -962,13 +974,6 @@ async fn replace_target_xtream_cluster_with_empty(
             ))
         })?;
 
-        let category_lock_path = target_category_lock_path(&paths.published_categories);
-        let mut lock_paths = [&paths.published_database, &category_lock_path];
-        lock_paths.sort_unstable();
-        let mut file_locks = Vec::with_capacity(lock_paths.len());
-        for path in lock_paths {
-            file_locks.push(app_config.file_locks.write_lock(path).await);
-        }
         let publication_paths = TargetEmptyClusterPaths {
             published_database: paths.published_database.clone(),
             published_index: paths.published_index.clone(),
@@ -1153,6 +1158,7 @@ pub async fn xtream_write_playlist(
         playlist,
         replace_empty_clusters,
         TargetEmptyReplacementMode::Persist,
+        None,
     )
     .await
 }
@@ -1171,16 +1177,18 @@ pub(crate) async fn xtream_write_playlist_with_injected_empty_replacement_failur
         playlist,
         replace_empty_clusters,
         TargetEmptyReplacementMode::FailAt(failure),
+        None,
     )
     .await
 }
 
-pub(super) async fn xtream_write_playlist_with_mode(
+pub(crate) async fn xtream_write_playlist_with_mode(
     app_cfg: &Arc<AppConfig>,
     target: &ConfigTarget,
     playlist: &mut [PlaylistGroup],
     replace_empty_clusters: ClusterFlags,
     empty_replacement_mode: TargetEmptyReplacementMode,
+    publication: Option<&OrdinaryPublication>,
 ) -> Result<(), TuliproxError> {
     let path = {
         let config = app_cfg.config.load();
@@ -1239,6 +1247,7 @@ pub(super) async fn xtream_write_playlist_with_mode(
         }
         let category_lock_path = target_category_lock_path(&col_path);
         let lock = app_config.file_locks.write_lock(&category_lock_path).await;
+        OrdinaryPublication::begin(publication)?;
         match json_write_documents_to_file(&col_path, data).await {
             Ok(()) => {}
             Err(err) => {
@@ -1254,8 +1263,14 @@ pub(super) async fn xtream_write_playlist_with_mode(
         [(XtreamCluster::Live, &live_col), (XtreamCluster::Video, &vod_col), (XtreamCluster::Series, &series_col)]
     {
         if col.is_empty() && replace_empty_clusters.contains(cluster_flag(cluster)) {
-            if let Err(error) =
-                replace_target_xtream_cluster_with_empty(app_cfg, &path, cluster, empty_replacement_mode.clone()).await
+            if let Err(error) = replace_target_xtream_cluster_with_empty(
+                app_cfg,
+                &path,
+                cluster,
+                empty_replacement_mode.clone(),
+                publication,
+            )
+            .await
             {
                 errors.push(format!("Persisting empty {cluster} target cluster failed: {error}"));
             }
@@ -1269,6 +1284,7 @@ pub(super) async fn xtream_write_playlist_with_mode(
             |item| item.virtual_id,
             vec![(cluster, data)],
             replace_empty_clusters,
+            publication,
         )
         .await
         {
