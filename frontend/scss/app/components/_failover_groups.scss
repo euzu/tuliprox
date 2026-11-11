@@ -534,6 +534,30 @@
       min-height: 0;
       max-height: none;
     }
+
+    // The candidate table fills the tab; its body scrolls and the paging controls stay visible.
+    &__candidates {
+      flex: 1 1 0;
+      min-height: 0;
+
+      .tp__paged-table,
+      .tp__paged-table > .tp__table,
+      .tp__table-shell,
+      .tp__table__container {
+        flex: 1 1 0;
+        min-height: 0;
+      }
+
+      .tp__table-shell__content {
+        display: flex;
+        flex-flow: column;
+        min-height: 0;
+      }
+
+      .tp__paged-table__controls {
+        flex: none;
+      }
+    }
   }
 }
 

@@ -1469,6 +1469,22 @@
 
 ## 🐛 Fixes
 
+- **Shared HLS cache delivers the selected failover group member.** For failover groups, shared-cache manifest access
+  previously fetched the representative member's origin URL while using the selected member's provider account. It now
+  delivers the selected member's stream URL and preserves its upstream user agent.
+
+- **Failover groups support start failover for fresh live HLS entries.** A fresh live HLS entry for a failover group now
+  checks the selected member's manifest and fails over to the next member on HTTP errors, timeouts, or invalid or empty
+  playlists (matching MPEG-TS). Start only; no switch during playback; segments and encryption keys are not checked.
+
+- **Live HLS entries with a member channel ID use group failover.** Opening a fresh live HLS stream using a failover
+  member's channel ID now uses group failover with that member preferred, instead of serving the member as an isolated
+  single channel.
+
+- **HLS panel provisioning for a failover group catch-up entry reserves the account with catch-up selection.** Virtual-entry
+  provisioning for a catch-up or archive poll on a failover group or member channel now derives archive selection mode
+  and avoids failing over across non-archive members.
+
 - **Dependencies updated, including `zip` 9 for a high-risk vulnerability.** Plugin package extraction keeps all its
   path, size and symlink checks. Random IVs come only from the operating system RNG; the YAML pre-check of user
   settings uses the parser bundled with `serde-saphyr` instead of a separately pinned copy. An unquoted `.inf`,

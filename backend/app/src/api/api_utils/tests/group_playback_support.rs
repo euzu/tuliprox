@@ -276,6 +276,55 @@ async fn spawn_tracked_origin(mode: FakeOriginMode) -> TrackedOrigin {
                         let _ = socket.shutdown().await;
                     }
                 }
+                FakeOriginMode::StalkerRetry { fresh_link_path, create_link_counter } => {
+                    if request_str.contains("action=handshake") {
+                        let body = r#"{"js":{"token":"mock-token"}}"#;
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    } else if request_str.contains("action=get_profile") {
+                        let body = r#"{"js":{"status":1,"max_connections":1}}"#;
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    } else if request_str.contains("action=create_link") {
+                        let count = create_link_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let link_url = if count == 0 {
+                            format!("http://{addr}/stale/live.m3u8")
+                        } else {
+                            format!("http://{addr}{fresh_link_path}")
+                        };
+                        let body = format!(r#"{{"js":{{"cmd":"ffmpeg {link_url}"}}}}"#);
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    } else if request_str.contains(fresh_link_path.as_str()) {
+                        let body = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\nsegment1.ts\n";
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    } else {
+                        let head = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    }
+                }
             }
         }
     });
@@ -335,6 +384,7 @@ impl GroupPlaybackEnv {
             channel_unavailable_video: false,
             m3u_inputs: std::collections::HashSet::new(),
             aliases: Vec::new(),
+            user_agent_stream_index_inputs: std::collections::HashSet::new(),
         }
     }
 
@@ -533,12 +583,14 @@ impl GroupPlaybackEnv {
         handles
     }
 
-    pub async fn get_hls_manifest(&self, vid: u32) -> Response {
+    pub async fn get_hls_manifest(&self, vid: u32) -> Response { self.get_hls_manifest_from(vid, 12345).await }
+
+    pub async fn get_hls_manifest_from(&self, vid: u32, port: u16) -> Response {
         let mut req = Request::builder()
             .uri(format!("/live/viewer/secret/{vid}.m3u8"))
             .body(Body::empty())
             .expect("request builder");
-        req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], port))));
         self.router.clone().oneshot(req).await.expect("endpoint response")
     }
 
@@ -645,6 +697,7 @@ pub(crate) struct GroupPlaybackEnvBuilder {
     channel_unavailable_video: bool,
     m3u_inputs: std::collections::HashSet<String>,
     aliases: Vec<(String, String)>,
+    user_agent_stream_index_inputs: std::collections::HashSet<String>,
 }
 
 #[allow(dead_code)]
@@ -677,6 +730,22 @@ impl GroupPlaybackEnvBuilder {
 
     pub fn share_ts(mut self) -> Self {
         self.share_ts = true;
+        self
+    }
+
+    pub fn user_agent_stream_index(mut self, input: &str) -> Self {
+        self.user_agent_stream_index_inputs.insert(input.to_string());
+        self
+    }
+
+    pub fn stalker_retry_origin(mut self, input: &str, fresh_link_path: &str) -> Self {
+        self.origin_modes.insert(
+            input.to_string(),
+            FakeOriginMode::StalkerRetry {
+                fresh_link_path: fresh_link_path.to_string(),
+                create_link_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            },
+        );
         self
     }
 
@@ -858,6 +927,13 @@ impl GroupPlaybackEnvBuilder {
                         username: None,
                         password: None,
                     })
+                } else {
+                    None
+                },
+                options: if self.user_agent_stream_index_inputs.contains(input_name) {
+                    let mut options = crate::model::ConfigInputOptions::defaults().clone();
+                    options.flags.set(crate::model::ConfigInputFlags::UserAgentStreamIndex);
+                    Some(options)
                 } else {
                     None
                 },

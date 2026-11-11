@@ -18,6 +18,7 @@ pub(super) struct HlsResourceEndpointContext<'a> {
 mod access;
 mod entry;
 mod fallback;
+mod group_start;
 mod legacy;
 mod registration;
 mod resources;

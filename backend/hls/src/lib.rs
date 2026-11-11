@@ -137,7 +137,7 @@ pub mod api {
         gc::exec_hls_cache_gc,
         headers::{
             append_hls_provider_session_headers, extract_hls_provider_session_headers, force_identity_without_range,
-            scrub_hls_origin_headers, should_remove_hls_origin_header,
+            merge_hls_provider_session_headers, scrub_hls_origin_headers, should_remove_hls_origin_header,
         },
         ids::{build_proxy_session_id, HlsSessionKey, ProxySessionId, HLS_ACCESS_LEASE_ID_PLACEHOLDER},
         late_custom_response::HlsLateCustomResponsePlan,

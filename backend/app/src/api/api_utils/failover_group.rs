@@ -404,34 +404,91 @@ pub(crate) async fn resolve_hls_group_entry(
     group: Arc<FailoverGroupRecord>,
     req: GroupSelectionRequest<'_>,
 ) -> Result<ResolvedGroupPlayback, GroupSelectionFailure> {
-    let max_attempts = u32::from(req.start.max_attempts.max(1));
-    let mut attempts = 0;
-    let start_time = std::time::Instant::now();
-    let budget = Duration::from_secs(req.start.timeout_secs);
+    resolve_hls_group_entry_with_probe(
+        app_state,
+        group,
+        req,
+        None::<fn(&ResolvedGroupPlayback, tokio::time::Instant) -> std::future::Ready<Result<(), FailureClass>>>,
+    )
+    .await
+    .map(|(resolved, _)| resolved)
+}
+
+pub(crate) async fn resolve_hls_group_entry_with_probe<T, F, Fut>(
+    app_state: &Arc<AppState>,
+    group: Arc<FailoverGroupRecord>,
+    req: GroupSelectionRequest<'_>,
+    mut probe: Option<F>,
+) -> Result<(ResolvedGroupPlayback, Option<T>), GroupSelectionFailure>
+where
+    F: FnMut(&ResolvedGroupPlayback, tokio::time::Instant) -> Fut,
+    Fut: Future<Output = Result<T, FailureClass>>,
+{
+    let started = tokio::time::Instant::now();
+    let attempt_budget = Duration::from_millis(app_state.hls.proxy.origin_manifest_timeout_ms().max(1));
+    let total_deadline = (req.start.timeout_secs != 0).then(|| started + Duration::from_secs(req.start.timeout_secs));
     let mut exclude: Vec<usize> = req.exclude.to_vec();
     let demoted_inputs: Vec<Arc<str>> = req.demoted_inputs.to_vec();
 
-    while attempts < max_attempts && (req.start.timeout_secs == 0 || start_time.elapsed() < budget) {
-        attempts += 1;
-        let attempt_req = GroupSelectionRequest {
+    for attempt in 0..req.start.max_attempts.max(1) {
+        if total_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            break;
+        }
+
+        let selection = GroupSelectionRequest {
             mode: req.mode.clone(),
             exclude: &exclude,
             demoted_inputs: &demoted_inputs,
-            prefer: if attempts == 1 { req.prefer } else { None },
+            prefer: if attempt == 0 { req.prefer } else { None },
             ..req
         };
 
-        let acquired = acquire_group_member(app_state, attempt_req).await?;
+        let selecting = acquire_group_member(app_state, selection);
+        let mut acquired = if let Some(deadline) = total_deadline {
+            match tokio::time::timeout_at(deadline, selecting).await {
+                Ok(Ok(acquired)) => acquired,
+                Ok(Err(err)) => return Err(err),
+                Err(_) => return Err(GroupSelectionFailure::Exhausted),
+            }
+        } else {
+            selecting.await?
+        };
+
         let member = group.members[acquired.index].clone();
         let Some(member_input) = app_state.app_config.get_input_by_name(&member.input_name) else {
-            record_member_failure(&app_state.member_health, &member, acquired.half_open, FailureClass::Stream);
+            record_member_failure(&app_state.member_health, &member, acquired.half_open.take(), FailureClass::Stream);
             drop(acquired.handle);
             exclude.push(acquired.index);
             continue;
         };
 
         let stream_url = Arc::clone(&member.url);
-        return Ok(ResolvedGroupPlayback { acquired, member, input: member_input, stream_url });
+        let mut resolved = ResolvedGroupPlayback { acquired, member, input: member_input, stream_url };
+
+        let Some(probe_fn) = probe.as_mut() else {
+            return Ok((resolved, None));
+        };
+
+        let attempt_deadline = total_deadline.map_or_else(
+            || tokio::time::Instant::now() + attempt_budget,
+            |d| d.min(tokio::time::Instant::now() + attempt_budget),
+        );
+        match probe_fn(&resolved, attempt_deadline).await {
+            Ok(result) => {
+                record_member_success(&app_state.member_health, &resolved.member, resolved.acquired.half_open.take());
+                return Ok((resolved, Some(result)));
+            }
+            Err(class) => {
+                record_member_failure(
+                    &app_state.member_health,
+                    &resolved.member,
+                    resolved.acquired.half_open.take(),
+                    class,
+                );
+                drop(resolved.acquired.handle);
+                exclude.push(resolved.acquired.index);
+            }
+        }
     }
 
     Err(GroupSelectionFailure::Exhausted)

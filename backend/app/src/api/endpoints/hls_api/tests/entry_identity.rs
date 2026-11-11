@@ -719,6 +719,7 @@ async fn hls_virtual_entry_reservation_uses_input_stream_id_for_shared_session_o
             &target,
             &input,
             &stream_identity,
+            "",
         )
         .await
     );

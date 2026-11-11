@@ -257,10 +257,7 @@ impl DelayedTerminalRefresh {
     async fn finish_refresh(&self, refresh: PendingRefresh) {
         self.release.send_replace(true);
         assert!(within_real_second(refresh).await);
-        let state = self.fixture.session.read().await;
-        assert!(!state.origin_refresh.in_flight);
-        assert_eq!(state.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire), 0);
-        assert!(state.origin_account_io_lease.as_ref().is_none_or(|lease| !lease.is_active_or_acquiring()));
+        self.assert_origin_stopped().await;
     }
 }
 

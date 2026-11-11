@@ -90,8 +90,8 @@ When a client starts a group, Tuliprox ranks the members and opens the best one 
   input last. This state is shared by all targets, because it belongs to the source, not to the target.
   "Too many connections" answers (`429`/`509`) never open a circuit.
 
-HLS entries use the same start selection; with the shared HLS cache enabled, viewers of the same member share one
-origin session.
+HLS entries use the same start selection with manifest probing (see [HLS behavior](#hls-behavior)); with the shared
+HLS cache enabled, viewers of the same member share one origin session.
 
 ### Catch-up and timeshift
 
@@ -145,7 +145,8 @@ Rules of a switch:
 Each switch emits the event `failover_group.member_switched` (with the reason); start selections emit
 `failover_group.member_selected`, exhausted groups `failover_group.exhausted`.
 
-HLS playback switches members only when a new entry is started; HLS runtime failover is not implemented.
+HLS playback switches members only when a new entry is started (see [HLS behavior](#hls-behavior)); HLS runtime
+failover is not implemented.
 
 ### Active Streams and manual switching
 
@@ -158,6 +159,34 @@ the selected member using the standard splice path (emitting `failover_group.mem
 If the chosen member cannot be opened, playback stays on (or reverts to) the previous member without disruption. For
 shared streams, the manual switch switches the shared upstream connection for all concurrent viewers. Manual switching
 is not available for HLS or catch-up streams (which display active member information only).
+
+## HLS behavior
+
+Live HLS group streams support start failover when opening a channel, but do not support switching sources midstream:
+
+- **Start failover.** When a client opens a fresh live HLS group entry, Tuliprox downloads and validates the selected
+  member's manifest before returning the playlist. If the member serves a master playlist, Tuliprox follows the first
+  variant to its media playlist and verifies that it contains at least one segment. If the manifest probe fails,
+  Tuliprox records the failure, releases the member's provider connection, and tries the next candidate member within
+  `start.max_attempts` and `start.timeout_secs`.
+- **What is checked and what is not.** The probe checks only the top-level manifest and the first media variant.
+  Individual media segments, encryption keys, initialization maps, and alternative variants are not checked.
+- **No runtime switch.** Failover occurs at stream start only. If a member fails while a player is already streaming
+  segments or refreshing playlists, playback is not switched to another member; the player must reconnect to trigger
+  a fresh start selection.
+- **Failure classes.** Probe failures are classified using the same rules as MPEG-TS stream starts:
+  - Auth / account (`401 Unauthorized`, `403 Forbidden`, or provider account errors).
+  - Capacity (`429 Too Many Requests`).
+  - Transport (connection errors, resets, or timeouts).
+  - Invalid content (empty playlists, invalid playlist bodies, or other HTTP errors).
+- **Shared cache.** With the shared HLS cache enabled, the start probe issues one extra manifest request to verify the
+  selected member before caching begins. The shared cache then manages its own background stream and reserves its own
+  provider account. When the member already has a shared cache session that has fetched its manifest, a new viewer
+  joins that session without a probe.
+- **Stalker links.** When a portal rejects a cached Stalker link during the probe, Tuliprox requests a fresh link
+  once and probes again before it counts a member failure.
+- **Member requests.** A fresh live HLS request using a member's individual channel ID uses group failover with that
+  member preferred.
 
 ## Corrections and own groups (failover files)
 
