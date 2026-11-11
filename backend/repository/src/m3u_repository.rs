@@ -5,30 +5,42 @@ use crate::{
     m3u_playlist_iterator::M3uPlaylistM3uTextIterator,
     playlist_backend::{ensure_storage_path, iter_raw_playlist, M3u, PlaylistBackend},
     playlist_repository::get_input_m3u_playlist_file_path,
-    storage::{build_input_storage_path, get_input_storage_path, get_target_storage_path},
+    storage::{
+        build_input_storage_path, existing_file_identity, file_digest, get_input_storage_path, get_target_storage_path,
+        FileIdentity,
+    },
     storage_const,
-    xtream_repository::CategoryKey,
+    xtream_repository::{
+        target_publish::{publish_target_file_replacements, TargetEmptyReplacementMode, TargetFileReplacement},
+        CategoryKey,
+    },
     LockedReceiverStream,
 };
 use indexmap::IndexMap;
-use log::{error, warn};
+use log::warn;
+use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
     error::{str_to_io_error, string_to_io_error, TuliproxError},
-    model::{LiveStreamProperties, M3uPlaylistItem, PlaylistGroup, PlaylistItem, StreamProperties, XtreamCluster},
+    model::{
+        ConfigTargetOptions, LiveStreamProperties, M3uPlaylistItem, PlaylistGroup, PlaylistItem, StreamProperties,
+        XtreamCluster,
+    },
     utils::{m3u_flussonic_live_file_index_key, m3u_stream_url_identity, PROVIDER_SCHEME_PREFIX},
 };
 use std::{
     collections::HashMap,
-    io::Error,
+    io::{self, Error},
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::{fs, io::AsyncWriteExt, task};
 use tuliprox_core::{
-    model::{AppConfig, Config, ConfigInput, ConfigTarget, M3uTargetOutput, ProxyUserCredentials},
+    model::{AppConfig, Config, ConfigInput, ConfigTarget, M3uTargetOutput, ProxyUserCredentials, SourcesConfig},
     utils::{async_file_writer, file_exists_async},
 };
+
+const M3U_TEXT_HEADER: &[u8] = b"#EXTM3U\n";
 
 pub fn m3u_get_file_path_for_db(target_path: &Path) -> PathBuf {
     target_path.join(storage_const::PATH_M3U).join(concat_string!(
@@ -60,6 +72,183 @@ fn provider_m3u_filename(path: &Path) -> PathBuf {
     path.with_file_name(new_name)
 }
 
+fn m3u_text_filename(config: &Config, output: &M3uTargetOutput) -> Option<PathBuf> {
+    tuliprox_core::utils::get_file_path(&config.storage_dir, output.filename.as_deref().map(PathBuf::from))
+}
+
+struct M3uExportPath<'a> {
+    path: &'a Path,
+    file: Option<FileIdentity>,
+    parent: Option<FileIdentity>,
+}
+
+impl<'a> M3uExportPath<'a> {
+    fn new(path: &'a Path) -> io::Result<Self> {
+        let parent = path.parent().and_then(|parent| existing_file_identity(parent).ok().flatten());
+        Ok(Self { path, file: existing_file_identity(path)?, parent })
+    }
+
+    fn aliases(&self, other: &Path) -> bool {
+        self.path == other
+            || (self.file.is_some() && existing_file_identity(other).is_ok_and(|file| file == self.file))
+            || (self.path.file_name() == other.file_name()
+                && self.parent.is_some()
+                && other.parent().and_then(|parent| existing_file_identity(parent).ok().flatten()) == self.parent)
+    }
+}
+
+fn conflicting_export_target(
+    candidate: &M3uExportPath<'_>,
+    sources: &SourcesConfig,
+    config: &Config,
+    target_name: &str,
+    is_companion: bool,
+) -> io::Result<Option<String>> {
+    for source in &sources.sources {
+        for target in &source.targets {
+            let same_target = target.name == target_name;
+            let storage = get_target_storage_path(config, &target.name);
+            if let Some(filename) = target.get_m3u_output().and_then(|output| m3u_text_filename(config, output)) {
+                if (!same_target || is_companion) && candidate.aliases(&filename) {
+                    return Ok(Some(target.name.clone()));
+                }
+                if !same_target {
+                    let companion = provider_m3u_filename(&filename);
+                    if candidate.aliases(&companion) {
+                        let provider_active = sources.inputs.iter().any(|input| {
+                            input.url.starts_with(PROVIDER_SCHEME_PREFIX) && source.inputs.contains(&input.name)
+                        });
+                        if provider_active {
+                            return Ok(Some(target.name.clone()));
+                        }
+                        let legacy_owner = if let Some(storage) = &storage {
+                            matches!(
+                                provider_export_state(
+                                    &companion,
+                                    &m3u_get_file_path_for_db(storage),
+                                    target.options.as_ref(),
+                                )?,
+                                ProviderExportState::Owned(_)
+                            )
+                        } else {
+                            false
+                        };
+                        if legacy_owner {
+                            return Ok(Some(target.name.clone()));
+                        }
+                    }
+                }
+            }
+            if let Some(storage) = &storage {
+                if target.plugin_outputs().any(|plugin| candidate.aliases(&storage.join(plugin.file_name()))) {
+                    return Ok(Some(target.name.clone()));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn checked_m3u_text_paths(
+    app: &AppConfig,
+    config: Arc<Config>,
+    target: &ConfigTarget,
+    filename: PathBuf,
+    provider_active: bool,
+    check_main: bool,
+) -> Result<(PathBuf, Option<PathBuf>), TuliproxError> {
+    let target_name = target.name.clone();
+    let sources = app.sources.load_full();
+    task::spawn_blocking(move || {
+        if check_main {
+            if let Some(owner) = M3uExportPath::new(&filename)
+                .and_then(|candidate| conflicting_export_target(&candidate, &sources, &config, &target_name, false))
+                .map_err(|err| cant_read_result!(RepositoryM3u, "text export", &filename, err))?
+            {
+                return Err(TuliproxError::RepositoryM3u(format!(
+                    "M3U export path {} is also used by target '{owner}'",
+                    filename.display()
+                )));
+            }
+        }
+        let path = provider_m3u_filename(&filename);
+        let read_error = |err| cant_read_result!(RepositoryM3u, "provider export", &path, err);
+        let candidate = M3uExportPath::new(&path).map_err(read_error)?;
+        if candidate.file.is_none() && !provider_active {
+            return Ok((filename, None));
+        }
+        match conflicting_export_target(&candidate, &sources, &config, &target_name, true).map_err(read_error)? {
+            Some(owner) if provider_active => Err(TuliproxError::RepositoryM3u(format!(
+                "Provider M3U export path {} is also used by target '{owner}'",
+                path.display()
+            ))),
+            Some(_) => Ok((filename, None)),
+            None => Ok((filename, Some(path))),
+        }
+    })
+    .await
+    .map_err(|err| TuliproxError::RepositoryM3u(format!("Failed to check M3U export paths: {err}")))?
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProviderExportOwner {
+    path: PathBuf,
+    digest: String,
+}
+
+enum ProviderExportState {
+    Missing,
+    Owned(blake3::Hash),
+    Unverified,
+}
+
+fn provider_export_owner_path(database: &Path) -> PathBuf { database.with_file_name("provider-export.json") }
+
+fn provider_export_state(
+    path: &Path,
+    database: &Path,
+    target_options: Option<&ConfigTargetOptions>,
+) -> io::Result<ProviderExportState> {
+    use ProviderExportState::{Missing, Owned, Unverified};
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(Unverified),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Missing),
+        Err(error) => return Err(error),
+    }
+    let actual = file_digest(path)?;
+    match std::fs::read(provider_export_owner_path(database)) {
+        Ok(bytes) => {
+            let owner: ProviderExportOwner = serde_json::from_slice(&bytes)?;
+            return Ok(if owner.path == path && owner.digest == actual.to_hex().as_str() {
+                Owned(actual)
+            } else {
+                Unverified
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    // Legacy exports predate the ownership record. Only an exact reproduction of the
+    // target database with unresolved provider URLs establishes ownership here.
+    if !database.try_exists()? {
+        return Ok(Unverified);
+    }
+    let index = crate::get_file_path_for_db_index(database);
+    let entries =
+        crate::open_playlist_reader::<u32, M3uPlaylistItem, u32>(database, &index, None).map_err(io::Error::other)?;
+    let mut expected = blake3::Hasher::new();
+    expected.update(M3U_TEXT_HEADER);
+    let mut has_provider_url = false;
+    for entry in entries {
+        let (_, item) = entry?;
+        has_provider_url |= m3u_effective_url(&item).starts_with(PROVIDER_SCHEME_PREFIX);
+        expected.update(item.to_m3u(target_options, false).as_bytes()).update(b"\n");
+    }
+    Ok(if has_provider_url && expected.finalize() == actual { Owned(actual) } else { Unverified })
+}
+
 async fn write_m3u_text_file<F>(
     m3u_filename: &Path,
     m3u_playlist: &[M3uPlaylistItem],
@@ -78,7 +267,7 @@ where
     let mut writer = async_file_writer(file);
     await_playlist_write!(
         RepositoryM3u,
-        writer.write_all(b"#EXTM3U\n"),
+        writer.write_all(M3U_TEXT_HEADER),
         "Failed to write header to {} - {}",
         m3u_filename.display()
     );
@@ -148,34 +337,9 @@ fn replace_m3u_url_line(line: &mut String, url: &str) {
     *line = rebuilt;
 }
 
-async fn cleanup_temp_file(temp_file: &Path) {
-    if let Err(err) = fs::remove_file(temp_file).await {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            error!("Failed to cleanup temp file {} - {err}", temp_file.display());
-        }
-    }
-}
-
-async fn persist_m3u_playlist_as_text(
-    app_config: &AppConfig,
-    target: &ConfigTarget,
-    target_output: &M3uTargetOutput,
-    m3u_playlist: &[M3uPlaylistItem],
-) -> Result<(), TuliproxError> {
-    let Some(filename) = target_output.filename.as_ref() else {
-        return Ok(());
-    };
-    let cfg = app_config.config.load();
-    let Some(m3u_filename) = tuliprox_core::utils::get_file_path(&cfg.storage_dir, Some(PathBuf::from(filename)))
-    else {
-        return Ok(());
-    };
-
-    let target_options = target.options.as_ref();
+fn m3u_provider_inputs(app_config: &AppConfig, target: &ConfigTarget) -> HashMap<Arc<str>, Arc<ConfigInput>> {
     let sources = app_config.sources.load();
-    let provider_input_by_name: HashMap<Arc<str>, Arc<ConfigInput>> = if let Some(source) =
-        sources.sources.iter().find(|source| source.targets.iter().any(|t| t.name == target.name))
-    {
+    if let Some(source) = sources.sources.iter().find(|source| source.targets.iter().any(|t| t.name == target.name)) {
         sources
             .inputs
             .iter()
@@ -185,71 +349,96 @@ async fn persist_m3u_playlist_as_text(
             .collect()
     } else {
         HashMap::new()
+    }
+}
+
+fn m3u_effective_url(item: &M3uPlaylistItem) -> &str {
+    if item.t_stream_url.is_empty() {
+        &item.url
+    } else {
+        &item.t_stream_url
+    }
+}
+
+fn resolved_m3u_line(
+    m3u: &M3uPlaylistItem,
+    target_options: Option<&ConfigTargetOptions>,
+    provider_input_by_name: &HashMap<Arc<str>, Arc<ConfigInput>>,
+) -> Result<String, TuliproxError> {
+    let effective_url = m3u_effective_url(m3u);
+    if !effective_url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return Ok(m3u.to_m3u(target_options, false));
+    }
+
+    let input = provider_input_by_name.get(&m3u.input_name).ok_or_else(|| {
+        TuliproxError::RepositoryM3u(format!("Input '{}' not found for provider URL resolution", m3u.input_name))
+    })?;
+
+    let resolved = input.resolve_url(effective_url)?;
+    if resolved.as_ref() == effective_url {
+        return Ok(m3u.to_m3u(target_options, false));
+    }
+
+    let mut line = m3u.to_m3u(target_options, false);
+    replace_m3u_url_line(&mut line, resolved.as_ref());
+    Ok(line)
+}
+
+fn m3u_items(playlist: &[PlaylistGroup]) -> Vec<M3uPlaylistItem> {
+    playlist
+        .iter()
+        .flat_map(|group| &group.channels)
+        .filter(|item| !item.header.item_type.is_series_info())
+        .map(M3uPlaylistItem::from)
+        .collect()
+}
+
+fn store_m3u_tree(path: &Path, items: Vec<M3uPlaylistItem>) -> Result<crate::PlaylistM3uStorage, TuliproxError> {
+    let mut tree = BPlusTree::new();
+    for item in items {
+        tree.insert(item.virtual_id.get(), item);
+    }
+    tree.store_with_index(path, |item| item.source_ordinal)
+        .map_err(|err| cant_write_result!(RepositoryM3u, "m3u", path, err))?;
+    Ok(tree)
+}
+
+async fn persist_m3u_playlist_as_text(
+    app_config: &AppConfig,
+    target: &ConfigTarget,
+    target_output: &M3uTargetOutput,
+    database: &Path,
+    m3u_playlist: &[M3uPlaylistItem],
+) -> Result<(), TuliproxError> {
+    let cfg = app_config.config.load_full();
+    let Some(m3u_filename) = m3u_text_filename(&cfg, target_output) else {
+        return Ok(());
     };
+
+    let target_options = target.options.as_ref();
+    let provider_input_by_name = m3u_provider_inputs(app_config, target);
 
     if provider_input_by_name.is_empty() {
         write_m3u_text_file_atomic(&m3u_filename, m3u_playlist, |m3u| Ok(m3u.to_m3u(target_options, false))).await?;
     } else {
-        let provider_filename = provider_m3u_filename(&m3u_filename);
-        let provider_tmp = temp_m3u_filename(&provider_filename);
-        let m3u_tmp = temp_m3u_filename(&m3u_filename);
-
-        write_m3u_text_file(&provider_tmp, m3u_playlist, |m3u| Ok(m3u.to_m3u(target_options, false))).await?;
-
-        write_m3u_text_file(&m3u_tmp, m3u_playlist, |m3u| {
-            let effective_url = if m3u.t_stream_url.is_empty() { &m3u.url } else { &m3u.t_stream_url };
-            if !effective_url.starts_with(PROVIDER_SCHEME_PREFIX) {
-                return Ok(m3u.to_m3u(target_options, false));
-            }
-
-            let input = provider_input_by_name.get(&m3u.input_name).ok_or_else(|| {
-                TuliproxError::RepositoryM3u(format!(
-                    "Input '{}' not found for provider URL resolution",
-                    m3u.input_name
-                ))
-            })?;
-
-            let resolved = input.resolve_url(effective_url)?;
-            if resolved.as_ref() == effective_url.as_ref() {
-                return Ok(m3u.to_m3u(target_options, false));
-            }
-
-            let mut line = m3u.to_m3u(target_options, false);
-            replace_m3u_url_line(&mut line, resolved.as_ref());
-            Ok(line)
-        })
+        let (m3u_filename, provider) =
+            checked_m3u_text_paths(app_config, cfg, target, m3u_filename, true, false).await?;
+        let mut files = stage_m3u_text_exports(
+            &m3u_filename,
+            provider,
+            database,
+            m3u_playlist,
+            target_options,
+            &provider_input_by_name,
+            uuid::Uuid::new_v4().simple(),
+        )
         .await?;
-
-        if let Err(rename_err) = async {
-            await_playlist_write!(
-                RepositoryM3u,
-                fs::rename(&provider_tmp, &provider_filename),
-                "Failed to replace {} - {}",
-                provider_filename.display()
-            );
-            Ok::<(), TuliproxError>(())
-        }
+        task::spawn_blocking(move || {
+            publish_target_file_replacements(&mut files, &TargetEmptyReplacementMode::Persist)
+        })
         .await
-        {
-            cleanup_temp_file(&provider_tmp).await;
-            cleanup_temp_file(&m3u_tmp).await;
-            return Err(rename_err);
-        }
-
-        if let Err(rename_err) = async {
-            await_playlist_write!(
-                RepositoryM3u,
-                fs::rename(&m3u_tmp, &m3u_filename),
-                "Failed to replace {} - {}",
-                m3u_filename.display()
-            );
-            Ok::<(), TuliproxError>(())
-        }
-        .await
-        {
-            cleanup_temp_file(&m3u_tmp).await;
-            return Err(rename_err);
-        }
+        .map_err(|err| cant_write_result!(RepositoryM3u, "text export", &m3u_filename, err))?
+        .map_err(|err| cant_write_result!(RepositoryM3u, "text export", &m3u_filename, err))?;
     }
 
     Ok(())
@@ -271,29 +460,18 @@ pub async fn m3u_write_playlist(
     let _m3u_path = ensure_m3u_storage_path(&config, target.name.as_str()).await?;
 
     let m3u_path = m3u_get_file_path_for_db(target_path);
-    let m3u_playlist = new_playlist
-        .iter()
-        .flat_map(|pg| &pg.channels)
-        .filter(|&pli| !pli.header.item_type.is_series_info())
-        .map(M3uPlaylistItem::from)
-        .collect::<Vec<M3uPlaylistItem>>();
+    let m3u_playlist = m3u_items(new_playlist);
 
     let file_lock = cfg.file_locks.write_lock(&m3u_path).await;
 
-    persist_m3u_playlist_as_text(cfg, target, target_output, &m3u_playlist).await?;
+    persist_m3u_playlist_as_text(cfg, target, target_output, &m3u_path, &m3u_playlist).await?;
 
     let m3u_path_clone = m3u_path.clone();
 
     // Move all B+Tree building and I/O to spawn_blocking
     task::spawn_blocking(move || -> Result<(), TuliproxError> {
         let _guard = file_lock;
-        let mut tree = BPlusTree::new();
-        for m3u in m3u_playlist {
-            tree.insert(m3u.virtual_id, m3u);
-        }
-        tree.store_with_index(&m3u_path_clone, |pli| pli.source_ordinal)
-            .map_err(|err| cant_write_result!(RepositoryM3u, "m3u", &m3u_path_clone, err))?;
-        Ok(())
+        store_m3u_tree(&m3u_path_clone, m3u_playlist).map(|_| ())
     })
     .await
     .map_err(|err| {
@@ -301,6 +479,126 @@ pub async fn m3u_write_playlist(
     })??;
 
     Ok(())
+}
+
+async fn stage_m3u_text_exports(
+    filename: &Path,
+    provider_filename: Option<PathBuf>,
+    database: &Path,
+    items: &[M3uPlaylistItem],
+    target_options: Option<&ConfigTargetOptions>,
+    provider_inputs: &HashMap<Arc<str>, Arc<ConfigInput>>,
+    token: uuid::fmt::Simple,
+) -> Result<Vec<TargetFileReplacement>, TuliproxError> {
+    let mut files = Vec::new();
+    if let Some(path) = provider_filename {
+        let previous = {
+            let (path, database, options) = (path.clone(), database.to_path_buf(), target_options.cloned());
+            task::spawn_blocking(move || provider_export_state(&path, &database, options.as_ref())).await
+        }
+        .map_err(|err| cant_read_result!(RepositoryM3u, "provider export", &path, err))?
+        .map_err(|err| cant_read_result!(RepositoryM3u, "provider export", &path, err))?;
+        let owner_path = provider_export_owner_path(database);
+        if provider_inputs.is_empty() {
+            if let ProviderExportState::Owned(digest) = previous {
+                let mut removal = TargetFileReplacement::new(&path, None, token);
+                removal.expect_previous_file(Some(digest));
+                files.push(removal);
+                files.push(TargetFileReplacement::new(&owner_path, None, token));
+            }
+        } else {
+            let digest = match previous {
+                ProviderExportState::Missing => None,
+                ProviderExportState::Owned(digest) => Some(digest),
+                ProviderExportState::Unverified => {
+                    return Err(TuliproxError::RepositoryM3u(format!(
+                        "Cannot verify ownership of provider M3U: {}",
+                        path.display()
+                    )));
+                }
+            };
+            let mut provider = TargetFileReplacement::staged_file(&path, token);
+            provider.expect_previous_file(digest);
+            write_m3u_text_file(provider.staging_path(), items, |item| Ok(item.to_m3u(target_options, false))).await?;
+            let staged_path = provider.staging_path().to_path_buf();
+            let digest = task::spawn_blocking(move || file_digest(&staged_path))
+                .await
+                .map_err(|err| cant_read_result!(RepositoryM3u, "staged provider export", &path, err))?
+                .map_err(|err| cant_read_result!(RepositoryM3u, "staged provider export", &path, err))?;
+            let owner = TargetFileReplacement::staged_file(&owner_path, token);
+            let bytes = serde_json::to_vec(&ProviderExportOwner { path, digest: digest.to_hex().to_string() })
+                .map_err(|err| cant_write_result!(RepositoryM3u, "provider export owner", &owner_path, err))?;
+            fs::write(owner.staging_path(), bytes)
+                .await
+                .map_err(|err| cant_write_result!(RepositoryM3u, "provider export owner", &owner_path, err))?;
+            files.extend([provider, owner]);
+        }
+    }
+
+    let text = TargetFileReplacement::staged_file(filename, token);
+    write_m3u_text_file(text.staging_path(), items, |item| {
+        if provider_inputs.is_empty() {
+            Ok(item.to_m3u(target_options, false))
+        } else {
+            resolved_m3u_line(item, target_options, provider_inputs)
+        }
+    })
+    .await?;
+    files.push(text);
+    Ok(files)
+}
+
+pub(crate) async fn stage_m3u_playlist(
+    app: &AppConfig,
+    target: &ConfigTarget,
+    output: &M3uTargetOutput,
+    target_path: &Path,
+    playlist: &[PlaylistGroup],
+    token: uuid::fmt::Simple,
+) -> Result<(crate::PlaylistM3uStorage, Vec<TargetFileReplacement>), TuliproxError> {
+    let config = app.config.load_full();
+    ensure_m3u_storage_path(&config, &target.name).await?;
+    let database = m3u_get_file_path_for_db(target_path);
+    let staging = database.with_file_name(format!(".m3u-replace-{token}.db"));
+    let mut files = vec![
+        TargetFileReplacement::database(&database, &staging, token)
+            .map_err(|err| cant_write_result!(RepositoryM3u, "staging", &staging, err))?,
+        TargetFileReplacement::new(
+            &crate::get_file_path_for_db_index(&database),
+            Some(&crate::get_file_path_for_db_index(&staging)),
+            token,
+        ),
+    ];
+    let provider_inputs = m3u_provider_inputs(app, target);
+    let text_paths = if let Some(filename) = m3u_text_filename(&config, output) {
+        Some(checked_m3u_text_paths(app, config, target, filename, !provider_inputs.is_empty(), true).await?)
+    } else {
+        None
+    };
+    let target_options = target.options.clone();
+    let items = m3u_items(playlist);
+    // Let an in-flight text or database write finish before its file owners can drop.
+    tokio::spawn(async move {
+        if let Some((filename, provider_filename)) = text_paths {
+            files.extend(
+                stage_m3u_text_exports(
+                    &filename,
+                    provider_filename,
+                    &database,
+                    &items,
+                    target_options.as_ref(),
+                    &provider_inputs,
+                    token,
+                )
+                .await?,
+            );
+        }
+        crate::xtream_repository::target_publish::write_target_staging(files, move || store_m3u_tree(&staging, items))
+            .await
+            .map(|(files, tree)| (tree, files))
+    })
+    .await
+    .map_err(|error| TuliproxError::RepositoryM3u(format!("Failed to join M3U staging: {error}")))?
 }
 
 pub async fn m3u_load_rewrite_playlist(

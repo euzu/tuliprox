@@ -10,6 +10,48 @@ use std::{
 use tuliprox_core::{model::Config, utils};
 use uuid::Uuid;
 
+#[cfg(any(unix, windows))]
+pub(crate) type FileIdentity = (u64, u64);
+#[cfg(not(any(unix, windows)))]
+pub(crate) type FileIdentity = PathBuf;
+
+pub(crate) fn existing_file_identity(path: &Path) -> io::Result<Option<FileIdentity>> {
+    match file_identity(path) {
+        Ok(identity) => Ok(Some(identity)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> io::Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = path.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(path: &Path) -> io::Result<FileIdentity> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+    };
+    let file = OpenOptions::new().access_mode(0).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // The open file handle and initialized output buffer remain valid for the call.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((u64::from(info.dwVolumeSerialNumber), (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(path: &Path) -> io::Result<FileIdentity> { path.canonicalize() }
+
+pub(crate) fn file_digest(path: &Path) -> io::Result<blake3::Hash> {
+    Ok(blake3::Hasher::new().update_reader(File::open(path)?)?.finalize())
+}
+
 pub fn get_target_id_mapping_file(target_path: &Path) -> PathBuf {
     // Join directly with &str to avoid an intermediate PathBuf allocation
     target_path.join(storage_const::FILE_ID_MAPPING)

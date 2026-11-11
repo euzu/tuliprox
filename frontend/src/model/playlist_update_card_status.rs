@@ -814,11 +814,7 @@ mod tests {
             }),
             targets: target_ids
                 .iter()
-                .map(|target_id| InputUpdateCardTarget {
-                    id: *target_id,
-                    name: format!("target-{target_id}"),
-                    xtream_only: false,
-                })
+                .map(|target_id| InputUpdateCardTarget { id: *target_id, name: format!("target-{target_id}") })
                 .collect(),
             last_update_at: None,
         }

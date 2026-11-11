@@ -314,6 +314,26 @@ pub async fn lineup_guide_index_write(
     .map_err(|err| TuliproxError::RepositoryPlaylist(format!("Lineup guide index write task failed: {err}")))?
 }
 
+pub(crate) async fn stage_lineup_guide_index(
+    playlist: &[PlaylistGroup],
+    view: LineupGuideView,
+    published: &Path,
+    token: uuid::fmt::Simple,
+) -> Result<crate::xtream_repository::target_publish::TargetFileReplacement, TuliproxError> {
+    use crate::xtream_repository::target_publish::{write_target_staging, TargetFileReplacement};
+    let path = published.with_file_name(format!(".lineup-replace-{token}.db"));
+    let artifact = TargetFileReplacement::database(published, &path, token)
+        .map_err(|err| TuliproxError::RepositoryPlaylist(format!("Failed to reserve lineup guide index: {err}")))?;
+    let rows = playlist_rows(playlist, view);
+    let (artifact, _) = write_target_staging(artifact, move || {
+        tree_from_rows(rows)
+            .store(&path)
+            .map_err(|err| TuliproxError::RepositoryPlaylist(format!("Failed to stage lineup guide index: {err}")))
+    })
+    .await?;
+    Ok(artifact)
+}
+
 /// Removes the indexes at `paths`, so they cannot describe a playlist they were not built for.
 ///
 /// A missing file is fine: it is what a reader expects before the first persistence step, and

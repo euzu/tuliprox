@@ -16,7 +16,6 @@ use std::{
 pub struct InputUpdateCardTarget {
     pub id: u16,
     pub name: String,
-    pub xtream_only: bool,
 }
 
 /// Frontend read model for one configured input, including inputs without a manual action.
@@ -146,11 +145,7 @@ pub fn build_input_update_card_models(
             let seen_target_ids = target_ids_by_input_id.entry(input.id).or_default();
             for target in source_targets {
                 if seen_target_ids.insert(target.id) {
-                    targets.push(InputUpdateCardTarget {
-                        id: target.id,
-                        name: target.name.clone(),
-                        xtream_only: false,
-                    });
+                    targets.push(InputUpdateCardTarget { id: target.id, name: target.name.clone() });
                 }
             }
         }
@@ -229,10 +224,7 @@ mod tests {
         let cards = build_input_update_card_models(&sources, &PlaylistUpdateStatusDto::default());
         assert_eq!(cards[0].input_id, 2);
         assert!(cards[0].capabilities.supports(InputRefreshPolicy::FORCE));
-        assert_eq!(
-            cards[0].targets,
-            [super::InputUpdateCardTarget { id: 3, name: "selected".into(), xtream_only: false }]
-        );
+        assert_eq!(cards[0].targets, [super::InputUpdateCardTarget { id: 3, name: "selected".into() }]);
         assert_eq!(file.inputs[0].id, 9);
         assert_eq!(file.sources[0].targets[0].name, "other");
     }

@@ -262,16 +262,18 @@ fn strm_with_username_requires_m3u_or_xtream_output() {
 
     let err = target.prepare(1, None, None).expect_err("STRM username without stream output should fail");
 
-    assert!(err.to_string().contains("xtream or m3u output"));
+    assert!(err.to_string().contains("proxy username requires an Xtream or M3U output"));
 }
 
 #[test]
-fn strm_without_username_requires_m3u_or_xtream_output() {
-    let mut target = target_with_outputs(vec![strm_without_username()]);
-
-    let err = target.prepare(1, None, None).expect_err("STRM without stream output should fail");
-
-    assert!(err.to_string().contains("xtream or m3u output"));
+fn strm_without_proxy_username_supports_standalone_export() {
+    for username in [None, Some("   ".to_owned())] {
+        let TargetOutputDto::Strm(mut output) = strm_without_username() else { unreachable!() };
+        output.username = username;
+        let mut target = target_with_outputs(vec![TargetOutputDto::Strm(output)]);
+        target.prepare(1, None, None).expect("direct STRM export");
+        assert!(matches!(&target.output[..], [TargetOutputDto::Strm(output)] if output.username.is_none()));
+    }
 }
 
 #[test]

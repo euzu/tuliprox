@@ -39,13 +39,15 @@ pub struct InputUpdateRunView {
 }
 
 impl InputUpdateRunView {
-    /// The card badge: the run while it is queued or updating, afterwards this input's own result. A target
-    /// that failed for another input does not mark this input as failed.
+    /// Show a running update or a terminal failure assigned to this card. Otherwise use the input result.
     #[must_use]
     pub const fn card_status(&self) -> InputUpdateCardStatus {
         match (self.overall_state, self.input_state) {
             (InputUpdateCardStatus::Queued | InputUpdateCardStatus::Updating, _)
             | (_, InputUpdateCardStatus::Ready) => self.overall_state,
+            (InputUpdateCardStatus::Partial | InputUpdateCardStatus::Failed, _) if !self.failure_reasons.is_empty() => {
+                self.overall_state
+            }
             (_, input_state) => input_state,
         }
     }
@@ -779,6 +781,11 @@ mod tests {
             assert_eq!(view.input_state, InputUpdateCardStatus::Success);
             assert_eq!(view.overall_state, InputUpdateCardStatus::Failed);
             assert_eq!(view.card_status(), InputUpdateCardStatus::Success, "the card shows its own input");
+            let local_failure = InputUpdateRunView {
+                failure_reasons: vec!["Target 'selected' replacement failed".into()],
+                ..view.clone()
+            };
+            assert_eq!(local_failure.card_status(), InputUpdateCardStatus::Failed);
             for running in [InputUpdateCardStatus::Queued, InputUpdateCardStatus::Updating] {
                 let busy = InputUpdateRunView { overall_state: running, ..view.clone() };
                 assert_eq!(busy.card_status(), running, "a running update shows the run");
@@ -948,7 +955,7 @@ mod tests {
             capabilities: InputUpdateCapabilities::for_input(input),
             targets: targets
                 .iter()
-                .map(|(id, name)| InputUpdateCardTarget { id: *id, name: (*name).to_string(), xtream_only: false })
+                .map(|(id, name)| InputUpdateCardTarget { id: *id, name: (*name).to_string() })
                 .collect(),
             last_update_at,
         }

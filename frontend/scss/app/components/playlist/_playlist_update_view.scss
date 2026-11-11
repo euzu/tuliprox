@@ -16,7 +16,9 @@
   padding: var(--padding-default) 0;
   box-sizing: border-box;
   max-width: 100%;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 
   &__header {
     display: flex;
@@ -41,27 +43,22 @@
 
   &__cards {
     container: update-list / inline-size;
-    flex: 1 1 auto;
+    flex: none;
     box-sizing: border-box;
     width: 100%;
-    min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
-    overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
   }
 
   &__cards-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    grid-auto-rows: 1fr;
-    align-items: stretch;
+    align-items: start;
     gap: var(--update-card-spacing);
   }
 
   &__input-card {
     box-sizing: border-box;
     padding: var(--update-card-spacing);
+    min-block-size: var(--closed-card-height, auto);
     max-width: 100%;
     min-width: 0;
   }
@@ -69,7 +66,6 @@
   &__input-card article {
     display: flex;
     flex-flow: column;
-    height: 100%;
     min-width: 0;
   }
 
@@ -101,21 +97,19 @@
     text-transform: capitalize;
   }
 
+  &__input-card-header > &__pipeline-status {
+    margin-inline-start: auto;
+  }
+
   &__input-card-body {
     container: update-card / inline-size;
     flex: 1 1 auto;
-    min-block-size: 0;
     min-width: 0;
-    overflow-y: auto;
-    scrollbar-color: var(--modest-text-color) transparent;
-    scrollbar-width: thin;
-    scrollbar-gutter: stable;
   }
 
   &__input-content {
     display: flex;
     flex-flow: column;
-    min-block-size: 100%;
     min-width: 0;
   }
 
@@ -298,7 +292,7 @@
   }
 
   &__action-area {
-    padding-block-end: 16px;
+    margin-block-start: var(--update-action-offset, 0px);
   }
 
   &__policy-select,
@@ -331,7 +325,6 @@
 
   &__policy-description {
     margin: 10px 0 0;
-    min-height: 2lh;
     color: var(--modest-text-color);
     font-size: var(--font-size-sm);
     line-height: 1.5;
@@ -400,12 +393,9 @@
   }
 
   &__update-details {
-    margin-block-start: auto;
+    margin-block-start: 14px;
     min-width: 0;
     border-block-start: 1px solid var(--border-color);
-
-    &[open] { margin-block-start: 0; }
-
     summary {
       width: fit-content;
       padding-block: max(var(--padding-default), 0.75rem);
@@ -418,11 +408,6 @@
         outline-offset: 2px;
       }
     }
-  }
-
-  // Keep the detail body in the card's scroll range without affecting grid track sizing.
-  &__update-details-slot {
-    block-size: 0;
   }
 
   &__update-details-body {

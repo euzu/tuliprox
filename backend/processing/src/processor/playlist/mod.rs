@@ -63,7 +63,7 @@ use tuliprox_curation::{
     SelectorOutcome,
 };
 use tuliprox_repository::{
-    persist_playlist_views_with_groups, CategoryKey, FailoverGroupBatch, FailoverGroupMeta, MemoryPlaylistSource,
+    persist_playlist_views_with_outputs, CategoryKey, FailoverGroupBatch, FailoverGroupMeta, MemoryPlaylistSource,
     PlaylistPublicationPlan, PlaylistSource, PlaylistStorageState, TargetPlaylistPersistOptions,
     TargetReplacementDeadline,
 };

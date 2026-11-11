@@ -27,6 +27,9 @@ use shared::{
 use std::{collections::HashMap, rc::Rc};
 use yew::{platform::spawn_local, prelude::*};
 
+#[path = "update_card_layout.rs"]
+mod update_card_layout;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PlaylistUpdateBulkOutcome {
     Accepted { run_id: Option<PlaylistUpdateRunId>, input_ids: Vec<u16> },
@@ -306,20 +309,7 @@ pub fn PlaylistUpdateView() -> Html {
             let (statuses, card_statuses) = update_snapshot
                 .as_ref()
                 .map_or((&fallback_status, &fallback_card_statuses), |snapshot| (&snapshot.status, &*card_statuses));
-            let mut cards = build_input_update_card_models(sources, statuses);
-            if let Some(snapshot) = update_snapshot.as_ref() {
-                let xtream_ids: std::collections::HashSet<_> = snapshot
-                    .scope
-                    .sources
-                    .iter()
-                    .flat_map(|source| &source.targets)
-                    .filter(|target| target.xtream_only)
-                    .map(|target| target.id)
-                    .collect();
-                for target in cards.iter_mut().flat_map(|card| &mut card.targets) {
-                    target.xtream_only = xtream_ids.contains(&target.id);
-                }
-            }
+            let cards = build_input_update_card_models(sources, statuses);
             let mut scope = playlist_update_bulk_scope(sources, &cards);
             if runtime_sources.is_none() {
                 scope.visible_input_ids.clear();
@@ -417,6 +407,11 @@ pub fn PlaylistUpdateView() -> Html {
 
     let library_progress_view = visible_library_progress(library_progress.as_ref());
 
+    let cards_grid = use_node_ref();
+    update_card_layout::use_update_card_layout(
+        cards_grid.clone(),
+        input_update_run_views.iter().map(|view| view.input_id).collect(),
+    );
     html! {
       <div class="tp__playlist-update-view">
          <Breadcrumbs items={&*breadcrumbs}/>
@@ -456,7 +451,7 @@ pub fn PlaylistUpdateView() -> Html {
              Html::default()
          }}
          <div class="tp__playlist-update-view__cards">
-         <div class="tp__playlist-update-view__cards-grid">
+         <div ref={cards_grid} class="tp__playlist-update-view__cards-grid">
             {for input_update_run_views.into_iter().map(|view| view.with_library_catalog(library_catalog.as_ref())).filter_map(|view| {
                 let input_id = view.input_id;
                 input_update_cards_by_id.get(&input_id).map(|model| html! {
@@ -990,7 +985,7 @@ mod tests {
 
         for marker in [
             "<article aria-labelledby={heading_id.clone()}>",
-            "<details class=\"tp__playlist-update-view__update-details\" ontoggle={scroll_open_update_details}>",
+            "<details class=\"tp__playlist-update-view__update-details\">",
             "<summary>{translate(\"MESSAGES.PLAYLIST_UPDATE.UPDATE_DETAILS\")}</summary>",
             "role=\"list\"",
             "role=\"listitem\"",
@@ -1090,12 +1085,7 @@ mod tests {
     fn playlist_update_view_keeps_progress_inside_details_without_a_permanent_logbox() {
         let source = include_str!("input_update_card.rs").split("#[cfg(test)]").next().unwrap();
         let styles = include_str!("../../../../scss/app/components/playlist/_playlist_update_view.scss");
-        let disclosure = source
-            .split_once(
-                "<details class=\"tp__playlist-update-view__update-details\" ontoggle={scroll_open_update_details}>",
-            )
-            .unwrap()
-            .1;
+        let disclosure = source.split_once("<details class=\"tp__playlist-update-view__update-details\">").unwrap().1;
 
         assert!(disclosure.contains("if !view.localized_progress_details.is_empty()"));
         assert!(disclosure.contains("tp__playlist-update-view__progress-details"));

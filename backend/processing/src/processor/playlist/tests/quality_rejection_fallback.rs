@@ -1766,6 +1766,7 @@ async fn quality_rejection_for_empty_bootstrap_does_not_invent_a_baseline() {
 mod m3u_update_quality;
 mod manual_update_integration;
 mod persisted_input_status;
+mod replacement_outputs;
 mod staged_completion;
 mod target_staging;
 

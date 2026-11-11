@@ -156,6 +156,12 @@ pub(crate) struct TargetFileReplacement {
     backup: PathBuf,
     previous_moved: bool,
     replacement_published: bool,
+    expected_previous: Option<ExpectedTargetFile>,
+}
+
+enum ExpectedTargetFile {
+    Missing,
+    Digest(blake3::Hash),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,13 +173,22 @@ pub(super) enum TargetFileMoveMode {
 #[cfg(unix)]
 pub(super) fn move_target_file_platform(source: &Path, destination: &Path, mode: TargetFileMoveMode) -> io::Result<()> {
     require_same_parent_directory(source, destination)?;
-    if mode == TargetFileMoveMode::PreserveDestination && destination.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("target transaction destination already exists: {}", destination.display()),
-        ));
+    if mode == TargetFileMoveMode::ReplaceDestination {
+        return fs::rename(source, destination);
     }
-    fs::rename(source, destination)
+    let mut source_path = tempfile::TempPath::try_from_path(source)?;
+    // The publication or rollback owns the source even if the destination is occupied.
+    source_path.disable_cleanup(true);
+    source_path.persist_noclobber(destination).map_err(|error| {
+        io::Error::new(
+            error.error.kind(),
+            format!(
+                "Cannot publish to {} without overwriting an existing file: {}",
+                destination.display(),
+                error.error
+            ),
+        )
+    })
 }
 
 #[cfg(windows)]
@@ -222,16 +237,51 @@ pub(super) fn move_target_file_platform(
 
 impl TargetFileReplacement {
     pub(crate) fn new(published: &Path, staging: Option<&Path>, token: uuid::fmt::Simple) -> Self {
-        let filename =
-            published.file_name().map_or_else(|| "target-artifact".into(), |name| name.to_string_lossy().into_owned());
         Self {
             published: published.to_path_buf(),
             staging: staging.map(Path::to_path_buf),
             staging_database: None,
-            backup: published.with_file_name(format!(".{filename}.force-empty-backup-{token}")),
+            backup: published.with_file_name(format!(".force-empty-backup-{token}-{}", Uuid::new_v4().simple())),
             previous_moved: false,
             replacement_published: false,
+            expected_previous: None,
         }
+    }
+
+    pub(crate) fn staged_file(published: &Path, token: uuid::fmt::Simple) -> Self {
+        let path = published.with_file_name(format!(".target-replace-{token}-{}", Uuid::new_v4().simple()));
+        Self::new(published, Some(&path), token)
+    }
+
+    pub(crate) fn staging_path(&self) -> &Path { self.staging.as_deref().expect("a staged file has a staging path") }
+
+    pub(crate) fn expect_previous_file(&mut self, digest: Option<blake3::Hash>) {
+        self.expected_previous = Some(digest.map_or(ExpectedTargetFile::Missing, ExpectedTargetFile::Digest));
+    }
+
+    fn validate_previous_file(&self) -> io::Result<()> {
+        let exists = match self.published.symlink_metadata() {
+            Ok(metadata) if metadata.is_file() => true,
+            Ok(_) => {
+                return Err(io::Error::other(format!("Target artifact is not a file: {}", self.published.display())));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        let unchanged = match self.expected_previous {
+            Some(ExpectedTargetFile::Missing) => !exists,
+            Some(ExpectedTargetFile::Digest(digest)) => {
+                exists && crate::storage::file_digest(&self.published)? == digest
+            }
+            None => true,
+        };
+        if !unchanged {
+            return Err(io::Error::other(format!(
+                "Target artifact changed after staging: {}",
+                self.published.display()
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn database(published: &Path, staging: &Path, token: uuid::fmt::Simple) -> io::Result<Self> {
@@ -289,11 +339,12 @@ fn rollback_target_file_replacements(replacements: &mut [TargetFileReplacement])
     let mut errors = Vec::new();
     for replacement in replacements.iter_mut().rev() {
         if replacement.previous_moved {
-            if let Err(error) = move_target_file_platform(
-                &replacement.backup,
-                &replacement.published,
-                TargetFileMoveMode::ReplaceDestination,
-            ) {
+            let mode = if replacement.replacement_published {
+                TargetFileMoveMode::ReplaceDestination
+            } else {
+                TargetFileMoveMode::PreserveDestination
+            };
+            if let Err(error) = move_target_file_platform(&replacement.backup, &replacement.published, mode) {
                 errors.push(format!(
                     "failed to restore {} from {}: {error}",
                     replacement.published.display(),
@@ -304,7 +355,7 @@ fn rollback_target_file_replacements(replacements: &mut [TargetFileReplacement])
             if let Err(error) = move_target_file_platform(
                 &replacement.published,
                 &replacement.backup,
-                TargetFileMoveMode::ReplaceDestination,
+                TargetFileMoveMode::PreserveDestination,
             ) {
                 errors.push(format!(
                     "failed to withdraw replacement {} during rollback: {error}",
@@ -335,22 +386,27 @@ pub(crate) fn publish_target_file_replacements(
     parents.dedup_by(|left, right| left.parent() == right.parent());
 
     // Preflight all paths and sync staged bytes before moving any published file.
+    let mut published_paths = std::collections::HashSet::with_capacity(replacements.len());
     for replacement in replacements.iter() {
+        let parent = replacement
+            .published
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let identity = std::fs::canonicalize(parent)?.join(replacement.published.file_name().ok_or_else(|| {
+            io::Error::other(format!("Target artifact has no filename: {}", replacement.published.display()))
+        })?);
+        if !published_paths.insert(identity) {
+            return Err(io::Error::other(format!(
+                "Target artifact configured more than once: {}",
+                replacement.published.display()
+            )));
+        }
         if let Some(staging) = &replacement.staging {
             require_same_parent_directory(staging, &replacement.published)?;
             File::open(staging)?.sync_all()?;
         }
-        match std::fs::symlink_metadata(&replacement.published) {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(io::Error::other(format!(
-                    "Target artifact is not a file: {}",
-                    replacement.published.display()
-                )));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        replacement.validate_previous_file()?;
     }
     // Keep owned parent paths for directory sync during rollback as well.
     let parents = parents.into_iter().map(Path::to_path_buf).collect::<Vec<_>>();
@@ -376,7 +432,9 @@ pub(crate) fn publish_target_file_replacements(
 
         for (index, replacement) in replacements.iter_mut().enumerate() {
             if let Some(staging) = &replacement.staging {
-                move_target_file_platform(staging, &replacement.published, TargetFileMoveMode::ReplaceDestination)?;
+                // Old outputs have already been moved aside. A destination that exists now
+                // can alias an earlier entry on a case-insensitive volume.
+                move_target_file_platform(staging, &replacement.published, TargetFileMoveMode::PreserveDestination)?;
                 replacement.replacement_published = true;
             }
             #[cfg(test)]

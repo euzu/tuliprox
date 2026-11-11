@@ -5,7 +5,7 @@ use super::{
         persist_xtream_target_playlist, playlist_has_items, prepare_target_output_playlists,
         validate_force_empty_output_filters, validate_target_playlist_persistence, TargetPersistenceMode,
     },
-    replacement::TargetReplacement,
+    replacement::{StagePluginOutputs, TargetReplacement},
     target::load_target_memory_cache_snapshot,
     PlaylistStorageState, TargetPlaylistPersistOptions,
 };
@@ -83,6 +83,32 @@ pub async fn persist_playlist_views_with_groups(
     options: TargetPlaylistPersistOptions,
     failover_groups: &mut FailoverGroupBatch,
 ) -> Result<(), Vec<TuliproxError>> {
+    persist_playlist_views_with_outputs(
+        app_config,
+        base_playlist,
+        xtream_playlist,
+        epg,
+        target,
+        playlist_state,
+        options,
+        failover_groups,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_playlist_views_with_outputs(
+    app_config: &Arc<AppConfig>,
+    base_playlist: &mut [PlaylistGroup],
+    xtream_playlist: Option<&mut [PlaylistGroup]>,
+    epg: Option<&Epg>,
+    target: &ConfigTarget,
+    playlist_state: Option<&Arc<PlaylistStorageState>>,
+    options: TargetPlaylistPersistOptions,
+    failover_groups: &mut FailoverGroupBatch,
+    stage_plugins: Option<&StagePluginOutputs<'_>>,
+) -> Result<(), Vec<TuliproxError>> {
     persist_playlist_views_with_mode(
         app_config,
         base_playlist,
@@ -93,6 +119,7 @@ pub async fn persist_playlist_views_with_groups(
         options,
         TargetPersistenceMode::Persist,
         failover_groups,
+        stage_plugins,
     )
     .await
 }
@@ -116,6 +143,7 @@ pub(super) async fn persist_playlist_with_mode(
         options,
         persistence_mode,
         &mut FailoverGroupBatch::default(),
+        None,
     )
     .await
 }
@@ -215,6 +243,7 @@ async fn persist_playlist_views_with_mode(
     options: TargetPlaylistPersistOptions,
     persistence_mode: TargetPersistenceMode,
     failover_groups: &mut FailoverGroupBatch,
+    stage_plugins: Option<&StagePluginOutputs<'_>>,
 ) -> Result<(), Vec<TuliproxError>> {
     let playlist_is_empty = !playlist_has_items(base_playlist)
         && xtream_playlist.as_deref().is_none_or(|playlist| !playlist_has_items(playlist));
@@ -294,9 +323,20 @@ async fn persist_playlist_views_with_mode(
             }
         };
 
-    if let Some(replacement) = replacement {
-        let source_playlist = xtream_playlist.as_deref_mut().unwrap_or(base_playlist);
-        let playlist = prepared_outputs[0].as_deref_mut().unwrap_or(source_playlist);
+    if let Some(mut replacement) = replacement {
+        let outputs = replacement
+            .stage_outputs(
+                app_config,
+                &target_path,
+                target,
+                base_playlist,
+                xtream_playlist,
+                &mut prepared_outputs,
+                epg,
+                stage_plugins,
+            )
+            .await
+            .map_err(|err| vec![err])?;
         let mode = match persistence_mode {
             #[cfg(test)]
             TargetPersistenceMode::FailEmptyReplacementAt(failure) => TargetEmptyReplacementMode::FailAt(failure),
@@ -310,8 +350,7 @@ async fn persist_playlist_views_with_mode(
             .publish(
                 app_config,
                 target,
-                playlist,
-                epg,
+                outputs,
                 playlist_state,
                 target_id_mapping,
                 file_lock,

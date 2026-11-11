@@ -1469,7 +1469,16 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
         flatten_tvguide(new_epg)
     };
     let library_empty = library_empty.for_filtered_playlist(&finalized_base);
-    let result = persist_playlist_views_with_groups(
+    let stage_plugins =
+        |playlist: &[PlaylistGroup], target_dir: &std::path::Path| -> futures::future::BoxFuture<'_, _> {
+            Box::pin(super::plugin_output::stage_replacement_outputs(
+                ctx.plugins.clone(),
+                target.clone(),
+                playlist.to_vec(),
+                target_dir.to_path_buf(),
+            ))
+        };
+    let result = persist_playlist_views_with_outputs(
         &ctx.config,
         &mut finalized_base,
         finalized_xtream.as_deref_mut(),
@@ -1484,12 +1493,16 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
             publication_plan: views.publication_plan,
         },
         &mut views.failover_groups,
+        Some(&stage_plugins),
     )
     .await;
     // `type: plugin` outputs (plan §7 *Output providers*): the repository has no
     // plugin seam, so they render here, each failing on its own.
-    let result =
-        super::plugin_output::persist_plugin_outputs(&ctx.plugins, &ctx.config, target, &finalized_base, result).await;
+    let result = if ctx.replace_target_contents {
+        result
+    } else {
+        super::plugin_output::persist_plugin_outputs(&ctx.plugins, &ctx.config, target, &finalized_base, result).await
+    };
     let outcome = if result.is_ok() { TargetAnalyticsOutcome::Published } else { TargetAnalyticsOutcome::Failed };
     persist_target_analytics(&config, &target.name, analytics_dto, &unmapped_csv, outcome).await;
     let watch_playlist = target_watch_view(&finalized_base, finalized_xtream.as_deref());

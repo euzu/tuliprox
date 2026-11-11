@@ -9,9 +9,12 @@ use shared::{
     error::TuliproxError,
     model::{HookCtx, PlaylistGroup, PlaylistItem, PlaylistItemType, PluginHost, PluginOutputRequest},
 };
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tuliprox_core::model::{is_valid, AppConfig, ConfigTarget, PluginTargetOutput};
-use tuliprox_repository::ensure_target_storage_path;
+use tuliprox_repository::{ensure_target_storage_path, StagedPluginOutput};
 
 /// Render every `type: plugin` output of `target` from `playlist` (the base
 /// view `persist_playlist_views` just persisted) and fold the failures into
@@ -62,7 +65,13 @@ async fn render_all<P: PluginHost>(
     errors: &mut Vec<TuliproxError>,
 ) {
     for output in target.plugin_outputs() {
-        if let Err(err) = render_one(plugins, target, output, playlist, target_dir).await {
+        let items = output_items(playlist, output);
+        if items.is_empty() {
+            debug!("Target '{}': nothing to render for the {} output; keeping its file", target.name, output.plugin);
+            continue;
+        }
+        let path = target_dir.join(output.file_name());
+        if let Err(err) = render_one(plugins, target, output, &items, &path).await {
             error!("Target '{}': plugin output of {} failed: {err}", target.name, output.plugin);
             errors.push(TuliproxError::Plugin(format!(
                 "target '{}': plugin output of {} failed: {err}",
@@ -72,28 +81,49 @@ async fn render_all<P: PluginHost>(
     }
 }
 
+pub(super) async fn stage_replacement_outputs<P: PluginHost>(
+    plugins: P,
+    target: ConfigTarget,
+    playlist: Vec<PlaylistGroup>,
+    target_dir: PathBuf,
+) -> Result<Vec<StagedPluginOutput>, TuliproxError> {
+    // A renderer may still be finishing its own temporary write after the update times out.
+    // Keep every staging guard with the detached render task until it finishes.
+    tokio::spawn(async move {
+        let mut outputs = Vec::new();
+        for output in target.plugin_outputs() {
+            let staged = StagedPluginOutput::new(&target_dir.join(output.file_name()));
+            let items = output_items(&playlist, output);
+            render_one(&plugins, &target, output, &items, staged.path()).await.map_err(|err| {
+                TuliproxError::Plugin(format!(
+                    "Target '{}': plugin output of {} failed: {err}",
+                    target.name, output.plugin
+                ))
+            })?;
+            outputs.push(staged);
+        }
+        Ok(outputs)
+    })
+    .await
+    .map_err(|err| TuliproxError::Plugin(format!("Failed to join plugin output staging: {err}")))?
+}
+
 async fn render_one<P: PluginHost>(
     plugins: &P,
     target: &ConfigTarget,
     output: &PluginTargetOutput,
-    playlist: &[PlaylistGroup],
-    target_dir: &Path,
+    items: &[&PlaylistItem],
+    path: &Path,
 ) -> Result<(), String> {
-    let items = output_items(playlist, output);
-    if items.is_empty() {
-        debug!("Target '{}': nothing to render for the {} output; keeping its file", target.name, output.plugin);
-        return Ok(());
-    }
-    let path = target_dir.join(output.file_name());
     let options = shared::model::plugin_options(&output.plugin_config);
     let request = PluginOutputRequest {
         target: &target.name,
         format: output.format.as_deref().unwrap_or_default(),
         options: &options,
-        path: &path,
+        path,
     };
     let ctx = HookCtx::new(&target.name).with_view("base");
-    plugins.render_output(&output.plugin, &ctx, &request, &items).await
+    plugins.render_output(&output.plugin, &ctx, &request, items).await
 }
 
 /// The items of `playlist` the output renders: those its filter lets through,

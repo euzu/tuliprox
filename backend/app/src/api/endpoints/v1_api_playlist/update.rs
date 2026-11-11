@@ -198,9 +198,9 @@ pub(in crate::api) fn resolve_manual_playlist_update_targets(
         }) {
             return Err(TuliproxError::ConfigSource("Target does not belong to the selected input".to_string()));
         }
-        if request.replace_target_contents && !target.is_xtream_only() {
+        if request.replace_target_contents && !target.enabled {
             return Err(TuliproxError::ConfigSource(format!(
-                "Target '{}' must have only an Xtream output to replace its contents",
+                "Target '{}' must be active to replace its contents",
                 target.name
             )));
         }

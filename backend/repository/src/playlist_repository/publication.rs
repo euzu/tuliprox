@@ -193,14 +193,7 @@ pub(super) fn validate_target_playlist_persistence(
     options: &TargetPlaylistPersistOptions,
 ) -> Result<(), TuliproxError> {
     if options.replace_target_contents {
-        return if target.is_xtream_only() {
-            Ok(())
-        } else {
-            Err(TuliproxError::RepositoryPlaylist(format!(
-                "Target '{}' must have only an Xtream output to replace its contents",
-                target.name
-            )))
-        };
+        return Ok(());
     }
     if !playlist_is_empty
         || options.library_empty.replaces_empty_target()

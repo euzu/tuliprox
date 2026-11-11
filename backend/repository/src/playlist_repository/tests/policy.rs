@@ -1,4 +1,250 @@
 use super::*;
+use crate::playlist_repository::persist_playlist;
+use shared::model::{ConfigProviderDto, ProviderUrlSelectionPolicy};
+use std::fs;
+use tuliprox_core::model::{ConfigInput, ConfigProvider, ConfigSource, SourcesConfig};
+
+#[tokio::test]
+async fn ap12_strm_replacement_preserves_exports_indexed_by_another_target() {
+    check_shared_strm_replacement(false).await;
+    check_shared_strm_replacement(true).await;
+}
+
+async fn check_shared_strm_replacement(case_alias: bool) {
+    let directory = tempdir().unwrap();
+    if case_alias {
+        let probe = directory.path().join("Case");
+        fs::write(&probe, "").unwrap();
+        let aliases = directory.path().join("case").exists();
+        fs::remove_file(probe).unwrap();
+        if !aliases {
+            return;
+        }
+    }
+    let app = app_config_in(directory.path());
+    let output =
+        StrmTargetOutput::from(&StrmTargetOutputDto { directory: "strm".into(), flat: true, ..Default::default() });
+    let selected = Arc::new(target_with_options("selected", vec![TargetOutput::Strm(output.clone())], false));
+    let other = Arc::new(ConfigTarget { id: 2, name: "other".into(), ..selected.as_ref().clone() });
+    app.sources.store(Arc::new(SourcesConfig {
+        sources: vec![ConfigSource { inputs: vec![], targets: vec![selected.clone(), other.clone()] }],
+        ..Default::default()
+    }));
+
+    let mut shared = target_group(XtreamCluster::Live, 1, "shared");
+    shared.channels[0].header.url = "https://example.test/shared".intern();
+    let mut exclusive = target_group(XtreamCluster::Live, 2, "exclusive");
+    exclusive.channels[0].header.url = "https://example.test/exclusive".intern();
+    let ordinary = TargetPlaylistPersistOptions::default();
+    persist_playlist(&app, &mut [shared.clone(), exclusive], None, &selected, None, ordinary.clone()).await.unwrap();
+    let mut other_group = shared.clone();
+    if case_alias {
+        other_group.channels[0].header.name = "Shared".intern();
+        other_group.channels[0].header.title = "Shared".intern();
+    }
+    persist_playlist(&app, &mut [other_group], None, &other, None, ordinary).await.unwrap();
+    let index_prefix = hash_string_as_hex("strm");
+    let selected_index = strm_get_file_paths(&index_prefix, &directory.path().join("selected"));
+    let other_index = strm_get_file_paths(&index_prefix, &directory.path().join("other"));
+    let previous_index = fs::read(&other_index).unwrap();
+    let shared_file = directory.path().join("strm/shared.strm");
+    let previous = fs::read(&shared_file).unwrap();
+    if case_alias {
+        assert_eq!(
+            fs::read_to_string(&selected_index).unwrap().lines().find(|name| *name == "shared.strm"),
+            Some("shared.strm")
+        );
+        assert_eq!(std::str::from_utf8(&previous_index).unwrap().trim(), "Shared.strm");
+    }
+
+    let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+    shared.channels[0].header.url = "https://example.test/changed".intern();
+    let errors = persist_playlist(&app, &mut [shared], None, &selected, None, replacement.clone()).await.unwrap_err();
+    assert!(errors.iter().any(|error| error.to_string().contains("STRM file is also managed by another target")));
+    assert!(directory.path().join("strm/exclusive.strm").is_file());
+    assert_eq!(fs::read(&shared_file).unwrap(), previous);
+
+    persist_playlist(&app, &mut [], None, &selected, None, replacement).await.unwrap();
+    assert_eq!(fs::read_to_string(selected_index).unwrap(), "");
+    assert_eq!(fs::read(other_index).unwrap(), previous_index);
+    assert_eq!(fs::read(shared_file).unwrap(), previous);
+    assert!(!directory.path().join("strm/exclusive.strm").exists());
+}
+
+#[tokio::test]
+async fn ap12_strm_replacement_rolls_back_when_new_names_alias_on_disk() {
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let output =
+        StrmTargetOutput::from(&StrmTargetOutputDto { directory: "strm".into(), flat: true, ..Default::default() });
+    let target = target_with_options("selected", vec![TargetOutput::Strm(output)], false);
+    let mut prior = target_group(XtreamCluster::Live, 1, "prior");
+    prior.channels[0].header.url = "https://example.test/prior".intern();
+    persist_playlist(&app, &mut [prior], None, &target, None, TargetPlaylistPersistOptions::default()).await.unwrap();
+    let root = directory.path().join("strm");
+    let case_alias = root.join("PRIOR.strm").is_file();
+    let index = strm_get_file_paths(&hash_string_as_hex("strm"), &directory.path().join("selected"));
+    let before = fs::read(&index).unwrap();
+
+    let mut first = target_group(XtreamCluster::Live, 2, "New");
+    first.channels[0].header.url = "https://example.test/first".intern();
+    let mut second = target_group(XtreamCluster::Live, 3, "new");
+    second.channels[0].header.url = "https://example.test/second".intern();
+    let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+    let result = persist_playlist(&app, &mut [first, second], None, &target, None, replacement).await;
+    if case_alias {
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.to_string().contains("new.strm") || error.to_string().contains("New.strm")));
+        assert_eq!(fs::read(&index).unwrap(), before);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        assert_eq!(fs::read_to_string(root.join("prior.strm")).unwrap().trim(), "https://example.test/prior");
+    } else {
+        result.unwrap();
+        assert_eq!(fs::read_to_string(index).unwrap(), "New.strm\nnew.strm\n");
+        assert_eq!(fs::read_to_string(root.join("New.strm")).unwrap().trim(), "https://example.test/first");
+        assert_eq!(fs::read_to_string(root.join("new.strm")).unwrap().trim(), "https://example.test/second");
+        assert!(!root.join("prior.strm").exists());
+    }
+}
+
+fn m3u_test_target(name: &str, filename: &str) -> Arc<ConfigTarget> {
+    Arc::new(target_with_options(
+        name,
+        vec![TargetOutput::M3u(M3uTargetOutput {
+            filename: Some(filename.to_owned()),
+            include_type_in_url: false,
+            mask_redirect_url: false,
+            filter: None,
+        })],
+        false,
+    ))
+}
+
+#[tokio::test]
+async fn ap12_m3u_replacement_rejects_main_paths_used_by_another_target() {
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let output = directory.path().join("plain.m3u");
+    let owner = m3u_test_target("other", output.to_str().unwrap());
+    let mut old = target_group(XtreamCluster::Live, 1, "old-live");
+    old.channels[0].header.url = "https://example.test/old.ts".intern();
+    persist_playlist(&app, &mut [old], None, &owner, None, TargetPlaylistPersistOptions::default()).await.unwrap();
+    let db = directory.path().join("other/m3u/m3u.db");
+    let previous = fs::read(&output).unwrap();
+    let previous_db = fs::read(&db).unwrap();
+    let mut names = vec!["plain.m3u"];
+    if directory.path().join("PLAIN.m3u").is_file() {
+        names.push("PLAIN.m3u");
+    }
+    for name in names {
+        let selected = m3u_test_target("selected", name);
+        app.sources.store(Arc::new(SourcesConfig {
+            sources: vec![ConfigSource { inputs: vec![], targets: vec![selected.clone(), owner.clone()] }],
+            ..Default::default()
+        }));
+        let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+        let errors = persist_playlist(&app, &mut [], None, &selected, None, replacement).await.unwrap_err();
+        assert!(errors.iter().any(|error| error.to_string().contains("also used by target 'other'")));
+        assert_eq!(fs::read(&output).unwrap(), previous);
+        assert_eq!(fs::read(&db).unwrap(), previous_db);
+        assert!(!directory.path().join("selected/m3u/m3u.db").exists());
+    }
+}
+
+#[tokio::test]
+async fn ap12_m3u_replacement_retires_the_legacy_provider_export_with_the_main_file() {
+    check_m3u_provider_retirement(false).await;
+    check_m3u_provider_retirement(true).await;
+}
+
+async fn check_m3u_provider_retirement(legacy: bool) {
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let target = m3u_test_target("selected", "plain.m3u");
+    let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+        name: "fixture".into(),
+        urls: vec!["https://example.test".into()],
+        provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
+        dns: None,
+    }));
+    let input = ConfigInput {
+        name: "target-test-input".intern(),
+        url: "provider://fixture".into(),
+        provider_configs: Some(vec![provider]),
+        ..Default::default()
+    };
+    let install = |input: ConfigInput, targets| {
+        app.sources.store(Arc::new(SourcesConfig {
+            sources: vec![ConfigSource { inputs: vec![input.name.clone()], targets }],
+            inputs: vec![Arc::new(input)],
+            ..Default::default()
+        }));
+    };
+    install(input.clone(), vec![target.clone()]);
+    let mut old = target_group(XtreamCluster::Live, 1, "old-live");
+    old.channels[0].header.url = "provider://fixture/old.ts".intern();
+    persist_playlist(&app, &mut [old], None, &target, None, TargetPlaylistPersistOptions::default()).await.unwrap();
+    let main = directory.path().join("plain.m3u");
+    let companion = directory.path().join("plain_provider.m3u");
+    let owner = directory.path().join("selected/m3u/provider-export.json");
+    let old_companion = fs::read_to_string(&companion).unwrap();
+    assert!(old_companion.contains("provider://fixture/old.ts"));
+    assert!(fs::read_to_string(&main).unwrap().contains("https://example.test/old.ts"));
+    assert!(owner.is_file());
+    if legacy {
+        fs::remove_file(&owner).unwrap();
+    }
+
+    let direct = ConfigInput { url: "https://example.test".into(), ..input };
+    let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+    let other = m3u_test_target("other", "plain_provider.m3u");
+    install(direct.clone(), vec![target.clone(), other.clone()]);
+    let errors = persist_playlist(&app, &mut [], None, &other, None, replacement.clone()).await.unwrap_err();
+    assert!(errors.iter().any(|error| error.to_string().contains("also used by target 'selected'")));
+    assert_eq!(fs::read_to_string(&companion).unwrap(), old_companion);
+
+    install(direct.clone(), vec![target.clone()]);
+    let backup = main.with_extension("fixture");
+    fs::rename(&main, &backup).unwrap();
+    fs::create_dir(&main).unwrap();
+    assert!(persist_playlist(&app, &mut [], None, &target, None, replacement.clone()).await.is_err());
+    assert_eq!(fs::read_to_string(&companion).unwrap(), old_companion);
+    fs::remove_dir(&main).unwrap();
+    fs::rename(backup, &main).unwrap();
+
+    persist_playlist(&app, &mut [], None, &target, None, replacement.clone()).await.unwrap();
+    assert_eq!(fs::read_to_string(&main).unwrap(), "#EXTM3U\n");
+    assert!(!companion.exists());
+    assert!(!owner.exists());
+
+    install(direct, vec![target.clone(), other]);
+    fs::write(&companion, &old_companion).unwrap();
+    persist_playlist(&app, &mut [], None, &target, None, replacement).await.unwrap();
+    assert_eq!(fs::read_to_string(companion).unwrap(), old_companion);
+}
+
+#[tokio::test]
+async fn ap12_m3u_replacement_preserves_an_unowned_or_changed_companion() {
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let target = m3u_test_target("selected", "plain.m3u");
+    let companion = directory.path().join("plain_provider.m3u");
+    let foreign = "#EXTM3U\n#EXTINF:-1,Independent playlist\nhttps://example.test/foreign.ts\n";
+    fs::write(&companion, foreign).unwrap();
+    let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+    persist_playlist(&app, &mut [], None, &target, None, replacement.clone()).await.unwrap();
+    assert_eq!(fs::read_to_string(&companion).unwrap(), foreign);
+
+    let owner = directory.path().join("selected/m3u/provider-export.json");
+    let recorded_digest = blake3::hash(b"previous generated export").to_hex().to_string();
+    fs::write(&owner, serde_json::to_vec(&serde_json::json!({"path":companion,"digest":recorded_digest})).unwrap())
+        .unwrap();
+    persist_playlist(&app, &mut [], None, &target, None, replacement).await.unwrap();
+    assert_eq!(fs::read_to_string(&companion).unwrap(), foreign);
+    assert!(owner.exists());
+}
 
 #[test]
 fn target_force_empty_authorization_is_limited_to_xtream_outputs() {

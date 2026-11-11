@@ -718,9 +718,9 @@ async fn playlist_update_status_reader_join_failure_returns_server_error_not_emp
 async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targets() {
     use crate::{
         auth::create_jwt_web_user,
-        model::{TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput},
+        model::{M3uTargetOutput, StrmTargetOutput, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput},
     };
-    use shared::model::{Permission, UserId, WebAuthConfigDto, WebUiConfigDto};
+    use shared::model::{Permission, StrmTargetOutputDto, UserId, WebAuthConfigDto, WebUiConfigDto};
 
     let mut eligible = playlist_update_target(1, "eligible");
     Arc::make_mut(&mut eligible).output.push(TargetOutput::Xtream(XtreamTargetOutput {
@@ -728,23 +728,34 @@ async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targ
         trakt: None,
         filter: None,
     }));
-    let mut other = eligible.clone();
-    Arc::make_mut(&mut other).id = 2;
-    Arc::make_mut(&mut other).name = "other".into();
-    let mut mixed = eligible.clone();
-    Arc::make_mut(&mut mixed).id = 3;
-    Arc::make_mut(&mut mixed).name = "mixed".into();
-    Arc::make_mut(&mut mixed).output.push(TargetOutput::M3u(crate::model::M3uTargetOutput {
+    let mut m3u = playlist_update_target(2, "m3u");
+    let m3u_output = TargetOutput::M3u(M3uTargetOutput {
         filename: None,
         include_type_in_url: false,
         mask_redirect_url: false,
         filter: None,
-    }));
+    });
+    Arc::make_mut(&mut m3u).output.push(m3u_output.clone());
+    let mut mixed = eligible.clone();
+    Arc::make_mut(&mut mixed).id = 3;
+    Arc::make_mut(&mut mixed).name = "mixed".into();
+    Arc::make_mut(&mut mixed).output.push(m3u_output);
+    let mut strm = playlist_update_target(4, "strm");
+    Arc::make_mut(&mut strm).output.push(TargetOutput::Strm(StrmTargetOutput::from(&StrmTargetOutputDto {
+        directory: "fixture-strm".into(),
+        ..Default::default()
+    })));
+    let mut disabled = playlist_update_target(5, "disabled");
+    Arc::make_mut(&mut disabled).enabled = false;
+    let foreign = playlist_update_target(6, "foreign");
     let input = Arc::new(ConfigInput { id: 4, name: "provider".intern(), enabled: true, ..Default::default() });
     let config = Arc::new(test_app_config(
         input.clone(),
-        ConfigSource { inputs: vec![input.name.clone()], targets: vec![eligible, other, mixed] },
+        ConfigSource { inputs: vec![input.name.clone()], targets: vec![eligible, m3u, mixed, strm, disabled] },
     ));
+    let mut sources = (*config.sources.load_full()).clone();
+    sources.sources.push(ConfigSource { inputs: Vec::new(), targets: vec![foreign] });
+    config.sources.store(Arc::new(sources));
     let auth =
         WebAuthConfigDto { issuer: "local-fixture".into(), secret: "fixture signing key".into(), ..Default::default() };
     let web = crate::model::WebUiConfig::from(&WebUiConfigDto { auth: Some(auth), ..Default::default() });
@@ -767,14 +778,22 @@ async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targ
         }
         router.clone().oneshot(request.body(Body::from(body.to_string())).unwrap())
     };
-    let valid = json!({"target_ids":[2,1],"replace_target_contents":true});
+    let valid = json!({"target_ids":[2,4,1,3],"replace_target_contents":true,
+        "input_refresh":{"input_id":4,"policy":{"cache":"respect","quality":"enforce"}}});
     for (token, scope, body, status) in [
         (&reader, Some(revision.as_str()), valid.clone(), StatusCode::FORBIDDEN),
         (&writer, None, valid.clone(), StatusCode::PRECONDITION_REQUIRED),
         (&writer, Some("\"stale\""), valid.clone(), StatusCode::PRECONDITION_FAILED),
         (&writer, Some(&revision), json!({"replace_target_contents":true}), StatusCode::BAD_REQUEST),
         (&writer, Some(&revision), json!({"target_ids":[],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
-        (&writer, Some(&revision), json!({"target_ids":[1,3],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (&writer, Some(&revision), json!({"target_ids":[5],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (
+            &writer,
+            Some(&revision),
+            json!({"target_ids":[6],"replace_target_contents":true,
+            "input_refresh":{"input_id":4,"policy":{"cache":"respect","quality":"enforce"}}}),
+            StatusCode::BAD_REQUEST,
+        ),
         (
             &writer,
             Some(&revision),
@@ -788,7 +807,7 @@ async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targ
     }
     assert_eq!(post(&writer, Some(&revision), valid).await.unwrap().status(), StatusCode::ACCEPTED);
     let accepted = queue.try_recv().unwrap();
-    assert_eq!(accepted.targets.targets, [2, 1]);
+    assert_eq!(accepted.targets.targets, [2, 4, 1, 3]);
     assert!(accepted.replace_target_contents);
     assert_eq!(accepted.expected_scope.unwrap().revision(), revision);
 
