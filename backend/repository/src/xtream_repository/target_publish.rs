@@ -379,13 +379,28 @@ pub(crate) fn publish_target_file_replacements(
     replacements: &mut [TargetFileReplacement],
     mode: &TargetEmptyReplacementMode,
 ) -> io::Result<()> {
+    sync_staged_target_files(replacements)?;
+    publish_synced_target_file_replacements(replacements, mode)
+}
+
+pub(crate) fn sync_staged_target_files(replacements: &[TargetFileReplacement]) -> io::Result<()> {
+    for staging in replacements.iter().filter_map(|replacement| replacement.staging.as_deref()) {
+        File::open(staging)?.sync_all()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn publish_synced_target_file_replacements(
+    replacements: &mut [TargetFileReplacement],
+    mode: &TargetEmptyReplacementMode,
+) -> io::Result<()> {
     #[cfg(not(test))]
     let _ = &mode;
     let mut parents = replacements.iter().map(|entry| entry.published.as_path()).collect::<Vec<_>>();
     parents.sort_unstable_by(|left, right| left.parent().cmp(&right.parent()));
     parents.dedup_by(|left, right| left.parent() == right.parent());
 
-    // Preflight all paths and sync staged bytes before moving any published file.
+    // Revalidate published paths with the reader locks held before moving any file.
     let mut published_paths = std::collections::HashSet::with_capacity(replacements.len());
     for replacement in replacements.iter() {
         let parent = replacement
@@ -404,7 +419,6 @@ pub(crate) fn publish_target_file_replacements(
         }
         if let Some(staging) = &replacement.staging {
             require_same_parent_directory(staging, &replacement.published)?;
-            File::open(staging)?.sync_all()?;
         }
         replacement.validate_previous_file()?;
     }

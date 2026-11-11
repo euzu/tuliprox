@@ -2680,7 +2680,7 @@
       "REPLACE_TARGET_CONTENTS": "Target-Inhalte ersetzen",
       "REPLACE_HELP": "Alle Ausgaben der ausgewählten Targets nach einem erfolgreichen Update ersetzen.",
       "REPLACE_SELECT_TARGET": "Mindestens ein Target auswählen.",
-      "REPLACE_SELECT_ACTIVE_TARGETS": "Nur aktive Targets auswählen.",
+      "REPLACE_SELECT_ACTIVE_TARGETS": "Wähle die inaktiven Targets ab ({targets}).",
       "SCOPE_LOAD_FAILED": "Die aktuellen Aktualisierungsziele konnten nicht geladen werden. Erneut versuchen, um Aktualisierungen pro Eingang zu aktivieren.",
       "BULK_ONLY_DESCRIPTION": "Single-input updates are not available for this input. Use ‘Update all inputs’.",
       "CACHE_BYPASSED_FORCE": "Bypassed by Force",

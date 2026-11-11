@@ -2680,7 +2680,7 @@
       "REPLACE_TARGET_CONTENTS": "Hedef içeriklerini değiştir",
       "REPLACE_HELP": "Başarılı bir güncellemeden sonra seçili hedeflerin tüm çıktılarını değiştir.",
       "REPLACE_SELECT_TARGET": "En az bir hedef seçin.",
-      "REPLACE_SELECT_ACTIVE_TARGETS": "Yalnızca etkin hedefleri seçin.",
+      "REPLACE_SELECT_ACTIVE_TARGETS": "Etkin olmayan hedeflerin seçimini kaldırın ({targets}).",
       "SCOPE_LOAD_FAILED": "Geçerli güncelleme hedefleri yüklenemedi. Giriş başına güncellemeleri etkinleştirmek için yeniden deneyin.",
       "BULK_ONLY_DESCRIPTION": "Single-input updates are not available for this input. Use ‘Update all inputs’.",
       "CACHE_BYPASSED_FORCE": "Bypassed by Force",

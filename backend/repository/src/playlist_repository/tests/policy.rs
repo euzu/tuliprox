@@ -163,18 +163,7 @@ async fn check_m3u_provider_retirement(legacy: bool) {
     let directory = tempdir().unwrap();
     let app = app_config_in(directory.path());
     let target = m3u_test_target("selected", "plain.m3u");
-    let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
-        name: "fixture".into(),
-        urls: vec!["https://example.test".into()],
-        provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
-        dns: None,
-    }));
-    let input = ConfigInput {
-        name: "target-test-input".intern(),
-        url: "provider://fixture".into(),
-        provider_configs: Some(vec![provider]),
-        ..Default::default()
-    };
+    let input = m3u_provider_input();
     let install = |input: ConfigInput, targets| {
         app.sources.store(Arc::new(SourcesConfig {
             sources: vec![ConfigSource { inputs: vec![input.name.clone()], targets }],
@@ -223,6 +212,54 @@ async fn check_m3u_provider_retirement(legacy: bool) {
     fs::write(&companion, &old_companion).unwrap();
     persist_playlist(&app, &mut [], None, &target, None, replacement).await.unwrap();
     assert_eq!(fs::read_to_string(companion).unwrap(), old_companion);
+}
+
+fn m3u_provider_input() -> ConfigInput {
+    let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+        name: "fixture".into(),
+        urls: vec!["https://example.test".into()],
+        provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
+        dns: None,
+    }));
+    ConfigInput {
+        name: "target-test-input".intern(),
+        url: "provider://fixture".into(),
+        provider_configs: Some(vec![provider]),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn ordinary_m3u_update_adopts_a_legacy_provider_export_with_different_bytes() {
+    let directory = tempdir().unwrap();
+    let app = app_config_in(directory.path());
+    let target = m3u_test_target("selected", "plain.m3u");
+    let input = m3u_provider_input();
+    app.sources.store(Arc::new(SourcesConfig {
+        sources: vec![ConfigSource { inputs: vec![input.name.clone()], targets: vec![target.clone()] }],
+        inputs: vec![Arc::new(input)],
+        ..Default::default()
+    }));
+    let mut playlist = [target_group(XtreamCluster::Live, 1, "live")];
+    playlist[0].channels[0].header.url = "provider://fixture/live.ts".intern();
+    let ordinary = TargetPlaylistPersistOptions::default();
+    persist_playlist(&app, &mut playlist, None, &target, None, ordinary.clone()).await.unwrap();
+
+    let companion = directory.path().join("plain_provider.m3u");
+    let owner = directory.path().join("selected/m3u/provider-export.json");
+    let previous = fs::read_to_string(&companion).unwrap();
+    let legacy = format!("{previous}# Legacy export formatting\n");
+    fs::remove_file(&owner).unwrap();
+    fs::write(&companion, &legacy).unwrap();
+
+    let replacement = TargetPlaylistPersistOptions { replace_target_contents: true, ..Default::default() };
+    let errors = persist_playlist(&app, &mut playlist, None, &target, None, replacement).await.unwrap_err();
+    assert!(errors.iter().any(|error| error.to_string().contains("Cannot verify ownership of provider M3U")));
+    assert_eq!(fs::read_to_string(&companion).unwrap(), legacy);
+
+    persist_playlist(&app, &mut playlist, None, &target, None, ordinary).await.unwrap();
+    assert_eq!(fs::read_to_string(&companion).unwrap(), previous);
+    assert!(owner.is_file());
 }
 
 #[tokio::test]

@@ -296,15 +296,16 @@ fn current_submission_outcome(
 fn replacement_unavailable_reason(
     targets: &[InputUpdateCardTarget],
     selected_target_ids: &[u16],
-) -> Option<&'static str> {
+    translate: impl Fn(&str) -> String,
+) -> Option<String> {
     let mut selected = targets.iter().filter(|target| selected_target_ids.contains(&target.id)).peekable();
     if selected.peek().is_none() {
-        Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_TARGET")
-    } else if selected.any(|target| !target.enabled) {
-        Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_ACTIVE_TARGETS")
-    } else {
-        None
+        return Some(translate("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_TARGET"));
     }
+    let inactive = selected.filter(|target| !target.enabled).map(|target| target.name.as_str()).collect::<Vec<_>>();
+    (!inactive.is_empty()).then(|| {
+        translate("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_ACTIVE_TARGETS").replace("{targets}", &inactive.join(", "))
+    })
 }
 
 fn selected_current_target_ids(model: &InputUpdateCardModel, selected_target_ids: &[u16]) -> Vec<u16> {
@@ -1088,7 +1089,8 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
     let effective_policy = state.policy_for_capabilities(model.capabilities);
     let policy_options = policy_options(model.capabilities, effective_policy, |key| translate.t(key));
     let show_replacement = model.capabilities.supports(effective_policy);
-    let replacement_reason = replacement_unavailable_reason(&model.targets, &state.controls.selected_target_ids);
+    let replacement_reason =
+        replacement_unavailable_reason(&model.targets, &state.controls.selected_target_ids, |key| translate.t(key));
     let can_replace = show_replacement && can_submit && replacement_reason.is_none();
     let replace_target_contents = can_replace && state.controls.replace_target_contents;
     let replacement_id = format!("input-update-{}-replace", model.input_id);
@@ -1396,7 +1398,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                 <label for={replacement_id.clone()} class="tp__playlist-update-view__replace-copy">
                                     <span class="tp__playlist-update-view__replace-label">{replacement_label.clone()}</span>
                                     <span id={replacement_help_id.clone()} class="tp__playlist-update-view__replace-help" aria-live="polite">
-                                        {translate.t(replacement_reason.unwrap_or("MESSAGES.PLAYLIST_UPDATE.REPLACE_HELP"))}
+                                        {replacement_reason.unwrap_or_else(|| translate.t("MESSAGES.PLAYLIST_UPDATE.REPLACE_HELP"))}
                                     </span>
                                 </label>
                                 <ToggleSwitch
@@ -2024,18 +2026,24 @@ mod tests {
     fn replace_target_contents_is_one_shot_and_checks_the_current_selection() {
         let mut model = card(7, &[1, 2]);
         model.targets[1].enabled = false;
+        let unavailable = |ids: &[u16]| {
+            replacement_unavailable_reason(&model.targets, ids, |key| match key {
+                "MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_TARGET" => "Select at least one target.".into(),
+                "MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_ACTIVE_TARGETS" => {
+                    "Deselect inactive targets ({targets}).".into()
+                }
+                _ => panic!("unexpected message key {key}"),
+            })
+        };
         let initial = InputUpdateCardInteractionState::from_model(&model);
         assert!(!initial.controls.replace_target_contents);
+        assert_eq!(unavailable(&[]).as_deref(), Some("Select at least one target."));
         assert_eq!(
-            replacement_unavailable_reason(&model.targets, &[]),
-            Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_TARGET")
-        );
-        assert_eq!(
-            replacement_unavailable_reason(&model.targets, &initial.controls.selected_target_ids),
-            Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_ACTIVE_TARGETS")
+            unavailable(&initial.controls.selected_target_ids).as_deref(),
+            Some("Deselect inactive targets (target-2).")
         );
         let selected = reduce(initial, InputUpdateCardAction::ToggleTarget(2));
-        assert_eq!(replacement_unavailable_reason(&model.targets, &selected.controls.selected_target_ids), None);
+        assert_eq!(unavailable(&selected.controls.selected_target_ids), None);
         let enabled = reduce(selected, InputUpdateCardAction::SetReplacement(true));
         assert!(enabled.controls.replace_target_contents);
         for reset in [

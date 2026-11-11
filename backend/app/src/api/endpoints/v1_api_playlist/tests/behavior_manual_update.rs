@@ -798,7 +798,14 @@ async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targ
         (&writer, Some("\"stale\""), valid.clone(), StatusCode::PRECONDITION_FAILED),
         (&writer, Some(&revision), json!({"replace_target_contents":true}), StatusCode::BAD_REQUEST),
         (&writer, Some(&revision), json!({"target_ids":[],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
-        (&writer, Some(&revision), json!({"target_ids":[5],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (&writer, Some(&revision), json!({"target_ids":[1],"replace_target_contents":true}), StatusCode::BAD_REQUEST),
+        (
+            &writer,
+            Some(&revision),
+            json!({"target_ids":[5],"replace_target_contents":true,
+            "input_refresh":{"input_id":4,"policy":{"cache":"respect","quality":"enforce"}}}),
+            StatusCode::BAD_REQUEST,
+        ),
         (
             &writer,
             Some(&revision),

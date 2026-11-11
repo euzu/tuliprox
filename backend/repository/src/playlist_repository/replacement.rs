@@ -11,7 +11,7 @@ use crate::{
     target_id_mapping::get_uuid_index_path,
     xtream_category_view_lock_path, xtream_get_epg_file_path_for_target, xtream_lineup_guide_index_path,
     xtream_repository::target_publish::{
-        publish_target_file_replacements, stage_complete_xtream_playlist, write_target_staging,
+        publish_synced_target_file_replacements, stage_complete_xtream_playlist, sync_staged_target_files,
         TargetEmptyReplacementMode, TargetFileReplacement,
     },
     BPlusTree, FailoverGroupStagedPublication, LineupGuideView, PlaylistM3uStorage, PlaylistStorageState,
@@ -330,17 +330,18 @@ impl TargetReplacement {
         let mapping_file = self.staged_mapping.clone();
         let keep_mapping = cache.is_some();
         let mapping_name = target.name.clone();
-        let (replacement, id_mapping) = write_target_staging(self, move || {
+        // Complete staging I/O before acquiring the locks shared with readers.
+        let (replacement, id_mapping, groups) = tokio::task::spawn_blocking(move || {
             let mapping_error = |error| Self::error(&mapping_name, error);
             mapping.persist().map_err(mapping_error)?;
             drop(mapping);
-            if keep_mapping {
-                BPlusTree::load(&mapping_file).map(Some).map_err(mapping_error)
-            } else {
-                Ok(None)
-            }
+            let id_mapping =
+                if keep_mapping { Some(BPlusTree::load(&mapping_file).map_err(mapping_error)?) } else { None };
+            sync_staged_target_files(&self.files).map_err(mapping_error)?;
+            Ok::<_, TuliproxError>((self, id_mapping, groups))
         })
-        .await?;
+        .await
+        .map_err(|err| error(&err))??;
         // Match the reader's snapshot-before-catalog lock order.
         let category_view =
             if let Some(path) = category_view { Some(app.file_locks.write_lock(&path).await) } else { None };
@@ -365,7 +366,7 @@ impl TargetReplacement {
                 let _guards = (mapping_lock, category_view, locks, groups);
                 let mut replacement = replacement;
                 let cache = new_cache;
-                publish_target_file_replacements(&mut replacement.files, &mode)?;
+                publish_synced_target_file_replacements(&mut replacement.files, &mode)?;
                 if let Some((mut cache, storage)) = cache {
                     cache.insert(target_name.clone(), storage);
                 }

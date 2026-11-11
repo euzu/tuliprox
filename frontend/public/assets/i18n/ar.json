@@ -2672,7 +2672,7 @@
       "REPLACE_TARGET_CONTENTS": "استبدال محتوى الأهداف",
       "REPLACE_HELP": "استبدل كل مخرجات الأهداف المحددة بعد تحديث ناجح.",
       "REPLACE_SELECT_TARGET": "حدد هدفًا واحدًا على الأقل.",
-      "REPLACE_SELECT_ACTIVE_TARGETS": "اختر الأهداف النشطة فقط.",
+      "REPLACE_SELECT_ACTIVE_TARGETS": "ألغِ تحديد الأهداف غير النشطة ({targets}).",
       "SCOPE_LOAD_FAILED": "تعذر تحميل أهداف التحديث الحالية. أعد المحاولة لتفعيل تحديث كل مدخل على حدة.",
       "BULK_ONLY_DESCRIPTION": "لا يتوفر تحديث منفرد لهذا الإدخال. استخدم «تحديث جميع الإدخالات».",
       "CACHE_BYPASSED_FORCE": "تم تجاوزه بواسطة Force",

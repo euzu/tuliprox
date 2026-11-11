@@ -127,6 +127,7 @@ fn conflicting_export_target(
                                     &companion,
                                     &m3u_get_file_path_for_db(storage),
                                     target.options.as_ref(),
+                                    ProviderExportOwnership::Verify,
                                 )?,
                                 ProviderExportState::Owned(_)
                             )
@@ -202,12 +203,19 @@ enum ProviderExportState {
     Unverified,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderExportOwnership {
+    Verify,
+    AdoptLegacy,
+}
+
 fn provider_export_owner_path(database: &Path) -> PathBuf { database.with_file_name("provider-export.json") }
 
 fn provider_export_state(
     path: &Path,
     database: &Path,
     target_options: Option<&ConfigTargetOptions>,
+    ownership: ProviderExportOwnership,
 ) -> io::Result<ProviderExportState> {
     use ProviderExportState::{Missing, Owned, Unverified};
     match path.symlink_metadata() {
@@ -228,6 +236,11 @@ fn provider_export_state(
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
+    }
+
+    // Ordinary updates historically overwrote this target's companion path.
+    if ownership == ProviderExportOwnership::AdoptLegacy {
+        return Ok(Owned(actual));
     }
 
     // Legacy exports predate the ownership record. Only an exact reproduction of the
@@ -424,12 +437,12 @@ async fn persist_m3u_playlist_as_text(
         let (m3u_filename, provider) =
             checked_m3u_text_paths(app_config, cfg, target, m3u_filename, true, false).await?;
         let mut files = stage_m3u_text_exports(
-            &m3u_filename,
-            provider,
+            (&m3u_filename, provider),
             database,
             m3u_playlist,
             target_options,
             &provider_input_by_name,
+            ProviderExportOwnership::AdoptLegacy,
             uuid::Uuid::new_v4().simple(),
         )
         .await?;
@@ -482,19 +495,19 @@ pub async fn m3u_write_playlist(
 }
 
 async fn stage_m3u_text_exports(
-    filename: &Path,
-    provider_filename: Option<PathBuf>,
+    (filename, provider_filename): (&Path, Option<PathBuf>),
     database: &Path,
     items: &[M3uPlaylistItem],
     target_options: Option<&ConfigTargetOptions>,
     provider_inputs: &HashMap<Arc<str>, Arc<ConfigInput>>,
+    ownership: ProviderExportOwnership,
     token: uuid::fmt::Simple,
 ) -> Result<Vec<TargetFileReplacement>, TuliproxError> {
     let mut files = Vec::new();
     if let Some(path) = provider_filename {
         let previous = {
             let (path, database, options) = (path.clone(), database.to_path_buf(), target_options.cloned());
-            task::spawn_blocking(move || provider_export_state(&path, &database, options.as_ref())).await
+            task::spawn_blocking(move || provider_export_state(&path, &database, options.as_ref(), ownership)).await
         }
         .map_err(|err| cant_read_result!(RepositoryM3u, "provider export", &path, err))?
         .map_err(|err| cant_read_result!(RepositoryM3u, "provider export", &path, err))?;
@@ -582,12 +595,12 @@ pub(crate) async fn stage_m3u_playlist(
         if let Some((filename, provider_filename)) = text_paths {
             files.extend(
                 stage_m3u_text_exports(
-                    &filename,
-                    provider_filename,
+                    (&filename, provider_filename),
                     &database,
                     &items,
                     target_options.as_ref(),
                     &provider_inputs,
+                    ProviderExportOwnership::Verify,
                     token,
                 )
                 .await?,
