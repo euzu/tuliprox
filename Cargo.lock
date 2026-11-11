@@ -1567,7 +1567,7 @@ checksum = "431a4c31778fde52b4400de34975f219eeca55cc829a9de157cd743a5b230ecb"
 
 [[package]]
 name = "frontend"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -4436,7 +4436,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -5162,7 +5162,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuliprox"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "aes",
  "arc-swap",
@@ -5245,7 +5245,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-auth"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "axum",
@@ -5268,7 +5268,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-btree"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -5288,7 +5288,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-config-loader"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -5308,7 +5308,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-core"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "aes",
  "arc-swap",
@@ -5361,7 +5361,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-curation"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "indexmap",
  "log",
@@ -5378,7 +5378,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-dvr"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -5406,7 +5406,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-hls"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "async-compression",
@@ -5446,7 +5446,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-iptv"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -5471,7 +5471,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-library"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "blake3",
  "bytes",
@@ -5498,7 +5498,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-media-server"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "bytes",
  "chrono",
@@ -5518,7 +5518,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-messaging"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -5540,7 +5540,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-metadata"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -5564,7 +5564,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-mpegts"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "aes",
  "bytes",
@@ -5578,7 +5578,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-parser"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -5631,7 +5631,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-plugins"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -5662,7 +5662,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-processing"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -5701,7 +5701,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-repository"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -5738,7 +5738,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-scripting"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "log",
  "rhai",
@@ -5747,7 +5747,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-session"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "arc-swap",
  "axum",
@@ -5777,7 +5777,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-testkit"
-version = "3.3.195"
+version = "3.3.196"
 dependencies = [
  "axum",
  "base64 0.23.1",
