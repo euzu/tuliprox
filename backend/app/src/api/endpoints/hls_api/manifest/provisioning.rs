@@ -1,16 +1,16 @@
 use super::{
     build_hls_origin_resolution, build_hls_origin_source, get_stream_channel, hls_cache_configured,
     hls_cache_enabled_for_user, hls_canonical_retry_after_response, hls_origin_account_reservation_ttl_secs_fallback,
-    hls_origin_account_reservation_ttl_secs_for_session, hls_runtime_or_standalone_custom_tail_response,
-    resolve_hls_origin_playlist_url, stalker_hls_stream, try_hls_cached_manifest_response, HlsEntryStreamIdentity,
-    HlsRuntimeBandwidthLearningContext,
+    hls_origin_account_reservation_ttl_secs_for_session, hls_playback_kind,
+    hls_runtime_or_standalone_custom_tail_response, m3u_archive_epg_reference_ts, resolve_hls_origin_playlist_url,
+    stalker_hls_stream, try_hls_cached_manifest_response, HlsEntryStreamIdentity, HlsRuntimeBandwidthLearningContext,
 };
 use crate::{
     api::{
         api_utils::{
-            connection_priority_for_kind, create_playback_session_fingerprint, get_hls_session_ttl_secs,
-            resolve_playback_request_admission, resolve_stalker_stream_for_account, select_provider_stream_url,
-            EvictionReentryGuard,
+            connection_priority_for_kind, create_m3u_catchup_session_key, create_playback_session_fingerprint,
+            failover_group::SelectionMode, get_hls_session_ttl_secs, resolve_playback_request_admission,
+            resolve_stalker_stream_for_account, select_provider_stream_url, EvictionReentryGuard,
         },
         model::{
             hls_custom_video_manifest_response_with_virtual_id, hls_provisioning_discontinuity_sequence,
@@ -127,6 +127,20 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
     })
 }
 
+fn normalize_archive_redirect_url(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    if url::Url::parse(path).is_ok() {
+        path.to_string()
+    } else {
+        url::Url::parse("http://localhost/")
+            .ok()
+            .and_then(|base| base.join(path.strip_prefix('/').unwrap_or(path)).ok())
+            .map_or_else(|| path.to_string(), |u| u.to_string())
+    }
+}
+
 /// Admits the virtual HLS entry and reserves its origin account; `false` when admission or reservation fails.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
@@ -136,10 +150,28 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
     target: &Arc<ConfigTarget>,
     input: &ConfigInput,
     stream_identity: &HlsEntryStreamIdentity,
+    ready_redirect_path: &str,
 ) -> bool {
     let virtual_id = stream_identity.virtual_id();
-    let session_token =
-        create_playback_session_fingerprint(fingerprint, &user.username, virtual_id, PlaylistItemType::LiveHls, None);
+    let normalized_redirect_url = normalize_archive_redirect_url(ready_redirect_path);
+    let archive_reference = m3u_archive_epg_reference_ts(&normalized_redirect_url);
+    let is_live = archive_reference.is_none()
+        && hls_playback_kind(archive_reference, ready_redirect_path, None) == PlaybackKind::LiveHls;
+    let playback_kind = if is_live { PlaybackKind::LiveHls } else { PlaybackKind::Catchup };
+    let session_token = archive_reference.map_or_else(
+        || {
+            create_playback_session_fingerprint(
+                fingerprint,
+                &user.username,
+                virtual_id,
+                if is_live { PlaylistItemType::LiveHls } else { PlaylistItemType::Catchup },
+                None,
+            )
+        },
+        |timestamp| {
+            create_m3u_catchup_session_key(fingerprint, &user.username, virtual_id, &format!("archive|{timestamp}|0"))
+        },
+    );
     let (connection_admission, _, _) = resolve_playback_request_admission(
         &app_state.admission_ctx(),
         user,
@@ -190,12 +222,16 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
         VirtualId::new(virtual_id),
     )
     .await;
-    let (entry_group, prefer) = tuliprox_repository::FailoverGroupRecord::classify_entry_target(&classified, true);
+    let (entry_group, prefer) = tuliprox_repository::FailoverGroupRecord::classify_entry_target(&classified, is_live);
     if let Some(group) = entry_group {
         let playback = crate::api::api_utils::group_playback_settings(app_state, target);
+        let now_ts = chrono::Utc::now().timestamp();
+        let mode =
+            archive_reference.map_or(SelectionMode::Live, |start_ts| SelectionMode::Archive { start_ts, now_ts });
         let req = crate::api::api_utils::GroupSelectionRequest {
+            mode,
             prefer,
-            lease: Some(PlaybackLeaseRef::new(session_owner, PlaybackKind::LiveHls)),
+            lease: Some(PlaybackLeaseRef::new(session_owner, playback_kind)),
             allow_provider_grace: playback.allow_provider_grace,
             bypass_maintenance: user.is_recording_proxy_user(),
             ..crate::api::api_utils::GroupSelectionRequest::new(
@@ -227,12 +263,12 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
         hls_cache_origin.session_entry_url.as_str(),
         &session_token,
         session_owner,
-        PlaybackKind::LiveHls,
+        playback_kind,
         reservation_ttl_secs,
         connection_admission.permission(),
         connection_kind,
         false,
-        stalker_hls_stream(stream_identity.stream_ref(), false),
+        stalker_hls_stream(stream_identity.stream_ref(), !is_live),
     )
     .await
     else {
@@ -420,6 +456,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_panel_provisioning_poll_resp
         target,
         input,
         stream_identity,
+        ready_redirect_path,
     )
     .await
     {
@@ -922,9 +959,132 @@ mod tests {
             &env.target,
             &solis_input,
             &stream_identity,
+            "",
         )
         .await;
 
         assert!(reserved, "virtual entry reservation for member vid should succeed via group selection on korath");
+    }
+
+    #[tokio::test]
+    async fn try_reserve_hls_virtual_entry_member_vid_archive_does_not_failover() {
+        // Solis has capacity (10 connections), Korath has max_connections=1 and is exhausted by a foreign reservation.
+        let env = GroupPlaybackEnv::new(&["solis", "korath"]).max_connections("korath", 1).hls_cache().build().await;
+        let korath_member_vid = env.member_vid("korath");
+        let korath_member =
+            env.group_record.members.iter().find(|m| m.input_name.as_ref() == "korath").expect("korath member");
+        let korath_input = env.app_state.app_config.get_input_by_name(&"korath".intern()).expect("korath input");
+
+        // Exhaust korath's single slot.
+        env.app_state.active_provider.refresh_provider_reservation(&korath_input.name, "foreign-owner", 60);
+        env.app_state.active_provider.confirm_playback_activity("foreign-owner").unwrap();
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let fingerprint = Fingerprint::new("fp-viewer".to_string(), "127.0.0.1".to_string(), addr);
+        let (user, _) = env.app_state.app_config.get_target_for_username("viewer").expect("viewer user");
+
+        let stream_identity = HlsEntryStreamIdentity::new(korath_member_vid, korath_member.input_stream_id.as_ref())
+            .expect("stream identity");
+
+        // Live request on korath_member_vid with korath (exhausted) succeeds by failing over to solis (has capacity).
+        let live_reserved = try_reserve_hls_virtual_entry_origin_account_for_redirect(
+            &env.app_state,
+            &fingerprint,
+            &user,
+            &env.target,
+            &korath_input,
+            &stream_identity,
+            "",
+        )
+        .await;
+        assert!(live_reserved, "live request should succeed via group failover to solis");
+
+        // Archive request on korath_member_vid must NOT failover to solis; it remains on korath and fails
+        // because korath is exhausted, waiting for capacity.
+        let archive_path = format!("/timeshift/viewer/secret/{korath_member_vid}.m3u8?utc=1700000000&lutc=1700003600");
+        let archive_reserved = try_reserve_hls_virtual_entry_origin_account_for_redirect(
+            &env.app_state,
+            &fingerprint,
+            &user,
+            &env.target,
+            &korath_input,
+            &stream_identity,
+            &archive_path,
+        )
+        .await;
+        assert!(
+            !archive_reserved,
+            "archive poll on exhausted member must not failover and should return false to keep waiting"
+        );
+    }
+
+    #[test]
+    fn normalize_archive_redirect_url_cases() {
+        assert_eq!(normalize_archive_redirect_url(""), "");
+        assert_eq!(
+            normalize_archive_redirect_url("/timeshift/viewer/secret/101.m3u8?utc=1700000000&lutc=1700003600"),
+            "http://localhost/timeshift/viewer/secret/101.m3u8?utc=1700000000&lutc=1700003600"
+        );
+        assert_eq!(
+            normalize_archive_redirect_url("http://origin.example/timeshift/101.m3u8?utc=1700000000"),
+            "http://origin.example/timeshift/101.m3u8?utc=1700000000"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_reserve_hls_virtual_entry_group_vid_archive_does_not_failover() {
+        // Solis has capacity (10 connections) but no archive (None).
+        // Korath has archive (Some(7)) but max_connections=1 and is exhausted by a foreign reservation.
+        let env = GroupPlaybackEnv::new(&["solis", "korath"])
+            .max_connections("korath", 1)
+            .with_member_archives(&[None, Some(7)])
+            .hls_cache()
+            .build()
+            .await;
+        let korath_member =
+            env.group_record.members.iter().find(|m| m.input_name.as_ref() == "korath").expect("korath member");
+        let korath_input = env.app_state.app_config.get_input_by_name(&"korath".intern()).expect("korath input");
+
+        // Exhaust korath's single slot.
+        env.app_state.active_provider.refresh_provider_reservation(&korath_input.name, "foreign-owner", 60);
+        env.app_state.active_provider.confirm_playback_activity("foreign-owner").unwrap();
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let fingerprint = Fingerprint::new("fp-viewer".to_string(), "127.0.0.1".to_string(), addr);
+        let (user, _) = env.app_state.app_config.get_target_for_username("viewer").expect("viewer user");
+
+        let stream_identity = HlsEntryStreamIdentity::new(env.group_vid, korath_member.input_stream_id.as_ref())
+            .expect("stream identity");
+
+        // Live request on group_vid with korath (exhausted) succeeds by selecting solis (has capacity).
+        let live_reserved = try_reserve_hls_virtual_entry_origin_account_for_redirect(
+            &env.app_state,
+            &fingerprint,
+            &user,
+            &env.target,
+            &korath_input,
+            &stream_identity,
+            "",
+        )
+        .await;
+        assert!(live_reserved, "live request should succeed via group selection on solis");
+
+        // Archive request on group_vid must NOT failover to solis; solis does not support archive,
+        // and korath is exhausted, so archive reservation fails and returns false to keep waiting.
+        let archive_path = format!("/timeshift/viewer/secret/{}.m3u8?utc=1700000000&lutc=1700003600", env.group_vid);
+        let archive_reserved = try_reserve_hls_virtual_entry_origin_account_for_redirect(
+            &env.app_state,
+            &fingerprint,
+            &user,
+            &env.target,
+            &korath_input,
+            &stream_identity,
+            &archive_path,
+        )
+        .await;
+        assert!(
+            !archive_reserved,
+            "archive poll on group vid must use SelectionMode::Archive and not failover to non-archive solis"
+        );
     }
 }

@@ -77,17 +77,6 @@ pub(in crate::api) fn build_virtual_hls_entry_path(
     }
 }
 
-pub(in crate::api::endpoints::hls_api) fn classify_hls_entry_group(
-    target_stream: &ResolvedStreamTarget,
-    is_entry_stage: bool,
-    is_live_hls: bool,
-) -> (Option<Arc<FailoverGroupRecord>>, Option<usize>) {
-    if !is_entry_stage {
-        return (None, None);
-    }
-    FailoverGroupRecord::classify_entry_target(target_stream, is_live_hls)
-}
-
 /// Serves an HLS manifest request for the selected provider account; a Stalker manifest URL is accepted, resolved or
 /// rejected per [`stalker_manifest_url`].
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -152,8 +141,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     } else {
         ResolvedStreamTarget::Item
     };
-    let (entry_group, prefer_member) =
-        classify_hls_entry_group(&classified, matches!(stage, HlsRequestStage::Entry), is_live_hls);
+    let (entry_group, prefer_member) = FailoverGroupRecord::classify_entry_target(&classified, is_live_hls);
 
     // Only a fresh entry is gated. Variant refreshes, segments and entry re-polls of a running
     // session (unwrapped media playlists) belong to a running playback. A group checks
@@ -215,12 +203,15 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     kind,
                 )
             };
-            let Ok((resolved, _probed)) = super::group_start::resolve_checked_hls_group_entry(
+            let Ok((resolved, probed)) = super::group_start::resolve_checked_hls_group_entry(
                 app_state,
                 target,
                 Arc::clone(&group),
                 req,
                 req_headers,
+                false,
+                None,
+                true,
             )
             .await
             else {
@@ -245,16 +236,19 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 .unwrap_or_else(|| Arc::clone(&resolved.member.input_name));
             app_state.connection_manager.release_provider_handle(selection_handle.take());
 
-            let Some(member_url) = super::group_start::build_hls_group_member_origin_url(
-                app_state,
-                target,
-                &resolved.input,
-                &resolved.member,
-                &allocated,
-                None,
-            )
-            .await
-            else {
+            let Some(member_url) = (if let Some(ref probed) = probed {
+                Some(probed.request_url.clone())
+            } else {
+                super::group_start::build_hls_group_member_origin_url(
+                    app_state,
+                    target,
+                    &resolved.input,
+                    &resolved.member,
+                    &allocated,
+                    None,
+                )
+                .await
+            }) else {
                 return hls_panel_provisioning_or_status_response(
                     app_state,
                     user,
@@ -335,7 +329,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
         provider_binding_tag,
         pinned_stalker_stream,
         probed_manifest,
-    ): (String, _, _, _, _, _, _) = if let Some(session) = user_session {
+        precomputed_user_agent_stream_index,
+    ): (String, _, _, _, _, _, _, _) = if let Some(session) = user_session {
         let bound_inp_opt = session.member_binding.as_ref().and_then(|binding| {
             app_state.app_config.get_input_by_name(&binding.input_name).map(|inp| (binding.member_vid, inp))
         });
@@ -508,6 +503,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             provider_binding_tag,
             pinned_stalker_stream,
             None,
+            None,
         )
     } else if let Some(group) = entry_group {
         let user_session_token = hls_entry_user_session_token(
@@ -547,6 +543,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
             Arc::clone(&group),
             req,
             req_headers,
+            true,
+            Some((&user.username, user_session_token.as_str())),
+            false,
         )
         .await
         else {
@@ -561,6 +560,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
             )
             .await;
         };
+
+        let precomputed_user_agent_stream_index = probed_manifest.as_ref().and_then(|p| p.user_agent_stream_index);
 
         let selected_provider_config =
             resolved.acquired.handle.handle().and_then(|handle| handle.allocation.get_provider_config());
@@ -669,6 +670,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             provider_binding_tag,
             pinned_stalker_stream,
             probed_manifest,
+            precomputed_user_agent_stream_index,
         )
     } else {
         // Append/shift catchup must keep an m3u-catchup session token even when shared HLS
@@ -736,6 +738,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             provider_binding_tag,
             None,
             None,
+            None,
         )
     };
 
@@ -773,14 +776,18 @@ pub(in crate::api) async fn handle_hls_stream_request(
             (virtual_id, input, stream_ref.as_str(), None)
         };
 
-    let user_agent_stream_index = crate::api::api_utils::resolve_stream_user_agent_index(
-        app_state,
-        effective_input,
-        selected_provider_config.is_some(),
-        &user.username,
-        session_token.as_deref(),
-    )
-    .await;
+    let user_agent_stream_index = if let Some(stream_index) = precomputed_user_agent_stream_index {
+        Some(stream_index)
+    } else {
+        crate::api::api_utils::resolve_stream_user_agent_index(
+            app_state,
+            effective_input,
+            selected_provider_config.is_some(),
+            &user.username,
+            session_token.as_deref(),
+        )
+        .await
+    };
     if let Some(stream_index) = user_agent_stream_index {
         request::append_user_agent_stream_index(&mut headers, stream_index);
         if let Some(session_token) = session_token.as_deref() {
@@ -991,12 +998,12 @@ fn rebind_session_cookie(
 /// Playlist body, final response URL, response headers and playlist kind of a manifest download.
 type ClassifiedHlsManifest = (String, String, HeaderMap, HlsPlaylistKind);
 
-/// A 4xx response or a non-playlist body, the two ways a portal answers an expired link.
-/// Timeouts, 5xx and transport errors do not trigger a fresh `create_link`. Neither do 4xx statuses that do not
-/// reject the link: rate limiting (429), request timeout (408) and proxy authentication (407).
-fn is_rejected_hls_manifest_download(result: &Result<ClassifiedHlsManifest, std::io::Error>) -> bool {
+/// True when a manifest download indicates an expired or rejected link (4xx client error or invalid body).
+pub(in crate::api::endpoints::hls_api) fn hls_download_rejects_link(
+    result: Result<HlsPlaylistKind, &std::io::Error>,
+) -> bool {
     match result {
-        Ok((_, _, _, kind)) => *kind == HlsPlaylistKind::Invalid,
+        Ok(kind) => kind == HlsPlaylistKind::Invalid,
         Err(err) => request::request_failed_status(&err.to_string()).is_some_and(|status| {
             status.is_client_error()
                 && !matches!(
@@ -1007,6 +1014,15 @@ fn is_rejected_hls_manifest_download(result: &Result<ClassifiedHlsManifest, std:
                 )
         }),
     }
+}
+
+/// A 4xx response or a non-playlist body, the two ways a portal answers an expired link.
+/// Timeouts, 5xx and transport errors do not trigger a fresh `create_link`. Neither do 4xx statuses that do not
+/// reject the link: rate limiting (429), request timeout (408) and proxy authentication (407).
+pub(in crate::api::endpoints::hls_api) fn is_rejected_hls_manifest_download(
+    result: &Result<ClassifiedHlsManifest, std::io::Error>,
+) -> bool {
+    hls_download_rejects_link(result.as_ref().map(|(_, _, _, kind)| *kind))
 }
 
 /// Downloads a legacy HLS playlist and classifies its body.
@@ -1179,64 +1195,10 @@ mod playback_provider_tests {
         assert!(is_rejected_hls_manifest_download(&manifest(HlsPlaylistKind::Invalid)));
         assert!(!is_rejected_hls_manifest_download(&manifest(HlsPlaylistKind::Media)));
         assert!(!is_rejected_hls_manifest_download(&manifest(HlsPlaylistKind::Master)));
-    }
-
-    #[test]
-    fn classify_hls_entry_group_member_live_uses_prefer() {
-        let group = Arc::new(FailoverGroupRecord {
-            group_vid: VirtualId::new(100),
-            key: Arc::from("group"),
-            origin: shared::model::FailoverGroupOrigin::Auto,
-            policy: shared::model::FailoverGroupPolicy::default(),
-            members: Vec::new(),
-            orphaned: Vec::new(),
-        });
-        let target = ResolvedStreamTarget::Member { group: Arc::clone(&group), index: 3 };
-
-        // Entry stage, live HLS -> (Some(group), Some(3))
-        let (entry_group, prefer) = classify_hls_entry_group(&target, true, true);
-        assert!(entry_group.is_some());
-        assert_eq!(prefer, Some(3));
-
-        // Entry stage, archive (not live) -> (None, None)
-        let (entry_group, prefer) = classify_hls_entry_group(&target, true, false);
-        assert!(entry_group.is_none());
-        assert_eq!(prefer, None);
-
-        // Not entry stage (e.g. segment/variant refresh) -> (None, None)
-        let (entry_group, prefer) = classify_hls_entry_group(&target, false, true);
-        assert!(entry_group.is_none());
-        assert_eq!(prefer, None);
-    }
-
-    #[test]
-    fn classify_hls_entry_group_group_vid_unchanged() {
-        let group = Arc::new(FailoverGroupRecord {
-            group_vid: VirtualId::new(100),
-            key: Arc::from("group"),
-            origin: shared::model::FailoverGroupOrigin::Auto,
-            policy: shared::model::FailoverGroupPolicy::default(),
-            members: Vec::new(),
-            orphaned: Vec::new(),
-        });
-        let target = ResolvedStreamTarget::Group(Arc::clone(&group));
-
-        // Group VID live -> (Some(group), None)
-        let (entry_group, prefer) = classify_hls_entry_group(&target, true, true);
-        assert!(entry_group.is_some());
-        assert_eq!(prefer, None);
-
-        // Group VID archive -> (Some(group), None)
-        let (entry_group, prefer) = classify_hls_entry_group(&target, true, false);
-        assert!(entry_group.is_some());
-        assert_eq!(prefer, None);
-    }
-
-    #[test]
-    fn classify_hls_entry_group_item_unchanged() {
-        let (entry_group, prefer) = classify_hls_entry_group(&ResolvedStreamTarget::Item, true, true);
-        assert!(entry_group.is_none());
-        assert_eq!(prefer, None);
+        assert!(super::hls_download_rejects_link(Err(&http_err(StatusCode::FORBIDDEN))));
+        assert!(super::hls_download_rejects_link(Ok(HlsPlaylistKind::Invalid)));
+        assert!(!super::hls_download_rejects_link(Ok(HlsPlaylistKind::Media)));
+        assert!(!super::hls_download_rejects_link(Err(&http_err(StatusCode::INTERNAL_SERVER_ERROR))));
     }
 
     #[tokio::test]

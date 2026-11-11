@@ -1481,6 +1481,10 @@
   member's channel ID now uses group failover with that member preferred, instead of serving the member as an isolated
   single channel.
 
+- **HLS panel provisioning for a failover group catch-up entry reserves the account with catch-up selection.** Virtual-entry
+  provisioning for a catch-up or archive poll on a failover group or member channel now derives archive selection mode
+  and avoids failing over across non-archive members.
+
 - **Dependencies updated, including `zip` 9 for a high-risk vulnerability.** Plugin package extraction keeps all its
   path, size and symlink checks. Random IVs come only from the operating system RNG; the YAML pre-check of user
   settings uses the parser bundled with `serde-saphyr` instead of a separately pinned copy. An unquoted `.inf`,

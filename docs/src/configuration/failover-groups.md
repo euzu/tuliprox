@@ -181,7 +181,10 @@ Live HLS group streams support start failover when opening a channel, but do not
   - Invalid content (empty playlists, invalid playlist bodies, or other HTTP errors).
 - **Shared cache.** With the shared HLS cache enabled, the start probe issues one extra manifest request to verify the
   selected member before caching begins. The shared cache then manages its own background stream and reserves its own
-  provider account.
+  provider account. When the member already has a shared cache session that has fetched its manifest, a new viewer
+  joins that session without a probe.
+- **Stalker links.** When a portal rejects a cached Stalker link during the probe, Tuliprox requests a fresh link
+  once and probes again before it counts a member failure.
 - **Member requests.** A fresh live HLS request using a member's individual channel ID uses group failover with that
   member preferred.
 

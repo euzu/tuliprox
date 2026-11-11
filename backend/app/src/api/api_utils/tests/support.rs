@@ -122,6 +122,10 @@ pub(crate) enum FakeOriginMode {
     TsStream(Vec<u8>),
     /// Accepts the request and never answers.
     Silent,
+    StalkerRetry {
+        fresh_link_path: String,
+        create_link_counter: Arc<std::sync::atomic::AtomicUsize>,
+    },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -224,7 +228,7 @@ pub(in crate::api::api_utils::tests) async fn spawn_controlled_fake_origin(
                     let _ = socket.write_all(bytes).await;
                     let _ = socket.shutdown().await;
                 }
-                FakeOriginMode::Hls => {
+                FakeOriginMode::Hls | FakeOriginMode::StalkerRetry { .. } => {
                     let head = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = socket.write_all(head.as_bytes()).await;
                     let _ = socket.shutdown().await;

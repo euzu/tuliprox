@@ -478,3 +478,93 @@ async fn hls_entry_stalker_url_resolution_hang_bounded_by_deadline() {
     assert_eq!(env.origin_hits("korath"), 1);
     assert!(elapsed < std::time::Duration::from_secs(2), "probe URL resolution must be bounded by attempt deadline");
 }
+
+#[tokio::test]
+async fn hls_entry_group_probe_request_carries_user_agent_stream_index() {
+    let env = GroupPlaybackEnv::builder(&["solis"]).hls().user_agent_stream_index("solis").build().await;
+    let response = env.get_hls_manifest(env.group_vid).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = env.last_request_headers("solis");
+    let ua = headers.get(axum::http::header::USER_AGENT).expect("user-agent header").to_str().expect("valid utf-8");
+    assert!(ua.ends_with(" 1"), "probe user agent should carry stream index suffix: {ua}");
+}
+
+#[tokio::test]
+async fn hls_entry_group_probe_request_user_agent_stream_index_follows_member_input_not_target_input() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls()
+        .origin_status("solis", 404)
+        .user_agent_stream_index("korath")
+        .build()
+        .await;
+    let response = env.get_hls_manifest(env.group_vid).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(env.bound_member_input("viewer").await, "korath");
+
+    let solis_headers = env.last_request_headers("solis");
+    let solis_ua =
+        solis_headers.get(axum::http::header::USER_AGENT).expect("solis user-agent").to_str().expect("valid utf-8");
+    assert!(!solis_ua.ends_with(" 1"), "solis probe must not have stream index suffix: {solis_ua}");
+
+    let korath_headers = env.last_request_headers("korath");
+    let korath_ua =
+        korath_headers.get(axum::http::header::USER_AGENT).expect("korath user-agent").to_str().expect("valid utf-8");
+    assert!(korath_ua.ends_with(" 1"), "korath probe must carry stream index suffix: {korath_ua}");
+}
+
+#[tokio::test]
+async fn hls_entry_group_probe_request_skips_stream_index_when_selected_member_input_has_no_flag() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls()
+        .user_agent_stream_index("solis")
+        .origin_status("solis", 404)
+        .build()
+        .await;
+    let response = env.get_hls_manifest(env.group_vid).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(env.bound_member_input("viewer").await, "korath");
+
+    let solis_headers = env.last_request_headers("solis");
+    let solis_ua =
+        solis_headers.get(axum::http::header::USER_AGENT).expect("solis user-agent").to_str().expect("valid utf-8");
+    assert!(solis_ua.ends_with(" 1"), "solis probe carries stream index suffix: {solis_ua}");
+
+    let korath_headers = env.last_request_headers("korath");
+    let korath_ua =
+        korath_headers.get(axum::http::header::USER_AGENT).expect("korath user-agent").to_str().expect("valid utf-8");
+    assert!(!korath_ua.ends_with(" 1"), "korath probe must not have stream index suffix: {korath_ua}");
+}
+
+#[tokio::test]
+async fn stalker_group_member_first_link_rejected_fresh_link_retried_and_served() {
+    let env = GroupPlaybackEnv::builder(&["solis"])
+        .hls()
+        .stalker("solis")
+        .stalker_retry_origin("solis", "/fresh/live.m3u8")
+        .build()
+        .await;
+    let input = env.app_state.app_config.get_input_by_name(&"solis".intern()).expect("member input");
+    publish_stalker_live_item(&env, &input).await;
+
+    let response = env.get_hls_manifest(env.group_vid).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(env.bound_member_input("viewer").await, "solis");
+    assert!(matches!(env.circuit("solis"), CircuitView::Closed));
+    let body = GroupPlaybackEnv::response_text(response).await;
+    assert!(body.contains("#EXT-X-STREAM-INF"), "fresh manifest delivered: {body}");
+}
+
+#[tokio::test]
+async fn second_viewer_on_same_member_makes_no_extra_origin_manifest_request() {
+    let env = GroupPlaybackEnv::new(&["solis"]).hls_cache().build().await;
+    let manifest = env.get_hls_manifest(env.group_vid).await;
+    assert!(manifest.status().is_success() || manifest.status().is_redirection());
+    let body = axum::body::to_bytes(manifest.into_body(), 1024 * 1024).await.expect("body");
+    let _variant = env.get(&first_segment_url(&String::from_utf8_lossy(&body))).await;
+    let origin_hits_after_first = env.origin_hits("solis");
+    assert!(origin_hits_after_first > 0);
+
+    let manifest2 = env.get_hls_manifest_from(env.group_vid, 12346).await;
+    assert!(manifest2.status().is_success() || manifest2.status().is_redirection());
+    assert_eq!(env.origin_hits("solis"), origin_hits_after_first);
+}

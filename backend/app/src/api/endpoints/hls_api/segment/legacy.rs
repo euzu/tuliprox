@@ -160,7 +160,3 @@ pub(in crate::api::endpoints::hls_api) async fn download_legacy_hls_manifest(
         .await
     }
 }
-
-pub(in crate::api::endpoints::hls_api) fn hls_manifest_error_status(msg: &str) -> Option<reqwest::StatusCode> {
-    request::request_failed_status(msg)
-}
