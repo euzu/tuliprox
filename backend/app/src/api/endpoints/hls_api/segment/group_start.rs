@@ -183,7 +183,8 @@ pub(in crate::api::endpoints::hls_api) async fn probe_selected_manifest(
         .await
         .ok_or(FailureClass::Transport)?;
 
-        let source = InputSource::for_request_url(&resolved.input, initial_url.clone());
+        let mut source = InputSource::for_request_url(&resolved.input, initial_url.clone());
+        source.headers.retain(|name, _| !name.eq_ignore_ascii_case("user-agent"));
         let (content, response_url, response_headers) =
             super::legacy::download_legacy_hls_manifest(app_state, &source, &headers)
                 .await
@@ -209,7 +210,8 @@ pub(in crate::api::endpoints::hls_api) async fn probe_selected_manifest(
                 let base = Url::parse(&response_url).map_err(|_| FailureClass::Stream)?;
                 let variant_url = base.join(first_variant_ref).map_err(|_| FailureClass::Stream)?.to_string();
 
-                let variant_source = InputSource::for_request_url(&resolved.input, variant_url);
+                let mut variant_source = InputSource::for_request_url(&resolved.input, variant_url);
+                variant_source.headers.retain(|name, _| !name.eq_ignore_ascii_case("user-agent"));
                 let (variant_content, _, _) =
                     super::legacy::download_legacy_hls_manifest(app_state, &variant_source, &headers)
                         .await
@@ -399,5 +401,24 @@ mod tests {
 
         let err = shared::error::string_to_io_error("some unknown stream parsing failure");
         assert_eq!(classify_hls_download_error(&err), FailureClass::Stream);
+    }
+
+    #[test]
+    fn probe_input_source_removes_user_agent_header() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("User-Agent".to_string(), "InputAgent/1.0".to_string());
+        headers.insert("Authorization".to_string(), "Bearer token".to_string());
+        let mut source = InputSource {
+            name: Arc::from("test"),
+            url: "http://example.com/playlist.m3u8".to_string(),
+            provider: None,
+            username: None,
+            password: None,
+            method: shared::model::InputFetchMethod::GET,
+            headers,
+        };
+        source.headers.retain(|name, _| !name.eq_ignore_ascii_case("user-agent"));
+        assert!(!source.headers.contains_key("User-Agent"));
+        assert_eq!(source.headers.get("Authorization").map(String::as_str), Some("Bearer token"));
     }
 }
