@@ -12,28 +12,50 @@ use crate::{
     model::{ConfigInput, ConfigTarget, InputSource, ProviderConfig},
     processing::parser::hls::{classify_hls_playlist, HlsPlaylistKind},
 };
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, HeaderValue};
 use std::{borrow::Cow, sync::Arc};
-use tuliprox_hls::api::extract_hls_provider_session_headers;
+use tuliprox_hls::api::{extract_hls_provider_session_headers, merge_hls_provider_session_headers};
 use tuliprox_repository::{failover_group_repository::GroupMember, FailoverGroupRecord};
 use tuliprox_session::{failover_group::FailureClass, ProviderSessionCookieStore};
 use url::Url;
 
 /// Request headers for the variant probe. Cookies the master response set are added only when the
 /// provider cookie store admits them for the variant URL (same origin, path, domain and secure rules).
+/// A configured input cookie is merged with them (master wins per name) and removed from
+/// `variant_source`, because configured input headers take precedence over request headers.
 fn variant_probe_headers<'a>(
     headers: &'a HeaderMap,
     master_url: &Url,
     master_response_headers: &HeaderMap,
-    variant_url: &str,
+    variant_source: &mut InputSource,
 ) -> Cow<'a, HeaderMap> {
     let mut store = ProviderSessionCookieStore::default();
     store.update(master_url, &extract_hls_provider_session_headers(master_response_headers));
-    let Some(session_headers) = store.headers_for(variant_url) else {
+    let Some(session_headers) = store.headers_for(&variant_source.url) else {
         return Cow::Borrowed(headers);
     };
+    let mut master_cookie = HeaderMap::new();
+    super::append_user_session_provider_headers(&mut master_cookie, &session_headers);
+
+    let mut configured_cookie = HeaderMap::new();
+    if let Some(cookie) = headers.get(header::COOKIE) {
+        configured_cookie.insert(header::COOKIE, cookie.clone());
+    }
+    variant_source.headers.retain(|name, value| {
+        if !name.eq_ignore_ascii_case(header::COOKIE.as_str()) {
+            return true;
+        }
+        if let Ok(cookie) = HeaderValue::from_str(value) {
+            configured_cookie.insert(header::COOKIE, cookie);
+        }
+        false
+    });
+
     let mut variant_headers = headers.clone();
-    super::append_user_session_provider_headers(&mut variant_headers, &session_headers);
+    if let Some(cookie) = merge_hls_provider_session_headers(&configured_cookie, &master_cookie).remove(header::COOKIE)
+    {
+        variant_headers.insert(header::COOKIE, cookie);
+    }
     Cow::Owned(variant_headers)
 }
 
@@ -308,9 +330,9 @@ pub(in crate::api::endpoints::hls_api) async fn probe_selected_manifest(
                 let base = Url::parse(&response_url).map_err(|_| FailureClass::Stream)?;
                 let variant_url = base.join(first_variant_ref).map_err(|_| FailureClass::Stream)?.to_string();
 
-                let variant_headers = variant_probe_headers(&headers, &base, &response_headers, &variant_url);
                 let mut variant_source = InputSource::for_request_url(input, variant_url);
                 variant_source.headers.retain(|name, _| !name.eq_ignore_ascii_case("user-agent"));
+                let variant_headers = variant_probe_headers(&headers, &base, &response_headers, &mut variant_source);
                 let (variant_content, _, _) =
                     super::legacy::download_legacy_hls_manifest(app_state, &variant_source, &variant_headers)
                         .await
@@ -504,35 +526,65 @@ mod tests {
         headers
     }
 
+    fn variant_source(url: &str, configured_cookie: Option<&str>) -> InputSource {
+        let mut headers = std::collections::HashMap::new();
+        if let Some(cookie) = configured_cookie {
+            headers.insert("Cookie".to_string(), cookie.to_string());
+        }
+        headers.insert("Authorization".to_string(), "Bearer token".to_string());
+        InputSource {
+            name: Arc::from("test"),
+            url: url.to_string(),
+            provider: None,
+            username: None,
+            password: None,
+            method: shared::model::InputFetchMethod::GET,
+            headers,
+        }
+    }
+
+    fn cookie_of(headers: &HeaderMap) -> Option<&str> { headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) }
+
     #[test]
     fn variant_probe_headers_forward_master_cookie_on_same_origin() {
         let master = Url::parse("http://origin.example/live/master.m3u8").expect("master url");
         let headers = base_headers();
-        let variant = variant_probe_headers(
-            &headers,
-            &master,
-            &master_response_with_cookie(),
-            "http://origin.example/live/v.m3u8",
-        );
-        assert_eq!(variant.get(axum::http::header::COOKIE).map(|v| v.to_str().ok()), Some(Some("tok=abc")));
-        assert_eq!(variant.get(axum::http::header::USER_AGENT), headers.get(axum::http::header::USER_AGENT));
+        let mut source = variant_source("http://origin.example/live/v.m3u8", None);
+        let variant = variant_probe_headers(&headers, &master, &master_response_with_cookie(), &mut source);
+        assert_eq!(cookie_of(&variant), Some("tok=abc"));
+        assert_eq!(variant.get(header::USER_AGENT), headers.get(header::USER_AGENT));
+        assert!(source.headers.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn variant_probe_headers_merge_configured_cookie_and_remove_it_from_source() {
+        let master = Url::parse("http://origin.example/live/master.m3u8").expect("master url");
+        let headers = base_headers();
+        let mut source = variant_source("http://origin.example/live/v.m3u8", Some("cfg=1; tok=old"));
+        let variant = variant_probe_headers(&headers, &master, &master_response_with_cookie(), &mut source);
+        assert_eq!(cookie_of(&variant), Some("cfg=1; tok=abc"));
+        assert!(!source.headers.keys().any(|name| name.eq_ignore_ascii_case("cookie")));
+        assert!(source.headers.contains_key("Authorization"));
     }
 
     #[test]
     fn variant_probe_headers_drop_master_cookie_across_origins() {
         let master = Url::parse("http://origin.example/live/master.m3u8").expect("master url");
         let headers = base_headers();
-        let variant =
-            variant_probe_headers(&headers, &master, &master_response_with_cookie(), "http://cdn.example/live/v.m3u8");
+        let mut source = variant_source("http://cdn.example/live/v.m3u8", Some("cfg=1"));
+        let variant = variant_probe_headers(&headers, &master, &master_response_with_cookie(), &mut source);
         assert!(matches!(variant, Cow::Borrowed(_)));
-        assert!(variant.get(axum::http::header::COOKIE).is_none());
+        assert!(cookie_of(&variant).is_none());
+        assert_eq!(source.headers.get("Cookie").map(String::as_str), Some("cfg=1"));
     }
 
     #[test]
     fn variant_probe_headers_without_master_cookie_keep_original_headers() {
         let master = Url::parse("http://origin.example/live/master.m3u8").expect("master url");
         let headers = base_headers();
-        let variant = variant_probe_headers(&headers, &master, &HeaderMap::new(), "http://origin.example/live/v.m3u8");
+        let mut source = variant_source("http://origin.example/live/v.m3u8", Some("cfg=1"));
+        let variant = variant_probe_headers(&headers, &master, &HeaderMap::new(), &mut source);
         assert!(matches!(variant, Cow::Borrowed(_)));
+        assert_eq!(source.headers.get("Cookie").map(String::as_str), Some("cfg=1"));
     }
 }
