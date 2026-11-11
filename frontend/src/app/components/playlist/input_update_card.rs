@@ -2,7 +2,7 @@ use super::{input_type_label_key, processing::PlaylistProcessingStage};
 use crate::{
     app::components::{
         popup_menu::{PopupMenuPlacement, PopupMenuWidth},
-        Card, DropDownOption, DropDownSelection, NoContent, PlaylistProcessing, Select, TextButton, ToggleSwitch,
+        Card, DropDownOption, DropDownSelection, PlaylistProcessing, Select, TextButton, ToggleSwitch,
     },
     error::Error,
     hooks::use_service_context,
@@ -297,8 +297,14 @@ fn replacement_unavailable_reason(
     targets: &[InputUpdateCardTarget],
     selected_target_ids: &[u16],
 ) -> Option<&'static str> {
-    (!targets.iter().any(|target| selected_target_ids.contains(&target.id)))
-        .then_some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_TARGET")
+    let mut selected = targets.iter().filter(|target| selected_target_ids.contains(&target.id)).peekable();
+    if selected.peek().is_none() {
+        Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_TARGET")
+    } else if selected.any(|target| !target.enabled) {
+        Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_ACTIVE_TARGETS")
+    } else {
+        None
+    }
 }
 
 fn selected_current_target_ids(model: &InputUpdateCardModel, selected_target_ids: &[u16]) -> Vec<u16> {
@@ -1081,8 +1087,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
     // Render consistently while the effect synchronizes the retained reducer state.
     let effective_policy = state.policy_for_capabilities(model.capabilities);
     let policy_options = policy_options(model.capabilities, effective_policy, |key| translate.t(key));
-    let show_replacement =
-        effective_policy == InputRefreshPolicy::NORMAL && model.capabilities.supports(InputRefreshPolicy::NORMAL);
+    let show_replacement = model.capabilities.supports(effective_policy);
     let replacement_reason = replacement_unavailable_reason(&model.targets, &state.controls.selected_target_ids);
     let can_replace = show_replacement && can_submit && replacement_reason.is_none();
     let replace_target_contents = can_replace && state.controls.replace_target_contents;
@@ -1158,7 +1163,12 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                         state.dispatch(InputUpdateCardAction::CancelSubmission(connection_context));
                         return;
                     };
-                    Some(dialog.confirm(&translate.t("MESSAGES.PLAYLIST_UPDATE.FORCE_CONFIRM")).await)
+                    let message = if replace_target_contents {
+                        "MESSAGES.PLAYLIST_UPDATE.FORCE_REPLACE_CONFIRM"
+                    } else {
+                        "MESSAGES.PLAYLIST_UPDATE.FORCE_CONFIRM"
+                    };
+                    Some(dialog.confirm(&translate.t(message)).await)
                 } else {
                     None
                 };
@@ -1178,7 +1188,10 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                 }
 
                 let result = if replace_target_contents {
-                    services.playlist.replace_target_contents(&target_ids, model.input_id, &update_revision).await
+                    services
+                        .playlist
+                        .replace_target_contents(&target_ids, model.input_id, request_policy, &update_revision)
+                        .await
                 } else {
                     services
                         .playlist
@@ -1287,7 +1300,11 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                         <section class="tp__playlist-update-view__input-targets">
                             <h3 id={target_group_heading_id.clone()}>{translate.t("LABEL.AFFECTED_TARGETS")}</h3>
                             if view.target_results.is_empty() {
-                                <NoContent text={translate.t("MESSAGES.PLAYLIST_UPDATE.NO_TARGETS_ASSIGNED")} />
+                                <div class="tp__playlist-update-view__target-toggles">
+                                    <span class="tp__playlist-update-view__no-targets-badge" role="status">
+                                        {translate.t("MESSAGES.PLAYLIST_UPDATE.NO_TARGETS_ASSIGNED")}
+                                    </span>
+                                </div>
                             } else {
                                 <div
                                     class="tp__playlist-update-view__target-toggles"
@@ -1440,7 +1457,7 @@ mod tests {
             }),
             targets: targets
                 .iter()
-                .map(|(target_id, name)| InputUpdateCardTarget { id: *target_id, name: name.clone() })
+                .map(|(target_id, name)| InputUpdateCardTarget { id: *target_id, name: name.clone(), enabled: true })
                 .collect(),
             last_update_at: None,
         }
@@ -2005,14 +2022,18 @@ mod tests {
 
     #[test]
     fn replace_target_contents_is_one_shot_and_checks_the_current_selection() {
-        let model = card(7, &[1, 2]);
+        let mut model = card(7, &[1, 2]);
+        model.targets[1].enabled = false;
         let initial = InputUpdateCardInteractionState::from_model(&model);
         assert!(!initial.controls.replace_target_contents);
         assert_eq!(
             replacement_unavailable_reason(&model.targets, &[]),
             Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_TARGET")
         );
-        assert_eq!(replacement_unavailable_reason(&model.targets, &initial.controls.selected_target_ids), None);
+        assert_eq!(
+            replacement_unavailable_reason(&model.targets, &initial.controls.selected_target_ids),
+            Some("MESSAGES.PLAYLIST_UPDATE.REPLACE_SELECT_ACTIVE_TARGETS")
+        );
         let selected = reduce(initial, InputUpdateCardAction::ToggleTarget(2));
         assert_eq!(replacement_unavailable_reason(&model.targets, &selected.controls.selected_target_ids), None);
         let enabled = reduce(selected, InputUpdateCardAction::SetReplacement(true));
@@ -2575,6 +2596,8 @@ mod tests {
             "/LABEL/REFRESH_START",
             "/LABEL/FORCE_UPDATE_START",
             "/MESSAGES/PLAYLIST_UPDATE/NO_TARGETS_ASSIGNED",
+            "/MESSAGES/PLAYLIST_UPDATE/REPLACE_SELECT_ACTIVE_TARGETS",
+            "/MESSAGES/PLAYLIST_UPDATE/FORCE_REPLACE_CONFIRM",
             "/MESSAGES/PLAYLIST_UPDATE/INPUT_ACCEPTED",
             "/MESSAGES/PLAYLIST_UPDATE/INPUT_BUSY",
             "/MESSAGES/PLAYLIST_UPDATE/INPUT_FAILED",

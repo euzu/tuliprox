@@ -10,8 +10,8 @@ use axum::{
 use serde_json::json;
 use shared::{
     model::{
-        InputRefreshOverride, InputRefreshPolicy, InputType, OperationRunAccepted,
-        PersistedPlaylistUpdateClusterSnapshot, PersistedPlaylistUpdateClusterState,
+        InputRefreshOverride, InputRefreshPolicy, InputType, InputUpdateAction, InputUpdateRequest,
+        OperationRunAccepted, PersistedPlaylistUpdateClusterSnapshot, PersistedPlaylistUpdateClusterState,
         PersistedPlaylistUpdateQualityDecision, PersistedPlaylistUpdateQualitySnapshot,
         PersistedPlaylistUpdateTechnicalState, PlaylistUpdateDataSource, PlaylistUpdateRequestDto,
         PlaylistUpdateRequestPayload, PlaylistUpdateStatusDto, PlaylistUpdateViewSnapshotDto, XtreamCluster,
@@ -715,6 +715,7 @@ async fn playlist_update_status_reader_join_failure_returns_server_error_not_emp
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one protected router fixture covers rejected and accepted requests")]
 async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targets() {
     use crate::{
         auth::create_jwt_web_user,
@@ -748,12 +749,23 @@ async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targ
     let mut disabled = playlist_update_target(5, "disabled");
     Arc::make_mut(&mut disabled).enabled = false;
     let foreign = playlist_update_target(6, "foreign");
-    let input = Arc::new(ConfigInput { id: 4, name: "provider".intern(), enabled: true, ..Default::default() });
+    let input = Arc::new(ConfigInput {
+        id: 4,
+        name: "provider".intern(),
+        input_type: InputType::M3u,
+        enabled: true,
+        ..Default::default()
+    });
     let config = Arc::new(test_app_config(
         input.clone(),
         ConfigSource { inputs: vec![input.name.clone()], targets: vec![eligible, m3u, mixed, strm, disabled] },
     ));
     let mut sources = (*config.sources.load_full()).clone();
+    for (id, input_type) in [(7, InputType::M3uBatch), (8, InputType::XtreamBatch), (9, InputType::StalkerBatch)] {
+        let name = format!("batch-{id}").intern();
+        sources.sources[0].inputs.push(name.clone());
+        sources.inputs.push(Arc::new(ConfigInput { id, name, input_type, enabled: true, ..Default::default() }));
+    }
     sources.sources.push(ConfigSource { inputs: Vec::new(), targets: vec![foreign] });
     config.sources.store(Arc::new(sources));
     let auth =
@@ -798,18 +810,28 @@ async fn replace_target_contents_requires_write_scope_and_eligible_explicit_targ
             &writer,
             Some(&revision),
             json!({"target_ids":[1],"replace_target_contents":true,
-            "input_refresh":{"input_id":4,"policy":{"cache":"bypass","quality":"enforce"}}}),
+            "input_refresh":{"input_id":4,"policy":{"cache":"respect","quality":"bypass"}}}),
             StatusCode::BAD_REQUEST,
         ),
     ] {
         assert_eq!(post(token, scope, body).await.unwrap().status(), status);
         assert!(queue.try_recv().is_err());
     }
-    assert_eq!(post(&writer, Some(&revision), valid).await.unwrap().status(), StatusCode::ACCEPTED);
-    let accepted = queue.try_recv().unwrap();
-    assert_eq!(accepted.targets.targets, [2, 4, 1, 3]);
-    assert!(accepted.replace_target_contents);
-    assert_eq!(accepted.expected_scope.unwrap().revision(), revision);
+    for input_id in [4, 7, 8, 9] {
+        for policy in [InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE] {
+            let body = json!({"target_ids":[2,4,1,3],"replace_target_contents":true,
+                "input_refresh":{"input_id":input_id,"policy":policy}});
+            assert_eq!(post(&writer, Some(&revision), body).await.unwrap().status(), StatusCode::ACCEPTED);
+            let accepted = queue.try_recv().unwrap();
+            assert_eq!(accepted.targets.targets, [2, 4, 1, 3]);
+            assert!(accepted.replace_target_contents);
+            assert_eq!(accepted.expected_scope.unwrap().revision(), revision);
+            assert_eq!(
+                accepted.input_action,
+                Some(InputUpdateRequest { input_id, action: InputUpdateAction::Provider(policy) })
+            );
+        }
+    }
 
     let ordinary = json!({"target_ids":[3],"replace_target_contents":false});
     assert_eq!(post(&writer, None, ordinary).await.unwrap().status(), StatusCode::ACCEPTED);

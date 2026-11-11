@@ -955,7 +955,7 @@ mod tests {
             capabilities: InputUpdateCapabilities::for_input(input),
             targets: targets
                 .iter()
-                .map(|(id, name)| InputUpdateCardTarget { id: *id, name: (*name).to_string() })
+                .map(|(id, name)| InputUpdateCardTarget { id: *id, name: (*name).to_string(), enabled: true })
                 .collect(),
             last_update_at,
         }

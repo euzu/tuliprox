@@ -146,10 +146,8 @@ pub(in crate::api) fn resolve_manual_playlist_update_targets(
         if request.target_ids.as_ref().is_none_or(Vec::is_empty) {
             return Err(TuliproxError::ConfigSource("Replacing target contents requires explicit target IDs"));
         }
-        if manual_action.is_some_and(|manual| {
-            manual.action != InputUpdateAction::Provider(shared::model::InputRefreshPolicy::NORMAL)
-        }) {
-            return Err(TuliproxError::ConfigSource("Replacing target contents requires the regular update policy"));
+        if manual_action.is_some_and(|manual| !matches!(manual.action, InputUpdateAction::Provider(_))) {
+            return Err(TuliproxError::ConfigSource("Replacing target contents requires a provider update policy"));
         }
     }
     let manual_input = if let Some(manual) = manual_action {

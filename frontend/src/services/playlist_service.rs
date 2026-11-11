@@ -115,12 +115,11 @@ impl PlaylistService {
         &self,
         target_ids: &[u16],
         provider_input_id: u16,
+        policy: InputRefreshPolicy,
         revision: &str,
     ) -> Result<OperationRunAccepted, Error> {
-        let mut request = build_target_id_update_request(target_ids)?;
-        request.replace_target_contents = true;
-        request.input_refresh =
-            Some(InputRefreshOverride { input_id: provider_input_id, policy: InputRefreshPolicy::NORMAL });
+        let request =
+            build_replacement_update_request(target_ids, InputRefreshOverride { input_id: provider_input_id, policy })?;
         self.submit_update_request_with_revision(&request, Some(revision)).await
     }
 
@@ -527,6 +526,16 @@ fn build_target_id_update_request(target_ids: &[u16]) -> Result<PlaylistUpdateRe
     })
 }
 
+fn build_replacement_update_request(
+    target_ids: &[u16],
+    input_refresh: InputRefreshOverride,
+) -> Result<PlaylistUpdateRequestDto, Error> {
+    let mut request = build_target_id_update_request(target_ids)?;
+    request.replace_target_contents = true;
+    request.input_refresh = Some(input_refresh);
+    Ok(request)
+}
+
 fn build_manual_input_update_request(
     target_ids: &[u16],
     request: shared::model::InputUpdateRequest,
@@ -680,6 +689,17 @@ mod tests {
                 // including when no single-input policy is offered by this capability.
                 assert_eq!(build_playlist_update_bulk_request(), Default::default());
             }
+        }
+    }
+
+    #[test]
+    fn playlist_update_replacement_preserves_the_selected_policy() {
+        for policy in [InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE] {
+            let refresh = InputRefreshOverride { input_id: 7, policy };
+            let request = super::build_replacement_update_request(&[30, 20], refresh).unwrap();
+            assert!(request.replace_target_contents);
+            assert_eq!(request.target_ids, Some(vec![30, 20]));
+            assert_eq!(request.input_refresh, Some(refresh));
         }
     }
 

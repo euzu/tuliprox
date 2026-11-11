@@ -262,11 +262,27 @@
     --text-button-active-border-color: var(--input-focus-border-color);
     --text-button-active-color: var(--theme-brand-text);
     --text-button-active-hover-color: var(--theme-brand-text);
+  }
+
+  &__target-toggle.tp__text-button,
+  &__no-targets-badge {
     min-height: 2rem;
     padding: var(--padding-micro) var(--padding-small);
     border-radius: var(--border-radius);
     font-size: var(--font-size-norm);
     font-weight: normal;
+  }
+
+  &__no-targets-badge {
+    display: inline-flex;
+    align-items: center;
+    box-sizing: border-box;
+    max-width: 100%;
+    min-width: 0;
+    border: 1px solid var(--error-color);
+    background-color: var(--error-background-color);
+    color: var(--error-color);
+    overflow-wrap: anywhere;
   }
 
   &__target-toggle {
