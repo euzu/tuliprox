@@ -804,7 +804,6 @@ async fn download_xtream_from_source<E: EventSink>(
     let mut fetch = PlaylistFetch::groups(Vec::with_capacity(128)).persisted(use_disk_based_processing);
 
     let mut staged_clusters = Vec::new();
-    let mut reached_clusters = Vec::with_capacity(clusters.len());
     let mut disk_stage_batch_result = XtreamClusterPublishBatchResult::default();
     for (xtream_cluster, category, stream) in &ACTIONS {
         if !clusters.contains(xtream_cluster) {
@@ -834,7 +833,6 @@ async fn download_xtream_from_source<E: EventSink>(
                 &mut disk_stage_batch_result,
             )
             .await;
-            reached_clusters.push(*xtream_cluster);
             match staged {
                 Some(outcome) => staged_clusters.push(outcome),
                 // One failed cluster stops the ordered batch; the clusters behind it stay unpublished.
@@ -880,7 +878,7 @@ async fn download_xtream_from_source<E: EventSink>(
         }
         let stopped_at = result.failed_cluster;
         apply_disk_cluster_publish_result(&mut fetch, result);
-        record_unreached_xtream_clusters(&mut fetch, clusters, &reached_clusters, stopped_at);
+        record_unreached_xtream_clusters(&mut fetch, clusters, stopped_at);
     }
 
     Ok(fetch)
@@ -961,20 +959,26 @@ async fn stage_downloaded_xtream_cluster(
     }
 }
 
-/// Reports every requested cluster that a stopped batch never reached.
+/// Reports the requested clusters that a stopped batch never reached.
 ///
-/// A cluster behind a failure was not refreshed in this run. Leaving it unreported would let the caller
-/// mistake it for an unchanged, still valid cluster instead of invalidating it.
+/// Clusters are processed in [`ACTIONS`] order, so only the requested clusters positioned behind `stopped_at` are
+/// still unreported. A cluster ahead of the stop either completed or already carries its own, more precise error
+/// from its download or staging attempt; inferring failure from absence in a reached set would blame it twice.
 fn record_unreached_xtream_clusters(
     fetch: &mut PlaylistFetch,
     requested: &[XtreamCluster],
-    reached: &[XtreamCluster],
     stopped_at: Option<XtreamCluster>,
 ) {
     let Some(stopped_at) = stopped_at else {
         return;
     };
-    for cluster in requested.iter().filter(|cluster| !reached.contains(*cluster)) {
+    let Some(stop_position) = ACTIONS.iter().position(|(cluster, ..)| *cluster == stopped_at) else {
+        return;
+    };
+    for (position, (cluster, ..)) in ACTIONS.iter().enumerate() {
+        if position <= stop_position || !requested.contains(cluster) {
+            continue;
+        }
         fetch.record_cluster_error(
             *cluster,
             TuliproxError::RepositoryXtream(format!(

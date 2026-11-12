@@ -926,15 +926,17 @@ async fn disk_staging_failure_stops_the_batch_and_reports_the_unreached_clusters
         "the failing cluster and every cluster behind it must be reported"
     );
 
-    // Live was staged before the failure. It must not become visible, which leaves the seeded state in place.
+    // Live was staged before the failure. It must not become visible, which leaves the seeded state in place:
+    // no extra group, no extra item, and the original provider ids.
     let storage = input_storage_path(&ctx, &input).await;
     let groups = tuliprox_repository::load_input_xtream_playlist(&ctx.config, &storage, &XTREAM_CLUSTER).await.unwrap();
-    for (cluster, title) in
-        [(XtreamCluster::Live, "old-live"), (XtreamCluster::Video, "old-vod"), (XtreamCluster::Series, "old-series")]
-    {
-        let group = groups.iter().find(|group| group.xtream_cluster == cluster).unwrap();
-        assert_eq!(group.title.as_ref(), title, "cluster {cluster} must keep its published state");
-    }
+    assert_eq!(
+        groups.len(),
+        baseline_groups().len(),
+        "the stopped batch must not add a group: {:?}",
+        groups.iter().map(|group| group.title.to_string()).collect::<Vec<_>>()
+    );
+    assert_baseline(&groups);
 
     let requests = server.finish();
     for unreached in ["get_series_categories", "get_series"] {
@@ -944,6 +946,220 @@ async fn disk_staging_failure_stops_the_batch_and_reports_the_unreached_clusters
         );
     }
     assert!(requests.iter().any(|action| action == "get_vod_streams"), "{requests:?}");
+}
+
+/// A cluster that failed on its own download keeps its own error; it must not be blamed a second time as a cluster
+/// the stopped batch never reached.
+#[tokio::test]
+async fn a_download_failure_is_not_reported_twice_as_a_cluster_left_unreached() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut responses = fixture_responses([2, 2, 2]);
+    responses.insert("get_series".to_owned(), "{".to_owned());
+    let server = TestXtreamServer::start_with_statuses(
+        responses,
+        HashMap::from([("get_vod_streams".to_owned(), reqwest::StatusCode::BAD_REQUEST)]),
+    );
+    let ctx = processing_context(temp.path());
+    let mut config = (**ctx.config.config.load()).clone();
+    config.disk_based_processing = true;
+    ctx.config.config.store(Arc::new(config));
+    let input = test_input(&server.base_url, ConfigInputUpdateQualityDto::default(), 0, &[]);
+
+    let fetch = tuliprox_iptv::xtream::download_xtream_playlist(
+        &ctx.config,
+        &ctx.client,
+        &ctx.events,
+        &input,
+        None,
+        UpdateQualityPolicy::Enforce,
+    )
+    .await;
+
+    // VOD failed on its download, Series failed while staging. Series is the stopping cluster, so nothing sits
+    // behind it: each cluster reports exactly one failure.
+    assert_eq!(fetch.failed_clusters, vec![XtreamCluster::Video, XtreamCluster::Series]);
+    assert_eq!(fetch.errors.len(), 2, "each failing cluster must report once: {:?}", fetch.errors);
+}
+
+/// A provider fixture that answers every request on its own connection and records the order of its answers.
+///
+/// One action is served with a delay between its headers and its body. That makes the difference between a
+/// just-in-time cluster request and one issued while an earlier body is still unread observable: only a request
+/// that waits for the body to be consumed can be delayed by it.
+struct OrderedXtreamServer {
+    base_url: String,
+    events: Arc<StdMutex<Vec<String>>>,
+    errors: Arc<StdMutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    connections: Arc<StdMutex<Vec<JoinHandle<()>>>>,
+    acceptor: Option<JoinHandle<()>>,
+}
+
+impl OrderedXtreamServer {
+    fn start(responses: HashMap<String, String>, delayed: (&str, Duration)) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ordered fixture listener");
+        listener.set_nonblocking(true).expect("configure ordered fixture listener");
+        let address = listener.local_addr().expect("ordered fixture address");
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let errors = Arc::new(StdMutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let connections: Arc<StdMutex<Vec<JoinHandle<()>>>> = Arc::new(StdMutex::new(Vec::new()));
+        let worker_stop = Arc::clone(&stop);
+        let worker_events = Arc::clone(&events);
+        let worker_errors = Arc::clone(&errors);
+        let worker_connections = Arc::clone(&connections);
+        let (delayed_action, delay) = (delayed.0.to_owned(), delayed.1);
+        let acceptor = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let responses = responses.clone();
+                        let events = Arc::clone(&worker_events);
+                        let errors = Arc::clone(&worker_errors);
+                        let delayed_action = delayed_action.clone();
+                        let connection = thread::spawn(move || {
+                            if let Err(error) =
+                                serve_ordered_request(stream, &responses, &delayed_action, delay, &events)
+                            {
+                                errors.lock().expect("server error lock").push(error.to_string());
+                            }
+                        });
+                        worker_connections.lock().expect("connection handle lock").push(connection);
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(1)),
+                    Err(error) => {
+                        worker_errors.lock().expect("server error lock").push(error.to_string());
+                        break;
+                    }
+                }
+            }
+        });
+        Self { base_url: format!("http://{address}"), events, errors, stop, connections, acceptor: Some(acceptor) }
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        self.stop_worker();
+        let errors = self.errors.lock().expect("server error lock").clone();
+        assert!(errors.is_empty(), "ordered Xtream fixture errors: {errors:?}");
+        self.events.lock().expect("event log lock").clone()
+    }
+
+    fn stop_worker(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(acceptor) = self.acceptor.take() {
+            acceptor.join().expect("ordered fixture acceptor should stop cleanly");
+        }
+        for connection in self.connections.lock().expect("connection handle lock").drain(..) {
+            connection.join().expect("ordered fixture connection should finish cleanly");
+        }
+    }
+}
+
+impl Drop for OrderedXtreamServer {
+    fn drop(&mut self) { self.stop_worker(); }
+}
+
+fn serve_ordered_request(
+    mut stream: TcpStream,
+    responses: &HashMap<String, String>,
+    delayed_action: &str,
+    delay: Duration,
+    events: &StdMutex<Vec<String>>,
+) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    let mut request = Vec::with_capacity(1_024);
+    let mut buffer = [0_u8; 1_024];
+    loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let request = String::from_utf8_lossy(&request);
+    let action = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|target| target.split_once("action=").map(|(_, value)| value))
+        .map_or_else(|| "login".to_string(), |value| value.split('&').next().unwrap_or(value).to_string());
+    let body = responses
+        .get(&action)
+        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, format!("unexpected action {action}")))?;
+    events.lock().expect("event log lock").push(format!("request:{action}"));
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes())?;
+    if action == delayed_action {
+        // A reader that only inspects the response magic resolves after four bytes. Delivering those first and then
+        // pausing keeps the rest of the body undelivered, which is the stalling connection of the regression: a
+        // request issued ahead of its cluster's turn now reaches the provider while this body is still unread.
+        let (first, rest) = body.split_at(body.len().min(4));
+        stream.write_all(first.as_bytes())?;
+        stream.flush()?;
+        events.lock().expect("event log lock").push(format!("streaming:{action}"));
+        thread::sleep(delay);
+        stream.write_all(rest.as_bytes())?;
+    } else {
+        stream.write_all(body.as_bytes())?;
+    }
+    stream.flush()?;
+    events.lock().expect("event log lock").push(format!("served:{action}"));
+    Ok(())
+}
+
+/// A disk-based refresh must fetch each cluster only when that cluster's staging actually starts.
+///
+/// The provider here delivers the VOD body only after a pause. A run that opens the remaining cluster requests while
+/// an earlier body is still unread reaches the provider inside that pause; the provider's connection then stalls and
+/// eventually times out, which is the failure this test pins down.
+#[tokio::test]
+async fn disk_processing_requests_each_cluster_only_after_the_previous_body_is_consumed() {
+    let temp = tempfile::tempdir().unwrap();
+    let server =
+        OrderedXtreamServer::start(fixture_responses([2, 2, 2]), ("get_vod_streams", Duration::from_millis(250)));
+    let ctx = processing_context(temp.path());
+    let mut config = (**ctx.config.config.load()).clone();
+    config.disk_based_processing = true;
+    ctx.config.config.store(Arc::new(config));
+    let input = test_input(&server.base_url, ConfigInputUpdateQualityDto::default(), 0, &[]);
+
+    let fetch = tuliprox_iptv::xtream::download_xtream_playlist(
+        &ctx.config,
+        &ctx.client,
+        &ctx.events,
+        &input,
+        None,
+        UpdateQualityPolicy::Enforce,
+    )
+    .await;
+
+    assert!(fetch.is_ok(), "the fixture must produce a complete refresh: {:?}", fetch.errors);
+    assert!(fetch.persisted);
+
+    let events = server.finish();
+    for (consumed, requested) in
+        [("served:get_live_streams", "request:get_vod_streams"), ("served:get_vod_streams", "request:get_series")]
+    {
+        let consumed_at = events
+            .iter()
+            .position(|event| event == consumed)
+            .unwrap_or_else(|| panic!("{consumed} never happened: {events:?}"));
+        let requested_at = events
+            .iter()
+            .position(|event| event == requested)
+            .unwrap_or_else(|| panic!("{requested} never happened: {events:?}"));
+        assert!(
+            consumed_at < requested_at,
+            "{requested} was issued while {consumed} was still unread; the provider would stall: {events:?}"
+        );
+    }
 }
 
 #[tokio::test]

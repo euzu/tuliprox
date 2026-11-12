@@ -677,6 +677,18 @@ pub(super) async fn publish_staged_xtream_clusters_with_batch_result(
     staged: Vec<StagedXtreamClusterOutcome>,
     mut result: XtreamClusterPublishBatchResult,
 ) -> XtreamClusterPublishBatchResult {
+    // Publishing is all-or-nothing over the staged batch: a batch that already carries a failure publishes nothing,
+    // so a partly refreshed cluster set never becomes visible. Failures recorded before this call stay reported.
+    if result.has_failure() || staged.iter().any(|outcome| matches!(outcome, StagedXtreamClusterOutcome::Failed { .. }))
+    {
+        for outcome in staged {
+            if let StagedXtreamClusterOutcome::Failed { error, .. } = outcome {
+                result.errors.push(error);
+            }
+        }
+        return result;
+    }
+
     let staged_clusters: HashSet<XtreamCluster> = staged
         .iter()
         .filter_map(|outcome| match outcome {
