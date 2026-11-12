@@ -375,8 +375,11 @@
     }
 
     &:has(input:disabled) {
-      .tp__playlist-update-view__replace-label { color: var(--modest-text-color); }
       .tp__playlist-update-view__replace-copy::before { cursor: default; }
+    }
+
+    &:not(.tp__playlist-update-view__replace-option--readonly):has(input:disabled) {
+      .tp__playlist-update-view__replace-label { color: var(--modest-text-color); }
     }
 
     .tp__toggle-switch { z-index: 1; }
