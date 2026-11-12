@@ -1096,7 +1096,7 @@ fn serve_ordered_request(
         body.len()
     );
     stream.write_all(headers.as_bytes())?;
-    if action == delayed_action {
+    let tail = if action == delayed_action {
         // A reader that only inspects the response magic resolves after four bytes. Delivering those first and then
         // pausing keeps the rest of the body undelivered, which is the stalling connection of the regression: a
         // request issued ahead of its cluster's turn now reaches the provider while this body is still unread.
@@ -1105,12 +1105,18 @@ fn serve_ordered_request(
         stream.flush()?;
         events.lock().expect("event log lock").push(format!("streaming:{action}"));
         thread::sleep(delay);
-        stream.write_all(rest.as_bytes())?;
+        rest
     } else {
-        stream.write_all(body.as_bytes())?;
-    }
+        body.as_str()
+    };
+
+    // Delivery and completion record are atomic under the event-log lock. The client can only issue its next request
+    // after this body arrived, and that request's handler records itself under the same lock; recording the
+    // completion after releasing it would let the next `request:` entry overtake the `served:` entry it depends on.
+    let mut event_log = events.lock().expect("event log lock");
+    stream.write_all(tail.as_bytes())?;
     stream.flush()?;
-    events.lock().expect("event log lock").push(format!("served:{action}"));
+    event_log.push(format!("served:{action}"));
     Ok(())
 }
 
