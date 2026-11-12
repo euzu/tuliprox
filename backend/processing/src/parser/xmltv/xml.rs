@@ -22,7 +22,7 @@ use tokio::io::AsyncRead;
 use tuliprox_core::{
     model::{
         PersistedEpgSource, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY,
-        EPG_TAG_CHANNEL, EPG_TAG_DESC, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW,
+        EPG_TAG_CHANNEL, EPG_TAG_DESC, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LCN, EPG_TAG_LIVE, EPG_TAG_NEW,
         EPG_TAG_PREVIOUSLY_SHOWN, EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
     },
     utils::{
@@ -198,6 +198,19 @@ impl TVGuide {
                 }),
             );
         }
+        // A channel number is an identity, so it is offered on its own: a guide
+        // that publishes `<lcn>` resolves 5.1, 5.2 and 5.3 even when all three
+        // carry the same display name. The channel counts as wanted right away,
+        // or its programmes would be dropped before the number resolves.
+        let number_match = smart_match
+            && tag
+                .children
+                .iter()
+                .flatten()
+                .find_map(|child| (child.name.as_ref() == EPG_TAG_LCN).then_some(child.value.as_deref()).flatten())
+                .is_some_and(|lcn| {
+                    id_cache.match_epg_channel_number(&tag_epg_id, lcn, epg_source.priority, source_order)
+                });
         // Case-insensitive (ASCII) membership: fold the guide id for the
         // lookup only; `tag_epg_id` keeps its original case for output.
         let add_channel = if smart_match {
@@ -205,7 +218,7 @@ impl TVGuide {
             let normalized_match = tag.normalized_epg_ids.as_ref().is_some_and(|candidates| {
                 id_cache.match_epg_channel_candidates(&tag_epg_id, candidates, epg_source.priority, source_order)
             });
-            direct_match || normalized_match
+            direct_match || normalized_match || number_match
         } else {
             id_cache.contains_channel_epg_id(&tag_epg_id)
         };

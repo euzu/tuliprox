@@ -811,7 +811,8 @@ of every ICS-specific field is YAML-first. Configure new ICS sources in `source.
 
 The fuzzy matching logic attempts to "guess" the EPG ID by generating search keys based on the channel name.
 
-For XMLTV sources, Tuliprox uses the channel IDs and display names from the XMLTV file.
+For XMLTV sources, Tuliprox uses the channel IDs, the display names and the channel numbers (`<lcn>`) from the XMLTV
+file.
 
 For ICS sources, Tuliprox uses the generated virtual channel metadata:
 
@@ -844,21 +845,33 @@ If a stream is missing the `tvg-id`, Tuliprox performs the following steps:
    becomes `hbo`.
 4. **Reconstruction:** Using `name_prefix.suffix` (`.`), the country code is appended to the name. The target search key
    becomes `hbo.us`.
-5. **Exact Matching:** Normalized XMLTV IDs and display names are checked first. Source priority resolves duplicate
+5. **Channel Number:** A guide channel that publishes `<lcn>` is offered to the playlist channels that state the same
+   number, which is how sub-channels such as `5.1`, `5.2` and `5.3` are told apart even when they share a display name.
+   The number is read from the tuner stream URL (`.../auto/v5.2`), the form the `HDHomeRun` HTTP API publishes. It is
+   deliberately not read from a title (`5 USA` is not channel 5) or from `chno` (the numbering stage overwrites it with
+   the output position), and it never passes through `normalize_regex`: a pattern without a dot would turn `5.2` into
+   `52`. An exact name match and a valid existing `tvg-id` still take precedence, but the number outranks a fuzzy name
+   guess — sub-channels share the call sign of their main station, which is exactly where fuzzy matching fails.
+6. **Exact Matching:** Normalized XMLTV IDs and display names are checked first. Source priority resolves duplicate
    exact candidates. Quality variants sharing one normalized name can reuse a populated direct ID.
-6. **Fuzzy Matching:** When enabled, the engine scores every candidate in the matching **Double Metaphone** bucket and
+7. **Fuzzy Matching:** When enabled, the engine scores every candidate in the matching **Double Metaphone** bucket and
    keeps the globally best result rather than the first acceptable result. If the phonetic lookup yields nothing, a
    same-initial fallback is allowed only at `best_match_threshold`.
-7. **Safety Checks:** Numeric signatures must agree (`TF1` cannot match `TF1+1`), tied candidates are rejected, and
+8. **Safety Checks:** Numeric signatures must agree (`TF1` cannot match `TF1+1`), tied candidates are rejected, and
    low-confidence candidates must beat the runner-up by a minimum margin. Explicit XMLTV ID country suffixes prevent
    cross-country matches, and decorative playlist separators are ignored.
-8. **Programme Validation:** A channel declaration without programmes is not treated as a successful guide match.
+9. **Programme Validation:** A channel declaration without programmes is not treated as a successful guide match.
    Tuliprox keeps ranked alternatives while parsing and selects the best candidate that actually contributes programme
    data. Existing IDs with no programmes can therefore be replaced by a populated, semantically compatible candidate.
    ICS channels with an enabled dummy policy also count as populated.
 
 At `debug` level, each processed input emits one `Smart EPG summary` with the number of live channels whose original ID
-was valid, whose ID was assigned by Smart Match, or which remained unresolved.
+was valid, whose ID was assigned by Smart Match, or which remained unresolved. Inputs that publish channel numbers add
+a `Smart EPG channel numbers` line with how many resolved that way and how many were claimed by more than one guide
+channel.
+
+A channel number that two guide channels claim resolves to neither, exactly as with an ambiguous name: no EPG is
+preferred over another channel's EPG.
 
 For an ICS source, the generated EPG channel participates in the same matching process. For example, this configuration:
 
