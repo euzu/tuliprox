@@ -850,8 +850,18 @@ fn policy_options(
     selected_policy: InputRefreshPolicy,
     label: impl Fn(&str) -> String,
 ) -> Rc<Vec<DropDownOption>> {
-    if capabilities == InputUpdateCapabilities::Rescan {
-        return Rc::new(vec![DropDownOption::new("rescan", Html::from(label("LABEL.RESCAN")), true)]);
+    match capabilities {
+        InputUpdateCapabilities::Rescan => {
+            return Rc::new(vec![DropDownOption::new("rescan", Html::from(label("LABEL.RESCAN")), true)]);
+        }
+        InputUpdateCapabilities::Disabled => {
+            return Rc::new(vec![DropDownOption::new(
+                policy_id(InputRefreshPolicy::NORMAL),
+                Html::from(label(policy_label_key(InputRefreshPolicy::NORMAL))),
+                true,
+            )]);
+        }
+        _ => {}
     }
     Rc::new(
         capabilities
@@ -1061,6 +1071,8 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
         });
     }
     let rebuilds_targets = model.capabilities.rebuilds_targets();
+    let input_disabled = model.capabilities == InputUpdateCapabilities::Disabled;
+    let show_actions = rebuilds_targets || input_disabled;
     let target_ids = view.target_results.iter().map(|target| target.target_id).collect::<Vec<_>>();
     let all_selection = target_selection_state(&state.controls.selected_target_ids, &target_ids);
 
@@ -1088,10 +1100,13 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
     // Render consistently while the effect synchronizes the retained reducer state.
     let effective_policy = state.policy_for_capabilities(model.capabilities);
     let policy_options = policy_options(model.capabilities, effective_policy, |key| translate.t(key));
-    let show_replacement = model.capabilities.supports(effective_policy);
-    let replacement_reason =
-        replacement_unavailable_reason(&model.targets, &state.controls.selected_target_ids, |key| translate.t(key));
-    let can_replace = show_replacement && can_submit && replacement_reason.is_none();
+    let supports_replacement = model.capabilities.supports(effective_policy);
+    let replacement_reason = if input_disabled {
+        None
+    } else {
+        replacement_unavailable_reason(&model.targets, &state.controls.selected_target_ids, |key| translate.t(key))
+    };
+    let can_replace = supports_replacement && can_submit && replacement_reason.is_none();
     let replace_target_contents = can_replace && state.controls.replace_target_contents;
     let replacement_id = format!("input-update-{}-replace", model.input_id);
     let replacement_help_id = format!("{replacement_id}-help");
@@ -1251,7 +1266,9 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
     let heading_id = format!("input-update-card-{}-title", view.input_id);
     let target_group_heading_id = format!("input-update-card-{}-targets", view.input_id);
     let policy_description_id = format!("input-update-card-{}-policy-description", view.input_id);
-    let start_label = translate.t(if model.capabilities == InputUpdateCapabilities::Rescan {
+    let start_label = translate.t(if input_disabled {
+        "LABEL.DISABLED"
+    } else if model.capabilities == InputUpdateCapabilities::Rescan {
         "LABEL.START_RESCAN"
     } else {
         start_button_label_key(effective_policy)
@@ -1261,7 +1278,17 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
         action_message(translate.t("MESSAGES.PLAYLIST_UPDATE.POLICY_LABEL"), &view.input_name, &action_label);
     let start_aria_label =
         action_message(translate.t("MESSAGES.PLAYLIST_UPDATE.START_LABEL"), &view.input_name, &start_label);
-    let policy_description = translate.t(model.capabilities.description_key(effective_policy));
+    let (policy_description, start_hint) = if input_disabled {
+        let enabled_capabilities = InputUpdateCapabilities::for_input_type(model.input_type, true);
+        let description_key = if enabled_capabilities.supports(InputRefreshPolicy::NORMAL) {
+            enabled_capabilities.description_key(InputRefreshPolicy::NORMAL)
+        } else {
+            "MESSAGES.PLAYLIST_UPDATE.POLICY_UPDATE_DESCRIPTION"
+        };
+        (translate.t(description_key), Some(translate.t(model.capabilities.description_key(effective_policy))))
+    } else {
+        (translate.t(model.capabilities.description_key(effective_policy)), None)
+    };
     let last_update = last_update_view_model(view.last_update_at, props.now);
     let last_update_text = match last_update.relative {
         LastUpdateRelative::Never => translate.t("LABEL.LAST_UPDATE_NEVER"),
@@ -1354,7 +1381,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                     <div class="tp__playlist-update-view__action-area">
                         <div class="tp__playlist-update-view__input-actions">
                         <div class="tp__playlist-update-view__policy-control">
-                            if rebuilds_targets {
+                            if show_actions {
                                 <Select
                                     name={select_label}
                                     icon={Some("ChevronDown".to_string())}
@@ -1363,24 +1390,26 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                     popup_placement={PopupMenuPlacement::BottomEnd}
                                     options={policy_options}
                                     on_select={on_policy_select}
+                                    readonly={input_disabled}
                                     aria_describedby={policy_description_id.clone()}
                                 />
                             } else {
                                 <TextButton
                                     name={format!("input_update_{}_unavailable", model.input_id)}
-                                    title={translate.t(if model.capabilities == InputUpdateCapabilities::BulkOnly { "LABEL.BULK_ONLY" } else { "LABEL.DISABLED" })}
+                                    title={translate.t("LABEL.BULK_ONLY")}
                                     aria_label={Some(select_label)}
                                     disabled={true}
                                     onclick={Callback::noop()}
                                 />
                             }
                         </div>
-                        if rebuilds_targets {
+                        if show_actions {
                             <TextButton
                                 name={format!("input_update_{}", model.input_id)}
                                 icon="Refresh"
                                 title={start_label.clone()}
                                 aria_label={Some(start_aria_label)}
+                                hint={start_hint}
                                 disabled={!props.connection_context.is_connected()
                                     || !can_start_update(&state, &model, can_submit)}
                                 onclick={on_start}
@@ -1393,8 +1422,11 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                         )} aria-live="polite">
                             {policy_description}
                         </p>
-                        if show_replacement {
-                            <div class="tp__playlist-update-view__replace-option">
+                        if supports_replacement || input_disabled {
+                            <div class={classes!(
+                                "tp__playlist-update-view__replace-option",
+                                input_disabled.then_some("tp__playlist-update-view__replace-option--readonly"),
+                            )}>
                                 <label for={replacement_id.clone()} class="tp__playlist-update-view__replace-copy">
                                     <span class="tp__playlist-update-view__replace-label">{replacement_label.clone()}</span>
                                     <span id={replacement_help_id.clone()} class="tp__playlist-update-view__replace-help" aria-live="polite">
@@ -1880,14 +1912,12 @@ mod tests {
                     state.controls.replace_target_contents = false;
                     assert_eq!(synchronized, state);
                     assert!(!capabilities.supports(synchronized.controls.policy));
-                    let expected_options =
-                        if capabilities == InputUpdateCapabilities::Rescan { vec!["rescan"] } else { Vec::new() };
+                    let expected_option =
+                        if capabilities == InputUpdateCapabilities::Rescan { "rescan" } else { "normal" };
+                    let options = policy_options(capabilities, synchronized.controls.policy, str::to_owned);
                     assert_eq!(
-                        policy_options(capabilities, synchronized.controls.policy, str::to_owned)
-                            .iter()
-                            .map(|option| option.id.as_str())
-                            .collect::<Vec<_>>(),
-                        expected_options
+                        options.iter().map(|option| (option.id.as_str(), option.selected)).collect::<Vec<_>>(),
+                        [(expected_option, true)],
                     );
                     assert_eq!(
                         can_start_update(&synchronized, &model, true),
@@ -2205,7 +2235,7 @@ mod tests {
                     enabled,
                     ..shared::model::ConfigInputDto::default()
                 });
-                let expected = if enabled { expected } else { &[] };
+                let expected = if enabled { expected } else { &[POLICY_NORMAL] };
                 for policy in [InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE] {
                     let options = policy_options(model.capabilities, policy, str::to_owned);
                     assert_eq!(options.iter().map(|option| option.id.as_str()).collect::<Vec<_>>(), expected);
