@@ -135,7 +135,7 @@ use self::target_publish::TargetEmptyPublicationHook;
 use self::target_publish::{xtream_write_playlist_with_mode, TargetEmptyReplacementMode};
 use self::{
     details::{cluster_flag, preserve_details_input_xtream_playlist_cluster_to_disk, PreserveDetailsOutcome},
-    input_refresh::{XtreamClusterEvaluationReport, XtreamRefreshLease},
+    input_refresh::XtreamRefreshLease,
     paths::{target_category_lock_path, XtreamRefreshPaths},
     publish::{publish_staged_file_same_directory, save_xtream_categories_to_file},
     read::{get_map_item_as_str, xtream_get_file_path_for_name},
@@ -147,7 +147,11 @@ pub use self::{
         persist_input_live_info, persist_input_live_info_batch, persist_input_series_info_batch,
         persist_input_vod_info, persist_input_vod_info_batch, persists_input_series_info,
     },
-    input_refresh::{persist_input_xtream_playlist_cluster_to_disk, persist_input_xtream_playlist_clusters_to_disk},
+    input_refresh::{
+        persist_input_xtream_playlist_cluster_to_disk, persist_input_xtream_playlist_clusters_to_disk,
+        publish_staged_xtream_clusters, stage_input_xtream_playlist_cluster_to_disk, StagedXtreamClusterOutcome,
+        XtreamClusterEvaluationReport,
+    },
     paths::{
         ensure_xtream_storage_path, get_collection_path, get_live_cat_collection_path, get_series_cat_collection_path,
         get_vod_cat_collection_path, xtream_category_view_lock_path, xtream_cluster_category_collection,

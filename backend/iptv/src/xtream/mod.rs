@@ -27,10 +27,11 @@ use tuliprox_core::{
 use tuliprox_parser::{xtream, xtream::parse_xtream_series_info};
 use tuliprox_repository::{
     count_input_xtream_cluster, get_input_storage_path, get_target_id_mapping, get_target_storage_path,
-    persist_input_vod_info, persist_input_xtream_playlist_clusters_to_disk, persists_input_series_info,
-    rewrite_provider_series_info_episode_virtual_id, write_playlist_batch_item_upsert, write_playlist_item_update,
-    PlaylistStorageState, ProviderEpisodeKey, VirtualIdRecord, XtreamClusterPublishBatchResult,
-    XtreamClusterQualityPolicy, XtreamClusterRefreshRequest,
+    persist_input_vod_info, persists_input_series_info, publish_staged_xtream_clusters,
+    rewrite_provider_series_info_episode_virtual_id, stage_input_xtream_playlist_cluster_to_disk,
+    write_playlist_batch_item_upsert, write_playlist_item_update, PlaylistStorageState, ProviderEpisodeKey,
+    StagedXtreamClusterOutcome, VirtualIdRecord, XtreamClusterPublishBatchResult, XtreamClusterQualityPolicy,
+    XtreamClusterRefreshRequest,
 };
 
 const THREE_DAYS_IN_SECS: i64 = 3 * 24 * 60 * 60;
@@ -734,6 +735,48 @@ async fn verify_xtream_playlist_account<E: EventSink>(
     Ok(())
 }
 
+/// An authenticated source session, or the reason this account cannot be used.
+enum XtreamSession {
+    /// The provider accepted the account; the value is the API base URL including the credentials.
+    Ready(String),
+    /// This account cannot be used, but the provider did not refuse its credentials.
+    Unavailable(TuliproxError),
+}
+
+/// Resolves the provider API base URL of `input_source` and verifies that its account is usable.
+///
+/// `Err` means the provider refused this account (blocked, expired, HTTP 401/403), so the caller may try
+/// another account of the same input.
+async fn open_xtream_session<E: EventSink>(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    events: &E,
+    input: &ConfigInput,
+    input_source: &InputSource,
+) -> Result<XtreamSession, TuliproxError> {
+    let username = input_source.username.as_deref().unwrap_or("");
+    let password = input_source.password.as_deref().unwrap_or("");
+    let base_input_url = if input_source.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        input_source.url.clone()
+    } else {
+        match input.resolve_url(&input_source.url) {
+            Ok(url) => url.into_owned(),
+            Err(err) => return Ok(XtreamSession::Unavailable(err)),
+        }
+    };
+    let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
+    let login_source = input_source.with_url(base_url.clone());
+
+    match verify_xtream_playlist_account(app_config, client, events, &login_source, username).await {
+        Ok(()) => Ok(XtreamSession::Ready(base_url)),
+        Err(AccountRejection::Rejected(err)) => Err(err),
+        Err(AccountRejection::LoginFailed(err)) => {
+            error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
+            Ok(XtreamSession::Unavailable(err))
+        }
+    }
+}
+
 /// Downloads xtream clusters from a single account of `input`.
 ///
 /// `Err` means the provider refused this account (blocked, expired, HTTP 401/403), so the caller may try another
@@ -747,111 +790,198 @@ async fn download_xtream_from_source<E: EventSink>(
     clusters: &[XtreamCluster],
     context: XtreamDownloadContext,
 ) -> Result<PlaylistFetch, TuliproxError> {
-    let (username, password) =
-        (input_source.username.as_deref().unwrap_or(""), input_source.password.as_deref().unwrap_or(""));
-
-    let is_provider_url = input_source.url.starts_with(PROVIDER_SCHEME_PREFIX);
-    let base_input_url = if is_provider_url {
-        input_source.url.clone()
-    } else {
-        match input.resolve_url(&input_source.url) {
-            Ok(url) => url.into_owned(),
-            Err(err) => return Ok(PlaylistFetch { failed_clusters: clusters.to_vec(), ..PlaylistFetch::failed(err) }),
-        }
-    };
-
-    let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
-    let input_source_login = input_source.with_url(base_url.clone());
-
-    match verify_xtream_playlist_account(app_config, client, events, &input_source_login, username).await {
-        Ok(()) => {}
-        Err(AccountRejection::Rejected(err)) => return Err(err),
-        Err(AccountRejection::LoginFailed(err)) => {
-            error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
+    let base_url = match open_xtream_session(app_config, client, events, input, input_source).await {
+        Ok(XtreamSession::Ready(base_url)) => base_url,
+        Ok(XtreamSession::Unavailable(err)) => {
             return Ok(PlaylistFetch { failed_clusters: clusters.to_vec(), ..PlaylistFetch::failed(err) });
         }
-    }
+        Err(err) => return Err(err),
+    };
 
     let cfg = app_config.config.load();
     let storage_dir = &cfg.storage_dir;
     let use_disk_based_processing = cfg.disk_based_processing && context.source_input_type.is_xtream();
     let mut fetch = PlaylistFetch::groups(Vec::with_capacity(128)).persisted(use_disk_based_processing);
 
-    let mut disk_cluster_readers = Vec::new();
+    let mut staged_clusters = Vec::new();
+    let mut reached_clusters = Vec::with_capacity(clusters.len());
+    let mut disk_stage_batch_result = XtreamClusterPublishBatchResult::default();
     for (xtream_cluster, category, stream) in &ACTIONS {
         if !clusters.contains(xtream_cluster) {
             continue;
         }
-        let input_source_category = input_source.with_url(concat_string!(&base_url, "&action=", category));
-        let input_source_stream = input_source.with_url(concat_string!(&base_url, "&action=", stream));
-        let category_file_path = tuliprox_core::utils::prepare_file_path(
-            input.persist.as_deref(),
+        let documents = XtreamClusterDocuments {
+            input_source,
+            base_url: &base_url,
+            cluster: *xtream_cluster,
+            actions: (category, stream),
             storage_dir,
-            concat_string!(category, "_").as_str(),
-        );
-        let stream_file_path = tuliprox_core::utils::prepare_file_path(
-            input.persist.as_deref(),
-            storage_dir,
-            concat_string!(stream, "_").as_str(),
-        );
-
-        match futures::join!(
-            request::get_input_json_content_as_stream(app_config, client, &input_source_category, category_file_path),
-            request::get_input_json_content_as_stream(app_config, client, &input_source_stream, stream_file_path)
-        ) {
-            (Ok(category_content), Ok(stream_content)) => {
-                if use_disk_based_processing {
-                    disk_cluster_readers.push(XtreamClusterRefreshRequest {
-                        cluster: *xtream_cluster,
-                        quality: disk_cluster_quality_policy(context.scope, input, *xtream_cluster),
-                        categories: category_content,
-                        streams: stream_content,
-                    });
-                } else {
-                    match xtream::parse_xtream(input, *xtream_cluster, category_content, stream_content).await {
-                        Ok(sub_playlist_parsed) => {
-                            if let Some(xtream_sub_playlist) = sub_playlist_parsed {
-                                if let Err(err) = apply_in_memory_cluster_download(
-                                    context.scope,
-                                    input,
-                                    *xtream_cluster,
-                                    xtream_sub_playlist,
-                                    &mut fetch,
-                                    || count_input_xtream_cluster(app_config, input, *xtream_cluster),
-                                )
-                                .await
-                                {
-                                    fetch.record_cluster_error(*xtream_cluster, err);
-                                }
-                            } else {
-                                error!(
-                                    "Could not parse playlist {xtream_cluster} for input {}: {}",
-                                    input_source.name,
-                                    sanitize_sensitive_info(&input_source.url)
-                                );
-                            }
+            persist: input.persist.as_deref(),
+        };
+        let Some((category_content, stream_content)) =
+            acquire_xtream_cluster_documents(app_config, client, documents, &mut fetch).await
+        else {
+            continue;
+        };
+        if use_disk_based_processing {
+            let staged = stage_downloaded_xtream_cluster(
+                app_config,
+                input,
+                *xtream_cluster,
+                disk_cluster_quality_policy(context.scope, input, *xtream_cluster),
+                category_content,
+                stream_content,
+                &mut disk_stage_batch_result,
+            )
+            .await;
+            reached_clusters.push(*xtream_cluster);
+            match staged {
+                Some(outcome) => staged_clusters.push(outcome),
+                // One failed cluster stops the ordered batch; the clusters behind it stay unpublished.
+                None => break,
+            }
+        } else {
+            match xtream::parse_xtream(input, *xtream_cluster, category_content, stream_content).await {
+                Ok(sub_playlist_parsed) => {
+                    if let Some(xtream_sub_playlist) = sub_playlist_parsed {
+                        if let Err(err) = apply_in_memory_cluster_download(
+                            context.scope,
+                            input,
+                            *xtream_cluster,
+                            xtream_sub_playlist,
+                            &mut fetch,
+                            || count_input_xtream_cluster(app_config, input, *xtream_cluster),
+                        )
+                        .await
+                        {
+                            fetch.record_cluster_error(*xtream_cluster, err);
                         }
-                        Err(err) => fetch.record_cluster_error(*xtream_cluster, err),
+                    } else {
+                        error!(
+                            "Could not parse playlist {xtream_cluster} for input {}: {}",
+                            input_source.name,
+                            sanitize_sensitive_info(&input_source.url)
+                        );
                     }
                 }
+                Err(err) => fetch.record_cluster_error(*xtream_cluster, err),
             }
-            (Err(err1), Err(err2)) => {
-                fetch.record_cluster_error(*xtream_cluster, err1);
-                fetch.record_cluster_error(*xtream_cluster, err2);
-            }
-            (_, Err(err)) | (Err(err), _) => fetch.record_cluster_error(*xtream_cluster, err),
         }
     }
 
-    if use_disk_based_processing && !disk_cluster_readers.is_empty() {
-        let result = persist_input_xtream_playlist_clusters_to_disk(app_config, input, disk_cluster_readers).await;
+    if use_disk_based_processing {
+        let result = if disk_stage_batch_result.has_failure() || staged_clusters.is_empty() {
+            disk_stage_batch_result
+        } else {
+            publish_staged_xtream_clusters(app_config, input, staged_clusters, disk_stage_batch_result).await
+        };
         for err in &result.errors {
-            error!("persist_input_xtream_playlist_clusters_to_disk failed: {err}");
+            error!("disk-based Xtream cluster refresh failed for input '{}': {err}", input.name);
         }
+        let stopped_at = result.failed_cluster;
         apply_disk_cluster_publish_result(&mut fetch, result);
+        record_unreached_xtream_clusters(&mut fetch, clusters, &reached_clusters, stopped_at);
     }
 
     Ok(fetch)
+}
+
+/// What one cluster of a source asks for: its two provider actions and where a persisted copy goes.
+struct XtreamClusterDocuments<'a> {
+    input_source: &'a InputSource,
+    base_url: &'a str,
+    cluster: XtreamCluster,
+    actions: (&'a str, &'a str),
+    storage_dir: &'a str,
+    persist: Option<&'a str>,
+}
+
+/// Downloads the category and stream documents of one cluster, recording every failure on `fetch`.
+///
+async fn acquire_xtream_cluster_documents(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    documents: XtreamClusterDocuments<'_>,
+    fetch: &mut PlaylistFetch,
+) -> Option<(request::DynReader, request::DynReader)> {
+    let XtreamClusterDocuments { input_source, base_url, cluster, actions: (category, stream), storage_dir, persist } =
+        documents;
+    let category_source = input_source.with_url(concat_string!(base_url, "&action=", category));
+    let stream_source = input_source.with_url(concat_string!(base_url, "&action=", stream));
+    let category_path =
+        tuliprox_core::utils::prepare_file_path(persist, storage_dir, concat_string!(category, "_").as_str());
+    let stream_path =
+        tuliprox_core::utils::prepare_file_path(persist, storage_dir, concat_string!(stream, "_").as_str());
+
+    match futures::join!(
+        request::get_input_json_content_as_stream(app_config, client, &category_source, category_path),
+        request::get_input_json_content_as_stream(app_config, client, &stream_source, stream_path)
+    ) {
+        (Ok(categories), Ok(streams)) => Some((categories, streams)),
+        (Err(first), Err(second)) => {
+            fetch.record_cluster_error(cluster, first);
+            fetch.record_cluster_error(cluster, second);
+            None
+        }
+        (_, Err(error)) | (Err(error), _) => {
+            fetch.record_cluster_error(cluster, error);
+            None
+        }
+    }
+}
+
+/// Stages one already downloaded cluster for disk publication.
+///
+/// `None` records the technical failure that stops the ordered batch. Clusters already staged in that batch are
+/// then dropped, so a partially refreshed cluster set never reaches the provider's catalog.
+async fn stage_downloaded_xtream_cluster(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    cluster: XtreamCluster,
+    quality: XtreamClusterQualityPolicy,
+    categories: request::DynReader,
+    streams: request::DynReader,
+    batch: &mut XtreamClusterPublishBatchResult,
+) -> Option<StagedXtreamClusterOutcome> {
+    let request = XtreamClusterRefreshRequest { cluster, quality, categories, streams };
+    let outcome = match stage_input_xtream_playlist_cluster_to_disk(app_config, input, request).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            batch.record_cluster_error(cluster, error);
+            return None;
+        }
+    };
+    batch.record_evaluation(outcome.evaluation());
+    match outcome {
+        StagedXtreamClusterOutcome::Failed { error, .. } => {
+            batch.record_cluster_error(cluster, error);
+            None
+        }
+        publishable => Some(publishable),
+    }
+}
+
+/// Reports every requested cluster that a stopped batch never reached.
+///
+/// A cluster behind a failure was not refreshed in this run. Leaving it unreported would let the caller
+/// mistake it for an unchanged, still valid cluster instead of invalidating it.
+fn record_unreached_xtream_clusters(
+    fetch: &mut PlaylistFetch,
+    requested: &[XtreamCluster],
+    reached: &[XtreamCluster],
+    stopped_at: Option<XtreamCluster>,
+) {
+    let Some(stopped_at) = stopped_at else {
+        return;
+    };
+    for cluster in requested.iter().filter(|cluster| !reached.contains(*cluster)) {
+        fetch.record_cluster_error(
+            *cluster,
+            TuliproxError::RepositoryXtream(format!(
+                "Xtream cluster {cluster} was not refreshed because cluster {stopped_at} failed earlier in this batch"
+            )),
+        );
+    }
 }
 
 async fn download_xtream_playlist_with_scope<E: EventSink>(

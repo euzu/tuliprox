@@ -889,6 +889,63 @@ async fn coderabbit_xtream_http_failure_preserves_successful_disk_clusters() {
     }
 }
 
+/// A cluster that fails while staging stops the rest of the batch: no already staged cluster may reach the
+/// published catalog, and the clusters behind the failure must be reported instead of silently skipped.
+#[tokio::test]
+async fn disk_staging_failure_stops_the_batch_and_reports_the_unreached_clusters() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut responses = fixture_responses([2, 2, 2]);
+    responses.insert("get_vod_streams".to_owned(), "{".to_owned());
+    let server = TestXtreamServer::start_with_responses(responses);
+    let ctx = processing_context(temp.path());
+    let mut config = (**ctx.config.config.load()).clone();
+    config.disk_based_processing = true;
+    ctx.config.config.store(Arc::new(config));
+    let input = test_input(&server.base_url, ConfigInputUpdateQualityDto { live: 100, vod: 100, series: 100 }, 0, &[]);
+    seed_baseline(&ctx, &input).await;
+
+    let fetch = tuliprox_iptv::xtream::download_xtream_playlist(
+        &ctx.config,
+        &ctx.client,
+        &ctx.events,
+        &input,
+        None,
+        UpdateQualityPolicy::Enforce,
+    )
+    .await;
+
+    assert!(!fetch.is_ok(), "a failed staging step must remain a technical failure");
+    assert!(fetch.completed_clusters.is_empty(), "a stopped batch publishes nothing");
+    // The evaluations completed before the failure are kept; only the publication result is missing.
+    let evaluated: Vec<_> = fetch.quality_acceptances.iter().map(|acceptance| acceptance.cluster).collect();
+    assert_eq!(evaluated, vec![XtreamCluster::Live]);
+    assert_eq!(fetch.quality_rejections.len(), 0);
+    assert_eq!(
+        fetch.failed_clusters,
+        vec![XtreamCluster::Video, XtreamCluster::Series],
+        "the failing cluster and every cluster behind it must be reported"
+    );
+
+    // Live was staged before the failure. It must not become visible, which leaves the seeded state in place.
+    let storage = input_storage_path(&ctx, &input).await;
+    let groups = tuliprox_repository::load_input_xtream_playlist(&ctx.config, &storage, &XTREAM_CLUSTER).await.unwrap();
+    for (cluster, title) in
+        [(XtreamCluster::Live, "old-live"), (XtreamCluster::Video, "old-vod"), (XtreamCluster::Series, "old-series")]
+    {
+        let group = groups.iter().find(|group| group.xtream_cluster == cluster).unwrap();
+        assert_eq!(group.title.as_ref(), title, "cluster {cluster} must keep its published state");
+    }
+
+    let requests = server.finish();
+    for unreached in ["get_series_categories", "get_series"] {
+        assert!(
+            !requests.iter().any(|action| action == unreached),
+            "the stopped batch must not request {unreached}: {requests:?}"
+        );
+    }
+    assert!(requests.iter().any(|action| action == "get_vod_streams"), "{requests:?}");
+}
+
 #[tokio::test]
 async fn pipeline_transparency_shows_failure_survives_xtream_fetch_and_reload() {
     for disk in [false, true] {

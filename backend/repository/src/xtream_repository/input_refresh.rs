@@ -32,8 +32,12 @@ use tuliprox_core::{
 };
 use tuliprox_parser::xtream;
 
+/// Quality decisions recorded for one staged cluster.
+///
+/// Public so callers can hand the value back to [`XtreamClusterPublishBatchResult::record_evaluation`], but
+/// opaque: only the staging code that evaluates a candidate may state its decision.
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct XtreamClusterEvaluationReport {
+pub struct XtreamClusterEvaluationReport {
     pub(super) quality_acceptance: Option<ClusterUpdateAcceptance>,
     pub(super) quality_rejection: Option<ClusterUpdateRejection>,
     pub(super) force_update: Option<ClusterForceUpdate>,
@@ -120,7 +124,7 @@ impl Default for XtreamClusterStageOperations {
     fn default() -> Self { Self { preserve_details: preserve_details_input_xtream_playlist_cluster_to_disk } }
 }
 
-struct StagedXtreamClusterRefresh {
+pub struct StagedXtreamClusterRefresh {
     refresh_lease: XtreamRefreshLease,
     publish_lock: Arc<FileWriteGuard>,
     storage_path: PathBuf,
@@ -131,14 +135,24 @@ struct StagedXtreamClusterRefresh {
     evaluation: XtreamClusterEvaluationReport,
 }
 
-enum StagedXtreamClusterOutcome {
+/// What staging decided for one cluster.
+///
+/// Only staging may produce an outcome. `Ready` is already unconstructible outside this crate because
+/// [`StagedXtreamClusterRefresh`] has private fields; the other two variants are marked non-exhaustive so a
+/// caller cannot fabricate a retention or a failure and thereby report a publication that never happened.
+pub enum StagedXtreamClusterOutcome {
     Ready(StagedXtreamClusterRefresh),
+    #[non_exhaustive]
     RetainedPrevious(ClusterUpdateRejection),
-    Failed { evaluation: XtreamClusterEvaluationReport, error: TuliproxError },
+    #[non_exhaustive]
+    Failed {
+        evaluation: XtreamClusterEvaluationReport,
+        error: TuliproxError,
+    },
 }
 
 impl StagedXtreamClusterOutcome {
-    pub(super) const fn evaluation(&self) -> XtreamClusterEvaluationReport {
+    pub const fn evaluation(&self) -> XtreamClusterEvaluationReport {
         match self {
             Self::Ready(refresh) => refresh.evaluation,
             Self::RetainedPrevious(rejection) => XtreamClusterEvaluationReport {
@@ -192,8 +206,22 @@ pub(super) fn evaluate_staged_xtream_cluster_quality(
     Ok(evaluate_update_quality(current_count, candidate_count, threshold))
 }
 
+pub async fn stage_input_xtream_playlist_cluster_to_disk(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    request: XtreamClusterRefreshRequest,
+) -> Result<StagedXtreamClusterOutcome, TuliproxError> {
+    stage_input_xtream_playlist_cluster_to_disk_with_operations(
+        app_config,
+        input,
+        request,
+        XtreamClusterStageOperations::default(),
+    )
+    .await
+}
+
 #[allow(clippy::too_many_lines)]
-async fn stage_input_xtream_playlist_cluster_to_disk(
+pub(super) async fn stage_input_xtream_playlist_cluster_to_disk_with_operations(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
     request: XtreamClusterRefreshRequest,
@@ -611,13 +639,16 @@ pub(super) async fn persist_input_xtream_playlist_clusters_to_disk_with_operatio
     let mut staged = Vec::with_capacity(cluster_readers.len());
     for request in cluster_readers {
         let cluster = request.cluster;
-        let outcome = match stage_input_xtream_playlist_cluster_to_disk(app_config, input, request, operations).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                result.record_cluster_error(cluster, error);
-                return result;
-            }
-        };
+        let outcome =
+            match stage_input_xtream_playlist_cluster_to_disk_with_operations(app_config, input, request, operations)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    result.record_cluster_error(cluster, error);
+                    return result;
+                }
+            };
         result.record_evaluation(outcome.evaluation());
         match outcome {
             StagedXtreamClusterOutcome::Failed { error, .. } => {
@@ -628,6 +659,24 @@ pub(super) async fn persist_input_xtream_playlist_clusters_to_disk_with_operatio
         }
     }
 
+    publish_staged_xtream_clusters_with_batch_result(app_config, input, staged, result).await
+}
+
+pub async fn publish_staged_xtream_clusters(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    staged: Vec<StagedXtreamClusterOutcome>,
+    result: XtreamClusterPublishBatchResult,
+) -> XtreamClusterPublishBatchResult {
+    publish_staged_xtream_clusters_with_batch_result(app_config, input, staged, result).await
+}
+
+pub(super) async fn publish_staged_xtream_clusters_with_batch_result(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    staged: Vec<StagedXtreamClusterOutcome>,
+    mut result: XtreamClusterPublishBatchResult,
+) -> XtreamClusterPublishBatchResult {
     let staged_clusters: HashSet<XtreamCluster> = staged
         .iter()
         .filter_map(|outcome| match outcome {

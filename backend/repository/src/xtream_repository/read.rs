@@ -413,12 +413,16 @@ pub async fn xtream_read_playlist_categories(
 }
 
 impl XtreamClusterPublishBatchResult {
-    pub(super) fn record_cluster_error(&mut self, cluster: XtreamCluster, error: TuliproxError) {
+    /// Whether a technical failure already stopped this batch.
+    #[must_use]
+    pub const fn has_failure(&self) -> bool { self.failed_cluster.is_some() }
+
+    pub fn record_cluster_error(&mut self, cluster: XtreamCluster, error: TuliproxError) {
         self.failed_cluster = Some(cluster);
         self.errors.push(error);
     }
 
-    pub(super) fn record_evaluation(&mut self, evaluation: XtreamClusterEvaluationReport) {
+    pub fn record_evaluation(&mut self, evaluation: XtreamClusterEvaluationReport) {
         if let Some(acceptance) = evaluation.quality_acceptance {
             self.quality_acceptances.push(acceptance);
         }
