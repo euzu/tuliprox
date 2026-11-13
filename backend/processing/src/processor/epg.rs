@@ -130,6 +130,15 @@ impl MatchRequirement {
     }
 }
 
+/// The channels publishing one tuner channel number.
+#[derive(Debug, Default)]
+struct NumberRequirement {
+    missing_id: bool,
+    /// Each channel's own id (folded) with its normalized name, so an id the guide
+    /// offers but under another channel's names still counts as needing the number.
+    direct_ids: HashSet<(Arc<str>, Arc<str>)>,
+}
+
 pub struct EpgIdCache {
     /// Membership set of the epg ids collected from playlist channels.
     /// Keys are stored ASCII-lowercased so guide-id matching is case-insensitive.
@@ -154,7 +163,7 @@ pub struct EpgIdCache {
     /// `52` against `5.2`.
     number_candidates: HashMap<Arc<str>, HashMap<Arc<str>, RankedEpgMatch>>,
     /// Channel numbers the playlist publishes, as normalized keys.
-    number_requirements: HashMap<Arc<str>, MatchRequirement>,
+    number_requirements: HashMap<Arc<str>, NumberRequirement>,
     /// Resolved guide id per number key, `None` when no candidate survived.
     number_matches: HashMap<Arc<str>, Option<Arc<str>>>,
     /// Early `match-channel` answers (normalized name -> guide id), used by
@@ -253,9 +262,15 @@ impl EpgIdCache {
         }));
         // A guide channel that resolved by number is referenced exactly like one
         // resolved by name; without this its programmes would be dropped. Like a name
-        // match it is only needed by channels that lack a usable id of their own.
+        // match it is only needed by channels that lack a usable id of their own:
+        // none, one the guide does not offer, or one whose guide names do not fit.
         selected.extend(self.number_matches.iter().filter_map(|(number, id)| {
-            let needed = self.number_requirements.get(number)?.lacks_available_id(available_epg_ids);
+            let requirement = self.number_requirements.get(number)?;
+            let needed = requirement.missing_id
+                || requirement.direct_ids.iter().any(|(direct_id, name)| {
+                    !available_epg_ids.contains(direct_id)
+                        || self.normalized_id_name_compatible(direct_id, name) == Some(false)
+                });
             needed.then(|| id.as_ref().map(|id| with_folded_epg_id(id, |folded| folded.intern()))).flatten()
         }));
         if self.hooks.keep_match_candidates {
@@ -478,10 +493,14 @@ impl EpgIdCache {
     /// worse than none.
     fn collect_channel_number(&mut self, header: &PlaylistItemHeader) {
         if let Some(number) = tuner_channel_number(&header.url) {
+            let direct =
+                header.epg_channel_id.as_ref().filter(|id| !id.is_empty()).map(|id| {
+                    (with_folded_epg_id(id, |folded| folded.intern()), self.normalize(&header.name).intern())
+                });
             let requirement = self.number_requirements.entry(number.intern()).or_default();
-            match header.epg_channel_id.as_ref().filter(|id| !id.is_empty()) {
-                Some(id) => {
-                    requirement.direct_ids.insert(with_folded_epg_id(id, |folded| folded.intern()));
+            match direct {
+                Some(direct) => {
+                    requirement.direct_ids.insert(direct);
                 }
                 None => requirement.missing_id = true,
             }
@@ -2255,6 +2274,23 @@ mod tests {
         let selected = cache.selected_epg_ids(&available);
         assert!(!selected.contains("wral.other"), "a channel with an available id never uses its number match");
         assert!(selected.contains("wxyz.guide"));
+    }
+
+    #[test]
+    fn selected_epg_ids_keep_number_matches_for_channels_with_a_name_incompatible_id() {
+        // `assign_smart_epg_id` replaces an available id whose guide names do not fit
+        // the channel, so the number-resolved replacement must keep its programmes.
+        let mut cache = smart_cache(80, 95);
+        let mut wrong_id = tuner_playlist_item("5.2", "WRAL DT");
+        wrong_id.header.epg_channel_id = Some("cartoon.valid".intern());
+        cache.collect_channel_number(&wrong_id.header);
+        cache.register_guide_names("cartoon.valid", ["Cartoon Network"]);
+        assert!(cache.match_epg_channel_number(&"wral.sub".intern(), "5.2", 0, 0));
+
+        let available = HashSet::from(["cartoon.valid".intern(), "wral.sub".intern()]);
+        cache.finalize_matches(&available);
+        assert_eq!(cache.channel_name_matches_epg_id("cartoon.valid", "WRAL DT"), Some(false));
+        assert!(cache.selected_epg_ids(&available).contains("wral.sub"));
     }
 
     #[test]
