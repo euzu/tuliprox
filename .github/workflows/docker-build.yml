@@ -36,7 +36,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
 
       - name: Install Rust Tools (Binaries)
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cross,trunk,wasm-bindgen-cli,cargo-edit,mdbook
 
@@ -301,7 +301,7 @@ jobs:
             (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master') ||
             (github.event_name == 'push' && github.ref == 'refs/heads/master')
           )
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: v${{ steps.version.outputs.value }}
           name: v${{ steps.version.outputs.value }}
