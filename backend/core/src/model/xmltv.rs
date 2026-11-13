@@ -25,6 +25,11 @@ pub const EPG_TAG_CHANNEL: &str = "channel";
 pub const EPG_ATTRIB_ID: &str = "id";
 pub const EPG_ATTRIB_CHANNEL: &str = "channel";
 pub const EPG_TAG_DISPLAY_NAME: &str = "display-name";
+/// XMLTV `<lcn>`, the logical channel number of a `<channel>`.
+///
+/// The only field of a guide channel that identifies a tuner channel by number
+/// rather than by name, which is what sub-channels (5.1, 5.2, 5.3) need.
+pub const EPG_TAG_LCN: &str = "lcn";
 pub const EPG_TAG_ICON: &str = "icon";
 pub const EPG_TAG_TITLE: &str = "title";
 pub const EPG_TAG_DESC: &str = "desc";

@@ -219,6 +219,16 @@
 
 ## 🌟 New Features
 
+- **Smart Match resolves channels by their channel number, not only by name.** A guide channel that publishes
+  `<lcn>` now matches the playlist channel stating the same number. The number is read from the tuner stream URL
+  (`.../auto/v5.2`) — not from a title, and not from `chno`, which the numbering stage fills with the output position.
+  This fixes HDHomeRun lineups, whose M3U carries no `tvg-id` and whose sub-channels (`5.1`, `5.2`, `5.3`) often share
+  one display name: name matching had to reject all of them as ambiguous.
+  A number claimed by two guide channels still resolves to neither. The number only fills a gap: a valid existing
+  `tvg-id` and an exact name match keep precedence, while the number outranks a fuzzy name match. Inputs without
+  channel numbers behave exactly as before. Debug logging adds a `Smart EPG channel numbers` line with the resolved and
+  ambiguous counts. See [Smart Match](docs/src/configuration/source.md#how-smart-matching-works).
+
 - **youtube-input supports yt-dlp as an optional stream resolver.** The plugin can now resolve playable YouTube streams
   using a user-provided `yt-dlp` executable instead of Invidious. The input form selects the resolver (`invidious` or
   `yt-dlp`) and accepts an optional `ytdlp_path` (defaulting to `/app/bin/yt-dlp` then `PATH`). Invidious instances are

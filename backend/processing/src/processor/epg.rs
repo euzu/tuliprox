@@ -4,8 +4,8 @@ use rphonetic::{DoubleMetaphone, Encoder};
 use shared::{
     model::{
         ConfigTargetOptions, EpgChannel, EpgNamePrefix, EpgProgramme, EpgSmartMatchConfigDto, HookCtx, PlaylistGroup,
-        PlaylistItem, PluginChannelProgrammes, PluginEpgChannel, PluginHook, PluginHost, PluginMatchRequest,
-        PluginRunReport, XtreamCluster,
+        PlaylistItem, PlaylistItemHeader, PluginChannelProgrammes, PluginEpgChannel, PluginHook, PluginHost,
+        PluginMatchRequest, PluginRunReport, XtreamCluster,
     },
     utils::{Internable, CONSTANTS},
 };
@@ -123,6 +123,22 @@ struct MatchRequirement {
     direct_ids: HashSet<Arc<str>>,
 }
 
+impl MatchRequirement {
+    /// True when a channel has no id of its own, or one the guide does not offer.
+    fn lacks_available_id(&self, available_epg_ids: &HashSet<Arc<str>>) -> bool {
+        self.missing_id || self.direct_ids.iter().any(|direct_id| !available_epg_ids.contains(direct_id))
+    }
+}
+
+/// The channels publishing one tuner channel number.
+#[derive(Debug, Default)]
+struct NumberRequirement {
+    missing_id: bool,
+    /// Each channel's own id (folded) with its normalized name, so an id the guide
+    /// offers but under another channel's names still counts as needing the number.
+    direct_ids: HashSet<(Arc<str>, Arc<str>)>,
+}
+
 pub struct EpgIdCache {
     /// Membership set of the epg ids collected from playlist channels.
     /// Keys are stored ASCII-lowercased so guide-id matching is case-insensitive.
@@ -139,6 +155,17 @@ pub struct EpgIdCache {
     match_candidates: HashMap<Arc<str>, HashMap<Arc<str>, RankedEpgMatch>>,
     match_requirements: HashMap<Arc<str>, MatchRequirement>,
     guide_names: HashMap<Arc<str>, HashSet<Arc<str>>>,
+    /// Guide channel numbers (`<lcn>`) offered per playlist channel number key.
+    ///
+    /// A separate key space on purpose. A channel number is an identity (`5.2`
+    /// is 5.2 and 5.1 is not), so it must never enter the phonetic, prefix or
+    /// core buckets that feed fuzzy name matching — those would happily score
+    /// `52` against `5.2`.
+    number_candidates: HashMap<Arc<str>, HashMap<Arc<str>, RankedEpgMatch>>,
+    /// Channel numbers the playlist publishes, as normalized keys.
+    number_requirements: HashMap<Arc<str>, NumberRequirement>,
+    /// Resolved guide id per number key, `None` when no candidate survived.
+    number_matches: HashMap<Arc<str>, Option<Arc<str>>>,
     /// Early `match-channel` answers (normalized name -> guide id), used by
     /// [`Self::finalize_matches`] when the built-in matcher has no winner.
     plugin_picks: HashMap<Arc<str>, Arc<str>>,
@@ -179,6 +206,9 @@ impl EpgIdCache {
             match_candidates: HashMap::new(),
             match_requirements: HashMap::new(),
             guide_names: HashMap::new(),
+            number_candidates: HashMap::new(),
+            number_requirements: HashMap::new(),
+            number_matches: HashMap::new(),
             plugin_picks: HashMap::new(),
             early_asked: HashSet::new(),
             processed: HashSet::new(),
@@ -190,7 +220,10 @@ impl EpgIdCache {
         }
     }
 
-    fn is_empty(&self) -> bool { self.channel_epg_id.is_empty() && self.normalized.is_empty() }
+    /// Nothing to match with, so the guide need not be read at all.
+    fn is_empty(&self) -> bool {
+        self.channel_epg_id.is_empty() && self.normalized.is_empty() && self.number_requirements.is_empty()
+    }
 
     /// Adds an epg id to the case-folded membership set.
     ///
@@ -221,12 +254,24 @@ impl EpgIdCache {
         let mut selected = self.channel_epg_id.intersection(available_epg_ids).cloned().collect::<HashSet<_>>();
         selected.extend(self.normalized.iter().filter_map(|(key, id)| {
             let requirement = self.match_requirements.get(key)?;
-            let needs_smart_match = requirement.missing_id
+            let needs_smart_match = requirement.lacks_available_id(available_epg_ids)
                 || requirement.direct_ids.iter().any(|direct_id| {
-                    !available_epg_ids.contains(direct_id)
-                        || self.normalized_id_name_compatible(direct_id, key).is_some_and(|compatible| !compatible)
+                    self.normalized_id_name_compatible(direct_id, key).is_some_and(|compatible| !compatible)
                 });
             needs_smart_match.then(|| id.as_ref().map(|id| with_folded_epg_id(id, |folded| folded.intern()))).flatten()
+        }));
+        // A guide channel that resolved by number is referenced exactly like one
+        // resolved by name; without this its programmes would be dropped. Like a name
+        // match it is only needed by channels that lack a usable id of their own:
+        // none, one the guide does not offer, or one whose guide names do not fit.
+        selected.extend(self.number_matches.iter().filter_map(|(number, id)| {
+            let requirement = self.number_requirements.get(number)?;
+            let needed = requirement.missing_id
+                || requirement.direct_ids.iter().any(|(direct_id, name)| {
+                    !available_epg_ids.contains(direct_id)
+                        || self.normalized_id_name_compatible(direct_id, name) == Some(false)
+                });
+            needed.then(|| id.as_ref().map(|id| with_folded_epg_id(id, |folded| folded.intern()))).flatten()
         }));
         if self.hooks.keep_match_candidates {
             // An ambiguous key has no winner, so nothing above selects its candidates,
@@ -310,6 +355,34 @@ impl EpgIdCache {
         debug!(
             "Smart EPG candidates: exact={exact}, fuzzy={fuzzy}, plugin={plugin}, ambiguous={ambiguous}, unavailable={unavailable}"
         );
+        self.finalize_number_matches(available_epg_ids);
+    }
+
+    /// Resolves the channel numbers collected so far, under the rule the names get.
+    ///
+    /// A candidate counts only when the guide that offered it actually processed
+    /// that channel, and a number two guide channels claim resolves to neither of
+    /// them: no EPG rather than the wrong channel's EPG, exactly as for names.
+    fn finalize_number_matches(&mut self, available_epg_ids: &HashSet<Arc<str>>) {
+        let mut matched = 0usize;
+        let mut ambiguous = 0usize;
+        for (key, candidates) in &self.number_candidates {
+            let available: Vec<&RankedEpgMatch> = candidates
+                .iter()
+                .filter(|(folded_id, _)| available_epg_ids.contains(*folded_id))
+                .map(|(_, c)| c)
+                .collect();
+            if let Some(winner) = best_ranked_match(available.iter().copied()) {
+                matched += 1;
+                self.number_matches.insert(Arc::clone(key), Some(Arc::clone(&winner.epg_id)));
+            } else {
+                ambiguous += usize::from(!available.is_empty());
+                self.number_matches.insert(Arc::clone(key), None);
+            }
+        }
+        if matched + ambiguous > 0 {
+            debug!("Smart EPG channel numbers: matched={matched}, ambiguous={ambiguous}");
+        }
     }
 
     /// Normalizes a channel name, computes its phonetic encoding, and stores both in the cache for later EPG matching.
@@ -377,33 +450,106 @@ impl EpgIdCache {
         let smart_match_enabled = self.smart_match_enabled;
         let fuzzy_matching = self.fuzzy_match_enabled;
 
-        // Helper closure to process a single item
-        // We use a closure here to capture `self` and avoid code duplication
-        let mut process_item = |name: &str, epg_channel_id: Option<&Arc<str>>| {
-            let mut missing_epg_id = true;
-            // insert epg_id to known channel epg_ids
-            if let Some(id) = epg_channel_id {
-                if !id.is_empty() {
-                    missing_epg_id = false;
-                    self.insert_channel_epg_id(id);
-                }
-            }
-
-            // for fuzzy_matching we need to put the normalized name even if there is an epg_id, because the epg_id
-            // could not match to the epg file. And then we try to guess it based on normalized name
-            let needs_normalization =
-                smart_match_enabled && (fuzzy_matching || missing_epg_id) && !is_decorative_channel_name(name);
-
-            if needs_normalization {
-                self.normalize_and_store(name, epg_channel_id);
-            }
-        };
-
         for channel in fp.items() {
             if channel.header.xtream_cluster == XtreamCluster::Live && channel.header.item_type.is_live() {
-                process_item(&channel.header.name, channel.header.epg_channel_id.as_ref());
+                self.collect_item(&channel.header, smart_match_enabled, fuzzy_matching);
             }
         }
+    }
+
+    /// Records one live channel: its epg id for the membership test, its name and
+    /// epg id as match keys, and its channel number as a number key.
+    fn collect_item(&mut self, header: &PlaylistItemHeader, smart_match_enabled: bool, fuzzy_matching: bool) {
+        let mut missing_epg_id = true;
+        // insert epg_id to known channel epg_ids
+        if let Some(id) = header.epg_channel_id.as_ref() {
+            if !id.is_empty() {
+                missing_epg_id = false;
+                self.insert_channel_epg_id(id);
+            }
+        }
+
+        // for fuzzy_matching we need to put the normalized name even if there is an epg_id, because the epg_id
+        // could not match to the epg file. And then we try to guess it based on normalized name
+        let needs_normalization =
+            smart_match_enabled && (fuzzy_matching || missing_epg_id) && !is_decorative_channel_name(&header.name);
+
+        if needs_normalization {
+            self.normalize_and_store(&header.name, header.epg_channel_id.as_ref());
+        }
+        if smart_match_enabled {
+            self.collect_channel_number(header);
+        }
+    }
+
+    /// Records the channel number a live channel publishes, so a guide channel
+    /// offering the same number in `<lcn>` can resolve it by identity instead of
+    /// by name.
+    ///
+    /// Only the number a tuner states in its own stream URL counts (`.../auto/v5.2`).
+    /// A number read from a title or from `chno` is not used: titles are free text
+    /// (`5 USA` is not channel 5) and the numbering stage overwrites `chno` with the
+    /// output position, so neither names a channel safely. A wrong number match is
+    /// worse than none.
+    fn collect_channel_number(&mut self, header: &PlaylistItemHeader) {
+        if let Some(number) = tuner_channel_number(&header.url) {
+            let direct =
+                header.epg_channel_id.as_ref().filter(|id| !id.is_empty()).map(|id| {
+                    (with_folded_epg_id(id, |folded| folded.intern()), self.normalize(&header.name).intern())
+                });
+            let requirement = self.number_requirements.entry(number.intern()).or_default();
+            match direct {
+                Some(direct) => {
+                    requirement.direct_ids.insert(direct);
+                }
+                None => requirement.missing_id = true,
+            }
+        }
+    }
+
+    /// Offers a guide channel number to the playlist channels publishing it.
+    ///
+    /// Exact by construction — `5.2` is 5.2 and nothing else — so no similarity
+    /// scoring is involved and the number never passes through the name
+    /// normalization. That normalization is configurable, and a `normalize_regex`
+    /// without a dot (a documented legacy value) would turn `5.2` into `52` and
+    /// collide it with channel 52.
+    ///
+    /// Returns `true` when the playlist publishes the number.
+    pub fn match_epg_channel_number(
+        &mut self,
+        epg_id: &Arc<str>,
+        lcn: &str,
+        source_priority: i16,
+        source_order: usize,
+    ) -> bool {
+        let number = lcn.trim();
+        // Checked before interning: a guide lists far more channels than the
+        // playlist asks for, so the misses must not allocate.
+        if !is_channel_number(number) || !self.number_requirements.contains_key(number) {
+            return false;
+        }
+        let rank = SmartMatchRank { kind: SmartMatchKind::Exact, score: 100, source_priority, source_order };
+        let folded_id = with_folded_epg_id(epg_id, |folded| folded.intern());
+        let candidates = self.number_candidates.entry(number.intern()).or_default();
+        match candidates.entry(folded_id) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if rank.cmp_preference(&entry.get().rank).is_gt() {
+                    entry.insert(RankedEpgMatch { epg_id: Arc::clone(epg_id), rank });
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(RankedEpgMatch { epg_id: Arc::clone(epg_id), rank });
+            }
+        }
+        true
+    }
+
+    /// The guide id this item's own channel number resolved to, if any.
+    fn matched_number_epg_id(&self, header: &PlaylistItemHeader) -> Option<(Arc<str>, SmartMatchKind)> {
+        let number = tuner_channel_number(&header.url)?;
+        let epg_id = self.number_matches.get(number)?.as_ref()?;
+        Some((Arc::clone(epg_id), SmartMatchKind::Exact))
     }
 
     pub fn normalize_candidates<I, S>(&self, candidates: I) -> Vec<Arc<str>>
@@ -950,6 +1096,28 @@ fn countries_compatible(left: Option<&str>, right: Option<&str>) -> bool {
     left.zip(right).is_none_or(|(left, right)| left == right)
 }
 
+/// The channel number a tuner publishes in its own stream URL (`.../auto/v5.2`).
+///
+/// The `/auto/v<number>` form is part of the `HDHomeRun` HTTP API, so it is read
+/// only there. A bare `v1234` path segment is a provider stream id, which must
+/// not be confused with a channel number.
+fn tuner_channel_number(url: &str) -> Option<&str> {
+    let rest = url.rsplit_once("/auto/v")?.1;
+    let end = rest.find(|character: char| !character.is_ascii_digit() && character != '.').unwrap_or(rest.len());
+    let number = &rest[..end];
+    is_channel_number(number).then_some(number)
+}
+
+/// `5` or `5.2`: at most four digits, at most three of them after the dot.
+fn is_channel_number(value: &str) -> bool {
+    let (major, minor) = value.split_once('.').map_or((value, None), |(major, minor)| (major, Some(minor)));
+    let major_is_digits = !major.is_empty() && major.len() <= 4 && major.bytes().all(|byte| byte.is_ascii_digit());
+    major_is_digits
+        && minor.is_none_or(|minor| {
+            !minor.is_empty() && minor.len() <= 3 && minor.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
 fn is_decorative_channel_name(name: &str) -> bool {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -1046,8 +1214,13 @@ fn assign_smart_epg_id(chan: &mut PlaylistItem, id_cache: &EpgIdCache) -> Channe
         return ChannelEpgAssignment::Existing;
     }
 
-    let matched = id_cache
-        .matched_epg_id(&chan.header.name)
+    // An exact name match is the strongest evidence there is, so it stands. A
+    // fuzzy guess does not: the number the tuner states for the channel is an
+    // identity, and ATSC sub-channels share the call-sign prefix of their main
+    // station, which is exactly where a fuzzy name guess goes wrong.
+    let name_match = id_cache.matched_epg_id(&chan.header.name);
+    let name_is_exact = matches!(name_match, Some((_, SmartMatchKind::Exact)));
+    let matched = if name_is_exact { name_match } else { id_cache.matched_number_epg_id(&chan.header).or(name_match) }
         .or_else(|| chan.header.epg_channel_id.as_deref().and_then(|id| id_cache.matched_epg_id(id)));
     let Some((new_id, kind)) = matched else {
         return if current_id_is_valid { ChannelEpgAssignment::Existing } else { ChannelEpgAssignment::Unresolved };
@@ -1617,6 +1790,21 @@ mod tests {
         }
     }
 
+    /// A live channel as an `HDHomeRun` `lineup.m3u` publishes it: the number in
+    /// the title and in the tuner stream URL, no `tvg-id`.
+    fn tuner_playlist_item(number: &str, name: &str) -> shared::model::PlaylistItem {
+        shared::model::PlaylistItem {
+            header: PlaylistItemHeader {
+                name: name.intern(),
+                title: format!("{number} {name}").intern(),
+                url: format!("http://192.168.1.40:5004/auto/v{number}").intern(),
+                xtream_cluster: super::XtreamCluster::Live,
+                item_type: PlaylistItemType::Live,
+                ..PlaylistItemHeader::default()
+            },
+        }
+    }
+
     fn smart_cache(match_threshold: u16, best_match_threshold: u16) -> super::EpgIdCache {
         let mut dto = shared::model::EpgSmartMatchConfigDto {
             enabled: true,
@@ -1676,6 +1864,19 @@ mod tests {
         smart_matching: bool,
         clear_invalid_epg_ids: bool,
     ) -> (Vec<Option<Arc<str>>>, Vec<tuliprox_core::model::Epg>) {
+        let items = channels.iter().map(|(name, epg_id)| live_playlist_item(name, *epg_id)).collect();
+        run_playlist_xmltv_matches(plugins, xmltv, items, smart_matching, clear_invalid_epg_ids).await
+    }
+
+    /// [`run_xmltv_matches_with`] for items that carry more than a name, e.g. a
+    /// tuner channel number in their title and URL.
+    async fn run_playlist_xmltv_matches<P: PluginHost>(
+        plugins: &P,
+        xmltv: &str,
+        items: Vec<shared::model::PlaylistItem>,
+        smart_matching: bool,
+        clear_invalid_epg_ids: bool,
+    ) -> (Vec<Option<Arc<str>>>, Vec<tuliprox_core::model::Epg>) {
         let dir = tempdir().unwrap();
         let epg_path = dir.path().join("smart-match.xml");
         fs::write(&epg_path, xmltv).unwrap();
@@ -1694,7 +1895,7 @@ mod tests {
         let groups = vec![PlaylistGroup {
             id: 1,
             title: "Live".intern(),
-            channels: channels.iter().map(|(name, epg_id)| live_playlist_item(name, *epg_id)).collect(),
+            channels: items,
             xtream_cluster: super::XtreamCluster::Live,
         }];
         let tv_guide = TVGuide::new(vec![PersistedEpgSource {
@@ -1756,6 +1957,262 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_number_is_read_from_the_tuner_url() {
+        assert_eq!(super::tuner_channel_number("http://192.168.1.40:5004/auto/v5.2"), Some("5.2"));
+        assert_eq!(super::tuner_channel_number("http://hdhr/auto/v5.2?duration=120"), Some("5.2"));
+        assert_eq!(super::tuner_channel_number("http://hdhr/auto/v17"), Some("17"));
+        // A provider stream id is not a channel number.
+        assert_eq!(super::tuner_channel_number("http://provider/v1234"), None);
+        assert_eq!(super::tuner_channel_number("http://provider/auto/v12345.ts"), None);
+        assert_eq!(super::tuner_channel_number("http://provider/stream/5"), None);
+    }
+
+    #[test]
+    fn a_channel_number_never_comes_from_chno_or_a_title() {
+        assert_eq!(super::tuner_channel_number(&tuner_playlist_item("5.2", "WRAL DT").header.url), Some("5.2"));
+
+        // `chno` holds the output position the numbering stage assigns, so a
+        // channel carrying only `chno` has no number identity to match on.
+        let mut positioned = live_playlist_item("WRAL DT", None);
+        positioned.header.chno = 7;
+        assert_eq!(super::tuner_channel_number(&positioned.header.url), None);
+
+        // A title is free text: `5 USA` is a channel of its own, not channel 5.
+        let mut titling = live_playlist_item("5 USA", None);
+        titling.header.title = "5 USA".intern();
+        assert_eq!(super::tuner_channel_number(&titling.header.url), None);
+    }
+
+    #[test]
+    fn a_cache_holding_only_channel_numbers_is_not_empty() {
+        let mut cache = smart_cache(80, 95);
+        assert!(cache.is_empty());
+        cache.collect_channel_number(&tuner_playlist_item("5.2", "WRAL DT").header);
+        // There is something to match with, so the guide must be read.
+        assert!(!cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_name_normalize_regex_cannot_corrupt_a_channel_number() {
+        // A documented legacy `normalize_regex` drops the dot, so running numbers
+        // through it would turn 5.2 into 52 and collide it with channel 52.
+        let dir = tempdir().unwrap();
+        let epg_path = dir.path().join("number-vs-normalize.xml");
+        let xmltv = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="US-SUB"><display-name>WRAL DT</display-name><lcn>5.2</lcn></channel>
+  <channel id="US-52"><display-name>Some 52 Network</display-name><lcn>52</lcn></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US-SUB"><title>A</title></programme>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US-52"><title>B</title></programme>
+</tv>"#;
+        fs::write(&epg_path, xmltv).unwrap();
+
+        let mut dto = shared::model::EpgSmartMatchConfigDto {
+            enabled: true,
+            normalize_regex: Some("[^a-zA-Z0-9\\-]".to_string()),
+            ..Default::default()
+        };
+        dto.prepare().expect("smart config");
+        let mut input = ConfigInput::from(ConfigInputDto::default());
+        input.epg = Some(EpgConfig {
+            configured_sources: None,
+            sources: vec![],
+            smart_match: Some(EpgSmartMatchConfig::from(dto)),
+        });
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Live".intern(),
+            channels: vec![tuner_playlist_item("5.2", "WRAL DT")],
+            xtream_cluster: super::XtreamCluster::Live,
+        }];
+        let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+            file_path: epg_path,
+            priority: 0,
+            logo_override: false,
+            kind: PersistedEpgSourceKind::Xmltv,
+            source_idx: 0,
+        }]);
+        let mut playlist = FetchedPlaylist {
+            input: &input,
+            source: MemoryPlaylistSource::new(groups).into_source(),
+            epg: Some(tv_guide),
+        };
+        let mut epg = Vec::new();
+        super::process_playlist_epg(&NoPlugins, &mut playlist, &mut epg, super::EpgAssignOptions::default()).await;
+        let ids: Vec<_> = playlist.items_mut().map(|item| item.header.epg_channel_id.clone()).collect();
+
+        // 5.2 must stay 5.2 and must never be read as 52.
+        assert_eq!(ids, vec![Some("US-SUB".intern())]);
+    }
+
+    #[tokio::test]
+    async fn an_exact_channel_number_outranks_a_fuzzy_name_match() {
+        // ATSC sub-channels share the call-sign prefix of their main station, so a
+        // fuzzy name guess is at its worst exactly where the number is exact.
+        let fuzzy_only = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="US-FUZZY"><display-name>WRAL DXX</display-name></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US-FUZZY"><title>A</title></programme>
+</tv>"#;
+        let with_number = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="US-FUZZY"><display-name>WRAL DXX</display-name></channel>
+  <channel id="US-NUMBER"><display-name>Totally Unrelated</display-name><lcn>5.2</lcn></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US-FUZZY"><title>A</title></programme>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US-NUMBER"><title>B</title></programme>
+</tv>"#;
+
+        // Premise: the name alone does match, but only fuzzily.
+        let (fuzzy, _) = run_playlist_xmltv_matches(
+            &NoPlugins,
+            fuzzy_only,
+            vec![tuner_playlist_item("5.2", "WRAL DX")],
+            true,
+            false,
+        )
+        .await;
+        assert_eq!(fuzzy, vec![Some("US-FUZZY".intern())]);
+
+        // With a channel carrying 5.2, the exact number wins over that guess.
+        let (exact, _) = run_playlist_xmltv_matches(
+            &NoPlugins,
+            with_number,
+            vec![tuner_playlist_item("5.2", "WRAL DX")],
+            true,
+            false,
+        )
+        .await;
+        assert_eq!(exact, vec![Some("US-NUMBER".intern())]);
+    }
+
+    const SUB_CHANNEL_GUIDE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="US19219"><display-name>WRAL HD</display-name><lcn>5.1</lcn></channel>
+  <channel id="US21915"><display-name>WRAL DT</display-name><lcn>5.2</lcn></channel>
+  <channel id="US21916"><display-name>WRAL DT</display-name><lcn>5.3</lcn></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US19219"><title>A</title></programme>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US21915"><title>B</title></programme>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US21916"><title>C</title></programme>
+</tv>"#;
+
+    #[tokio::test]
+    async fn smart_match_resolves_colliding_sub_channels_by_their_channel_number() {
+        let items = vec![
+            tuner_playlist_item("5.1", "WRAL HD"),
+            tuner_playlist_item("5.2", "WRAL DT"),
+            tuner_playlist_item("5.3", "WRAL DT"),
+        ];
+        let (ids, _) = run_playlist_xmltv_matches(&NoPlugins, SUB_CHANNEL_GUIDE, items, true, false).await;
+
+        // 5.2 and 5.3 share the display name, so only the channel number tells them apart.
+        assert_eq!(ids, vec![Some("US19219".intern()), Some("US21915".intern()), Some("US21916".intern())]);
+    }
+
+    #[tokio::test]
+    async fn a_channel_number_resolves_without_fuzzy_matching() {
+        // The number is an exact identity, so it does not depend on the fuzzy
+        // fallback being enabled.
+        let dir = tempdir().unwrap();
+        let epg_path = dir.path().join("no-fuzzy.xml");
+        fs::write(&epg_path, SUB_CHANNEL_GUIDE).unwrap();
+        let mut dto = shared::model::EpgSmartMatchConfigDto { enabled: true, ..Default::default() };
+        dto.prepare().expect("smart config");
+        let mut input = ConfigInput::from(ConfigInputDto::default());
+        input.epg = Some(EpgConfig {
+            configured_sources: None,
+            sources: vec![],
+            smart_match: Some(EpgSmartMatchConfig::from(dto)),
+        });
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Live".intern(),
+            channels: vec![tuner_playlist_item("5.2", "WRAL DT"), tuner_playlist_item("5.3", "WRAL DT")],
+            xtream_cluster: super::XtreamCluster::Live,
+        }];
+        let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+            file_path: epg_path,
+            priority: 0,
+            logo_override: false,
+            kind: PersistedEpgSourceKind::Xmltv,
+            source_idx: 0,
+        }]);
+        let mut playlist = FetchedPlaylist {
+            input: &input,
+            source: MemoryPlaylistSource::new(groups).into_source(),
+            epg: Some(tv_guide),
+        };
+        let mut epg = Vec::new();
+        super::process_playlist_epg(&NoPlugins, &mut playlist, &mut epg, super::EpgAssignOptions::default()).await;
+        let ids: Vec<_> = playlist.items_mut().map(|item| item.header.epg_channel_id.clone()).collect();
+
+        assert_eq!(ids, vec![Some("US21915".intern()), Some("US21916".intern())]);
+    }
+
+    #[tokio::test]
+    async fn without_an_lcn_the_same_names_stay_ambiguous() {
+        let xmltv = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="US19219"><display-name>WRAL HD</display-name></channel>
+  <channel id="US21915"><display-name>WRAL DT</display-name></channel>
+  <channel id="US21916"><display-name>WRAL DT</display-name></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US19219"><title>A</title></programme>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US21915"><title>B</title></programme>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US21916"><title>C</title></programme>
+</tv>"#;
+        let items = vec![
+            tuner_playlist_item("5.1", "WRAL HD"),
+            tuner_playlist_item("5.2", "WRAL DT"),
+            tuner_playlist_item("5.3", "WRAL DT"),
+        ];
+        let (ids, _) = run_playlist_xmltv_matches(&NoPlugins, xmltv, items, true, false).await;
+
+        assert_eq!(ids, vec![Some("US19219".intern()), None, None]);
+    }
+
+    #[tokio::test]
+    async fn a_channel_number_two_guide_channels_claim_resolves_to_neither() {
+        let xmltv = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="US1"><display-name>ONE</display-name><lcn>5.2</lcn></channel>
+  <channel id="US2"><display-name>TWO</display-name><lcn>5.2</lcn></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US1"><title>A</title></programme>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US2"><title>B</title></programme>
+</tv>"#;
+        let (ids, _) =
+            run_playlist_xmltv_matches(&NoPlugins, xmltv, vec![tuner_playlist_item("5.2", "WRAL DT")], true, false)
+                .await;
+
+        assert_eq!(ids, vec![None]);
+    }
+
+    #[tokio::test]
+    async fn an_existing_guide_id_outranks_the_channel_number() {
+        let mut item = tuner_playlist_item("5.2", "WRAL HD");
+        item.header.epg_channel_id = Some("US19219".intern());
+        let (ids, _) = run_playlist_xmltv_matches(&NoPlugins, SUB_CHANNEL_GUIDE, vec![item], true, false).await;
+
+        // The id is valid and its guide names agree with the channel name, so the
+        // channel number does not override it.
+        assert_eq!(ids, vec![Some("US19219".intern())]);
+    }
+
+    #[tokio::test]
+    async fn a_channel_number_fills_in_a_missing_id_without_a_name_match() {
+        // The playlist name shares no similarity with the guide name; only the
+        // number links them.
+        let xmltv = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="US21915"><display-name>WRALDT</display-name><lcn>5.2</lcn></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="US21915"><title>A</title></programme>
+</tv>"#;
+        let (ids, _) =
+            run_playlist_xmltv_matches(&NoPlugins, xmltv, vec![tuner_playlist_item("5.2", "Kanal Zwei")], true, false)
+                .await;
+
+        assert_eq!(ids, vec![Some("US21915".intern())]);
+    }
+
+    #[test]
     fn smart_match_rejects_ambiguous_equal_scores() {
         let cache = smart_cache(70, 95);
         let guide = vec!["abcc".intern()];
@@ -1799,6 +2256,41 @@ mod tests {
 
         cache.finalize_matches(&HashSet::from(["opaque-a".intern(), "opaque-b".intern()]));
         assert_eq!(cache.normalized.get("tf1.fr").and_then(Option::as_deref), None);
+    }
+
+    #[test]
+    fn selected_epg_ids_skip_number_matches_for_channels_with_a_valid_id() {
+        let mut cache = smart_cache(80, 95);
+        let mut with_id = tuner_playlist_item("5.2", "WRAL DT");
+        with_id.header.epg_channel_id = Some("wral.valid".intern());
+        let without_id = tuner_playlist_item("7.1", "WXYZ");
+        cache.collect_channel_number(&with_id.header);
+        cache.collect_channel_number(&without_id.header);
+        assert!(cache.match_epg_channel_number(&"wral.other".intern(), "5.2", 0, 0));
+        assert!(cache.match_epg_channel_number(&"wxyz.guide".intern(), "7.1", 0, 0));
+
+        let available = HashSet::from(["wral.valid".intern(), "wral.other".intern(), "wxyz.guide".intern()]);
+        cache.finalize_matches(&available);
+        let selected = cache.selected_epg_ids(&available);
+        assert!(!selected.contains("wral.other"), "a channel with an available id never uses its number match");
+        assert!(selected.contains("wxyz.guide"));
+    }
+
+    #[test]
+    fn selected_epg_ids_keep_number_matches_for_channels_with_a_name_incompatible_id() {
+        // `assign_smart_epg_id` replaces an available id whose guide names do not fit
+        // the channel, so the number-resolved replacement must keep its programmes.
+        let mut cache = smart_cache(80, 95);
+        let mut wrong_id = tuner_playlist_item("5.2", "WRAL DT");
+        wrong_id.header.epg_channel_id = Some("cartoon.valid".intern());
+        cache.collect_channel_number(&wrong_id.header);
+        cache.register_guide_names("cartoon.valid", ["Cartoon Network"]);
+        assert!(cache.match_epg_channel_number(&"wral.sub".intern(), "5.2", 0, 0));
+
+        let available = HashSet::from(["cartoon.valid".intern(), "wral.sub".intern()]);
+        cache.finalize_matches(&available);
+        assert_eq!(cache.channel_name_matches_epg_id("cartoon.valid", "WRAL DT"), Some(false));
+        assert!(cache.selected_epg_ids(&available).contains("wral.sub"));
     }
 
     #[test]
