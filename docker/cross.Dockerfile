@@ -15,7 +15,7 @@
 FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg-static
 
 # The cross image provides the target compiler and sysroot, but no Rust toolchain.
-FROM rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS rust-toolchain
+FROM rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS rust-toolchain
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -62,7 +62,7 @@ RUN mkdir -p frontend/src backend/app/src/tools tools/tuliprox-testkit/src && \
 # -----------------------------------------------------------------
 # Stage 1: Build the Rust binary for production
 # -----------------------------------------------------------------
-FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main@sha256:33dc93e5cbd980965d76f1c60dbae655ae13dfe068bebbf48b1d38cfbc97120d AS rust-build
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main@sha256:fa3864a88bf2d8c5db8cb6403b803c3692b445b87a563c3be2e4c36ec6816e2e AS rust-build
 
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
@@ -165,7 +165,7 @@ RUN set -eu; \
 # -----------------------------------------------------------------
 # Stage 4: Prepare timezone data
 # -----------------------------------------------------------------
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS tz-prep
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS tz-prep
 
 ARG TZ=UTC
 ENV TZ=${TZ}
@@ -189,7 +189,7 @@ RUN apk add --no-cache tzdata \
 # -----------------------------------------------------------------
 # Final Image #1: Debugging Environment (Alpine-based)
 # -----------------------------------------------------------------
-FROM rust:1.99.0-alpine3.24@sha256:0cce0a5e0e8ba67b455257a3a02a1d99005f382748789d6464460028810f1627 AS debug
+FROM rust:1.99.1-alpine3.24@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS debug
 
 # For Alpine, the correct target architecture uses 'musl'
 ARG RUST_TARGET=x86_64-unknown-linux-musl
@@ -256,7 +256,7 @@ CMD ["-s", "-p", "/app/config"]
 # -----------------------------------------------------------------
 # Final Image #3: Production image based on Alpine
 # -----------------------------------------------------------------
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS alpine-final
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS alpine-final
 
 ARG RUST_TARGET
 ARG TZ=UTC
