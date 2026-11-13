@@ -1,6 +1,6 @@
 use crate::app::components::{
     popup_menu::{PopupMenuPlacement, PopupMenuWidth},
-    DropDownIconButton, DropDownOption, DropDownSelection,
+    AppIcon, DropDownIconButton, DropDownOption, DropDownSelection,
 };
 use std::rc::Rc;
 use yew::prelude::*;
@@ -40,6 +40,8 @@ pub struct SelectProps {
     #[prop_or_default]
     pub aria_describedby: Option<String>,
     #[prop_or_default]
+    pub readonly: bool,
+    #[prop_or_default]
     pub close_on_resize: bool,
 }
 
@@ -77,17 +79,26 @@ pub fn Select(props: &SelectProps) -> Html {
         })
     };
 
+    let icon = props.icon.clone().unwrap_or_else(|| "Popup".to_owned());
     html! {
         <div class={classes!(
             "tp__select",
+            props.readonly.then_some("tp__select--readonly"),
             props.required.then_some("tp__input--required"),
             props.error.as_ref().map(|_| "tp__input--error"),
             props.class.clone())}>
-            <div class="tp__select-wrapper" ref={field_ref.clone()} onclick={handle_click_button}>
+            <div class="tp__select-wrapper" ref={field_ref.clone()}
+                role={props.readonly.then_some("group")}
+                aria-label={props.readonly.then(|| props.name.clone())}
+                aria-describedby={props.readonly.then(|| aria_describedby.clone()).flatten()}
+                onclick={(!props.readonly).then_some(handle_click_button)}>
                 <div class="tp__select__selected">
                     {(*selected_options).clone()}
                 </div>
-                <DropDownIconButton
+                if props.readonly {
+                    <span class="tp__icon-button" aria-hidden="true"><AppIcon name={icon}/></span>
+                } else {
+                    <DropDownIconButton
                      button_ref={button_ref}
                      popup_width={props.popup_width}
                      popup_placement={props.popup_placement}
@@ -98,13 +109,14 @@ pub fn Select(props: &SelectProps) -> Html {
                      searchable={props.searchable}
                      options={props.options.clone()}
                      name={props.name.clone()}
-                     icon={props.icon.as_ref().map_or_else(|| "Popup".to_owned(), std::clone::Clone::clone)}
+                     icon={icon}
                      aria_label={props.name.clone()}
                      aria_required={props.required.then_some(true)}
                      aria_invalid={props.error.as_ref().map(|_| true)}
                      aria_describedby={aria_describedby}
                      close_on_resize={props.close_on_resize}
                      on_select={props.on_select.clone()} />
+                }
             </div>
             { props.error.as_ref().map_or_else(Html::default, |error| html! {
                 <span id={error_id.clone()} class="tp__input-error" role="alert">{ error.clone() }</span>
