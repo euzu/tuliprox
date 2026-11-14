@@ -87,14 +87,19 @@ pub(super) async fn prepare_hls_origin_runtime(
             reason: hls_no_account_reason_for_binding(session.origin_account_binding.as_ref()),
         });
     };
-    session.write().await.origin_account_runtime = Some(Arc::new(AppHlsOriginAccountRuntime::new(
-        Arc::downgrade(app_state),
-        input.id,
-        Arc::clone(&input.name),
-        raw_request_url.to_string(),
-        session_entry_url.to_string(),
-        fingerprint.clone(),
-    )));
+    {
+        let mut session_guard = session.write().await;
+        if session_guard.origin_account_runtime.is_none() {
+            session_guard.origin_account_runtime = Some(Arc::new(AppHlsOriginAccountRuntime::new(
+                Arc::downgrade(app_state),
+                input.id,
+                Arc::clone(&input.name),
+                raw_request_url.to_string(),
+                session_entry_url.to_string(),
+                fingerprint.clone(),
+            )));
+        }
+    }
     let input = input.as_ref();
     advance_hls_origin_account_lifecycle(app_state, session, now_ms).await;
     let observed = HlsOriginAccountSnapshot::from_session(&*session.read().await);
@@ -1024,7 +1029,7 @@ async fn handoff_hls_group_member(
         return;
     };
 
-    let (current_index, old_binding, proxy_session_id, playback_kind, policy, request_headers) = {
+    let (current_index, failed_origin, old_binding, proxy_session_id, playback_kind, policy, request_headers) = {
         let session = session.read().await;
         let input_name = session.origin_source.input_name.clone();
         let stream_ref = session.origin_source.stream_ref.clone();
@@ -1033,6 +1038,7 @@ async fn handoff_hls_group_member(
         });
         (
             index,
+            session.origin_source.clone(),
             session.origin_account_binding.clone(),
             session.proxy_session_id.clone(),
             session.origin_playback_kind(),
@@ -1069,11 +1075,21 @@ async fn handoff_hls_group_member(
     let prepare_lock = Arc::clone(&session.read().await.origin_account_prepare_lock);
     let prepare_guard = prepare_lock.lock().await;
 
-    let session_owner = old_binding
+    // A handoff that finished while this one waited already replaced the failed member; this
+    // notification is stale. A binding change on the same member (account rebind) still hands off,
+    // from the binding current under the lock.
+    let current_binding = {
+        let session = session.read().await;
+        if session.origin_source != failed_origin {
+            return;
+        }
+        session.origin_account_binding.clone()
+    };
+    let session_owner = current_binding
         .as_ref()
         .map_or_else(|| build_hls_origin_session_owner(&proxy_session_id), |binding| binding.session_owner.clone());
     let expected_work_generation =
-        begin_hls_group_member_handoff(app_state, session, old_binding.as_ref(), now_ms).await;
+        begin_hls_group_member_handoff(app_state, session, current_binding.as_ref(), now_ms).await;
 
     let req = GroupSelectionRequest {
         mode: SelectionMode::Live,
@@ -1154,7 +1170,7 @@ async fn handoff_hls_group_member(
         None,
         Some(&member_url),
     );
-    let generation = old_binding.as_ref().map_or(0, |binding| binding.generation.saturating_add(1));
+    let generation = current_binding.as_ref().map_or(0, |binding| binding.generation.saturating_add(1));
     let mut new_binding = HlsOriginAccountBinding::rebound(
         Arc::clone(&resolved.input.name),
         Arc::clone(&new_account),
@@ -1168,7 +1184,7 @@ async fn handoff_hls_group_member(
     let published = publish_hls_origin_account_with_status(app_state, session, |current| {
         if !publish_hls_origin_member_handoff(
             current,
-            old_binding.as_ref(),
+            current_binding.as_ref(),
             expected_work_generation,
             new_source.clone(),
             new_binding.clone(),

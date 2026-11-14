@@ -195,6 +195,11 @@ impl HlsSegmentWorkerPool {
         }
         recompute_unpublished_live_head(session);
         let reset_failures = session.record_successful_segment_fetch();
+        // Only this object's own retry run ends; the runs of other objects stay untouched.
+        session.forget_segment_object_failures(&HlsSegmentFailureObject::Normal {
+            proxy_seq: snapshot.proxy_seq,
+            origin_seq: snapshot.origin_seq,
+        });
         self.metrics.record_segment_cached();
         if log::log_enabled!(log::Level::Debug) {
             let identity = super::super::HlsLogIdentity::from_session(session);
@@ -363,13 +368,13 @@ fn failed_segment_status(
         );
     }
     let threshold = policy.permanent_failure_segment_threshold.max(1);
-    let transition = session.record_temporary_segment_fetch_failure(
-        finished_at_ms,
-        HlsSegmentFailureObject::Normal { proxy_seq: snapshot.proxy_seq, origin_seq: snapshot.origin_seq },
-        threshold,
-    );
+    let object = HlsSegmentFailureObject::Normal { proxy_seq: snapshot.proxy_seq, origin_seq: snapshot.origin_seq };
+    let transition = session.record_temporary_segment_fetch_failure(finished_at_ms, object.clone(), threshold);
+    // Every delivered segment resets the session-wide counter, so a success on another object must
+    // not hide that this object already burned its own retries: judge the object's own run too.
+    let object_exhausted = session.take_exhausted_segment_object(&object, threshold);
     match transition {
-        HlsSegmentFailureTransition::StillRetryable { failures, threshold } => {
+        HlsSegmentFailureTransition::StillRetryable { failures, threshold } if !object_exhausted => {
             if log::log_enabled!(log::Level::Debug) {
                 let identity = super::super::HlsLogIdentity::from_session(session);
                 debug!(
@@ -383,7 +388,9 @@ fn failed_segment_status(
             }
             (SegmentCacheStatus::FailedRetryable { failed_at_ms: finished_at_ms, retry_after_ms: 1_000 }, false)
         }
-        HlsSegmentFailureTransition::BecamePermanentlyFailed { failures, threshold } => {
+        HlsSegmentFailureTransition::StillRetryable { failures, threshold }
+        | HlsSegmentFailureTransition::BecamePermanentlyFailed { failures, threshold } => {
+            session.forget_segment_object_failures(&object);
             if log::log_enabled!(log::Level::Warn) {
                 let identity = super::super::HlsLogIdentity::from_session(session);
                 warn!(

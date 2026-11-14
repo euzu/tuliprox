@@ -22,7 +22,7 @@ use super::{
 };
 use axum::http::HeaderMap;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     fmt,
     sync::Arc,
 };
@@ -65,11 +65,38 @@ pub enum HlsTerminalTailProtectionRemoval {
     RemovedStaleGeneration { actual: HlsTerminalTailGeneration },
 }
 
+/// Objects whose own failure run is remembered at once; the oldest run is dropped beyond this.
+const MAX_TRACKED_FAILING_OBJECTS: usize = 32;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HlsSegmentFailureTracker {
     pub consecutive_temporary_failures: u32,
     pub last_failure_at_ms: Option<u64>,
     pub last_failed_object: Option<HlsSegmentFailureObject>,
+    /// Failures per object since the object last succeeded. A success of another object leaves a run
+    /// untouched, so concurrent healthy segments cannot hide a failing one from the member-health check.
+    object_failures: VecDeque<(HlsSegmentFailureObject, u32)>,
+}
+
+impl HlsSegmentFailureTracker {
+    pub fn object_failures(&self, object: &HlsSegmentFailureObject) -> u32 {
+        self.object_failures.iter().find(|(tracked, _)| tracked == object).map_or(0, |(_, failures)| *failures)
+    }
+
+    fn record_object_failure(&mut self, object: &HlsSegmentFailureObject) {
+        if let Some((_, failures)) = self.object_failures.iter_mut().find(|(tracked, _)| tracked == object) {
+            *failures = failures.saturating_add(1);
+            return;
+        }
+        if self.object_failures.len() >= MAX_TRACKED_FAILING_OBJECTS {
+            self.object_failures.pop_front();
+        }
+        self.object_failures.push_back((object.clone(), 1));
+    }
+
+    fn forget_object(&mut self, object: &HlsSegmentFailureObject) {
+        self.object_failures.retain(|(tracked, _)| tracked != object);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -615,6 +642,8 @@ impl HlsSession {
             // Member inputs and stream references differ; drop the old member's user agent so
             // the next manifest request rebuilds origin headers for the new bound member.
             self.origin_request_headers.clear();
+            // The failure counts belong to the old member's objects; the new member starts clean.
+            self.segment_failure_tracker = HlsSegmentFailureTracker::default();
             // A different member publishes unrelated media by design, so it can neither continue the
             // old member's media sequence nor prove content-anchor equality. Admit its first manifest
             // as a fresh baseline (the provisioning-handoff acceptance mode) and cut over to a new
@@ -672,8 +701,26 @@ impl HlsSession {
             return None;
         }
         let previous = self.segment_failure_tracker.consecutive_temporary_failures;
-        self.segment_failure_tracker = HlsSegmentFailureTracker::default();
+        let tracker = &mut self.segment_failure_tracker;
+        tracker.consecutive_temporary_failures = 0;
+        tracker.last_failure_at_ms = None;
+        tracker.last_failed_object = None;
         Some(previous)
+    }
+
+    /// The object delivered: its own failure run ends.
+    pub fn forget_segment_object_failures(&mut self, object: &HlsSegmentFailureObject) {
+        self.segment_failure_tracker.forget_object(object);
+    }
+
+    /// True once `object` failed `threshold` times since it last succeeded. Reporting consumes the run,
+    /// so the next report needs `threshold` fresh failures.
+    pub fn take_exhausted_segment_object(&mut self, object: &HlsSegmentFailureObject, threshold: u32) -> bool {
+        let exhausted = self.segment_failure_tracker.object_failures(object) >= threshold;
+        if exhausted {
+            self.segment_failure_tracker.forget_object(object);
+        }
+        exhausted
     }
 
     pub fn record_temporary_segment_fetch_failure(
@@ -685,6 +732,7 @@ impl HlsSession {
         let failures = self.segment_failure_tracker.consecutive_temporary_failures.saturating_add(1);
         self.segment_failure_tracker.consecutive_temporary_failures = failures;
         self.segment_failure_tracker.last_failure_at_ms = Some(now_ms);
+        self.segment_failure_tracker.record_object_failure(&object);
         self.segment_failure_tracker.last_failed_object = Some(object);
 
         if failures >= threshold {
@@ -2058,6 +2106,45 @@ mod tests {
         assert!(session.pending_origin_epoch_handoff);
         assert_eq!(session.pending_handoff_discontinuity_sequence, Some(0));
         assert_eq!(session.origin_account_manifest_pending, Some(1));
+    }
+
+    fn exhaust_failure_tracker(session: &mut HlsSession) {
+        for at in [1_000, 2_000] {
+            let _ = session.record_temporary_segment_fetch_failure(
+                at,
+                HlsSegmentFailureObject::Normal { proxy_seq: 1, origin_seq: 10 },
+                3,
+            );
+        }
+    }
+
+    #[test]
+    fn member_handoff_to_a_different_source_resets_the_segment_failure_tracker() {
+        let mut session = recovery_eligible_session();
+        exhaust_failure_tracker(&mut session);
+        let mut source = session.origin_source.clone();
+        source.input_name = Arc::from("member-b");
+        source.stream_ref = "member-b-stream".to_string();
+        let binding = member_handoff_binding(&session);
+        session.handoff_origin_member(source, binding);
+        assert_eq!(
+            session.record_temporary_segment_fetch_failure(
+                3_000,
+                HlsSegmentFailureObject::Normal { proxy_seq: 2, origin_seq: 20 },
+                3,
+            ),
+            HlsSegmentFailureTransition::StillRetryable { failures: 1, threshold: 3 },
+            "the first retryable failure of the new member must not inherit the old member's exhaustion"
+        );
+    }
+
+    #[test]
+    fn account_handoff_within_one_source_keeps_the_segment_failure_tracker() {
+        let mut session = recovery_eligible_session();
+        exhaust_failure_tracker(&mut session);
+        let binding = member_handoff_binding(&session);
+        session.handoff_origin_account(binding);
+        assert_eq!(session.segment_failure_tracker.consecutive_temporary_failures, 2);
     }
 
     #[test]

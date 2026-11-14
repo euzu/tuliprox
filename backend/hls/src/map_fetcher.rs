@@ -239,11 +239,9 @@ impl HlsMapWorkerPool {
             if generation_valid && result.is_err() {
                 if let Err(error) = &result {
                     session.record_start_provider_failure(error);
-                    // A retryable MAP failure is re-fetched by the scheduler, so it is not yet
-                    // evidence against the member; only a permanent failure may start a handoff.
-                    if !error.retryable_failure() {
-                        member_unhealthy = session.member_unhealthy_after_media_failure(error);
-                    }
+                    // A MAP has no failure threshold: a retryable failure never becomes permanent,
+                    // so the exhausted fetch itself is the member evidence.
+                    member_unhealthy = session.member_unhealthy_after_media_failure(error);
                 }
                 session.origin_control.path_condition =
                     super::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure;
@@ -903,13 +901,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn map_retryable_status_after_retries_does_not_notify() {
-        assert_eq!(map_failure_notifies_for(MapOriginFault::Status("503 Service Unavailable")).await, Vec::new());
+    async fn map_retryable_status_after_retries_notifies_the_group_member_runtime() {
+        assert_eq!(
+            map_failure_notifies_for(MapOriginFault::Status("503 Service Unavailable")).await,
+            vec![crate::origin_account_runtime::HlsMemberUnhealthyReason::SegmentFailure]
+        );
     }
 
     #[tokio::test]
-    async fn map_transport_failure_after_retries_does_not_notify() {
-        assert_eq!(map_failure_notifies_for(MapOriginFault::Reset).await, Vec::new());
+    async fn map_transport_failure_after_retries_notifies_the_group_member_runtime() {
+        assert_eq!(
+            map_failure_notifies_for(MapOriginFault::Reset).await,
+            vec![crate::origin_account_runtime::HlsMemberUnhealthyReason::SegmentFailure]
+        );
     }
 
     #[derive(Clone, Copy)]

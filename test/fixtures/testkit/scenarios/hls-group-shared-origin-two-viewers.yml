@@ -51,6 +51,9 @@ steps:
     assert_origin:
       max_active_body: 3
       latest_segment_account: input-a
+    assert_runtime:
+      active_streams: 2
+      distinct_shared_streams: 1
   - command_id: viewer-1-stops
     stop: { playback_id: playback-1 }
   - command_id: viewer-2-stops

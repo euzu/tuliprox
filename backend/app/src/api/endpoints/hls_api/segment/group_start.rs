@@ -127,13 +127,12 @@ pub(in crate::api::endpoints::hls_api) async fn build_hls_group_member_origin_ur
 /// Checks if a live failover-group shared cache session is currently reusable.
 /// The session is keyed by the logical group (`target_id` + `group_vid`), not by a member.
 /// Only sessions with committed origin manifests and currently healthy origin paths
-/// (no consecutive refresh failures, origin path not degraded, and no publication lateness)
-/// provide verified evidence that the bound member origin works, justifying skipping the probe
-/// and recording member success.
-pub(in crate::api::endpoints::hls_api) async fn has_active_shared_cache_session(
+/// Checks whether an active shared cache session exists whose bound origin matches the candidate member.
+pub(in crate::api::endpoints::hls_api) async fn has_active_shared_cache_session_for_member(
     app_state: &Arc<AppState>,
     target_id: u16,
     group_vid: u32,
+    member: &GroupMember,
 ) -> bool {
     let session_key = HlsSessionKey::for_group(target_id, group_vid);
     let Some(session) = app_state.hls.proxy.sessions().get_by_key(&session_key).await else {
@@ -141,6 +140,8 @@ pub(in crate::api::endpoints::hls_api) async fn has_active_shared_cache_session(
     };
     let s = session.read().await;
     s.origin_reusable_at(app_state.hls.proxy.now_ms())
+        && s.origin_source.input_name.as_ref() == member.input_name.as_ref()
+        && s.origin_source.stream_ref.as_str() == member.input_stream_id.as_ref()
 }
 
 /// The bound member origin and its entry URL of an existing live failover-group shared cache
@@ -443,7 +444,13 @@ pub(in crate::api::endpoints::hls_api) async fn resolve_checked_hls_group_entry(
 
                 async move {
                     if check_active_cache
-                        && has_active_shared_cache_session(app_state, target.id, group.group_vid.get()).await
+                        && has_active_shared_cache_session_for_member(
+                            app_state,
+                            target.id,
+                            group.group_vid.get(),
+                            &member,
+                        )
+                        .await
                     {
                         return Ok(None);
                     }

@@ -204,13 +204,12 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
     } else {
         None
     };
-    let origin_mismatch = match live_group_session {
-        Some(session) => session.read().await.origin_source != origin.origin_source,
-        None => {
-            origin.origin_source.input_id != context.input_id || origin.origin_source.stream_ref != context.stream_ref
+    if let Some(session) = live_group_session {
+        if session.read().await.origin_source != origin.origin_source {
+            return Some(hls_canonical_retry_after_response());
         }
-    };
-    if origin_mismatch {
+    } else if origin.origin_source.input_id != context.input_id || origin.origin_source.stream_ref != context.stream_ref
+    {
         return Some(StatusCode::NOT_FOUND.into_response());
     }
 

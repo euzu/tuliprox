@@ -1191,7 +1191,8 @@ async fn hls_guarded_response(
 }
 
 /// Like [`hls_guarded_response`], but paces the body out in small chunks so a segment takes
-/// `payload.len() / bytes_per_second` seconds to deliver. The `Content-Length` is kept intact.
+/// `payload.len() / bytes_per_second` seconds to deliver. The `Content-Length` is kept intact unless
+/// `unknown_length` is set.
 async fn slow_hls_guarded_response(
     payload: Bytes,
     content_type: &'static str,
@@ -1199,11 +1200,12 @@ async fn slow_hls_guarded_response(
     req_id: u64,
     tracker: &OriginTracker,
     bytes_per_second: u64,
+    unknown_length: bool,
 ) -> Response {
     const SLOW_BODY_CHUNK_BYTES: usize = 512;
 
     let length = payload.len() as u64;
-    let _evict_rx = tracker.on_body_started(conn_id, req_id, Some(length)).await;
+    let _evict_rx = tracker.on_body_started(conn_id, req_id, if unknown_length { None } else { Some(length) }).await;
     let bytes_emitted = Arc::new(AtomicU64::new(0));
     let guard = Arc::new(BodyDropGuard {
         conn_id,
@@ -1234,8 +1236,10 @@ async fn slow_hls_guarded_response(
     });
     let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
-        response.headers_mut().insert(header::CONTENT_LENGTH, value);
+    if !unknown_length {
+        if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
+            response.headers_mut().insert(header::CONTENT_LENGTH, value);
+        }
     }
     response
 }
@@ -1358,6 +1362,7 @@ async fn hls(
             req_id,
             &state.tracker,
             bytes_per_second,
+            false,
         )
         .await;
     }
@@ -1387,6 +1392,7 @@ async fn profiled_hls_response(
             req_id,
             &state.tracker,
             bytes_per_second,
+            profile.unknown_length,
         )
         .await;
     }
@@ -2777,6 +2783,63 @@ fn latest_account(events: &[OriginEvent], marker: Option<u32>, segment_only: boo
     })
 }
 
+/// Whether a failed HLS segment request of `account` (answered without a body and without a limit
+/// rejection) is the last segment request of that account before another account serves one, i.e. a
+/// segment failure triggered the handoff. Members may rotate earlier for other reasons, so this is
+/// an ordered failure-to-handoff pair, not a comparison of first events. The handoff request must
+/// itself start a body, otherwise playback did not actually continue on the other member.
+fn segment_failure_precedes_handoff(events: &[OriginEvent], marker: Option<u32>, account: &str) -> bool {
+    let body_started: HashSet<(u64, u64)> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            OriginEventKind::BodyStarted { conn_id, request_id, .. } => Some((*conn_id, *request_id)),
+            _ => None,
+        })
+        .collect();
+    let answered: HashSet<(u64, u64)> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            OriginEventKind::BodyStarted { conn_id, request_id, .. }
+            | OriginEventKind::LimitRejected { conn_id, request_id, .. } => Some((*conn_id, *request_id)),
+            _ => None,
+        })
+        .collect();
+    let mut failed_last = false;
+    for event in events {
+        let OriginEventKind::RequestStarted { conn_id, request_id, path, account: request_account, .. } = &event.kind
+        else {
+            continue;
+        };
+        if !is_hls_segment_path(path) || marker.is_some_and(|marker| origin_path_marker(path) != Some(marker)) {
+            continue;
+        }
+        if request_account.as_deref() == Some(account) {
+            failed_last = !answered.contains(&(*conn_id, *request_id));
+        } else if failed_last && request_account.is_some() && body_started.contains(&(*conn_id, *request_id)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns the number of active streams and the number of distinct shared stream ids among them.
+fn count_shared_streams(streams: &serde_json::Value) -> (usize, usize) {
+    let Some(list) = streams.as_array() else {
+        return (0, 0);
+    };
+    let ids: HashSet<u64> = list
+        .iter()
+        .filter_map(|stream| {
+            let channel = stream.get("channel")?;
+            if channel.get("shared").and_then(serde_json::Value::as_bool) != Some(true) {
+                return None;
+            }
+            channel.get("shared_stream_id").and_then(serde_json::Value::as_u64)
+        })
+        .collect();
+    (list.len(), ids.len())
+}
+
 /// `marker` scopes `latest_request_account` to the started channel, so reloads of other
 /// playbacks that are still held do not count as the latest request.
 #[allow(clippy::too_many_arguments)]
@@ -2818,7 +2881,13 @@ async fn check_origin_assertions<'a>(
                 let check_rejections = assert_origin.no_limit_rejections.unwrap_or(false);
                 let check_account = assert_origin.latest_request_account.as_deref();
                 let check_segment_account = assert_origin.latest_segment_account.as_deref();
-                if check_evictions || check_rejections || check_account.is_some() || check_segment_account.is_some() {
+                let check_segment_failure = assert_origin.segment_failure_before_handoff_from.as_deref();
+                if check_evictions
+                    || check_rejections
+                    || check_account.is_some()
+                    || check_segment_account.is_some()
+                    || check_segment_failure.is_some()
+                {
                     if let Ok(evts) = obs.events(origin_run_id).await {
                         if check_evictions
                             && evts.iter().any(|e| matches!(e.kind, OriginEventKind::EvictionTriggered { .. }))
@@ -2842,6 +2911,12 @@ async fn check_origin_assertions<'a>(
                             if latest_account(&evts, marker, true) != Some(Some(expected_account)) {
                                 *any_failed = true;
                                 events.push((step_id, "origin_segment_account_mismatch"));
+                            }
+                        }
+                        if let Some(failed_account) = check_segment_failure {
+                            if !segment_failure_precedes_handoff(&evts, marker, failed_account) {
+                                *any_failed = true;
+                                events.push((step_id, "origin_segment_failure_before_handoff_missing"));
                             }
                         }
                     } else {
@@ -2966,7 +3041,27 @@ async fn check_runtime_assertions<'a>(
             let users_ok = assertions.active_users.is_none_or(|expected| users == expected as u64);
             let connections_ok =
                 assertions.active_user_connections.is_none_or(|expected| connections == expected as u64);
-            if (users_ok && connections_ok) || tokio::time::Instant::now() >= deadline {
+            let (streams_ok, shared_ok) =
+                if assertions.active_streams.is_none() && assertions.distinct_shared_streams.is_none() {
+                    (true, true)
+                } else if let Ok(streams) = observer.streams().await {
+                    let (active, shared) = count_shared_streams(&streams);
+                    (
+                        assertions.active_streams.is_none_or(|expected| active == expected),
+                        assertions.distinct_shared_streams.is_none_or(|expected| shared == expected),
+                    )
+                } else {
+                    (assertions.active_streams.is_none(), assertions.distinct_shared_streams.is_none())
+                };
+            if (users_ok && connections_ok && streams_ok && shared_ok) || tokio::time::Instant::now() >= deadline {
+                if !streams_ok {
+                    *any_failed = true;
+                    events.push((step_id, "runtime_active_streams_mismatch"));
+                }
+                if !shared_ok {
+                    *any_failed = true;
+                    events.push((step_id, "runtime_distinct_shared_streams_mismatch"));
+                }
                 if !users_ok {
                     *any_failed = true;
                     events.push((step_id, "runtime_active_users_mismatch"));
@@ -4148,7 +4243,7 @@ mod tests {
         let tracker = OriginTracker::new("slow-body-run", OriginPolicy::default());
         let payload = Bytes::from(vec![0u8; 4096]);
         let started = Instant::now();
-        let response = slow_hls_guarded_response(payload, "video/mp2t", 1, 1, &tracker, 4096).await;
+        let response = slow_hls_guarded_response(payload, "video/mp2t", 1, 1, &tracker, 4096, false).await;
         let body = axum::body::to_bytes(response.into_body(), 8192)
             .await
             .map_err(|error| TestkitError::Protocol(error.to_string()))?;
@@ -4214,6 +4309,38 @@ mod tests {
         assert_eq!(fast_body, slow_body);
         assert!(slow_elapsed >= Duration::from_millis(300), "profile delivery was too fast: {slow_elapsed:?}");
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn slow_segment_body_keeps_unknown_length_framing() {
+        let mut state = test_origin_state("hls-profile-unknown-len-run");
+        state.hls_profile = Some(Arc::new(tuliprox_testkit::hls_probe::HlsOriginProfile {
+            prefix_delay_millis: 0,
+            unknown_length: true,
+            ..tuliprox_testkit::hls_probe::HlsOriginProfile::default()
+        }));
+        state
+            .faults
+            .lock()
+            .await
+            .insert(
+                "a-slow".to_owned(),
+                OriginFault::SlowSegmentBody { account: "input-a".to_owned(), bytes_per_second: 1_000_000 },
+            )
+            .unwrap();
+        let response = hls(
+            Path("17/0.ts".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-profile-unknown-len-run".to_owned()),
+                ("token".to_owned(), "input-a".to_owned()),
+            ])),
+            State(state),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
     }
 
     #[tokio::test]
@@ -4483,6 +4610,108 @@ mod tests {
         assert!(any_failed);
         assert!(!observations_incomplete);
         assert!(events.iter().any(|(s, e)| *s == "step-1" && *e == "origin_eviction_observed"));
+    }
+
+    fn segment_request(seq: u64, request_id: u64, account: &str, answered: bool) -> Vec<OriginEvent> {
+        let mut events = vec![OriginEvent::new(
+            seq * 10,
+            "test-run",
+            OriginEventKind::RequestStarted {
+                conn_id: 1,
+                request_id,
+                method: "GET".to_owned(),
+                path: "/hls/17/3.ts".to_owned(),
+                range: None,
+                user_agent: None,
+                account: Some(account.to_owned()),
+            },
+        )];
+        if answered {
+            events.push(OriginEvent::new(
+                seq * 10 + 1,
+                "test-run",
+                OriginEventKind::BodyStarted { conn_id: 1, request_id, content_length: Some(1) },
+            ));
+        }
+        events
+    }
+
+    #[test]
+    fn segment_failure_must_precede_handoff() {
+        let mut ok = segment_request(1, 1, "input-a", true);
+        ok.extend(segment_request(2, 2, "input-a", false));
+        ok.extend(segment_request(3, 3, "input-b", true));
+        assert!(segment_failure_precedes_handoff(&ok, Some(17), "input-a"));
+
+        // The failing account retried once; the retry also failed and the handoff followed.
+        let mut retried = segment_request(1, 1, "input-a", false);
+        retried.extend(segment_request(2, 2, "input-a", false));
+        retried.extend(segment_request(3, 3, "input-b", true));
+        assert!(segment_failure_precedes_handoff(&retried, Some(17), "input-a"));
+
+        // A handoff after answered segments only is a stall/probe switch, not a failure.
+        let mut stall_switch = segment_request(1, 1, "input-a", true);
+        stall_switch.extend(segment_request(2, 2, "input-b", true));
+        assert!(!segment_failure_precedes_handoff(&stall_switch, Some(17), "input-a"));
+
+        // A failure that recovers before the other account serves a segment proves nothing.
+        let mut recovered = segment_request(1, 1, "input-a", false);
+        recovered.extend(segment_request(2, 2, "input-a", true));
+        recovered.extend(segment_request(3, 3, "input-b", true));
+        assert!(!segment_failure_precedes_handoff(&recovered, Some(17), "input-a"));
+
+        // A handoff request that starts no body did not continue playback on the other member.
+        let mut unserved_handoff = segment_request(1, 1, "input-a", false);
+        unserved_handoff.extend(segment_request(2, 2, "input-b", false));
+        assert!(!segment_failure_precedes_handoff(&unserved_handoff, Some(17), "input-a"));
+
+        // A request without an account is not provably another member.
+        let mut anonymous_handoff = segment_request(1, 1, "input-a", false);
+        anonymous_handoff.push(OriginEvent::new(
+            20,
+            "test-run",
+            OriginEventKind::RequestStarted {
+                conn_id: 1,
+                request_id: 7,
+                method: "GET".to_owned(),
+                path: "/hls/17/4.ts".to_owned(),
+                range: None,
+                user_agent: None,
+                account: None,
+            },
+        ));
+        anonymous_handoff.push(OriginEvent::new(
+            21,
+            "test-run",
+            OriginEventKind::BodyStarted { conn_id: 1, request_id: 7, content_length: Some(1) },
+        ));
+        assert!(!segment_failure_precedes_handoff(&anonymous_handoff, Some(17), "input-a"));
+
+        // A failure with no later segment request of another account is not a handoff.
+        let mut late_failure = segment_request(1, 1, "input-b", true);
+        late_failure.extend(segment_request(2, 2, "input-a", false));
+        assert!(!segment_failure_precedes_handoff(&late_failure, Some(17), "input-a"));
+
+        // Other markers do not count as the scoped channel.
+        let mut other_marker = segment_request(1, 1, "input-a", false);
+        other_marker.extend(segment_request(2, 2, "input-b", true));
+        assert!(!segment_failure_precedes_handoff(&other_marker, Some(19), "input-a"));
+    }
+
+    #[test]
+    fn count_shared_streams_counts_distinct_shared_ids() {
+        let streams = serde_json::json!([
+            { "channel": { "shared": true, "shared_stream_id": 7 } },
+            { "channel": { "shared": true, "shared_stream_id": 7 } },
+            { "channel": { "shared": false } },
+        ]);
+        assert_eq!(count_shared_streams(&streams), (3, 1));
+        let split = serde_json::json!([
+            { "channel": { "shared": true, "shared_stream_id": 7 } },
+            { "channel": { "shared": true, "shared_stream_id": 8 } },
+        ]);
+        assert_eq!(count_shared_streams(&split), (2, 2));
+        assert_eq!(count_shared_streams(&serde_json::json!({})), (0, 0));
     }
 
     #[test]

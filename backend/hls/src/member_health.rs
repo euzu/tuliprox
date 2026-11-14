@@ -19,6 +19,10 @@ const HARD_MANIFEST_FAILURES_BEFORE_REPORT: u32 = 2;
 /// Segment downloads needed inside the window before the rate is judged.
 const MIN_SLOW_SAMPLES: usize = 3;
 const MAX_SLOW_SAMPLES: usize = 64;
+/// A sample older than the window is still kept while fewer than [`MIN_SLOW_SAMPLES`] would remain,
+/// but never older than this many windows. `MIN_SLOW_SAMPLES` completions spaced up to one window
+/// apart span `MIN_SLOW_SAMPLES - 1` windows.
+const SLOW_RETENTION_WINDOWS: u64 = (MIN_SLOW_SAMPLES - 1) as u64;
 
 /// A member-unhealthy signal ready to be sent once the session lock is released.
 pub(crate) struct HlsMemberUnhealthyNotice {
@@ -48,21 +52,27 @@ pub(crate) struct HlsSlowDeliveryMeter {
 impl HlsSlowDeliveryMeter {
     pub(crate) fn record(&mut self, at_ms: u64, media_ms: u64, download_ms: u64, window_ms: u64) {
         // Eviction is robust against wall-clock steps: samples timestamped in the future (after a
-        // forward step) are dropped together with those older than the window, so a backward step
-        // cannot pin a stale sample at the front by making the subtraction saturate to zero.
-        while self
-            .samples
-            .front()
-            .is_some_and(|sample| at_ms < sample.at_ms || at_ms.saturating_sub(sample.at_ms) > window_ms)
-            || self.samples.len() >= MAX_SLOW_SAMPLES
+        // forward step) are dropped together with those older than the retention bound, so a backward
+        // step cannot pin a stale sample at the front by making the subtraction saturate to zero.
+        // A sample older than the window leaves only once `MIN_SLOW_SAMPLES` newer ones exist, and
+        // never later than the retention bound: slow, serialized completions (for example one per 8 s
+        // with a 15 s window) would otherwise never reach `MIN_SLOW_SAMPLES` inside the window and the
+        // slow member would never be detected.
+        let retention_ms = window_ms.saturating_mul(SLOW_RETENTION_WINDOWS);
+        while self.samples.front().is_some_and(|sample| {
+            let age_ms = at_ms.saturating_sub(sample.at_ms);
+            at_ms < sample.at_ms
+                || age_ms > retention_ms
+                || (age_ms > window_ms && self.samples.len() >= MIN_SLOW_SAMPLES)
+        }) || self.samples.len() >= MAX_SLOW_SAMPLES
         {
             self.samples.pop_front();
         }
         self.samples.push_back(DeliverySample { at_ms, media_ms, download_ms: download_ms.max(1) });
     }
 
-    /// True when at least [`MIN_SLOW_SAMPLES`] downloads in the window delivered less than `pct`
-    /// percent of real time.
+    /// True when at least [`MIN_SLOW_SAMPLES`] retained downloads delivered less than `pct` percent
+    /// of real time.
     pub(crate) fn is_slow(&self, pct: u8) -> bool {
         if self.samples.len() < MIN_SLOW_SAMPLES {
             return false;
@@ -380,12 +390,48 @@ mod tests {
     }
 
     #[test]
-    fn meter_drops_samples_older_than_the_window() {
+    fn meter_drops_samples_older_than_the_retention_bound() {
         let mut meter = HlsSlowDeliveryMeter::default();
         meter.record(1_000, 4_000, 8_000, 15_000);
         meter.record(2_000, 4_000, 8_000, 15_000);
-        meter.record(20_000, 4_000, 8_000, 15_000);
-        assert!(!meter.is_slow(90), "only one sample remains inside the window");
+        meter.record(40_000, 4_000, 8_000, 15_000);
+        assert!(!meter.is_slow(90), "only one sample remains inside the retention bound");
+    }
+
+    #[test]
+    fn meter_detects_serialized_slow_completions_spaced_over_half_the_window() {
+        // 4 s segments, one completion every 8 s: three samples span 16 s, one more than the window.
+        let mut meter = HlsSlowDeliveryMeter::default();
+        for at in [8_000, 16_000, 24_000] {
+            meter.record(at, 4_000, 8_000, 15_000);
+        }
+        assert!(meter.is_slow(90), "delivery at half real time must be detected");
+    }
+
+    #[test]
+    fn meter_keeps_serialized_completions_up_to_one_window_apart() {
+        // The retention bound is `MIN_SLOW_SAMPLES - 1` windows, so completions one full window
+        // apart still reach three samples.
+        let mut meter = HlsSlowDeliveryMeter::default();
+        for at in [0, 15_000, 30_000] {
+            meter.record(at, 4_000, 15_000, 15_000);
+        }
+        assert_eq!(meter.samples.len(), 3);
+        assert!(meter.is_slow(90), "27 percent of real time must be detected");
+    }
+
+    #[test]
+    fn meter_does_not_keep_old_samples_for_dense_completions() {
+        // Dense samples stay bound to the plain window: slow history older than it does not count.
+        let mut meter = HlsSlowDeliveryMeter::default();
+        for at in [1_000, 2_000, 3_000] {
+            meter.record(at, 4_000, 8_000, 15_000);
+        }
+        for at in [20_000, 21_000, 22_000] {
+            meter.record(at, 4_000, 400, 15_000);
+        }
+        assert_eq!(meter.samples.len(), 3, "samples outside the window leave once three newer ones exist");
+        assert!(!meter.is_slow(90));
     }
 
     #[test]

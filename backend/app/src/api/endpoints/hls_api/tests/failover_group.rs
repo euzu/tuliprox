@@ -408,6 +408,12 @@ async fn hls_entry_master_with_child_followed_and_delivered() {
 
     let body = GroupPlaybackEnv::response_text(response).await;
     assert!(body.contains("#EXT-X-STREAM-INF"), "master playlist delivered to client: {body}");
+
+    let child_uri = first_segment_url(&body);
+    let child_response = env.get(&child_uri).await;
+    assert_eq!(child_response.status(), StatusCode::OK);
+    let child_body = GroupPlaybackEnv::response_text(child_response).await;
+    assert!(child_body.contains("#EXTINF"), "child playlist delivered to client: {child_body}");
 }
 
 #[tokio::test]
@@ -800,6 +806,143 @@ async fn member_handoff_moves_group_session_to_next_member() {
         proxy_session_id_from_master(&env.get_hls_manifest_text(env.group_vid).await),
         first_proxy,
         "the client must keep its proxy session id"
+    );
+}
+
+#[tokio::test]
+async fn member_handoff_rereads_binding_after_prepare_lock() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::HlsAdvancing)
+        .build()
+        .await;
+
+    let first_master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&first_master);
+    let first_variant = env.get(&variant_uri).await;
+    assert_eq!(first_variant.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+
+    let prepare_lock = session.read().await.origin_account_prepare_lock.clone();
+    let prepare_guard = prepare_lock.lock().await;
+
+    let runtime = session.read().await.origin_account_runtime.clone().expect("origin runtime");
+    runtime.notify_member_unhealthy(&session, HlsMemberUnhealthyReason::ManifestFailure);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    {
+        let mut s = session.write().await;
+        if let Some(ref mut b) = s.origin_account_binding {
+            b.generation += 1;
+        }
+    }
+
+    drop(prepare_guard);
+
+    wait_for_bound_member(&session, "korath").await;
+
+    let session = session.read().await;
+    assert_eq!(session.origin_source.input_name.as_ref(), "korath");
+}
+
+#[tokio::test]
+async fn member_handoff_drops_a_notification_whose_member_was_already_replaced() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::HlsAdvancing)
+        .build()
+        .await;
+
+    let first_master = env.get_hls_manifest_text(env.group_vid).await;
+    let first_variant = env.get(&first_segment_url(&first_master)).await;
+    assert_eq!(first_variant.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    let prepare_lock = session.read().await.origin_account_prepare_lock.clone();
+    let prepare_guard = prepare_lock.lock().await;
+
+    let runtime = session.read().await.origin_account_runtime.clone().expect("origin runtime");
+    runtime.notify_member_unhealthy(&session, HlsMemberUnhealthyReason::ManifestFailure);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Another handoff replaced the failed member while this notification waited for the lock.
+    let generation_before = {
+        let mut s = session.write().await;
+        s.origin_source.input_name = Arc::from("replaced-member");
+        s.origin_account_binding.as_ref().map(|binding| binding.generation)
+    };
+    drop(prepare_guard);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let s = session.read().await;
+    assert_eq!(s.origin_source.input_name.as_ref(), "replaced-member", "stale notification must not hand off");
+    assert_eq!(s.origin_account_binding.as_ref().map(|binding| binding.generation), generation_before);
+}
+
+#[tokio::test]
+async fn check_active_cache_does_not_skip_probe_for_different_member() {
+    use crate::api::api_utils::{failover_group::group_playback_settings, GroupSelectionRequest};
+    use tuliprox_session::failover_group::SelectionMode;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::Status(500))
+        .build()
+        .await;
+
+    let first_master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&first_master);
+    let first_variant = env.get(&variant_uri).await;
+    assert_eq!(first_variant.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    assert_eq!(session.read().await.origin_source.input_name.as_ref(), "solis");
+
+    let group = Arc::clone(&env.group_record);
+    let korath_idx = group.members.iter().position(|m| m.input_name.as_ref() == "korath").expect("korath member index");
+
+    let playback = group_playback_settings(&env.app_state, &env.target);
+    let addr: std::net::SocketAddr = "127.0.0.1:10001".parse().unwrap();
+    let req = GroupSelectionRequest {
+        mode: SelectionMode::Live,
+        prefer: Some(korath_idx),
+        ..GroupSelectionRequest::new(
+            env.target.name.as_str(),
+            &group,
+            playback.start,
+            &addr,
+            "viewer",
+            0,
+            ConnectionKind::Normal,
+        )
+    };
+
+    let result = super::super::segment::resolve_checked_hls_group_entry(
+        &env.app_state,
+        &env.target,
+        Arc::clone(&group),
+        req,
+        &HeaderMap::new(),
+        false,
+        None,
+        true,
+        &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), addr),
+    )
+    .await
+    .expect("group selection should succeed by failing over from broken korath to solis");
+
+    assert_eq!(
+        result.0.member.input_name.as_ref(),
+        "solis",
+        "must failover to healthy member, not shortcut broken korath to success"
     );
 }
 
@@ -1560,4 +1703,228 @@ async fn legacy_removed_bound_member_does_not_panic() {
     .await
     .into_response();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn manifest_success_with_rebound_session_does_not_commit_stale_failover_state() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().m3u("solis").m3u("korath").build().await;
+    let user = env.app_state.app_config.get_user_credentials("viewer").expect("test user");
+    let solis_input = env.app_state.app_config.get_input_by_name(&"solis".intern()).expect("solis input");
+    let korath_input = env.app_state.app_config.get_input_by_name(&"korath".intern()).expect("korath input");
+    let addr: SocketAddr = "127.0.0.1:12345".parse().expect("addr");
+    let fingerprint = Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+    let token = "test-rebound-token";
+
+    env.app_state
+        .active_users
+        .create_user_session(CreateUserSessionParams {
+            user: &user,
+            session_token: token,
+            virtual_id: env.group_vid,
+            provider: &solis_input.name,
+            stream_url: &format!("http://{}/live/101", env.origins.get("solis").expect("origin").addr),
+            addr: &addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    env.app_state
+        .active_users
+        .bind_member(
+            &user.username,
+            token,
+            MemberBinding {
+                group_vid: env.group_vid,
+                member_vid: env.group_record.members[0].member_vid.get(),
+                member_index: 0,
+                input_name: Arc::clone(&solis_input.name),
+                member_title: "Solis".intern(),
+                provider: Arc::clone(&solis_input.name),
+            },
+        )
+        .await;
+
+    let session_snapshot =
+        env.app_state.active_users.get_and_update_user_session(&user.username, token).await.expect("session");
+
+    env.app_state
+        .active_users
+        .bind_member(
+            &user.username,
+            token,
+            MemberBinding {
+                group_vid: env.group_vid,
+                member_vid: env.group_record.members[1].member_vid.get(),
+                member_index: 1,
+                input_name: Arc::clone(&korath_input.name),
+                member_title: "Korath".intern(),
+                provider: Arc::clone(&korath_input.name),
+            },
+        )
+        .await;
+
+    let source = super::super::resolve_hls_virtual_source_for_target(&env.app_state, &env.target, env.group_vid)
+        .await
+        .expect("group stream context");
+
+    let response = super::super::handle_hls_stream_request(
+        &fingerprint,
+        &env.app_state,
+        &user,
+        &env.target,
+        Some(&session_snapshot),
+        None,
+        &session_snapshot.stream_url,
+        None,
+        source.stream_context,
+        &solis_input,
+        &HeaderMap::new(),
+        UserConnectionPermission::Allowed,
+        Some(ConnectionKind::Normal),
+        "/live/viewer/secret/1.m3u8",
+        super::super::HlsRequestStage::LegacyVariant,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "stale session whose member binding changed during request must return 503, not overwrite state"
+    );
+}
+
+#[tokio::test]
+async fn legacy_switch_in_flight_loser_does_not_terminate_session() {
+    let faults = OriginFaults::default();
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls()
+        .m3u("solis")
+        .m3u("korath")
+        .origin_mode("solis", faults.mode(0))
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    assert_eq!(env.active_session_vids("viewer").await.len(), 1);
+
+    faults.fail_manifests(500);
+
+    let token_segment = variant_uri.rsplit('/').next().unwrap().trim_end_matches(".m3u8");
+    let decoded = crate::processing::parser::hls::get_hls_session_token_and_url_from_token(
+        &env.app_state.get_encrypt_secret(),
+        token_segment,
+    )
+    .expect("decode token");
+    let token = decoded.session_token.expect("session token");
+    let user_session = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.unwrap();
+    user_session.legacy_switch_in_flight.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let response = env.get(&variant_uri).await;
+    assert_ne!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "losing switch in flight must not return 404 ChannelUnavailable"
+    );
+
+    user_session.legacy_switch_in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let remaining_vids = env.active_session_vids("viewer").await;
+    assert_eq!(remaining_vids.len(), 1, "session must remain active when losing switch_in_flight race");
+}
+
+#[tokio::test]
+async fn legacy_switch_retry_same_bypasses_session_termination() {
+    let faults = OriginFaults::default();
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls()
+        .m3u("solis")
+        .m3u("korath")
+        .origin_mode("solis", faults.mode(0))
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    assert_eq!(env.active_session_vids("viewer").await.len(), 1);
+
+    let token_segment = variant_uri.rsplit('/').next().unwrap().trim_end_matches(".m3u8");
+    let decoded = crate::processing::parser::hls::get_hls_session_token_and_url_from_token(
+        &env.app_state.get_encrypt_secret(),
+        token_segment,
+    )
+    .expect("decode token");
+    let token = decoded.session_token.expect("session token");
+
+    // Prime the session's failover budget to return RetrySame on the next trigger.
+    let failover = shared::model::FailoverGroupRuntimeConfig {
+        same_source_retries: 2,
+        stable_after_secs: 0,
+        ..Default::default()
+    };
+    let mut budget = tuliprox_session::failover_group::FailoverBudget::new(&failover);
+    budget.on_data(std::time::Instant::now());
+
+    let user_session = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.unwrap();
+    env.app_state
+        .active_users
+        .replace_legacy_failover_state("viewer", &token, user_session.legacy_rebase.clone(), Some(budget), false)
+        .await;
+
+    faults.fail_manifests(500);
+
+    let response = env.get(&variant_uri).await;
+    assert_ne!(response.status(), StatusCode::NOT_FOUND, "retry_same decision must not return 404 ChannelUnavailable");
+
+    let remaining_vids = env.active_session_vids("viewer").await;
+    assert_eq!(remaining_vids.len(), 1, "session must remain active on retry_same");
+}
+
+#[tokio::test]
+async fn legacy_switch_bypasses_when_failover_disabled() {
+    let faults = OriginFaults::default();
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls()
+        .m3u("solis")
+        .m3u("korath")
+        .origin_mode("solis", faults.mode(0))
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .with_failover(shared::model::FailoverGroupRuntimeConfig { enabled: false, ..Default::default() })
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+
+    let token_segment = variant_uri.rsplit('/').next().unwrap().trim_end_matches(".m3u8");
+    let decoded = crate::processing::parser::hls::get_hls_session_token_and_url_from_token(
+        &env.app_state.get_encrypt_secret(),
+        token_segment,
+    )
+    .expect("decode token");
+    let token = decoded.session_token.expect("session token");
+
+    let user_session_before = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.unwrap();
+    assert!(
+        user_session_before.legacy_failover_budget.is_none(),
+        "failover budget must not be created when failover is disabled"
+    );
+
+    // With failover disabled, tuliprox must not switch to korath on failure;
+    // it must return 404 ChannelUnavailable.
+    faults.fail_manifests(500);
+
+    let response = env.get(&variant_uri).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "disabled failover must not switch to healthy member; must return 404"
+    );
 }

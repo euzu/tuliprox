@@ -770,7 +770,44 @@ async fn record_legacy_segment_member_failure(
         return;
     };
     super::failover_group::record_member_failure(&app_state.member_health, member, None, FailureClass::Stream);
-    app_state.active_users.mark_member_failed_on_segment(username, &user_session.token).await;
+    app_state
+        .active_users
+        .mark_member_failed_on_segment(username, &user_session.token, user_session.identity(), binding)
+        .await;
+}
+
+pub(super) fn attach_legacy_segment_body_error_recording<S>(
+    stream: S,
+    hls_resource: bool,
+    app_state: &Arc<AppState>,
+    username: &str,
+    user_session: &UserSession,
+    target_id: u16,
+) -> futures::stream::BoxStream<'static, Result<bytes::Bytes, StreamError>>
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, StreamError>> + Send + 'static,
+{
+    use futures::{StreamExt, TryStreamExt};
+    if hls_resource && user_session.member_binding.is_some() {
+        let app_state = Arc::clone(app_state);
+        let username = username.to_string();
+        let session = user_session.clone();
+        let recorded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        stream
+            .inspect_err(move |_err| {
+                if !recorded.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let app_state = Arc::clone(&app_state);
+                    let username = username.clone();
+                    let session = session.clone();
+                    tokio::spawn(async move {
+                        record_legacy_segment_member_failure(&app_state, &username, &session, target_id).await;
+                    });
+                }
+            })
+            .boxed()
+    } else {
+        stream.boxed()
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1020,6 +1057,7 @@ pub(super) async fn force_stream_response(
         app_state.active_users.update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr).await;
         stream_channel.shared = share_stream;
         let socket_bound = user_session.socket_bound;
+        let target_id = stream_channel.target_id;
         let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -1084,6 +1122,14 @@ pub(super) async fn force_stream_response(
             response = response.header(key, value);
         }
 
+        let stream = attach_legacy_segment_body_error_recording(
+            stream,
+            hls_resource,
+            app_state,
+            &ctx.user.username,
+            user_session,
+            target_id,
+        );
         let body_stream = prepare_body_stream(app_state, item_type, stream);
         debug_if_enabled!(
             "Streaming provider forced stream request from {}",
@@ -1355,4 +1401,156 @@ pub(crate) fn should_allow_exhausted_shared_reconnect(
                 && session.virtual_id == requested_virtual_id
                 && session.stream_url.as_ref() == requested_stream_url
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use futures::StreamExt;
+    use std::net::SocketAddr;
+    use tuliprox_session::{CreateUserSessionParams, MemberBinding};
+
+    #[tokio::test]
+    async fn legacy_segment_body_stream_error_records_member_failure() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let addr: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "viewer".to_string();
+        let token = env
+            .app_state
+            .active_users
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls",
+                virtual_id: env.group_vid,
+                provider: "solis",
+                stream_url: "http://example.com/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: None,
+                socket_bound: false,
+            })
+            .await;
+
+        let binding = MemberBinding {
+            group_vid: env.group_vid,
+            member_vid: env.member_vid("solis"),
+            member_index: 0,
+            input_name: Arc::from("solis"),
+            member_title: Arc::from("solis"),
+            provider: Arc::from("solis"),
+        };
+        env.app_state.active_users.bind_member(&user.username, &token, binding).await;
+
+        let user_session = env
+            .app_state
+            .active_users
+            .get_and_update_user_session(&user.username, &token)
+            .await
+            .expect("session must exist");
+
+        let failing_stream = futures::stream::iter([
+            Ok(bytes::Bytes::from_static(b"partial segment data")),
+            Err(StreamError::Stream("connection reset mid-segment".to_string())),
+        ]);
+
+        let wrapped = attach_legacy_segment_body_error_recording(
+            failing_stream,
+            true,
+            &env.app_state,
+            &user.username,
+            &user_session,
+            env.target.id,
+        );
+
+        let items = wrapped.collect::<Vec<_>>().await;
+        assert_eq!(items.len(), 2);
+        assert!(items[1].is_err());
+
+        // Wait for asynchronous failure recording
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let session_after = env
+            .app_state
+            .active_users
+            .get_and_update_user_session(&user.username, &token)
+            .await
+            .expect("session must exist");
+        assert!(
+            session_after.member_failed_on_segment,
+            "mid-stream StreamError on legacy segment must mark member_failed_on_segment"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_hls_resource_body_error_does_not_record_segment_failure() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let addr: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "viewer".to_string();
+        let token = env
+            .app_state
+            .active_users
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-ts",
+                virtual_id: env.group_vid,
+                provider: "solis",
+                stream_url: "http://example.com/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: None,
+                socket_bound: false,
+            })
+            .await;
+
+        let binding = MemberBinding {
+            group_vid: env.group_vid,
+            member_vid: env.member_vid("solis"),
+            member_index: 0,
+            input_name: Arc::from("solis"),
+            member_title: Arc::from("solis"),
+            provider: Arc::from("solis"),
+        };
+        env.app_state.active_users.bind_member(&user.username, &token, binding).await;
+
+        let user_session = env
+            .app_state
+            .active_users
+            .get_and_update_user_session(&user.username, &token)
+            .await
+            .expect("session must exist");
+
+        let failing_stream = futures::stream::iter([
+            Ok(bytes::Bytes::from_static(b"partial ts data")),
+            Err(StreamError::Stream("connection reset".to_string())),
+        ]);
+
+        let wrapped = attach_legacy_segment_body_error_recording(
+            failing_stream,
+            false,
+            &env.app_state,
+            &user.username,
+            &user_session,
+            env.target.id,
+        );
+
+        let items = wrapped.collect::<Vec<_>>().await;
+        assert_eq!(items.len(), 2);
+        assert!(items[1].is_err());
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let session_after = env
+            .app_state
+            .active_users
+            .get_and_update_user_session(&user.username, &token)
+            .await
+            .expect("session must exist");
+        assert!(
+            !session_after.member_failed_on_segment,
+            "non-HLS resource body error must NOT mark member_failed_on_segment"
+        );
+    }
 }

@@ -980,46 +980,45 @@ mod tests {
         assert_eq!(snapshot.daily_buckets.get(&today).map(|bucket| bucket.connect_count), Some(1));
     }
 
-    #[test]
-    fn member_identity_records_yield_non_null_qos() {
-        let mut bucket = QosSnapshotDailyBucket::default();
+    #[tokio::test]
+    async fn member_identity_records_yield_non_null_qos() {
+        let temp = tempdir().expect("tempdir should succeed");
+        let history_dir = temp.path().join("stream_history");
+        let today = current_utc_day();
 
         let mut connect = base_record(StreamHistoryEventType::Connect);
+        connect.partition_day_utc = today.clone();
         connect.input_name = Some("solis".intern());
         connect.provider_name = Some("solis".intern());
         connect.provider_id = Some(1);
         connect.virtual_id = Some(101);
         connect.item_type = Some(PlaylistItemType::Live);
+        connect.stream_identity_key = Some("member-a".to_string());
         connect.shared_joined_existing = Some(false);
-        fold_record_into_bucket(&mut bucket, &connect);
 
         let mut failed = base_record(StreamHistoryEventType::ConnectFailed);
+        failed.partition_day_utc = today.clone();
         failed.input_name = Some("solis".intern());
         failed.provider_name = Some("solis".intern());
         failed.provider_id = Some(1);
         failed.virtual_id = Some(101);
         failed.item_type = Some(PlaylistItemType::Live);
+        failed.stream_identity_key = Some("member-a".to_string());
         failed.connect_failure_reason = Some(ConnectFailureReason::ChannelUnavailable);
         failed.failure_stage = Some(FailureStage::ProviderOpen);
-        fold_record_into_bucket(&mut bucket, &failed);
+        write_pending_history_records(&history_dir, &[connect, failed]);
 
-        let mut snapshot = QosSnapshotRecord {
-            stream_identity_key: "member-a".to_string(),
-            input_name: "solis".intern(),
-            target_name: "test_target".intern(),
-            provider_name: "solis".intern(),
-            provider_id: 1,
-            virtual_id: 101,
-            item_type: PlaylistItemType::Live,
-            updated_at: 1,
-            last_event_at: 1,
-            window_24h: QosSnapshotWindow::default(),
-            window_7d: QosSnapshotWindow::default(),
-            window_30d: QosSnapshotWindow::default(),
-            daily_buckets: BTreeMap::from([("2026-04-02".to_string(), bucket)]),
-        };
-        rebuild_windows(&mut snapshot, "2026-04-02");
+        let repo = std::sync::Arc::new(QosSnapshotRepository::open(temp.path()).expect("repo should open"));
+        let repo_c = repo.clone();
+        let h_dir = history_dir.clone();
+        let now = today.clone();
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c, &h_dir, &now, 0))
+            .await
+            .unwrap()
+            .expect("aggregation should succeed");
 
+        let snapshot =
+            repo.get_snapshot("member-a").expect("load snapshot should succeed").expect("snapshot should exist");
         assert_eq!(snapshot.window_24h.connect_count, 1);
         assert_eq!(snapshot.window_24h.connect_failed_count, 1);
         assert!(snapshot.window_24h.score > 0);

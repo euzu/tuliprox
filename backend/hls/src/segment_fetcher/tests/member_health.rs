@@ -90,6 +90,76 @@ async fn retryable_failures_do_not_notify_until_the_object_is_permanently_failed
     }
 }
 
+fn failing_object(fixture: &Fixture) -> HlsSegmentFailureObject {
+    HlsSegmentFailureObject::Normal { proxy_seq: fixture.snapshot.proxy_seq, origin_seq: fixture.snapshot.origin_seq }
+}
+
+/// Applies a successful fetch of a second segment, as the worker pool does for a concurrent object.
+async fn succeed_on_another_segment(fixture: &Fixture) {
+    let other =
+        fixture.worker.next_fetch_snapshot(&fixture.context, 20, &fixture.policy).await.expect("second snapshot");
+    assert_ne!(other.proxy_seq, fixture.snapshot.proxy_seq);
+    let commit = super::super::SegmentFetchCommit { origin_digest: None, content_length: 1, generation_valid: true };
+    let mut session = fixture.context.session.write().await;
+    fixture.worker.apply_segment_fetch_result(&mut session, &other, &fixture.policy, Ok(commit), 21);
+}
+
+#[tokio::test]
+async fn success_on_another_segment_does_not_reset_retry_exhaustion_of_the_failing_object() {
+    let fixture = fixture(true).await;
+    {
+        let mut session = fixture.context.session.write().await;
+        for at in [1, 2] {
+            session.record_temporary_segment_fetch_failure(at, failing_object(&fixture), 3);
+        }
+    }
+    succeed_on_another_segment(&fixture).await;
+    apply(&fixture, Err(retryable_origin_error(0)), 22).await;
+    assert_eq!(fixture.runtime.reasons(), vec![HlsMemberUnhealthyReason::SegmentFailure]);
+}
+
+#[tokio::test]
+async fn delivering_the_failing_object_clears_its_own_retry_run() {
+    let fixture = fixture(true).await;
+    {
+        let mut session = fixture.context.session.write().await;
+        for at in [1, 2] {
+            session.record_temporary_segment_fetch_failure(at, failing_object(&fixture), 3);
+        }
+    }
+    // The object itself delivers: its own run ends with the session-wide counter.
+    let commit = super::super::SegmentFetchCommit { origin_digest: None, content_length: 1, generation_valid: true };
+    apply(&fixture, Ok(commit), 21).await;
+    let session = fixture.context.session.read().await;
+    assert_eq!(session.segment_failure_tracker.consecutive_temporary_failures, 0);
+    assert_eq!(
+        session.segment_failure_tracker.object_failures(&failing_object(&fixture)),
+        0,
+        "a delivered object starts counting from zero"
+    );
+    drop(session);
+    fixture.runtime.assert_quiet("");
+}
+
+#[tokio::test]
+async fn reported_exhaustion_restarts_the_count_of_the_object() {
+    let fixture = fixture(true).await;
+    {
+        let mut session = fixture.context.session.write().await;
+        for at in [1, 2] {
+            session.record_temporary_segment_fetch_failure(at, failing_object(&fixture), 3);
+        }
+    }
+    succeed_on_another_segment(&fixture).await;
+    apply(&fixture, Err(retryable_origin_error(0)), 22).await;
+    assert_eq!(fixture.runtime.reasons().len(), 1);
+    assert_eq!(
+        fixture.context.session.read().await.segment_failure_tracker.object_failures(&failing_object(&fixture)),
+        0,
+        "the next report needs a fresh run of failures"
+    );
+}
+
 fn retryable_origin_error(kind: u8) -> HlsOriginResourceFetchError {
     match kind {
         0 => HlsOriginResourceFetchError::RetryableStatus(StatusCode::BAD_GATEWAY),

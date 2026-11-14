@@ -21,8 +21,9 @@ use crate::{
     auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, InputSource, ProxyUserCredentials},
     processing::parser::hls::{
-        classify_hls_playlist, media_playlist_media_sequence, media_playlist_segment_count, rewrite_hls,
-        HlsManifestSource, HlsMediaSequenceRebase, HlsPlaylistKind, RewriteHlsProps,
+        classify_hls_playlist, media_playlist_discontinuity_sequence, media_playlist_media_sequence,
+        media_playlist_segment_count, rewrite_hls, HlsManifestSource, HlsMediaSequenceRebase, HlsPlaylistKind,
+        RewriteHlsProps,
     },
     repository::{m3u_get_item_for_stream_id, storage_const, xtream_get_item_for_stream_id},
     utils::{debug_if_enabled, request},
@@ -417,6 +418,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 
     let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
+    let mut expected_binding = user_session.and_then(|session| session.member_binding.clone());
     let mut bound_member_info: Option<(u32, Arc<ConfigInput>, String, Option<HalfOpenGuard>)> = None;
 
     // Set when the session cookie for the pinned URL's host replaced the request cookie; holds the prior value.
@@ -543,6 +545,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 }
                 None => None,
             }
+        } else if accept_requested_stream_url {
+            Some((Arc::clone(&selected_provider_config.name), url.clone()))
         } else if let Some((member_vid, member_input, _, _)) = bound_member_info.as_ref() {
             // A bound group member resolves its own playlist URL from the group record on every
             // refresh. The sealed entry URL belongs to the member at entry time and cannot be
@@ -726,21 +730,16 @@ pub(in crate::api) async fn handle_hls_stream_request(
             })
             .await;
 
-        app_state
-            .active_users
-            .bind_member(
-                &user.username,
-                &session_token,
-                MemberBinding {
-                    group_vid: group.group_vid.get(),
-                    member_vid: resolved.member.member_vid.get(),
-                    member_index: resolved.acquired.index,
-                    input_name: Arc::clone(&resolved.member.input_name),
-                    member_title: Arc::clone(&resolved.member.title),
-                    provider: Arc::clone(&provider_name),
-                },
-            )
-            .await;
+        let new_binding = MemberBinding {
+            group_vid: group.group_vid.get(),
+            member_vid: resolved.member.member_vid.get(),
+            member_index: resolved.acquired.index,
+            input_name: Arc::clone(&resolved.member.input_name),
+            member_title: Arc::clone(&resolved.member.title),
+            provider: Arc::clone(&provider_name),
+        };
+        app_state.active_users.bind_member(&user.username, &session_token, new_binding.clone()).await;
+        expected_binding = Some(new_binding);
 
         app_state.active_provider.refresh_adaptive_playback_lease(
             &provider_name,
@@ -921,7 +920,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     // without retrying the failed member.
     if is_live_hls && legacy_group_session && user_session.is_some_and(|session| session.member_failed_on_segment) {
         if let (Some(session), Some(session_token)) = (user_session, session_token.as_deref()) {
-            if let Some(response) = try_switch_legacy_hls_member(
+            if let LegacySwitchOutcome::Switched(response) = try_switch_legacy_hls_member(
                 app_state,
                 fingerprint,
                 user,
@@ -1027,21 +1026,44 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         fresh.as_ref().and_then(|session| session.legacy_rebase.clone()).unwrap_or_default();
                     rebase_props = plan_legacy_rebase(&mut rebase_state, &content, playlist_kind);
                     let playback = group_playback_settings(app_state, target);
-                    let mut budget = fresh
-                        .as_ref()
-                        .and_then(|session| session.legacy_failover_budget.clone())
-                        .unwrap_or_else(|| FailoverBudget::new(&playback.failover));
-                    budget.on_data(std::time::Instant::now());
-                    app_state
-                        .active_users
-                        .replace_legacy_failover_state(
+                    let budget = if playback.failover.enabled {
+                        let mut b = fresh
+                            .as_ref()
+                            .and_then(|session| session.legacy_failover_budget.clone())
+                            .unwrap_or_else(|| FailoverBudget::new(&playback.failover));
+                        b.on_data(std::time::Instant::now());
+                        Some(b)
+                    } else {
+                        None
+                    };
+                    // Commit only onto the binding this manifest was fetched for. A concurrent
+                    // switch or rebind owns the timeline now; the player retries the playlist.
+                    let committed = match session_identity {
+                        Some(identity) => {
+                            app_state
+                                .active_users
+                                .replace_legacy_failover_state_if_bound(
+                                    &user.username,
+                                    session_token,
+                                    identity,
+                                    expected_binding.as_ref(),
+                                    rebase_state,
+                                    budget,
+                                )
+                                .await
+                        }
+                        None => false,
+                    };
+                    if !committed {
+                        release_prepared_hls_manifest_session(
+                            app_state,
                             &user.username,
                             session_token,
-                            Some(rebase_state),
-                            Some(budget),
-                            false,
+                            &fingerprint.addr,
                         )
                         .await;
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
                 }
             }
             let rewrite_hls_props = RewriteHlsProps {
@@ -1109,7 +1131,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 let class = super::group_start::classify_hls_download_error(&err);
                 if is_legacy_manifest_failover_class(class) {
                     if let (Some(session), Some(session_token)) = (user_session, session_token.as_deref()) {
-                        if let Some(response) = try_switch_legacy_hls_member(
+                        match try_switch_legacy_hls_member(
                             app_state,
                             fingerprint,
                             user,
@@ -1124,7 +1146,18 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         )
                         .await
                         {
-                            return response;
+                            LegacySwitchOutcome::Switched(response) => return response,
+                            LegacySwitchOutcome::RetrySame | LegacySwitchOutcome::SwitchInFlight => {
+                                release_prepared_hls_manifest_session(
+                                    app_state,
+                                    &user.username,
+                                    session_token,
+                                    &fingerprint.addr,
+                                )
+                                .await;
+                                return StatusCode::BAD_GATEWAY.into_response();
+                            }
+                            LegacySwitchOutcome::GiveUp | LegacySwitchOutcome::Disabled => {}
                         }
                     }
                 }
@@ -1178,44 +1211,78 @@ fn plan_legacy_rebase(
     }
     let upstream_seq = media_playlist_media_sequence(content).unwrap_or(0);
     let segment_count = media_playlist_segment_count(content);
+    let upstream_discontinuity_sequence = media_playlist_discontinuity_sequence(content).unwrap_or(0);
     let mut served_seq = upstream_seq.saturating_add_signed(state.media_sequence_offset);
     // An upstream restart moves the whole window behind what the client already played. Rebase it
     // after the last served segment with a discontinuity, as after a member switch.
-    if !state.insert_discontinuity
-        && segment_count > 0
-        && served_seq.saturating_add(segment_count - 1) < state.last_served_sequence
-    {
+    if segment_count > 0 && served_seq.saturating_add(segment_count - 1) < state.last_served_sequence {
         let next_seq = state.last_served_sequence.saturating_add(1);
         state.media_sequence_offset =
             i64::try_from(next_seq).unwrap_or(i64::MAX).saturating_sub(i64::try_from(upstream_seq).unwrap_or(i64::MAX));
-        state.insert_discontinuity = true;
+        begin_legacy_discontinuity(state);
         served_seq = next_seq;
     }
-    let insert_discontinuity = state.insert_discontinuity;
-    if insert_discontinuity {
-        state.discontinuity_boundary_seq = Some(served_seq);
-        state.insert_discontinuity = false;
-    } else if let Some(boundary) = state.discontinuity_boundary_seq {
-        if served_seq > boundary {
-            state.discontinuity_sequence = state.discontinuity_sequence.saturating_add(1);
-            state.discontinuity_boundary_seq = None;
+    // The first serve after a boundary comes from a restarted or different upstream whose
+    // discontinuity counter is unrelated; only advances within one upstream carry over.
+    let new_upstream = state.insert_discontinuity && state.discontinuity_boundary_seq.is_none();
+    match state.upstream_discontinuity_sequence {
+        Some(previous) if !new_upstream => {
+            state.discontinuity_sequence =
+                state.discontinuity_sequence.saturating_add(upstream_discontinuity_sequence.saturating_sub(previous));
         }
+        None if !new_upstream => state.discontinuity_sequence = upstream_discontinuity_sequence,
+        _ => {}
     }
-    // Read after the advance above so the poll where the boundary leaves the window emits the
-    // incremented `EXT-X-DISCONTINUITY-SEQUENCE`.
-    let discontinuity_sequence = state.discontinuity_sequence;
+    state.upstream_discontinuity_sequence = Some(upstream_discontinuity_sequence);
+    if new_upstream {
+        state.discontinuity_boundary_seq = Some(served_seq);
+    }
+    // The boundary tag stays on every serve while its segment is in the window; the sequence
+    // advances on the serve where it leaves.
+    if state.discontinuity_boundary_seq.is_some_and(|boundary| served_seq > boundary) {
+        state.discontinuity_sequence = state.discontinuity_sequence.saturating_add(1);
+        state.discontinuity_boundary_seq = None;
+        state.insert_discontinuity = false;
+    }
+    let insert_discontinuity = state.insert_discontinuity;
     if segment_count > 0 {
         state.last_served_sequence = served_seq.saturating_add(segment_count - 1);
     }
-    if insert_discontinuity || state.media_sequence_offset != 0 {
-        Some(HlsMediaSequenceRebase { media_sequence: served_seq, insert_discontinuity, discontinuity_sequence })
+    if insert_discontinuity
+        || state.media_sequence_offset != 0
+        || state.discontinuity_sequence != upstream_discontinuity_sequence
+    {
+        Some(HlsMediaSequenceRebase {
+            media_sequence: served_seq,
+            insert_discontinuity,
+            discontinuity_sequence: state.discontinuity_sequence,
+        })
     } else {
         None
     }
 }
 
+/// Starts a new discontinuity boundary for the next serve. A previous boundary still pending has
+/// left the window, because the new window starts after every segment served so far.
+fn begin_legacy_discontinuity(state: &mut LegacyHlsRebase) {
+    if state.discontinuity_boundary_seq.take().is_some() {
+        state.discontinuity_sequence = state.discontinuity_sequence.saturating_add(1);
+    }
+    state.insert_discontinuity = true;
+}
+
+/// Result of an attempted legacy group member switch.
+#[derive(Debug)]
+enum LegacySwitchOutcome {
+    Switched(axum::response::Response),
+    RetrySame,
+    SwitchInFlight,
+    GiveUp,
+    Disabled,
+}
+
 /// Switches a running legacy HLS group playback to the next member after a hard failure, rebinds
-/// the user session, and serves the new member's manifest (rebased). Returns `None` when the
+/// the user session, and serves the new member's manifest (rebased). Returns `GiveUp` when the
 /// switch budget is exhausted or no candidate member can serve.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn switch_legacy_hls_group_member(
@@ -1233,7 +1300,11 @@ async fn switch_legacy_hls_group_member(
     record_failure: bool,
     playback: shared::model::FailoverGroupPlayback,
     connection_kind: crate::api::model::ConnectionKind,
-) -> Option<axum::response::Response> {
+) -> LegacySwitchOutcome {
+    if !playback.failover.enabled {
+        return LegacySwitchOutcome::Disabled;
+    }
+
     let now = std::time::Instant::now();
 
     // A one-member group cannot switch; keep the current member and its reservation so the
@@ -1244,7 +1315,7 @@ async fn switch_legacy_hls_group_member(
                 record_member_failure(&app_state.member_health, member, None, failure_class);
             }
         }
-        return None;
+        return LegacySwitchOutcome::GiveUp;
     }
 
     if record_failure {
@@ -1256,7 +1327,7 @@ async fn switch_legacy_hls_group_member(
     let mut budget = session.legacy_failover_budget.clone().unwrap_or_else(|| FailoverBudget::new(&playback.failover));
     let decision = budget.on_trigger(failed_index, group.members.len(), now);
     let exclude = match decision {
-        BudgetDecision::GiveUp | BudgetDecision::RetrySame => {
+        BudgetDecision::GiveUp => {
             app_state
                 .active_users
                 .replace_legacy_failover_state(
@@ -1267,7 +1338,20 @@ async fn switch_legacy_hls_group_member(
                     false,
                 )
                 .await;
-            return None;
+            return LegacySwitchOutcome::GiveUp;
+        }
+        BudgetDecision::RetrySame => {
+            app_state
+                .active_users
+                .replace_legacy_failover_state(
+                    &user.username,
+                    session_token,
+                    session.legacy_rebase.clone(),
+                    Some(budget),
+                    false,
+                )
+                .await;
+            return LegacySwitchOutcome::RetrySame;
         }
         BudgetDecision::Next { exclude } => exclude,
     };
@@ -1317,7 +1401,7 @@ async fn switch_legacy_hls_group_member(
                 false,
             )
             .await;
-        return None;
+        return LegacySwitchOutcome::GiveUp;
     };
 
     let mut acquired_handle = resolved.acquired.handle;
@@ -1350,7 +1434,7 @@ async fn switch_legacy_hls_group_member(
                 false,
             )
             .await;
-        return None;
+        return LegacySwitchOutcome::GiveUp;
     };
 
     let provider_name = selected_provider_config
@@ -1409,7 +1493,7 @@ async fn switch_legacy_hls_group_member(
                     false,
                 )
                 .await;
-            return None;
+            return LegacySwitchOutcome::GiveUp;
         };
         let playlist_kind = classify_hls_playlist(&content);
         (content, response_url, response_headers, playlist_kind)
@@ -1423,7 +1507,7 @@ async fn switch_legacy_hls_group_member(
         let offset = i128::from(next_seq) - i128::from(new_upstream);
         rebase_state.media_sequence_offset =
             i64::try_from(offset).unwrap_or(if offset > 0 { i64::MAX } else { i64::MIN });
-        rebase_state.insert_discontinuity = true;
+        begin_legacy_discontinuity(&mut rebase_state);
         plan_legacy_rebase(&mut rebase_state, &content, playlist_kind)
     } else {
         None
@@ -1468,11 +1552,11 @@ async fn switch_legacy_hls_group_member(
     }
     release_prepared_hls_manifest_session(app_state, &user.username, session_token, &fingerprint.addr).await;
 
-    Some(hls_response(hls_content).into_response())
+    LegacySwitchOutcome::Switched(hls_response(hls_content).into_response())
 }
 
 /// Attempts a legacy runtime member switch and serves the new member's manifest, or returns
-/// `None` when no switch happened (budget exhausted, single member, or not a group).
+/// an outcome indicating why no switch happened (budget exhausted, in flight, disabled, or not a group).
 #[allow(clippy::too_many_arguments)]
 async fn try_switch_legacy_hls_member(
     app_state: &Arc<AppState>,
@@ -1486,26 +1570,34 @@ async fn try_switch_legacy_hls_member(
     failure_class: FailureClass,
     record_failure: bool,
     connection_kind: crate::api::model::ConnectionKind,
-) -> Option<axum::response::Response> {
-    let binding = session.member_binding.clone()?;
+) -> LegacySwitchOutcome {
+    let Some(binding) = session.member_binding.clone() else {
+        return LegacySwitchOutcome::Disabled;
+    };
     let ResolvedStreamTarget::Group(group) =
         classify_virtual_id(&app_state.app_config, &app_state.playlists, target, VirtualId::new(binding.group_vid))
             .await
     else {
-        return None;
+        return LegacySwitchOutcome::Disabled;
     };
     // A removed/reordered member after a config reload must never index out of bounds.
-    let failed_index = group
+    let Some(failed_index) = group
         .members
         .iter()
         .position(|member| member.member_vid.get() == binding.member_vid)
-        .or_else(|| (binding.member_index < group.members.len()).then_some(binding.member_index))?;
+        .or_else(|| (binding.member_index < group.members.len()).then_some(binding.member_index))
+    else {
+        return LegacySwitchOutcome::GiveUp;
+    };
     let playback = group_playback_settings(app_state, target);
+    if !playback.failover.enabled {
+        return LegacySwitchOutcome::Disabled;
+    }
 
     // Single-flight: only one concurrent poll switches the session. The flag is shared across
     // session clones via its `Arc`, and the guard resets it even if the switch future is dropped.
     if session.legacy_switch_in_flight.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() {
-        return None;
+        return LegacySwitchOutcome::SwitchInFlight;
     }
     let _guard = LegacySwitchGuard { flag: Arc::clone(&session.legacy_switch_in_flight) };
     switch_legacy_hls_group_member(
@@ -1841,6 +1933,89 @@ mod legacy_rebase_tests {
     fn media(sequence: u64, segments: u64) -> String {
         let header = format!("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n");
         (sequence..sequence + segments).fold(header, |body, seq| body + format!("#EXTINF:4,\nseg{seq}.ts\n").as_str())
+    }
+
+    fn media_with_disc_seq(sequence: u64, disc_seq: u64, segments: u64) -> String {
+        let header = format!("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n#EXT-X-DISCONTINUITY-SEQUENCE:{disc_seq}\n");
+        (sequence..sequence + segments).fold(header, |body, seq| body + format!("#EXTINF:4,\nseg{seq}.ts\n").as_str())
+    }
+
+    #[test]
+    fn discontinuity_boundary_stays_in_every_response_while_in_window() {
+        let mut state = LegacyHlsRebase::default();
+        plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media);
+
+        let rebase1 = plan_legacy_rebase(&mut state, &media(0, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(rebase1.media_sequence, 103);
+        assert!(rebase1.insert_discontinuity);
+
+        let rebase2 = plan_legacy_rebase(&mut state, &media(0, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(rebase2.media_sequence, 103);
+        assert!(rebase2.insert_discontinuity, "boundary must stay emitted while in the window");
+
+        let rebase3 = plan_legacy_rebase(&mut state, &media(1, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(rebase3.media_sequence, 104);
+        assert!(!rebase3.insert_discontinuity);
+        assert_eq!(rebase3.discontinuity_sequence, 1, "discontinuity sequence advances when boundary leaves window");
+    }
+
+    #[test]
+    fn discontinuity_sequence_never_decreases_when_the_new_upstream_counts_lower() {
+        let mut state = LegacyHlsRebase::default();
+        assert!(plan_legacy_rebase(&mut state, &media_with_disc_seq(100, 50, 3), HlsPlaylistKind::Media).is_none());
+
+        let switched =
+            plan_legacy_rebase(&mut state, &media_with_disc_seq(0, 2, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(switched.discontinuity_sequence, 50, "boundary serve keeps the client counter");
+        assert!(switched.insert_discontinuity);
+
+        let left =
+            plan_legacy_rebase(&mut state, &media_with_disc_seq(1, 2, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(left.discontinuity_sequence, 51);
+
+        let advanced =
+            plan_legacy_rebase(&mut state, &media_with_disc_seq(2, 3, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(advanced.discontinuity_sequence, 52, "upstream advance carries over");
+    }
+
+    #[test]
+    fn second_restart_while_the_first_boundary_is_in_the_window_keeps_both_discontinuities() {
+        let mut state = LegacyHlsRebase::default();
+        plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media);
+        let first = plan_legacy_rebase(&mut state, &media(0, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!((first.media_sequence, first.discontinuity_sequence), (103, 0));
+        assert!(first.insert_discontinuity);
+
+        // The upstream restarts again before the first boundary segment left the window.
+        let second = plan_legacy_rebase(&mut state, &media(0, 2), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(second.media_sequence, 106, "timeline continues after the last served segment");
+        assert!(second.insert_discontinuity, "second boundary is emitted");
+        assert_eq!(second.discontinuity_sequence, 1, "first boundary left the window");
+
+        let third = plan_legacy_rebase(&mut state, &media(1, 2), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(third.media_sequence, 107);
+        assert!(!third.insert_discontinuity);
+        assert_eq!(third.discontinuity_sequence, 2);
+    }
+
+    #[test]
+    fn discontinuity_sequence_preserves_upstream_advances_and_synthetic_offset() {
+        let mut state = LegacyHlsRebase::default();
+        plan_legacy_rebase(&mut state, &media_with_disc_seq(100, 2, 3), HlsPlaylistKind::Media);
+
+        let rebase1 =
+            plan_legacy_rebase(&mut state, &media_with_disc_seq(0, 2, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(rebase1.discontinuity_sequence, 2);
+        assert!(rebase1.insert_discontinuity);
+
+        let rebase2 =
+            plan_legacy_rebase(&mut state, &media_with_disc_seq(1, 2, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(rebase2.discontinuity_sequence, 3, "upstream 2 + synthetic 1 = 3");
+        assert!(!rebase2.insert_discontinuity);
+
+        let rebase3 =
+            plan_legacy_rebase(&mut state, &media_with_disc_seq(2, 3, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(rebase3.discontinuity_sequence, 4, "upstream 3 + synthetic 1 = 4");
     }
 
     #[test]

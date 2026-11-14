@@ -301,6 +301,7 @@ impl ActiveUserManager {
         if let Some(connection_data) = user_connections.by_key.get_mut(username) {
             if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
                 session.member_binding = Some(binding.clone());
+                session.member_failed_on_segment = false;
             }
             for stream in &mut connection_data.streams {
                 if stream.session_token.as_deref() == Some(token) {
@@ -335,19 +336,312 @@ impl ActiveUserManager {
             if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
                 session.legacy_rebase = rebase;
                 session.legacy_failover_budget = budget;
-                session.member_failed_on_segment = member_failed_on_segment;
+                session.member_failed_on_segment = session.member_failed_on_segment || member_failed_on_segment;
             }
         }
     }
 
+    /// Commits the legacy timeline state of a successful manifest serve only when the session still
+    /// has the expected identity and member binding, checked under the same write lock. Returns
+    /// `false` and changes nothing when a concurrent switch or rebind replaced the binding.
+    pub async fn replace_legacy_failover_state_if_bound(
+        &self,
+        username: &str,
+        token: &str,
+        identity: SessionIdentity,
+        expected_binding: Option<&MemberBinding>,
+        rebase: LegacyHlsRebase,
+        budget: Option<FailoverBudget>,
+    ) -> bool {
+        let mut user_connections = self.write_connections().await;
+        let Some(session) = user_connections
+            .by_key
+            .get_mut(username)
+            .and_then(|connection_data| connection_data.sessions.iter_mut().find(|s| s.token == token))
+        else {
+            return false;
+        };
+        if session.identity() != identity || session.member_binding.as_ref() != expected_binding {
+            return false;
+        }
+        session.legacy_rebase = Some(rebase);
+        session.legacy_failover_budget = budget;
+        true
+    }
+
     /// Marks the bound member of a legacy HLS group session failed by a hard segment request, so
-    /// the next manifest refresh switches instead of serving the failed member.
-    pub async fn mark_member_failed_on_segment(&self, username: &str, token: &str) {
+    /// the next manifest refresh switches instead of serving the failed member. Validates that the
+    /// session identity and member binding match under the same write lock.
+    pub async fn mark_member_failed_on_segment(
+        &self,
+        username: &str,
+        token: &str,
+        identity: SessionIdentity,
+        expected_binding: &MemberBinding,
+    ) -> bool {
         let mut user_connections = self.write_connections().await;
         if let Some(connection_data) = user_connections.by_key.get_mut(username) {
             if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
-                session.member_failed_on_segment = true;
+                if session.identity() == identity && session.member_binding.as_ref() == Some(expected_binding) {
+                    session.member_failed_on_segment = true;
+                    return true;
+                }
             }
         }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::EventManager;
+    use arc_swap::ArcSwapOption;
+    use tuliprox_core::model::{Config, ProxyUserCredentials};
+    use tuliprox_repository::GeoIp;
+
+    fn test_manager() -> ActiveUserManager {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        ActiveUserManager::new(&config, &geoip, &event_manager)
+    }
+
+    fn test_user() -> ProxyUserCredentials {
+        let mut user = ProxyUserCredentials::default();
+        user.username = "test-user".to_string();
+        user.password = "password".to_string();
+        user.max_connections = 5;
+        user.soft_connections = 0;
+        user
+    }
+
+    #[tokio::test]
+    async fn manifest_refresh_preserves_pending_member_failed_on_segment() {
+        let manager = test_manager();
+        let user = test_user();
+        let addr = "127.0.0.1:8000".parse().unwrap();
+        let token = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-1",
+                virtual_id: 100,
+                provider: "prov-1",
+                stream_url: "http://example.com/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: None,
+                socket_bound: false,
+            })
+            .await;
+
+        let binding = MemberBinding {
+            group_vid: 100,
+            member_vid: 101,
+            member_index: 0,
+            input_name: Arc::from("input-1"),
+            member_title: Arc::from("title-1"),
+            provider: Arc::from("prov-1"),
+        };
+        manager.bind_member(&user.username, &token, binding.clone()).await;
+
+        let identity = {
+            let connections = manager.connections.read().await;
+            connections
+                .by_key
+                .get(&user.username)
+                .unwrap()
+                .sessions
+                .iter()
+                .find(|s| s.token == token)
+                .unwrap()
+                .identity()
+        };
+
+        let marked = manager.mark_member_failed_on_segment(&user.username, &token, identity, &binding).await;
+        assert!(marked, "mark should succeed with matching identity and binding");
+
+        {
+            let connections = manager.connections.read().await;
+            let session =
+                connections.by_key.get(&user.username).unwrap().sessions.iter().find(|s| s.token == token).unwrap();
+            assert!(session.member_failed_on_segment, "session should have member_failed_on_segment set");
+        }
+
+        // Ordinary manifest refresh passing false preserves the flag
+        manager.replace_legacy_failover_state(&user.username, &token, None, None, false).await;
+
+        {
+            let connections = manager.connections.read().await;
+            let session =
+                connections.by_key.get(&user.username).unwrap().sessions.iter().find(|s| s.token == token).unwrap();
+            assert!(session.member_failed_on_segment, "manifest refresh must not clear pending segment failure");
+        }
+
+        // Switch path rebinds to next member, clearing the pending failure flag
+        let next_binding = MemberBinding {
+            group_vid: 100,
+            member_vid: 102,
+            member_index: 1,
+            input_name: Arc::from("input-2"),
+            member_title: Arc::from("title-2"),
+            provider: Arc::from("prov-2"),
+        };
+        manager.bind_member(&user.username, &token, next_binding).await;
+
+        {
+            let connections = manager.connections.read().await;
+            let session =
+                connections.by_key.get(&user.username).unwrap().sessions.iter().find(|s| s.token == token).unwrap();
+            assert!(!session.member_failed_on_segment, "switch path must clear segment failure flag");
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_member_failed_on_segment_validates_identity_and_binding() {
+        let manager = test_manager();
+        let user = test_user();
+        let addr = "127.0.0.1:8000".parse().unwrap();
+        let token = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-2",
+                virtual_id: 200,
+                provider: "prov-1",
+                stream_url: "http://example.com/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: None,
+                socket_bound: false,
+            })
+            .await;
+
+        let binding_a = MemberBinding {
+            group_vid: 200,
+            member_vid: 201,
+            member_index: 0,
+            input_name: Arc::from("input-a"),
+            member_title: Arc::from("title-a"),
+            provider: Arc::from("prov-a"),
+        };
+        manager.bind_member(&user.username, &token, binding_a.clone()).await;
+
+        let identity = {
+            let connections = manager.connections.read().await;
+            connections
+                .by_key
+                .get(&user.username)
+                .unwrap()
+                .sessions
+                .iter()
+                .find(|s| s.token == token)
+                .unwrap()
+                .identity()
+        };
+
+        // Stale identity: must not mark
+        let stale_identity = SessionIdentity {
+            incarnation: identity.incarnation.wrapping_add(1),
+            binding_generation: identity.binding_generation,
+        };
+        let marked = manager.mark_member_failed_on_segment(&user.username, &token, stale_identity, &binding_a).await;
+        assert!(!marked, "stale identity must not mark segment failure");
+
+        // Stale binding: must not mark
+        let wrong_binding = MemberBinding {
+            group_vid: 200,
+            member_vid: 999,
+            member_index: 5,
+            input_name: Arc::from("input-wrong"),
+            member_title: Arc::from("title-wrong"),
+            provider: Arc::from("prov-wrong"),
+        };
+        let marked = manager.mark_member_failed_on_segment(&user.username, &token, identity, &wrong_binding).await;
+        assert!(!marked, "wrong binding must not mark segment failure");
+
+        {
+            let connections = manager.connections.read().await;
+            let session =
+                connections.by_key.get(&user.username).unwrap().sessions.iter().find(|s| s.token == token).unwrap();
+            assert!(!session.member_failed_on_segment, "flag should still be false");
+        }
+
+        // Matching identity and binding: marks successfully
+        let marked = manager.mark_member_failed_on_segment(&user.username, &token, identity, &binding_a).await;
+        assert!(marked, "matching identity and binding must mark segment failure");
+
+        {
+            let connections = manager.connections.read().await;
+            let session =
+                connections.by_key.get(&user.username).unwrap().sessions.iter().find(|s| s.token == token).unwrap();
+            assert!(session.member_failed_on_segment, "flag must be true");
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_legacy_failover_state_if_bound_rejects_a_rebound_session() {
+        let manager = test_manager();
+        let user = test_user();
+        let addr = "127.0.0.1:8000".parse().unwrap();
+        let token = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-3",
+                virtual_id: 300,
+                provider: "prov-1",
+                stream_url: "http://example.com/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: None,
+                socket_bound: false,
+            })
+            .await;
+        let member = |member_vid: u32, name: &str| MemberBinding {
+            group_vid: 300,
+            member_vid,
+            member_index: 0,
+            input_name: Arc::from(name),
+            member_title: Arc::from(name),
+            provider: Arc::from(name),
+        };
+        let binding_a = member(301, "input-a");
+        manager.bind_member(&user.username, &token, binding_a.clone()).await;
+        let identity = manager.session_identity(&user.username, &token).await.expect("session identity");
+        let rebase = LegacyHlsRebase { last_served_sequence: 42, ..LegacyHlsRebase::default() };
+
+        // A concurrent switch rebinds the session to member B before the manifest commit.
+        manager.bind_member(&user.username, &token, member(302, "input-b")).await;
+        assert!(
+            !manager
+                .replace_legacy_failover_state_if_bound(
+                    &user.username,
+                    &token,
+                    identity,
+                    Some(&binding_a),
+                    rebase.clone(),
+                    None
+                )
+                .await,
+            "stale binding must not commit"
+        );
+        let session = manager.get_and_update_user_session(&user.username, &token).await.expect("session");
+        assert_eq!(session.legacy_rebase, None, "stale commit must leave the timeline untouched");
+
+        let binding_b = member(302, "input-b");
+        let identity = manager.session_identity(&user.username, &token).await.expect("session identity");
+        assert!(
+            manager
+                .replace_legacy_failover_state_if_bound(
+                    &user.username,
+                    &token,
+                    identity,
+                    Some(&binding_b),
+                    rebase.clone(),
+                    None
+                )
+                .await
+        );
+        let session = manager.get_and_update_user_session(&user.username, &token).await.expect("session");
+        assert_eq!(session.legacy_rebase, Some(rebase));
     }
 }

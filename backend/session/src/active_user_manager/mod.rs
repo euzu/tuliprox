@@ -143,8 +143,11 @@ pub struct LegacyHlsRebase {
     pub media_sequence_offset: i64,
     /// Client media sequence of the last served segment; the next member starts at this + 1.
     pub last_served_sequence: u64,
-    /// `EXT-X-DISCONTINUITY-SEQUENCE` value of the next inserted boundary.
+    /// Client `EXT-X-DISCONTINUITY-SEQUENCE` of the last served window; never decreases.
     pub discontinuity_sequence: u64,
+    /// Upstream `EXT-X-DISCONTINUITY-SEQUENCE` of the last served window; its advances are added to
+    /// the client value while the same member keeps serving.
+    pub upstream_discontinuity_sequence: Option<u64>,
     /// Client media sequence of the last discontinuity boundary, while it is still in the window.
     pub discontinuity_boundary_seq: Option<u64>,
     /// Insert an `EXT-X-DISCONTINUITY` before the first segment of the next manifest serve.

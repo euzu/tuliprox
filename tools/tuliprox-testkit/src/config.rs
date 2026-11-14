@@ -430,6 +430,11 @@ pub struct AssertOrigin {
     /// failover independently of manifest requests.
     #[serde(default)]
     pub latest_segment_account: Option<String>,
+    /// Account whose HLS segment request failed (answered without a body) right before another
+    /// account served a segment. Proves a segment failure triggered the handoff instead of a stall
+    /// or timeout; earlier stall/probe switches do not satisfy it.
+    #[serde(default)]
+    pub segment_failure_before_handoff_from: Option<String>,
     /// Portal handshakes the emulated Stalker portal answered at least.
     #[serde(default)]
     pub stalker_handshakes_at_least: Option<u64>,
@@ -463,6 +468,13 @@ pub struct RuntimeAssertions {
     pub active_users: Option<usize>,
     #[serde(default)]
     pub active_user_connections: Option<usize>,
+    /// Number of active streams listed by the SUT (`/streams`).
+    #[serde(default)]
+    pub active_streams: Option<usize>,
+    /// Number of distinct `shared_stream_id` values among active shared streams. `1` while several
+    /// viewers play proves they joined one shared session.
+    #[serde(default)]
+    pub distinct_shared_streams: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
