@@ -781,7 +781,7 @@ impl TimelineDraft {
 
         let mut previous_proxy_seq: Option<u64> = None;
         for parsed in &manifest.segments {
-            match self.classify_candidate_segment(parsed, effective_host_id) {
+            match self.classify_candidate_segment(parsed, effective_host_id, false) {
                 Ok(CandidateSegmentDisposition::CurrentMapping(proxy_seq)) if parsed.origin_seq <= highwater => {
                     if previous_proxy_seq.is_some_and(|previous| previous.checked_add(1) != Some(proxy_seq))
                         || self.segments[&proxy_seq].duration_ms != parsed.duration_ms
@@ -872,11 +872,17 @@ impl TimelineDraft {
     ) -> Result<CandidateTimelinePlan<'a>, TimelineMapError> {
         let effective_host_changed =
             self.origin_epoch_effective_host_id.is_some_and(|committed_host_id| committed_host_id != effective_host_id);
+        // A new origin epoch is already pre-ordained for these transitions, so
+        // the retained epoch's origin-sequence mappings cannot classify the new
+        // member's media. `Rebase` alone does not qualify: an unreferenced
+        // rebase that merely trims a prefix must still reject an overlapping
+        // origin sequence whose resource identity changed.
+        let starts_new_epoch = self.pending_origin_epoch_handoff
+            || effective_host_changed
+            || self.should_start_new_origin_epoch_for_rollover(manifest);
         let explicit_handoff =
             matches!(mode, TimelineApplyMode::ExplicitHandoff { .. } | TimelineApplyMode::Rebase { .. })
-                || self.pending_origin_epoch_handoff
-                || effective_host_changed
-                || self.should_start_new_origin_epoch_for_rollover(manifest);
+                || starts_new_epoch;
         let mut segments = Vec::with_capacity(manifest.segments.len());
         let mut trimmed_published_prefix = false;
         let mut trimmed_prefix_highwater: Option<u64> = None;
@@ -887,7 +893,7 @@ impl TimelineDraft {
         for (candidate_position, parsed) in manifest.segments.iter().enumerate() {
             let resource_identity =
                 HlsMediaResourceIdentity::from_url(&parsed.resolved_origin_url, parsed.origin_byte_range);
-            let disposition = self.classify_candidate_segment(parsed, effective_host_id)?;
+            let disposition = self.classify_candidate_segment(parsed, effective_host_id, starts_new_epoch)?;
             if let CandidateSegmentDisposition::CurrentMapping(proxy_seq)
             | CandidateSegmentDisposition::PublishedOverlap(proxy_seq) = disposition
             {
@@ -961,21 +967,28 @@ impl TimelineDraft {
         &self,
         parsed: &ParsedOriginSegment,
         effective_host_id: u64,
+        starts_new_epoch: bool,
     ) -> Result<CandidateSegmentDisposition, TimelineMapError> {
         let identity = HlsMediaResourceIdentity::from_url(&parsed.resolved_origin_url, parsed.origin_byte_range);
-        if let Some(current_key) = self.current_origin_key(effective_host_id, parsed.origin_seq) {
-            if let Some(proxy_seq) = self.origin_to_proxy.get(&current_key).copied() {
-                let current_identity = self.segments.get(&proxy_seq).and_then(SegmentEntry::media_resource_identity);
-                if current_identity.is_some_and(|current| current.matches(identity)) {
-                    return Ok(CandidateSegmentDisposition::CurrentMapping(proxy_seq));
+        // A handoff starts a fresh origin epoch, so the retained epoch's
+        // origin-sequence mappings cannot classify the new member's media. Its
+        // overlapping sequence numbers are new resources, never a conflict.
+        if !starts_new_epoch {
+            if let Some(current_key) = self.current_origin_key(effective_host_id, parsed.origin_seq) {
+                if let Some(proxy_seq) = self.origin_to_proxy.get(&current_key).copied() {
+                    let current_identity =
+                        self.segments.get(&proxy_seq).and_then(SegmentEntry::media_resource_identity);
+                    if current_identity.is_some_and(|current| current.matches(identity)) {
+                        return Ok(CandidateSegmentDisposition::CurrentMapping(proxy_seq));
+                    }
+                    if let Some(existing_proxy_seq) = self.proxy_seq_for_resource(identity) {
+                        return Ok(CandidateSegmentDisposition::PublishedOverlap(existing_proxy_seq));
+                    }
+                    return Err(TimelineMapError::OriginSequenceResourceConflict {
+                        existing_proxy_seq: proxy_seq,
+                        candidate_origin_seq: parsed.origin_seq,
+                    });
                 }
-                if let Some(existing_proxy_seq) = self.proxy_seq_for_resource(identity) {
-                    return Ok(CandidateSegmentDisposition::PublishedOverlap(existing_proxy_seq));
-                }
-                return Err(TimelineMapError::OriginSequenceResourceConflict {
-                    existing_proxy_seq: proxy_seq,
-                    candidate_origin_seq: parsed.origin_seq,
-                });
             }
         }
         Ok(self

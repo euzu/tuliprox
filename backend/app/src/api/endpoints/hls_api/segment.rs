@@ -49,6 +49,10 @@ pub(super) use fallback::{
     hls_unpublished_lease_channel_unavailable_response,
 };
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
+pub(super) use group_start::{
+    build_hls_group_member_origin_url, resolve_checked_hls_group_entry, shared_cache_group_session_origin,
+};
+#[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub(super) use legacy::{
     build_hls_manifest_request_headers, download_legacy_hls_manifest, ensure_hls_manifest_extension,
     normalize_xtream_live_hls_url, release_prepared_hls_manifest_session, terminate_failed_hls_manifest_session,

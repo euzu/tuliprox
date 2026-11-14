@@ -5,6 +5,7 @@ use super::{
     HlsLifecycleEventKey, HlsLifecycleManager, HlsProxyManager, HlsSessionHandle, HlsTerminalTailProtectionRemoval,
     ProxySessionId, HLS_SESSION_IDLE_PROTECTION_RETRY_MS,
 };
+use crate::HlsOriginAccountBinding;
 use log::{debug, error};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -228,7 +229,51 @@ impl HlsProxyManager {
                     self.sync_recovery_binding_protection(active_provider, &session, now_ms).await;
                 }
             }
+            HlsLifecycleEventKey::MemberHealthStall { proxy_session_id } => {
+                self.handle_member_health_stall_event(&proxy_session_id, now_ms).await;
+            }
         }
+    }
+
+    /// Arms or disarms the per-session member-health stall timer. The timer fires while the session
+    /// has a policy, media progress and an active binding, so an idle-but-leased session still
+    /// reports a stopped origin even when no manifest refresh completes.
+    pub(crate) async fn schedule_member_health_stall(&self, session: &HlsSessionHandle, now_ms: u64) {
+        let (proxy_session_id, due_at_ms) = {
+            let session = session.read().await;
+            let due_at_ms = (!session.is_gc_marked_for_removal()
+                && session.origin_account_binding.as_ref().is_some_and(HlsOriginAccountBinding::is_active))
+            .then(|| session.member_health_stall_due_at_ms())
+            .flatten();
+            (session.proxy_session_id.clone(), due_at_ms)
+        };
+        let key = HlsLifecycleEventKey::MemberHealthStall { proxy_session_id };
+        match due_at_ms {
+            Some(due_at_ms) => self.lifecycle.schedule(key, due_at_ms.max(now_ms)).await,
+            None => self.lifecycle.cancel(&key).await,
+        }
+    }
+
+    async fn handle_member_health_stall_event(&self, proxy_session_id: &ProxySessionId, now_ms: u64) {
+        let Some(session) = self.sessions.get_by_proxy_session_id(proxy_session_id).await else {
+            return;
+        };
+        let eligible = {
+            let session = session.read().await;
+            !session.is_gc_marked_for_removal()
+                && session.origin_account_binding.as_ref().is_some_and(HlsOriginAccountBinding::is_active)
+        };
+        if !eligible {
+            return;
+        }
+        let notice = {
+            let mut session = session.write().await;
+            session.member_unhealthy_on_stall_timer(now_ms)
+        };
+        if let Some(notice) = notice {
+            notice.send(&session);
+        }
+        self.schedule_member_health_stall(&session, now_ms).await;
     }
 
     async fn handle_session_idle_lifecycle_event(&self, proxy_session_id: &ProxySessionId, now_ms: u64) {

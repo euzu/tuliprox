@@ -246,6 +246,35 @@ pub(super) fn classify_manifest_fetch_failure(err: &OriginManifestFetchError) ->
     }
 }
 
+/// `Some(hard)` when a failed refresh is evidence about the bound group member's origin. Account
+/// allocation, timeline conflicts and discarded work are not: the account runtime and the acceptance
+/// machinery handle them, and switching members would not help.
+pub(super) fn member_origin_failure(err: &OriginManifestFetchError) -> Option<bool> {
+    use HlsManifestFetchFailureKind as Kind;
+
+    let signal = classify_manifest_fetch_failure(err);
+    match signal.kind {
+        Kind::Timeout
+        | Kind::RetryExhausted
+        | Kind::HttpStatus { .. }
+        | Kind::Transport
+        | Kind::Redirect
+        | Kind::InvalidContentCodingHeader
+        | Kind::UnsupportedContentCoding
+        | Kind::EncodedPartialContent
+        | Kind::ContentPrefixRead
+        | Kind::ContentDecoding { .. }
+        | Kind::DecodedBodyLimit
+        | Kind::InvalidUtf8 => Some(signal.is_hard()),
+        Kind::AcceptanceConflict
+        | Kind::Superseded
+        | Kind::ProviderAcquire { .. }
+        | Kind::LocalRepresentationLimit
+        | Kind::MalformedTransientRepresentation
+        | Kind::CommitGenerationExhausted => None,
+    }
+}
+
 pub(crate) fn manifest_hard_fetch_error(err: &OriginManifestFetchError) -> bool {
     classify_manifest_fetch_failure(err).is_hard()
 }

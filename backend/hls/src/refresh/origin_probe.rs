@@ -528,6 +528,15 @@ fn capture_probe_inputs(
     mode: HlsManifestCommitAcceptanceMode,
     host: u64,
 ) -> Result<OriginProbePlan, HlsManifestCommitError> {
+    if mode == HlsManifestCommitAcceptanceMode::FreshBaseline && session.pending_origin_epoch_handoff {
+        // A failover-group member handoff (fresh baseline plus a pre-ordained
+        // origin epoch) admits the new member's first manifest as a new epoch:
+        // its sequence numbers may sit below the retained highwater and its
+        // media is unrelated, so there is no content anchor to verify and no
+        // same-host restart probe to run. A plain provisioning handoff keeps
+        // its probe.
+        return Ok(OriginProbePlan::None);
+    }
     if manifest.segments.iter().any(|segment| segment.map_ref.is_some() || segment.encryption.is_some()) {
         return bound_query_inputs(request, session, manifest, host, false);
     }

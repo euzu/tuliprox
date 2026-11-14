@@ -37,6 +37,8 @@ pub struct HlsOriginProfile {
     pub missing_head_segments: u32,
     pub abort_segments: Vec<u64>,
     pub unknown_length: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "segment_duration")]
+    pub segment_duration_secs: Option<u32>,
 }
 
 impl Default for HlsOriginProfile {
@@ -47,6 +49,7 @@ impl Default for HlsOriginProfile {
             missing_head_segments: 0,
             abort_segments: Vec::new(),
             unknown_length: false,
+            segment_duration_secs: None,
         }
     }
 }
@@ -62,6 +65,13 @@ impl HlsOriginProfile {
                 "HLS profile requires 3..64 segments, a shorter missing head, at most 64 aborts and delay <= 10000 ms"
                     .to_owned(),
             ));
+        }
+        if let Some(duration) = self.segment_duration_secs {
+            if !(1..=60).contains(&duration) {
+                return Err(TestkitError::Configuration(
+                    "HLS profile segment duration must be between 1 and 60 seconds".to_owned(),
+                ));
+            }
         }
         Ok(())
     }
@@ -362,6 +372,11 @@ mod tests {
     fn rejects_unbounded_or_empty_profiles() {
         assert!(HlsOriginProfile { window_segments: 2, ..HlsOriginProfile::default() }.validate().is_err());
         assert!(HlsOriginProfile { missing_head_segments: 6, ..HlsOriginProfile::default() }.validate().is_err());
+        assert!(HlsOriginProfile { segment_duration_secs: Some(0), ..HlsOriginProfile::default() }.validate().is_err());
+        assert!(HlsOriginProfile { segment_duration_secs: Some(61), ..HlsOriginProfile::default() }
+            .validate()
+            .is_err());
+        assert!(HlsOriginProfile { segment_duration_secs: Some(2), ..HlsOriginProfile::default() }.validate().is_ok());
         assert!(HlsOriginProfile::default().validate().is_ok());
     }
 }

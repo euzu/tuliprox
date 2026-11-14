@@ -30,11 +30,11 @@ use tokio::{
 };
 use tuliprox_testkit::{
     bootstrap::{fixture_password, IsolatedFixture},
-    config::{ExpectedPlayback, PostReadAction, RuntimeAssertions, Scenario},
+    config::{ExpectedPlayback, OriginFaultSpec, PostReadAction, RuntimeAssertions, Scenario},
     control::{PlaybackRegistry, StartDisposition},
     custom_video::WireMarkerScanner,
     discovery::VirtualIdMap,
-    faults::{FaultSchedule, OriginFault},
+    faults::{FaultSchedule, OriginFault, OriginFaultKind},
     frame::{Frame, FrameDecoder, FrameValidator},
     hls::{parse_manifest_url, read_playlist, read_segments},
     observation::TuliproxObserver,
@@ -1114,13 +1114,23 @@ async fn reset_origin_run(Path(run_id): Path<String>, State(state): State<Origin
     StatusCode::NO_CONTENT
 }
 
-async fn set_fault(Path((run_id, fault_id)): Path<(String, String)>, State(state): State<OriginState>) -> StatusCode {
+async fn set_fault(
+    Path((run_id, fault_id)): Path<(String, String)>,
+    State(state): State<OriginState>,
+    body: Option<Json<OriginFaultSpec>>,
+) -> StatusCode {
     if run_id != state.run_id.0 {
         return StatusCode::NOT_FOUND;
     }
-    let fault = match fault_id.as_str() {
-        "close-before-first-byte" => OriginFault::CloseBeforeFirstByte,
-        _ => return StatusCode::BAD_REQUEST,
+    let fault = if fault_id == "close-before-first-byte" {
+        OriginFault::CloseBeforeFirstByte
+    } else if let Some(Json(spec)) = body {
+        match OriginFault::from_parts(spec.kind, spec.account, spec.status, spec.bytes_per_second) {
+            Ok(fault) => fault,
+            Err(_) => return StatusCode::BAD_REQUEST,
+        }
+    } else {
+        return StatusCode::BAD_REQUEST;
     };
     match state.faults.lock().await.insert(fault_id, fault) {
         Ok(()) => StatusCode::NO_CONTENT,
@@ -1136,6 +1146,10 @@ async fn clear_fault(Path((run_id, fault_id)): Path<(String, String)>, State(sta
         Ok(()) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,
     }
+}
+
+fn fault_status_response(status: u16) -> Response {
+    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR).into_response()
 }
 
 async fn hls_guarded_response(
@@ -1176,6 +1190,79 @@ async fn hls_guarded_response(
     response
 }
 
+/// Like [`hls_guarded_response`], but paces the body out in small chunks so a segment takes
+/// `payload.len() / bytes_per_second` seconds to deliver. The `Content-Length` is kept intact unless
+/// `unknown_length` is set.
+async fn slow_hls_guarded_response(
+    payload: Bytes,
+    content_type: &'static str,
+    conn_id: u64,
+    req_id: u64,
+    tracker: &OriginTracker,
+    bytes_per_second: u64,
+    unknown_length: bool,
+) -> Response {
+    const SLOW_BODY_CHUNK_BYTES: usize = 512;
+
+    let length = payload.len() as u64;
+    let _evict_rx = tracker.on_body_started(conn_id, req_id, if unknown_length { None } else { Some(length) }).await;
+    let bytes_emitted = Arc::new(AtomicU64::new(0));
+    let guard = Arc::new(BodyDropGuard {
+        conn_id,
+        req_id,
+        tracker: tracker.clone(),
+        bytes_emitted: bytes_emitted.clone(),
+        start_time: Instant::now(),
+        closed: Arc::new(AtomicBool::new(false)),
+        evicted: Arc::new(AtomicBool::new(false)),
+    });
+    let stream = futures::stream::unfold((0usize, payload), move |(offset, payload)| {
+        let guard = Arc::clone(&guard);
+        let bytes_emitted = Arc::clone(&bytes_emitted);
+        async move {
+            if offset >= payload.len() {
+                return None;
+            }
+            let end = (offset + SLOW_BODY_CHUNK_BYTES).min(payload.len());
+            let chunk = payload.slice(offset..end);
+            let delay_micros = (chunk.len() as u64).saturating_mul(1_000_000) / bytes_per_second.max(1);
+            if delay_micros > 0 {
+                tokio::time::sleep(Duration::from_micros(delay_micros)).await;
+            }
+            let _keep_guard = &guard;
+            bytes_emitted.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            Some((Ok::<_, std::convert::Infallible>(chunk), (end, payload)))
+        }
+    });
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    if !unknown_length {
+        if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
+            response.headers_mut().insert(header::CONTENT_LENGTH, value);
+        }
+    }
+    response
+}
+
+/// Armed HLS status fault for the requesting account: manifest faults hit `index.m3u8`, segment
+/// faults hit `.ts` segments.
+async fn hls_fault_response(state: &OriginState, resource: &str, account: Option<&str>) -> Option<Response> {
+    let account = account?;
+    let faults = state.faults.lock().await;
+    let status = if resource == "index.m3u8" {
+        faults.manifest_status_for(account)
+    } else if has_ts_extension(resource) {
+        faults.segment_status_for(account)
+    } else {
+        None
+    }?;
+    Some(fault_status_response(status))
+}
+
+fn has_ts_extension(path: &str) -> bool {
+    std::path::Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("ts"))
+}
+
 async fn hls(
     Path(resource): Path<String>,
     Query(query): Query<HashMap<String, String>>,
@@ -1208,6 +1295,9 @@ async fn hls(
             return StatusCode::from_u16(status).unwrap_or(StatusCode::TOO_MANY_REQUESTS).into_response();
         }
     };
+    if let Some(response) = hls_fault_response(&state, resource, account).await {
+        return response;
+    }
     if resource == "index.m3u8" {
         let mut sequences = state.hls_sequences.lock().await;
         let sequence = sequences.entry(marker).or_insert(0);
@@ -1218,11 +1308,12 @@ async fn hls(
             format!("&token={encoded}")
         });
         let playlist = if let Some(profile) = &state.hls_profile {
+            let duration = profile.segment_duration_secs.unwrap_or(4);
             let first = sequence.saturating_sub(1) / 10;
             let mut playlist =
-                format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+                format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{duration}\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
             for seq in first..first + u64::from(profile.window_segments) {
-                let _ = writeln!(playlist, "#EXTINF:4.0,\n{seq}.ts?run={}{account_query}", state.run_id.0);
+                let _ = writeln!(playlist, "#EXTINF:{duration}.0,\n{seq}.ts?run={}{account_query}", state.run_id.0);
             }
             playlist
         } else {
@@ -1244,6 +1335,10 @@ async fn hls(
     let Some(sequence) = segment else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let segment_rate = match account {
+        Some(account) => state.faults.lock().await.segment_rate_for(account),
+        None => None,
+    };
     if let Some(profile) = &state.hls_profile {
         if sequence < u64::from(profile.missing_head_segments) {
             let status = if sequence.is_multiple_of(2) { StatusCode::NOT_FOUND } else { StatusCode::GONE };
@@ -1251,13 +1346,25 @@ async fn hls(
             *response.status_mut() = status;
             return response;
         }
-        return profiled_hls_response(&state, profile, marker, sequence, conn_id, req_id).await;
+        return profiled_hls_response(&state, profile, marker, sequence, conn_id, req_id, segment_rate).await;
     }
     let frame =
         Frame::synthetic(&state.run_id, &OriginStreamId::new(format!("hls-presentation-{marker}")), marker, sequence);
     let mut encoded = BytesMut::new();
     if frame.encode(&mut encoded).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if let Some(bytes_per_second) = segment_rate {
+        return slow_hls_guarded_response(
+            encoded.freeze(),
+            "video/mp2t",
+            conn_id,
+            req_id,
+            &state.tracker,
+            bytes_per_second,
+            false,
+        )
+        .await;
     }
     hls_guarded_response(encoded.freeze(), "video/mp2t", conn_id, req_id, &state.tracker).await
 }
@@ -1269,10 +1376,26 @@ async fn profiled_hls_response(
     sequence: u64,
     conn_id: u64,
     req_id: u64,
+    segment_rate: Option<u64>,
 ) -> Response {
     let Ok(parts) = tuliprox_testkit::hls_probe::segment_parts(&state.run_id, marker, sequence) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
+    if let Some(bytes_per_second) = segment_rate {
+        let mut payload = BytesMut::with_capacity(parts.0.len() + parts.1.len());
+        payload.extend_from_slice(&parts.0);
+        payload.extend_from_slice(&parts.1);
+        return slow_hls_guarded_response(
+            payload.freeze(),
+            "video/mp2t",
+            conn_id,
+            req_id,
+            &state.tracker,
+            bytes_per_second,
+            profile.unknown_length,
+        )
+        .await;
+    }
     let length = (parts.0.len() + parts.1.len()) as u64;
     let _evict_rx =
         state.tracker.on_body_started(conn_id, req_id, if profile.unknown_length { None } else { Some(length) }).await;
@@ -1774,6 +1897,33 @@ impl OriginObserver {
         let resp = self.client.post(&url).send().await?;
         if !resp.status().is_success() {
             return Err(TestkitError::Protocol(format!("origin reset error: {}", resp.status())));
+        }
+        Ok(())
+    }
+
+    pub async fn set_fault(
+        &self,
+        run_id: &str,
+        fault_id: &str,
+        kind: OriginFaultKind,
+        account: &str,
+        status: Option<u16>,
+        bytes_per_second: Option<u64>,
+    ) -> Result<(), TestkitError> {
+        let url = format!("{}/v1/runs/{run_id}/faults/{fault_id}", self.control_base_url);
+        let body = json!({ "kind": kind, "account": account, "status": status, "bytes_per_second": bytes_per_second });
+        let resp = self.client.put(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            return Err(TestkitError::Protocol(format!("origin set fault error: {}", resp.status())));
+        }
+        Ok(())
+    }
+
+    pub async fn clear_fault(&self, run_id: &str, fault_id: &str) -> Result<(), TestkitError> {
+        let url = format!("{}/v1/runs/{run_id}/faults/{fault_id}", self.control_base_url);
+        let resp = self.client.delete(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(TestkitError::Protocol(format!("origin clear fault error: {}", resp.status())));
         }
         Ok(())
     }
@@ -2392,6 +2542,9 @@ async fn run_controller_scenario(
     } else {
         HashMap::new()
     };
+    if scenario.tuliprox.failover_groups.is_some() {
+        wait_for_failover_groups(&scenario.tuliprox.base_url).await?;
+    }
     let origin_observer = origin_control_url.map(OriginObserver::new);
     let controller_state = start_controller_transport(agent_listen, &scenario.name).await?;
     wait_for_required_agents(&controller_state, &scenario.agents.required).await?;
@@ -2508,6 +2661,33 @@ async fn discover_virtual_ids(
     }
 }
 
+/// The playlist output is written before the failover group store is published. A playback that
+/// starts in between is classified as a plain channel, so group scenarios wait for the store of
+/// the fixture target `testkit` (see `bootstrap.rs`).
+async fn wait_for_failover_groups(base_url: &str) -> Result<(), TestkitError> {
+    let url = format!("{}/api/v1/failover/groups?target=testkit", base_url.trim_end_matches('/'));
+    let deadline = tokio::time::Instant::now() + PLAYLIST_DISCOVERY_TIMEOUT;
+    let client = reqwest::Client::new();
+    loop {
+        let last_reason = match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => match response.json::<serde_json::Value>().await {
+                Ok(body) if body["groups"].as_array().is_some_and(|groups| !groups.is_empty()) => return Ok(()),
+                Ok(_) => "failover group list is empty".to_owned(),
+                Err(error) => error.to_string(),
+            },
+            Ok(response) => format!("failover group list returned {}", response.status()),
+            Err(error) => error.to_string(),
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Err(TestkitError::Protocol(format!(
+                "Tuliprox did not publish failover groups within {} seconds: {last_reason}",
+                PLAYLIST_DISCOVERY_TIMEOUT.as_secs()
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn start_agent_lease_renewals(
     controller_state: ControllerState,
     agent_ids: &[String],
@@ -2577,6 +2757,89 @@ fn origin_path_marker(path: &str) -> Option<u32> {
     rest.split(['/', '.', '?']).next()?.parse().ok()
 }
 
+/// True for an HLS media segment request (`/hls/{marker}/{sequence}.ts`), not a manifest.
+fn is_hls_segment_path(path: &str) -> bool { path.starts_with("/hls/") && has_ts_extension(path) }
+
+/// Latest origin request account whose path matches the scoped marker.
+///
+/// `segment_only` restricts the match to HLS media segment requests so a scenario can prove
+/// segment-level failover without a later manifest refresh shadowing the media evidence.
+#[expect(
+    clippy::option_option,
+    reason = "None: no matching request; Some(None): the latest matching request carried no account."
+)]
+fn latest_account(events: &[OriginEvent], marker: Option<u32>, segment_only: bool) -> Option<Option<&str>> {
+    events.iter().rev().find_map(|event| match &event.kind {
+        OriginEventKind::RequestStarted { path, account, .. } => {
+            let path_matches = if segment_only {
+                is_hls_segment_path(path)
+            } else {
+                path.starts_with("/live/") || path.starts_with("/vod/") || path.starts_with("/hls/")
+            };
+            (path_matches && marker.is_none_or(|marker| origin_path_marker(path) == Some(marker)))
+                .then_some(account.as_deref())
+        }
+        _ => None,
+    })
+}
+
+/// Whether a failed HLS segment request of `account` (answered without a body and without a limit
+/// rejection) is the last segment request of that account before another account serves one, i.e. a
+/// segment failure triggered the handoff. Members may rotate earlier for other reasons, so this is
+/// an ordered failure-to-handoff pair, not a comparison of first events. The handoff request must
+/// itself start a body, otherwise playback did not actually continue on the other member.
+fn segment_failure_precedes_handoff(events: &[OriginEvent], marker: Option<u32>, account: &str) -> bool {
+    let body_started: HashSet<(u64, u64)> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            OriginEventKind::BodyStarted { conn_id, request_id, .. } => Some((*conn_id, *request_id)),
+            _ => None,
+        })
+        .collect();
+    let answered: HashSet<(u64, u64)> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            OriginEventKind::BodyStarted { conn_id, request_id, .. }
+            | OriginEventKind::LimitRejected { conn_id, request_id, .. } => Some((*conn_id, *request_id)),
+            _ => None,
+        })
+        .collect();
+    let mut failed_last = false;
+    for event in events {
+        let OriginEventKind::RequestStarted { conn_id, request_id, path, account: request_account, .. } = &event.kind
+        else {
+            continue;
+        };
+        if !is_hls_segment_path(path) || marker.is_some_and(|marker| origin_path_marker(path) != Some(marker)) {
+            continue;
+        }
+        if request_account.as_deref() == Some(account) {
+            failed_last = !answered.contains(&(*conn_id, *request_id));
+        } else if failed_last && request_account.is_some() && body_started.contains(&(*conn_id, *request_id)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns the number of active streams and the number of distinct shared stream ids among them.
+fn count_shared_streams(streams: &serde_json::Value) -> (usize, usize) {
+    let Some(list) = streams.as_array() else {
+        return (0, 0);
+    };
+    let ids: HashSet<u64> = list
+        .iter()
+        .filter_map(|stream| {
+            let channel = stream.get("channel")?;
+            if channel.get("shared").and_then(serde_json::Value::as_bool) != Some(true) {
+                return None;
+            }
+            channel.get("shared_stream_id").and_then(serde_json::Value::as_u64)
+        })
+        .collect();
+    (list.len(), ids.len())
+}
+
 /// `marker` scopes `latest_request_account` to the started channel, so reloads of other
 /// playbacks that are still held do not count as the latest request.
 #[allow(clippy::too_many_arguments)]
@@ -2617,7 +2880,14 @@ async fn check_origin_assertions<'a>(
                 let check_evictions = assert_origin.no_evictions.unwrap_or(false);
                 let check_rejections = assert_origin.no_limit_rejections.unwrap_or(false);
                 let check_account = assert_origin.latest_request_account.as_deref();
-                if check_evictions || check_rejections || check_account.is_some() {
+                let check_segment_account = assert_origin.latest_segment_account.as_deref();
+                let check_segment_failure = assert_origin.segment_failure_before_handoff_from.as_deref();
+                if check_evictions
+                    || check_rejections
+                    || check_account.is_some()
+                    || check_segment_account.is_some()
+                    || check_segment_failure.is_some()
+                {
                     if let Ok(evts) = obs.events(origin_run_id).await {
                         if check_evictions
                             && evts.iter().any(|e| matches!(e.kind, OriginEventKind::EvictionTriggered { .. }))
@@ -2632,20 +2902,21 @@ async fn check_origin_assertions<'a>(
                             events.push((step_id, "origin_rejection_observed"));
                         }
                         if let Some(expected_account) = check_account {
-                            let latest_account = evts.iter().rev().find_map(|event| match &event.kind {
-                                OriginEventKind::RequestStarted { path, account, .. }
-                                    if (path.starts_with("/live/")
-                                        || path.starts_with("/vod/")
-                                        || path.starts_with("/hls/"))
-                                        && marker.is_none_or(|marker| origin_path_marker(path) == Some(marker)) =>
-                                {
-                                    Some(account.as_deref())
-                                }
-                                _ => None,
-                            });
-                            if latest_account != Some(Some(expected_account)) {
+                            if latest_account(&evts, marker, false) != Some(Some(expected_account)) {
                                 *any_failed = true;
                                 events.push((step_id, "origin_request_account_mismatch"));
+                            }
+                        }
+                        if let Some(expected_account) = check_segment_account {
+                            if latest_account(&evts, marker, true) != Some(Some(expected_account)) {
+                                *any_failed = true;
+                                events.push((step_id, "origin_segment_account_mismatch"));
+                            }
+                        }
+                        if let Some(failed_account) = check_segment_failure {
+                            if !segment_failure_precedes_handoff(&evts, marker, failed_account) {
+                                *any_failed = true;
+                                events.push((step_id, "origin_segment_failure_before_handoff_missing"));
                             }
                         }
                     } else {
@@ -2770,7 +3041,27 @@ async fn check_runtime_assertions<'a>(
             let users_ok = assertions.active_users.is_none_or(|expected| users == expected as u64);
             let connections_ok =
                 assertions.active_user_connections.is_none_or(|expected| connections == expected as u64);
-            if (users_ok && connections_ok) || tokio::time::Instant::now() >= deadline {
+            let (streams_ok, shared_ok) =
+                if assertions.active_streams.is_none() && assertions.distinct_shared_streams.is_none() {
+                    (true, true)
+                } else if let Ok(streams) = observer.streams().await {
+                    let (active, shared) = count_shared_streams(&streams);
+                    (
+                        assertions.active_streams.is_none_or(|expected| active == expected),
+                        assertions.distinct_shared_streams.is_none_or(|expected| shared == expected),
+                    )
+                } else {
+                    (assertions.active_streams.is_none(), assertions.distinct_shared_streams.is_none())
+                };
+            if (users_ok && connections_ok && streams_ok && shared_ok) || tokio::time::Instant::now() >= deadline {
+                if !streams_ok {
+                    *any_failed = true;
+                    events.push((step_id, "runtime_active_streams_mismatch"));
+                }
+                if !shared_ok {
+                    *any_failed = true;
+                    events.push((step_id, "runtime_distinct_shared_streams_mismatch"));
+                }
                 if !users_ok {
                     *any_failed = true;
                     events.push((step_id, "runtime_active_users_mismatch"));
@@ -2838,6 +3129,26 @@ async fn execute_scenario_steps<'a>(
             if let Some(pause_millis) = step.pause_millis {
                 tokio::time::sleep(Duration::from_millis(pause_millis)).await;
                 events.push((step.command_id.as_str(), "paused"));
+                continue;
+            }
+            if let Some(fault) = &step.origin_fault {
+                let Some(obs) = origin_observer else {
+                    observations_incomplete = true;
+                    events.push((step.command_id.as_str(), "origin_observer_missing"));
+                    continue;
+                };
+                let origin_run_id = scenario
+                    .origin
+                    .as_ref()
+                    .map_or_else(|| RunId::new(&scenario.name), |origin| RunId::new(&origin.run_id));
+                if let Some(set) = &fault.set {
+                    obs.set_fault(&origin_run_id.0, &set.id, set.kind, &set.account, set.status, set.bytes_per_second)
+                        .await?;
+                    events.push((step.command_id.as_str(), "origin_fault_set"));
+                } else if let Some(clear_id) = &fault.clear {
+                    obs.clear_fault(&origin_run_id.0, clear_id).await?;
+                    events.push((step.command_id.as_str(), "origin_fault_cleared"));
+                }
                 continue;
             }
             if let Some(stop) = &step.stop {
@@ -3848,6 +4159,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hls_manifest_status_fault_targets_one_account() {
+        let state = test_origin_state("hls-fault-run");
+        state
+            .faults
+            .lock()
+            .await
+            .insert(
+                "a-manifest".to_owned(),
+                OriginFault::HlsManifestStatus { account: "input-a".to_owned(), status: 404 },
+            )
+            .unwrap();
+
+        let faulted = hls(
+            Path("17/index.m3u8".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-fault-run".to_owned()),
+                ("token".to_owned(), "input-a".to_owned()),
+            ])),
+            State(state.clone()),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(faulted.status(), StatusCode::NOT_FOUND);
+
+        let healthy = hls(
+            Path("17/index.m3u8".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-fault-run".to_owned()),
+                ("token".to_owned(), "input-b".to_owned()),
+            ])),
+            State(state),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(healthy.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn hls_segment_status_fault_leaves_manifest_healthy() {
+        let state = test_origin_state("hls-seg-fault-run");
+        state
+            .faults
+            .lock()
+            .await
+            .insert(
+                "a-segment".to_owned(),
+                OriginFault::HlsSegmentStatus { account: "input-a".to_owned(), status: 503 },
+            )
+            .unwrap();
+
+        let manifest = hls(
+            Path("17/index.m3u8".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-seg-fault-run".to_owned()),
+                ("token".to_owned(), "input-a".to_owned()),
+            ])),
+            State(state.clone()),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(manifest.status(), StatusCode::OK);
+
+        let segment = hls(
+            Path("17/0.ts".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-seg-fault-run".to_owned()),
+                ("token".to_owned(), "input-a".to_owned()),
+            ])),
+            State(state),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(segment.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn slow_segment_body_paces_delivery() -> Result<(), TestkitError> {
+        let tracker = OriginTracker::new("slow-body-run", OriginPolicy::default());
+        let payload = Bytes::from(vec![0u8; 4096]);
+        let started = Instant::now();
+        let response = slow_hls_guarded_response(payload, "video/mp2t", 1, 1, &tracker, 4096, false).await;
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .map_err(|error| TestkitError::Protocol(error.to_string()))?;
+        let elapsed = started.elapsed();
+        assert_eq!(body.len(), 4096);
+        assert!(elapsed >= Duration::from_millis(900), "delivery was too fast: {elapsed:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slow_segment_body_paces_profiled_hls_delivery() -> Result<(), TestkitError> {
+        let mut state = test_origin_state("hls-profile-slow-run");
+        state.hls_profile = Some(Arc::new(tuliprox_testkit::hls_probe::HlsOriginProfile {
+            prefix_delay_millis: 0,
+            ..tuliprox_testkit::hls_probe::HlsOriginProfile::default()
+        }));
+        state
+            .faults
+            .lock()
+            .await
+            .insert(
+                "a-slow".to_owned(),
+                OriginFault::SlowSegmentBody { account: "input-a".to_owned(), bytes_per_second: 512 },
+            )
+            .unwrap();
+
+        let started = Instant::now();
+        let fast_response = hls(
+            Path("17/0.ts".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-profile-slow-run".to_owned()),
+                ("token".to_owned(), "input-b".to_owned()),
+            ])),
+            State(state.clone()),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(fast_response.status(), StatusCode::OK);
+        let fast_body = axum::body::to_bytes(fast_response.into_response().into_body(), 8192)
+            .await
+            .map_err(|error| TestkitError::Protocol(error.to_string()))?;
+        let fast_elapsed = started.elapsed();
+        assert!(fast_elapsed < Duration::from_millis(250));
+
+        let started = Instant::now();
+        let slow_response = hls(
+            Path("17/0.ts".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-profile-slow-run".to_owned()),
+                ("token".to_owned(), "input-a".to_owned()),
+            ])),
+            State(state),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(slow_response.status(), StatusCode::OK);
+        let slow_body = axum::body::to_bytes(slow_response.into_response().into_body(), 8192)
+            .await
+            .map_err(|error| TestkitError::Protocol(error.to_string()))?;
+        let slow_elapsed = started.elapsed();
+        assert_eq!(fast_body, slow_body);
+        assert!(slow_elapsed >= Duration::from_millis(300), "profile delivery was too fast: {slow_elapsed:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slow_segment_body_keeps_unknown_length_framing() {
+        let mut state = test_origin_state("hls-profile-unknown-len-run");
+        state.hls_profile = Some(Arc::new(tuliprox_testkit::hls_probe::HlsOriginProfile {
+            prefix_delay_millis: 0,
+            unknown_length: true,
+            ..tuliprox_testkit::hls_probe::HlsOriginProfile::default()
+        }));
+        state
+            .faults
+            .lock()
+            .await
+            .insert(
+                "a-slow".to_owned(),
+                OriginFault::SlowSegmentBody { account: "input-a".to_owned(), bytes_per_second: 1_000_000 },
+            )
+            .unwrap();
+        let response = hls(
+            Path("17/0.ts".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-profile-unknown-len-run".to_owned()),
+                ("token".to_owned(), "input-a".to_owned()),
+            ])),
+            State(state),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
+    }
+
+    #[tokio::test]
+    async fn set_fault_keeps_legacy_close_before_first_byte() {
+        let state = test_origin_state("fault-param-run");
+        assert_eq!(
+            set_fault(
+                Path(("fault-param-run".to_owned(), "close-before-first-byte".to_owned())),
+                State(state.clone()),
+                None,
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(matches!(
+            state.faults.lock().await.take("close-before-first-byte"),
+            Some(OriginFault::CloseBeforeFirstByte)
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_fault_accepts_parameterised_body_and_clear_removes() {
+        let state = test_origin_state("fault-param-run");
+        let status = set_fault(
+            Path(("fault-param-run".to_owned(), "a-manifest".to_owned())),
+            State(state.clone()),
+            Some(Json(OriginFaultSpec {
+                kind: OriginFaultKind::HlsManifestStatus,
+                account: "input-a".to_owned(),
+                status: Some(404),
+                bytes_per_second: None,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(state.faults.lock().await.manifest_status_for("input-a"), Some(404));
+
+        assert_eq!(
+            clear_fault(Path(("fault-param-run".to_owned(), "a-manifest".to_owned())), State(state.clone())).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(state.faults.lock().await.manifest_status_for("input-a"), None);
+    }
+
+    #[tokio::test]
+    async fn set_fault_requires_body_for_parameterised_ids() {
+        let state = test_origin_state("fault-param-run");
+        assert_eq!(
+            set_fault(Path(("fault-param-run".to_owned(), "a-manifest".to_owned())), State(state), None).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
     async fn live_rejects_a_missing_or_foreign_run_correlation() {
         let state = test_origin_state("live-run");
         assert_eq!(
@@ -3883,7 +4430,8 @@ mod tests {
     async fn faults_cannot_be_mutated_by_a_foreign_run() {
         let state = test_origin_state("fault-run");
         assert_eq!(
-            set_fault(Path(("other".to_owned(), "close-before-first-byte".to_owned())), State(state.clone()),).await,
+            set_fault(Path(("other".to_owned(), "close-before-first-byte".to_owned())), State(state.clone()), None,)
+                .await,
             StatusCode::NOT_FOUND
         );
         assert!(state.faults.lock().await.take("close-before-first-byte").is_none());
@@ -4062,5 +4610,212 @@ mod tests {
         assert!(any_failed);
         assert!(!observations_incomplete);
         assert!(events.iter().any(|(s, e)| *s == "step-1" && *e == "origin_eviction_observed"));
+    }
+
+    fn segment_request(seq: u64, request_id: u64, account: &str, answered: bool) -> Vec<OriginEvent> {
+        let mut events = vec![OriginEvent::new(
+            seq * 10,
+            "test-run",
+            OriginEventKind::RequestStarted {
+                conn_id: 1,
+                request_id,
+                method: "GET".to_owned(),
+                path: "/hls/17/3.ts".to_owned(),
+                range: None,
+                user_agent: None,
+                account: Some(account.to_owned()),
+            },
+        )];
+        if answered {
+            events.push(OriginEvent::new(
+                seq * 10 + 1,
+                "test-run",
+                OriginEventKind::BodyStarted { conn_id: 1, request_id, content_length: Some(1) },
+            ));
+        }
+        events
+    }
+
+    #[test]
+    fn segment_failure_must_precede_handoff() {
+        let mut ok = segment_request(1, 1, "input-a", true);
+        ok.extend(segment_request(2, 2, "input-a", false));
+        ok.extend(segment_request(3, 3, "input-b", true));
+        assert!(segment_failure_precedes_handoff(&ok, Some(17), "input-a"));
+
+        // The failing account retried once; the retry also failed and the handoff followed.
+        let mut retried = segment_request(1, 1, "input-a", false);
+        retried.extend(segment_request(2, 2, "input-a", false));
+        retried.extend(segment_request(3, 3, "input-b", true));
+        assert!(segment_failure_precedes_handoff(&retried, Some(17), "input-a"));
+
+        // A handoff after answered segments only is a stall/probe switch, not a failure.
+        let mut stall_switch = segment_request(1, 1, "input-a", true);
+        stall_switch.extend(segment_request(2, 2, "input-b", true));
+        assert!(!segment_failure_precedes_handoff(&stall_switch, Some(17), "input-a"));
+
+        // A failure that recovers before the other account serves a segment proves nothing.
+        let mut recovered = segment_request(1, 1, "input-a", false);
+        recovered.extend(segment_request(2, 2, "input-a", true));
+        recovered.extend(segment_request(3, 3, "input-b", true));
+        assert!(!segment_failure_precedes_handoff(&recovered, Some(17), "input-a"));
+
+        // A handoff request that starts no body did not continue playback on the other member.
+        let mut unserved_handoff = segment_request(1, 1, "input-a", false);
+        unserved_handoff.extend(segment_request(2, 2, "input-b", false));
+        assert!(!segment_failure_precedes_handoff(&unserved_handoff, Some(17), "input-a"));
+
+        // A request without an account is not provably another member.
+        let mut anonymous_handoff = segment_request(1, 1, "input-a", false);
+        anonymous_handoff.push(OriginEvent::new(
+            20,
+            "test-run",
+            OriginEventKind::RequestStarted {
+                conn_id: 1,
+                request_id: 7,
+                method: "GET".to_owned(),
+                path: "/hls/17/4.ts".to_owned(),
+                range: None,
+                user_agent: None,
+                account: None,
+            },
+        ));
+        anonymous_handoff.push(OriginEvent::new(
+            21,
+            "test-run",
+            OriginEventKind::BodyStarted { conn_id: 1, request_id: 7, content_length: Some(1) },
+        ));
+        assert!(!segment_failure_precedes_handoff(&anonymous_handoff, Some(17), "input-a"));
+
+        // A failure with no later segment request of another account is not a handoff.
+        let mut late_failure = segment_request(1, 1, "input-b", true);
+        late_failure.extend(segment_request(2, 2, "input-a", false));
+        assert!(!segment_failure_precedes_handoff(&late_failure, Some(17), "input-a"));
+
+        // Other markers do not count as the scoped channel.
+        let mut other_marker = segment_request(1, 1, "input-a", false);
+        other_marker.extend(segment_request(2, 2, "input-b", true));
+        assert!(!segment_failure_precedes_handoff(&other_marker, Some(19), "input-a"));
+    }
+
+    #[test]
+    fn count_shared_streams_counts_distinct_shared_ids() {
+        let streams = serde_json::json!([
+            { "channel": { "shared": true, "shared_stream_id": 7 } },
+            { "channel": { "shared": true, "shared_stream_id": 7 } },
+            { "channel": { "shared": false } },
+        ]);
+        assert_eq!(count_shared_streams(&streams), (3, 1));
+        let split = serde_json::json!([
+            { "channel": { "shared": true, "shared_stream_id": 7 } },
+            { "channel": { "shared": true, "shared_stream_id": 8 } },
+        ]);
+        assert_eq!(count_shared_streams(&split), (2, 2));
+        assert_eq!(count_shared_streams(&serde_json::json!({})), (0, 0));
+    }
+
+    #[test]
+    fn latest_account_scopes_requests_and_segments() {
+        let events = vec![
+            OriginEvent::new(
+                1,
+                "test-run",
+                OriginEventKind::RequestStarted {
+                    conn_id: 1,
+                    request_id: 1,
+                    method: "GET".to_owned(),
+                    path: "/hls/17/3.ts".to_owned(),
+                    range: None,
+                    user_agent: None,
+                    account: Some("input-b".to_owned()),
+                },
+            ),
+            OriginEvent::new(
+                2,
+                "test-run",
+                OriginEventKind::RequestStarted {
+                    conn_id: 1,
+                    request_id: 2,
+                    method: "GET".to_owned(),
+                    path: "/hls/17/index.m3u8".to_owned(),
+                    range: None,
+                    user_agent: None,
+                    account: Some("input-a".to_owned()),
+                },
+            ),
+        ];
+        assert_eq!(latest_account(&events, Some(17), false), Some(Some("input-a")));
+        assert_eq!(latest_account(&events, Some(17), true), Some(Some("input-b")));
+        assert_eq!(latest_account(&events, Some(19), true), None);
+        assert!(is_hls_segment_path("/hls/17/3.ts"));
+        assert!(!is_hls_segment_path("/hls/17/index.m3u8"));
+        assert!(!is_hls_segment_path("/live/17.ts"));
+    }
+
+    #[tokio::test]
+    async fn check_origin_assertions_latest_segment_account_passes() {
+        use axum::routing::get;
+        let events_payload = vec![
+            OriginEvent::new(
+                1,
+                "test-run",
+                OriginEventKind::RequestStarted {
+                    conn_id: 1,
+                    request_id: 1,
+                    method: "GET".to_owned(),
+                    path: "/hls/17/3.ts".to_owned(),
+                    range: None,
+                    user_agent: None,
+                    account: Some("input-b".to_owned()),
+                },
+            ),
+            OriginEvent::new(
+                2,
+                "test-run",
+                OriginEventKind::RequestStarted {
+                    conn_id: 1,
+                    request_id: 2,
+                    method: "GET".to_owned(),
+                    path: "/hls/17/index.m3u8".to_owned(),
+                    range: None,
+                    user_agent: None,
+                    account: Some("input-a".to_owned()),
+                },
+            ),
+        ];
+        let app = Router::new()
+            .route("/v1/runs/test-run/stats", get(|| async { Json(OriginStats::default()) }))
+            .route("/v1/runs/test-run/events", get(move || async move { Json(events_payload.clone()) }));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let obs = OriginObserver::new(&format!("http://127.0.0.1:{port}"));
+        let mut events = Vec::new();
+        let mut any_failed = false;
+        let mut observations_incomplete = false;
+        let assert_origin = tuliprox_testkit::config::AssertOrigin {
+            latest_request_account: Some("input-a".to_owned()),
+            latest_segment_account: Some("input-b".to_owned()),
+            ..Default::default()
+        };
+
+        check_origin_assertions(
+            "step-1",
+            Some(17),
+            &assert_origin,
+            &obs,
+            "test-run",
+            &mut events,
+            &mut any_failed,
+            &mut observations_incomplete,
+        )
+        .await;
+
+        assert!(!any_failed);
+        assert!(!observations_incomplete);
     }
 }

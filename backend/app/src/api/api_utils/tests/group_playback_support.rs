@@ -10,7 +10,8 @@ use crate::{
     },
     model::{
         Config, ConfigInput, ConfigProvider, ConfigTarget, Epg, HdHomeRunDeviceConfig, HdHomeRunTargetOutput,
-        M3uTargetOutput, ProxyUserCredentials, SourcesConfig, StreamConfig, TargetOutput, XtreamTargetOutput,
+        M3uTargetOutput, ProxyUserCredentials, SourcesConfig, StreamConfig, StreamHistoryConfig, TargetOutput,
+        XtreamTargetOutput,
     },
     repository::{
         get_target_storage_path, persist_playlist_views_with_groups, FailoverGroupBatch, FailoverGroupOrigin,
@@ -165,7 +166,11 @@ async fn spawn_tracked_origin(mode: FakeOriginMode) -> TrackedOrigin {
     let requests_clone = Arc::clone(&requests);
 
     let task = tokio::spawn(async move {
-        for _ in 0..20 {
+        let mut advancing_seq = match &mode {
+            FakeOriginMode::HlsAdvancingFrom(start) | FakeOriginMode::HlsAdvancingWithFault { start, .. } => *start,
+            _ => 0,
+        };
+        for _ in 0..200 {
             let Ok((mut socket, _)) = listener.accept().await else { break };
             let mut request = Vec::new();
             while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -276,6 +281,46 @@ async fn spawn_tracked_origin(mode: FakeOriginMode) -> TrackedOrigin {
                         let _ = socket.shutdown().await;
                     }
                 }
+                FakeOriginMode::HlsAdvancing
+                | FakeOriginMode::HlsAdvancingFrom(_)
+                | FakeOriginMode::HlsAdvancingWithFault { .. } => {
+                    let fault = match &mode {
+                        FakeOriginMode::HlsAdvancingWithFault { manifest_status, segment_status, .. } => {
+                            let status = if request_str.contains(".ts") { segment_status } else { manifest_status };
+                            status.load(std::sync::atomic::Ordering::Acquire)
+                        }
+                        _ => 0,
+                    };
+                    if fault != 0 {
+                        let head = format!("HTTP/1.1 {fault}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    } else if request_str.contains(".ts") {
+                        let bytes = ts_fixture();
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            bytes.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(&bytes).await;
+                        let _ = socket.shutdown().await;
+                    } else {
+                        advancing_seq += 1;
+                        let body = format!(
+                            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{}\n#EXTINF:4.0,\n{}.ts\n#EXTINF:4.0,\n{}.ts\n",
+                            advancing_seq,
+                            advancing_seq,
+                            advancing_seq + 1
+                        );
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    }
+                }
                 FakeOriginMode::StalkerRetry { fresh_link_path, create_link_counter } => {
                     if request_str.contains("action=handshake") {
                         let body = r#"{"js":{"token":"mock-token"}}"#;
@@ -373,6 +418,7 @@ impl GroupPlaybackEnv {
             favourite: false,
             plain_channel: true,
             member_archives: Vec::new(),
+            member_catchup_modes: Vec::new(),
             epg: None,
             epg_channel_id: None,
             hdhomerun: false,
@@ -385,6 +431,7 @@ impl GroupPlaybackEnv {
             m3u_inputs: std::collections::HashSet::new(),
             aliases: Vec::new(),
             user_agent_stream_index_inputs: std::collections::HashSet::new(),
+            stream_history: false,
         }
     }
 
@@ -686,6 +733,7 @@ pub(crate) struct GroupPlaybackEnvBuilder {
     favourite: bool,
     plain_channel: bool,
     member_archives: Vec<Option<i32>>,
+    member_catchup_modes: Vec<Option<String>>,
     epg: Option<Epg>,
     epg_channel_id: Option<String>,
     hdhomerun: bool,
@@ -698,6 +746,7 @@ pub(crate) struct GroupPlaybackEnvBuilder {
     m3u_inputs: std::collections::HashSet<String>,
     aliases: Vec<(String, String)>,
     user_agent_stream_index_inputs: std::collections::HashSet<String>,
+    stream_history: bool,
 }
 
 #[allow(dead_code)]
@@ -735,6 +784,12 @@ impl GroupPlaybackEnvBuilder {
 
     pub fn user_agent_stream_index(mut self, input: &str) -> Self {
         self.user_agent_stream_index_inputs.insert(input.to_string());
+        self
+    }
+
+    /// Enables stream history writing to a per-test temporary directory.
+    pub fn with_stream_history(mut self) -> Self {
+        self.stream_history = true;
         self
     }
 
@@ -821,6 +876,11 @@ impl GroupPlaybackEnvBuilder {
 
     pub fn with_member_archives(mut self, archives: &[Option<i32>]) -> Self {
         self.member_archives = archives.to_vec();
+        self
+    }
+
+    pub fn with_member_catchup_modes(mut self, modes: &[Option<&str>]) -> Self {
+        self.member_catchup_modes = modes.iter().map(|m| m.map(ToString::to_string)).collect();
         self
     }
 
@@ -966,7 +1026,11 @@ impl GroupPlaybackEnvBuilder {
                 cache: None,
                 rate_limit: None,
                 geoip: None,
-                stream_history: None,
+                stream_history: self.stream_history.then(|| StreamHistoryConfig {
+                    stream_history_enabled: true,
+                    stream_history_directory: format!("{storage_dir}/stream_history"),
+                    ..StreamHistoryConfig::default()
+                }),
                 qos_aggregation: None,
                 hls_cache: self
                     .hls_cache
@@ -1137,7 +1201,22 @@ impl GroupPlaybackEnvBuilder {
                 format!("http://{}/live/101", origin.addr)
             };
             let member_archive = self.member_archives.get(idx).copied().flatten();
+            let custom_catchup_mode = self.member_catchup_modes.get(idx).and_then(Clone::clone);
             let member_catchup = member_archive.and_then(|dur| {
+                if let Some(mode) = custom_catchup_mode {
+                    return Some(CatchupProperties {
+                        mode: Some(mode.intern()),
+                        days: Some(dur.to_string().intern()),
+                        source: Some(
+                            format!(
+                                "http://{}/catchup?utc={{utc}}&duration={{duration}}&username=viewer&password=secret",
+                                origin.addr
+                            )
+                            .intern(),
+                        ),
+                        ..Default::default()
+                    });
+                }
                 is_m3u.then(|| CatchupProperties {
                     mode: Some("default".intern()),
                     days: Some(dur.to_string().intern()),

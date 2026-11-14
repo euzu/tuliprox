@@ -3,6 +3,41 @@ use crate::{
     HlsSessionHandle,
 };
 use std::{fmt, future::Future, pin::Pin};
+use tuliprox_session::failover_group::FailureClass;
+
+/// Why the bound group member was reported unhealthy. The HLS workers call
+/// [`HlsOriginAccountRuntime::notify_member_unhealthy`] with one of these once the corresponding
+/// trigger (see `member_health`) fires.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HlsMemberUnhealthyReason {
+    ManifestFailure,
+    SegmentFailure,
+    Stall,
+    SlowDelivery,
+}
+
+impl HlsMemberUnhealthyReason {
+    /// Member-circuit/QoS failure class used for the failing member. All member-health
+    /// triggers are stream-level signals, not account or capacity errors.
+    pub const fn failure_class(self) -> FailureClass {
+        match self {
+            Self::ManifestFailure | Self::SegmentFailure | Self::Stall | Self::SlowDelivery => FailureClass::Stream,
+        }
+    }
+}
+
+/// Member-health thresholds of a failover-group runtime, derived from `FailoverGroupRuntimeConfig`
+/// by the app adapter. The HLS crate classifies signals; these values only decide when a signal
+/// becomes a [`HlsOriginAccountRuntime::notify_member_unhealthy`] call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HlsMemberHealthPolicy {
+    /// Time without a successful refresh or new media before the member is reported; 0 disables it.
+    pub no_data_timeout_ms: u64,
+    /// Segment download rate, in percent of real time, below which delivery counts as slow; 0 disables it.
+    pub slow_source_pct: u8,
+    /// Sliding window over which the download rate is measured.
+    pub slow_source_window_ms: u64,
+}
 
 /// Origin operation being prepared; media work must first qualify an account handoff.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +100,29 @@ pub trait HlsOriginAccountRuntime: Send + Sync + fmt::Debug {
         work: HlsOriginAccountWork,
         class: HlsOriginWorkClass,
     ) -> Pin<Box<dyn Future<Output = Result<HlsPreparedOriginAccount, HlsBoundAccountAcquireErrorKind>> + Send + 'a>>;
+
+    /// Raw origin request URL captured when this runtime was installed, when the app stores one.
+    fn raw_request_url(&self) -> Option<String> { None }
+
+    /// Origin entry URL captured when this runtime was installed, when the app stores one.
+    fn entry_url(&self) -> Option<String> { None }
+
+    /// Reports that the currently bound group member is unhealthy and should be handed off.
+    ///
+    /// The default implementation is a no-op so single-item sessions and runtimes without a
+    /// group member binding are unaffected. Implementations must stay cheap and non-blocking:
+    /// spawn the handoff, keep at most one handoff per session in flight, and coalesce
+    /// concurrent notifications.
+    fn notify_member_unhealthy(&self, _session: &HlsSessionHandle, _reason: HlsMemberUnhealthyReason) {}
+
+    /// Thresholds for the member-health triggers. `None` (the default) turns every trigger off, which
+    /// is the case for single-item sessions and for groups with runtime failover disabled.
+    fn member_health_policy(&self, _session: &crate::HlsSession) -> Option<HlsMemberHealthPolicy> { None }
+
+    /// Reports that the bound member delivered media (a segment became ready), so the runtime can end
+    /// an incident after a healthy period. Called under the session lock: it must be cheap and
+    /// non-blocking.
+    fn notify_member_progress(&self, _session: &crate::HlsSession) {}
 }
 
 pub(crate) async fn prepare_media_origin(

@@ -101,6 +101,7 @@ pub(super) async fn detected_catchup_hls_response(
             user_token: Some(session_token),
             origin_provider: Some(&provider),
             playlist_kind: Some(playlist_kind),
+            rebase: None,
         },
     );
 

@@ -454,9 +454,26 @@ pub(in crate::api::endpoints::hls_api) async fn hls_api_stream_resolved(
         let archive_reference = resolve_m3u_archive_reference(&hls_url, Some(session.token.as_str()))
             .or_else(|| m3u_archive_epg_reference_ts(session.stream_url.as_ref()));
         session.stream_url = hls_url.clone();
-        if session.virtual_id == virtual_id
-            || session.member_binding.as_ref().is_some_and(|b| b.member_vid == virtual_id)
-        {
+        let bound_group_vid = session.member_binding.as_ref().map(|binding| binding.group_vid);
+        let mut is_session_stream = session.virtual_id == virtual_id
+            || session.member_binding.as_ref().is_some_and(|b| b.member_vid == virtual_id);
+        if !is_session_stream {
+            if let Some(group_vid) = bound_group_vid {
+                // After a legacy runtime member switch the client still polls the sealed variant
+                // URL of the previous member; accept it when it is another member of the same group.
+                is_session_stream = matches!(
+                    classify_virtual_id(
+                        &app_state.app_config,
+                        &app_state.playlists,
+                        &target,
+                        VirtualId::new(virtual_id)
+                    )
+                    .await,
+                    ResolvedStreamTarget::Member { group, .. } if group.group_vid.get() == group_vid
+                );
+            }
+        }
+        if is_session_stream {
             app_state.connection_manager.touch_http_activity(&user.username, &session.token, &fingerprint.addr).await;
         } else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();

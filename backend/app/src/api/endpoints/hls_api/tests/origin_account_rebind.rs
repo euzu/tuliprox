@@ -1723,3 +1723,55 @@ async fn handover_waits_for_viewer_projection_without_holding_hls_write_lock() {
     drop(held);
     publish.await.unwrap();
 }
+
+#[tokio::test]
+async fn prepare_hls_origin_runtime_keeps_existing_runtime_instance() {
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "12345", &input.name, current_time_millis()).await;
+    let now = current_time_millis();
+    let url = "http://upstream.example.com/live.m3u8";
+    let id = session.read().await.proxy_session_id.clone();
+
+    let initial = prepare_hls_origin_runtime(
+        &app,
+        &session,
+        &input,
+        url,
+        url,
+        &id,
+        &test_fingerprint(),
+        ConnectionKind::Normal,
+        0,
+        HlsOriginWorkKind::Manifest,
+        HlsOriginWorkClass::ManifestInteractive,
+        now,
+    )
+    .await
+    .unwrap();
+    app.connection_manager.release_managed_provider_handle(initial.preacquired_origin_account_handle);
+    let original_runtime = session.read().await.origin_account_runtime.clone().unwrap();
+
+    session.write().await.origin_account_binding = None;
+
+    let second = prepare_hls_origin_runtime(
+        &app,
+        &session,
+        &input,
+        url,
+        url,
+        &id,
+        &test_fingerprint(),
+        ConnectionKind::Normal,
+        0,
+        HlsOriginWorkKind::Manifest,
+        HlsOriginWorkClass::ManifestInteractive,
+        now,
+    )
+    .await
+    .unwrap();
+    app.connection_manager.release_managed_provider_handle(second.preacquired_origin_account_handle);
+    let second_runtime = session.read().await.origin_account_runtime.clone().unwrap();
+
+    assert!(Arc::ptr_eq(&original_runtime, &second_runtime), "runtime instance must be preserved across prepares");
+}
