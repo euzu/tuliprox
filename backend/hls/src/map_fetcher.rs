@@ -227,6 +227,7 @@ impl HlsMapWorkerPool {
         let result = fetch_map_into_cache(&context, &snapshot, &policy).await;
         let finished_at_ms = current_time_millis();
         let fetch_succeeded = result.is_ok();
+        let mut member_unhealthy = None;
         let (generation_valid, evidence_changed_for) = {
             let mut session = context.session.write().await;
             session.active_map_fetches = session.active_map_fetches.saturating_sub(1);
@@ -238,6 +239,11 @@ impl HlsMapWorkerPool {
             if generation_valid && result.is_err() {
                 if let Err(error) = &result {
                     session.record_start_provider_failure(error);
+                    // A retryable MAP failure is re-fetched by the scheduler, so it is not yet
+                    // evidence against the member; only a permanent failure may start a handoff.
+                    if !error.retryable_failure() {
+                        member_unhealthy = session.member_unhealthy_after_media_failure(error);
+                    }
                 }
                 session.origin_control.path_condition =
                     super::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure;
@@ -295,6 +301,9 @@ impl HlsMapWorkerPool {
             }
             (generation_valid, generation_valid.then(|| session.proxy_session_id.clone()))
         };
+        if let Some(notice) = member_unhealthy {
+            notice.send(&context.session);
+        }
         if generation_valid {
             super::origin::finish_failed_hls_start(
                 context.origin_io.as_ref(),
@@ -883,6 +892,99 @@ mod tests {
             HlsOriginProgressPhase::Terminal | HlsOriginProgressPhase::TerminalPartial
         ));
         server.await.expect("server joins");
+    }
+
+    #[tokio::test]
+    async fn map_failure_after_retries_notifies_the_group_member_runtime() {
+        assert_eq!(
+            map_failure_notifies_for(MapOriginFault::Status("404 Not Found")).await,
+            vec![crate::origin_account_runtime::HlsMemberUnhealthyReason::SegmentFailure]
+        );
+    }
+
+    #[tokio::test]
+    async fn map_retryable_status_after_retries_does_not_notify() {
+        assert_eq!(map_failure_notifies_for(MapOriginFault::Status("503 Service Unavailable")).await, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn map_transport_failure_after_retries_does_not_notify() {
+        assert_eq!(map_failure_notifies_for(MapOriginFault::Reset).await, Vec::new());
+    }
+
+    #[derive(Clone, Copy)]
+    enum MapOriginFault {
+        Status(&'static str),
+        Reset,
+    }
+
+    async fn map_failure_notifies_for(
+        fault: MapOriginFault,
+    ) -> Vec<crate::origin_account_runtime::HlsMemberUnhealthyReason> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let mut request = Vec::new();
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut chunk = [0_u8; 2048];
+                    let Ok(read) = socket.read(&mut chunk).await else { return };
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                match fault {
+                    MapOriginFault::Status(status) => {
+                        let _ = socket
+                            .write_all(
+                                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                                    .as_bytes(),
+                            )
+                            .await;
+                    }
+                    MapOriginFault::Reset => drop(socket),
+                }
+            }
+        });
+        let manifest = normal_manifest(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\n1.m4s\n",
+            &format!("http://{addr}/live/index.m3u8"),
+        );
+        let store = HlsSessionStore::new();
+        let session = store.get_or_create_session(HlsSessionKey::new(1, "1"), b"secret", 0).await;
+        let runtime = crate::member_health::test_support::RecordingMemberRuntime::new(Some(
+            crate::member_health::test_support::RecordingMemberRuntime::default_policy(),
+        ));
+        {
+            let mut session = session.write().await;
+            session.origin_account_runtime = Some(runtime.clone());
+            session.apply_origin_manifest(&manifest).expect("manifest maps");
+            session.queue_map_fetch_candidates(1);
+        }
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let policy = SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..Default::default() };
+        let worker = Arc::new(HlsMapWorkerPool::new(policy.clone()));
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        grant_usable_map_access_lease(&worker, &proxy_session_id).await;
+        let context = MapFetchContext {
+            session: Arc::clone(&session),
+            segment_cache: Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path().to_path_buf())),
+            headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
+            client: reqwest::Client::new(),
+            no_redirect_client: reqwest::Client::new(),
+            use_manual_redirects: false,
+            origin_io: None,
+        };
+        let snapshot = worker.next_fetch_snapshot(&context, 2, &policy).await.expect("map snapshot");
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.expect("test permit");
+
+        Arc::clone(&worker).fetch_one_map(context, snapshot, policy, permit).await;
+
+        server.abort();
+        runtime.reasons()
     }
 
     #[tokio::test]

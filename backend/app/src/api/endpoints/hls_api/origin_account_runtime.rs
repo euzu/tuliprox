@@ -56,14 +56,14 @@ pub(super) async fn prepare_hls_origin_runtime(
             let mut current = session.write().await;
             if !current.is_gc_marked_for_removal() && observed.matches_session(&current) {
                 if current.origin_account_runtime.is_none() {
-                    current.origin_account_runtime = Some(Arc::new(AppHlsOriginAccountRuntime {
-                        app_state: Arc::downgrade(app_state),
-                        input_id: input.id,
-                        input_name: Arc::clone(&input.name),
-                        raw_request_url: raw_request_url.to_string(),
-                        entry_url: session_entry_url.to_string(),
-                        fingerprint: fingerprint.clone(),
-                    }));
+                    current.origin_account_runtime = Some(Arc::new(AppHlsOriginAccountRuntime::new(
+                        Arc::downgrade(app_state),
+                        input.id,
+                        Arc::clone(&input.name),
+                        raw_request_url.to_string(),
+                        session_entry_url.to_string(),
+                        fingerprint.clone(),
+                    )));
                 }
                 return Ok(PreparedHlsOriginRuntime::published(
                     prepared,
@@ -87,14 +87,14 @@ pub(super) async fn prepare_hls_origin_runtime(
             reason: hls_no_account_reason_for_binding(session.origin_account_binding.as_ref()),
         });
     };
-    session.write().await.origin_account_runtime = Some(Arc::new(AppHlsOriginAccountRuntime {
-        app_state: Arc::downgrade(app_state),
-        input_id: input.id,
-        input_name: Arc::clone(&input.name),
-        raw_request_url: raw_request_url.to_string(),
-        entry_url: session_entry_url.to_string(),
-        fingerprint: fingerprint.clone(),
-    }));
+    session.write().await.origin_account_runtime = Some(Arc::new(AppHlsOriginAccountRuntime::new(
+        Arc::downgrade(app_state),
+        input.id,
+        Arc::clone(&input.name),
+        raw_request_url.to_string(),
+        session_entry_url.to_string(),
+        fingerprint.clone(),
+    )));
     let input = input.as_ref();
     advance_hls_origin_account_lifecycle(app_state, session, now_ms).await;
     let observed = HlsOriginAccountSnapshot::from_session(&*session.read().await);
@@ -586,29 +586,152 @@ pub(super) async fn mark_hls_origin_rebind_failed(
     );
 }
 
-use std::{future::Future, pin::Pin, sync::Weak};
-use tuliprox_hls::api::{
-    trigger_origin_refresh_sync, HlsBoundAccountAcquireErrorKind, HlsManifestAcceptanceDirective,
-    HlsOriginAccountRuntime, HlsOriginAccountSnapshot, HlsOriginAccountWork, HlsPreparedOriginAccount,
-    LiveHlsOriginEntry,
+use crate::api::api_utils::{
+    failover_group::{group_playback_settings, record_member_failure, GroupSelectionRequest, SelectionMode},
+    failover_group_runtime::{BudgetDecision, FailoverBudget},
 };
+use arc_swap::ArcSwap;
+use shared::model::{FailoverGroupRuntimeConfig, VirtualId};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
+    time::Instant,
+};
+use tuliprox_hls::api::{
+    build_hls_origin_session_owner, hls_manifest_acceptance_directive_for_session, trigger_origin_refresh_sync,
+    HlsBoundAccountAcquireErrorKind, HlsManifestAcceptanceDirective, HlsManifestAcceptanceEvaluationOutcome,
+    HlsMemberHealthPolicy, HlsMemberUnhealthyReason, HlsOriginAccountRuntime, HlsOriginAccountSnapshot,
+    HlsOriginAccountWork, HlsOriginSource, HlsPreparedOriginAccount, HlsSession, LiveHlsOriginEntry,
+};
+use tuliprox_repository::target_stream_item::{classify_virtual_id, ResolvedStreamTarget};
 
-struct AppHlsOriginAccountRuntime {
-    app_state: Weak<AppState>,
+/// Swappable member identity installed on the app origin-account runtime. A group member handoff
+/// replaces this binding atomically; single-item sessions keep the value installed at creation.
+#[derive(Clone)]
+struct AppHlsMemberBinding {
     input_id: u16,
     input_name: Arc<str>,
     raw_request_url: String,
     entry_url: String,
+}
+
+struct AppHlsOriginAccountRuntime {
+    app_state: Weak<AppState>,
+    member: Arc<ArcSwap<AppHlsMemberBinding>>,
     fingerprint: Fingerprint,
+    /// One handoff per session at a time; concurrent notifications coalesce.
+    handoff_in_flight: Arc<AtomicBool>,
+    /// Incident budget created lazily on the first member-handoff trigger.
+    handoff_budget: Arc<tokio::sync::Mutex<Option<FailoverBudget>>>,
+    /// Group failover config cached for the lifetime of this runtime (see [`Self::group_failover_config`]).
+    cached_failover: std::sync::OnceLock<Option<FailoverGroupRuntimeConfig>>,
+}
+
+/// Resets the single-flight handoff flag on every exit, including a panic in the spawned task.
+struct HandoffInFlightGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for HandoffInFlightGuard {
+    fn drop(&mut self) { self.flag.store(false, Ordering::Release); }
+}
+
+impl AppHlsOriginAccountRuntime {
+    fn new(
+        app_state: Weak<AppState>,
+        input_id: u16,
+        input_name: Arc<str>,
+        raw_request_url: String,
+        entry_url: String,
+        fingerprint: Fingerprint,
+    ) -> Self {
+        Self {
+            app_state,
+            member: Arc::new(ArcSwap::from_pointee(AppHlsMemberBinding {
+                input_id,
+                input_name,
+                raw_request_url,
+                entry_url,
+            })),
+            fingerprint,
+            handoff_in_flight: Arc::new(AtomicBool::new(false)),
+            handoff_budget: Arc::new(tokio::sync::Mutex::new(None)),
+            cached_failover: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl AppHlsOriginAccountRuntime {
+    /// Runtime failover settings of the group the session belongs to; `None` for single-item sessions.
+    fn group_failover_config(&self, session: &HlsSession) -> Option<FailoverGroupRuntimeConfig> {
+        // Computed once for this runtime. A live session keeps its runtime across member handoffs,
+        // so a config reload is not observed for the rest of the session; that is acceptable because
+        // these values are timing thresholds, not routing decisions.
+        *self.cached_failover.get_or_init(|| {
+            let (target_id, _) = session.key.group_identity()?;
+            let app_state = self.app_state.upgrade()?;
+            let target = app_state.app_config.get_target_by_id(target_id)?;
+            Some(group_playback_settings(&app_state, &target).failover)
+        })
+    }
 }
 
 impl std::fmt::Debug for AppHlsOriginAccountRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppHlsOriginAccountRuntime").field("input_id", &self.input_id).finish_non_exhaustive()
+        f.debug_struct("AppHlsOriginAccountRuntime")
+            .field("input_id", &self.member.load().input_id)
+            .finish_non_exhaustive()
     }
 }
 
 impl HlsOriginAccountRuntime for AppHlsOriginAccountRuntime {
+    fn raw_request_url(&self) -> Option<String> { Some(self.member.load().raw_request_url.clone()) }
+
+    fn entry_url(&self) -> Option<String> { Some(self.member.load().entry_url.clone()) }
+
+    fn member_health_policy(&self, session: &HlsSession) -> Option<HlsMemberHealthPolicy> {
+        let failover = self.group_failover_config(session)?;
+        failover.enabled.then(|| HlsMemberHealthPolicy {
+            no_data_timeout_ms: failover.no_data_timeout_secs.saturating_mul(1_000),
+            slow_source_pct: failover.slow_source_pct,
+            slow_source_window_ms: failover.slow_source_secs.saturating_mul(1_000),
+        })
+    }
+
+    fn notify_member_progress(&self, session: &HlsSession) {
+        // Never wait for a handoff that currently holds the budget; the next segment reports again.
+        let Ok(mut budget) = self.handoff_budget.try_lock() else {
+            return;
+        };
+        if budget.is_none() {
+            *budget = self.group_failover_config(session).map(|failover| FailoverBudget::new(&failover));
+        }
+        if let Some(budget) = budget.as_mut() {
+            budget.on_data(Instant::now());
+        }
+    }
+
+    fn notify_member_unhealthy(&self, session: &HlsSessionHandle, reason: HlsMemberUnhealthyReason) {
+        let app_state = self.app_state.clone();
+        let member = Arc::clone(&self.member);
+        let handoff_in_flight = Arc::clone(&self.handoff_in_flight);
+        let handoff_budget = Arc::clone(&self.handoff_budget);
+        let fingerprint = self.fingerprint.clone();
+        let session = Arc::clone(session);
+        if handoff_in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        tokio::spawn(async move {
+            let _guard = HandoffInFlightGuard { flag: handoff_in_flight };
+            let Some(app_state) = app_state.upgrade() else { return };
+            handoff_hls_group_member(&app_state, &session, &handoff_budget, &member, &fingerprint, reason).await;
+        });
+    }
+
     #[allow(clippy::too_many_lines)]
     fn prepare<'a>(
         &'a self,
@@ -619,10 +742,11 @@ impl HlsOriginAccountRuntime for AppHlsOriginAccountRuntime {
     {
         Box::pin(async move {
             let app_state = self.app_state.upgrade().ok_or(HlsBoundAccountAcquireErrorKind::Unavailable)?;
+            let member = self.member.load();
             let input = app_state
                 .app_config
-                .get_input_by_id(self.input_id)
-                .filter(|input| input.name == self.input_name)
+                .get_input_by_id(member.input_id)
+                .filter(|input| input.name == member.input_name)
                 .ok_or(HlsBoundAccountAcquireErrorKind::Missing)?;
             let (proxy_id, policy, unavailable) = {
                 let session = session.read().await;
@@ -648,8 +772,8 @@ impl HlsOriginAccountRuntime for AppHlsOriginAccountRuntime {
                 &app_state,
                 session,
                 &input,
-                &self.raw_request_url,
-                &self.entry_url,
+                &member.raw_request_url,
+                &member.entry_url,
                 &proxy_id,
                 &self.fingerprint,
                 policy.connection_kind,
@@ -738,6 +862,353 @@ impl HlsOriginAccountRuntime for AppHlsOriginAccountRuntime {
             }
             Ok(HlsPreparedOriginAccount { entry, snapshot })
         })
+    }
+}
+
+fn hls_member_binding_matches(current: &HlsOriginAccountBinding, expected: &HlsOriginAccountBinding) -> bool {
+    current.account_name == expected.account_name
+        && current.session_owner == expected.session_owner
+        && current.generation == expected.generation
+        && current.provider_binding_tag == expected.provider_binding_tag
+}
+
+/// Clears the old member's reservation exactly once and fences concurrent origin work before a
+/// member handoff: detach the old binding and bump the work generation. Returns the fence value.
+async fn begin_hls_group_member_handoff(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    old_binding: Option<&HlsOriginAccountBinding>,
+    now_ms: u64,
+) -> u64 {
+    if let Some(binding) = old_binding {
+        app_state.active_provider.clear_identified_provider_reservation(
+            &binding.session_owner,
+            &binding.account_name,
+            binding.provider_binding_tag,
+        );
+    }
+    let mut session = session.write().await;
+    if let Some(binding) = old_binding {
+        if let Some(current) =
+            session.origin_account_binding.as_mut().filter(|current| hls_member_binding_matches(current, binding))
+        {
+            current.detach(HlsOriginAccountDetachedReason::AccountMissingOrExpired, now_ms);
+        }
+    }
+    session.invalidate_queued_origin_work();
+    session.activity.origin_work_generation
+}
+
+/// Publishes a member handoff only into the same binding and work generation observed before the
+/// switch, mirroring the account-rebind publication fence.
+fn publish_hls_origin_member_handoff(
+    session: &mut tuliprox_hls::api::HlsSession,
+    expected: Option<&HlsOriginAccountBinding>,
+    expected_work_generation: u64,
+    source: HlsOriginSource,
+    replacement: HlsOriginAccountBinding,
+) -> bool {
+    if session.is_gc_marked_for_removal() || session.activity.origin_work_generation != expected_work_generation {
+        return false;
+    }
+    let matches = match (expected, session.origin_account_binding.as_ref()) {
+        (Some(expected), Some(current)) => hls_member_binding_matches(current, expected),
+        (None, None) => true,
+        _ => false,
+    };
+    if !matches {
+        return false;
+    }
+    session.handoff_origin_member(source, replacement);
+    true
+}
+
+/// Fetches and commits the new member's manifest through the regular refresh/acceptance pipeline,
+/// mirroring the account-rebind follow-up. This makes the host switch, epoch, discontinuity, key
+/// namespace and init-map transitions happen inside the handoff rather than on the next poll.
+#[allow(clippy::too_many_arguments)]
+async fn trigger_hls_group_member_handoff_refresh(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    member_url: &str,
+    url_failover_provider: Option<Arc<ConfigProvider>>,
+    runtime_provider_config: Option<Arc<crate::model::ProviderConfig>>,
+    snapshot: HlsOriginAccountSnapshot,
+    fingerprint: &Fingerprint,
+    preacquired_handle: tuliprox_session::ManagedProviderHandle,
+    now_ms: u64,
+) {
+    let Some(entry) =
+        LiveHlsOriginEntry::parse_with_provider_configs(member_url, url_failover_provider, runtime_provider_config)
+    else {
+        return;
+    };
+    let proxy_session_id = session.read().await.proxy_session_id.clone();
+    let acceptance_directive =
+        match hls_manifest_acceptance_directive_for_session(&app_state.hls_ctx(), session, &proxy_session_id).await {
+            HlsManifestAcceptanceEvaluationOutcome::Evaluated(directive) => directive,
+            HlsManifestAcceptanceEvaluationOutcome::SessionSuperseded => return,
+            HlsManifestAcceptanceEvaluationOutcome::StateContention { .. } => HlsManifestAcceptanceDirective::none(),
+        };
+    let (policy, reservation_ttl_secs, playback_kind, account_runtime, headers) = {
+        let session = session.read().await;
+        (
+            session.effective_origin_acquire_policy_or_default(),
+            session.account_overlap_timing().reservation_ttl_secs(),
+            session.origin_playback_kind(),
+            session.origin_account_runtime.clone(),
+            session.origin_request_headers.clone(),
+        )
+    };
+    let origin_io = HlsOriginIoContext {
+        ctx: app_state.hls_ctx(),
+        client_addr: fingerprint.addr,
+        allow_grace: HlsOriginWorkClass::ManifestInteractive.allows_grace(),
+        priority: policy.priority,
+        connection_kind: policy.connection_kind,
+        reservation_ttl_secs,
+        preacquired_provider_handle: None,
+        started_generation: None,
+        prepared_account: None,
+        playback_kind,
+        account_runtime,
+    }
+    .with_managed_provider_handle(preacquired_handle);
+    let manifest_commit_requirement = tuliprox_hls::api::hls_manifest_commit_requirement(
+        session,
+        tuliprox_hls::api::HlsSessionStoreOutcome::Reused,
+        None,
+        false,
+        now_ms,
+    )
+    .await;
+    let request = hls_origin_refresh_request(
+        app_state,
+        session,
+        HlsPreparedOriginAccount { entry, snapshot },
+        HlsOriginRefreshOptions {
+            headers,
+            origin_io,
+            manifest_commit_requirement,
+            acceptance_directive,
+            access_lease_id: None,
+            rewrite_secret: app_state.get_encrypt_secret().to_vec(),
+            now_ms,
+        },
+    );
+    trigger_origin_refresh_sync(request).await;
+}
+
+/// Hands a live failover-group session over to the next healthy member. R3 triggers call this via
+/// [`HlsOriginAccountRuntime::notify_member_unhealthy`]; R2 also calls it from the cached entry
+/// path when a fresh selection disagrees with a non-reusable bound session.
+#[allow(clippy::too_many_lines)]
+async fn handoff_hls_group_member(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    handoff_budget: &tokio::sync::Mutex<Option<FailoverBudget>>,
+    member: &ArcSwap<AppHlsMemberBinding>,
+    fingerprint: &Fingerprint,
+    reason: HlsMemberUnhealthyReason,
+) {
+    let now_ms = current_time_millis();
+    let Some((target_id, group_vid)) = session.read().await.key.group_identity() else {
+        return;
+    };
+    let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
+        return;
+    };
+    let ResolvedStreamTarget::Group(group) =
+        classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, VirtualId::new(group_vid)).await
+    else {
+        return;
+    };
+
+    let (current_index, old_binding, proxy_session_id, playback_kind, policy, request_headers) = {
+        let session = session.read().await;
+        let input_name = session.origin_source.input_name.clone();
+        let stream_ref = session.origin_source.stream_ref.clone();
+        let index = group.members.iter().position(|member| {
+            member.input_name.as_ref() == input_name.as_ref() && member.input_stream_id.as_ref() == stream_ref.as_str()
+        });
+        (
+            index,
+            session.origin_account_binding.clone(),
+            session.proxy_session_id.clone(),
+            session.origin_playback_kind(),
+            session.effective_origin_acquire_policy_or_default(),
+            session.origin_request_headers.clone(),
+        )
+    };
+
+    if let Some(index) = current_index {
+        record_member_failure(&app_state.member_health, &group.members[index], None, reason.failure_class());
+    }
+
+    let playback = group_playback_settings(app_state, &target);
+    let member_count = group.members.len();
+    let decision = {
+        let mut guard = handoff_budget.lock().await;
+        let budget = guard.get_or_insert_with(|| FailoverBudget::new(&playback.failover));
+        budget.on_trigger(current_index.unwrap_or(0), member_count, Instant::now())
+    };
+
+    let exclude = match decision {
+        BudgetDecision::GiveUp => {
+            begin_hls_group_member_handoff(app_state, session, old_binding.as_ref(), now_ms).await;
+            return;
+        }
+        BudgetDecision::RetrySame => return,
+        BudgetDecision::Next { exclude } => exclude,
+    };
+
+    // Serialize the member handoff with concurrent account prepares. Once the old binding is
+    // detached below, a client manifest poll can reacquire it through the ordinary prepare path,
+    // bump the work generation and invalidate this handoff's publication fence. The follow-up
+    // refresh re-enters prepare, so the lock is dropped before it runs.
+    let prepare_lock = Arc::clone(&session.read().await.origin_account_prepare_lock);
+    let prepare_guard = prepare_lock.lock().await;
+
+    let session_owner = old_binding
+        .as_ref()
+        .map_or_else(|| build_hls_origin_session_owner(&proxy_session_id), |binding| binding.session_owner.clone());
+    let expected_work_generation =
+        begin_hls_group_member_handoff(app_state, session, old_binding.as_ref(), now_ms).await;
+
+    let req = GroupSelectionRequest {
+        mode: SelectionMode::Live,
+        prefer: None,
+        lease: Some(PlaybackLeaseRef::new(&session_owner, playback_kind)),
+        allow_provider_grace: playback.allow_provider_grace,
+        bypass_maintenance: false,
+        exclude: &exclude,
+        demoted_inputs: &[],
+        allow_preempt: false,
+        ..GroupSelectionRequest::new(
+            target.name.as_str(),
+            &group,
+            playback.start,
+            &fingerprint.addr,
+            "",
+            policy.priority,
+            policy.connection_kind,
+        )
+    };
+
+    let selected = resolve_checked_hls_group_entry(
+        app_state,
+        &target,
+        Arc::clone(&group),
+        req,
+        &request_headers,
+        true,
+        None,
+        false,
+        fingerprint,
+    )
+    .await;
+    let Ok((resolved, probed)) = selected else {
+        // No member left: the old binding is already detached and fenced, so the session's
+        // existing terminal/unavailable handling takes over.
+        return;
+    };
+
+    let Some(provider_config) =
+        resolved.acquired.handle.handle().and_then(|handle| handle.allocation.get_provider_config())
+    else {
+        drop(resolved.acquired.handle);
+        return;
+    };
+    let Some(new_account) = resolved.acquired.handle.handle().and_then(|handle| handle.allocation.get_provider_name())
+    else {
+        drop(resolved.acquired.handle);
+        return;
+    };
+    let member_url = if let Some(probed) = probed.as_ref() {
+        Some(probed.request_url.clone())
+    } else {
+        build_hls_group_member_origin_url(
+            app_state,
+            &target,
+            &resolved.input,
+            &resolved.member,
+            &new_account,
+            Some(&provider_config),
+        )
+        .await
+    };
+    let Some(member_url) = member_url else {
+        drop(resolved.acquired.handle);
+        return;
+    };
+
+    let (raw_request_url, entry_url) = match build_hls_origin_resolution(&resolved.input, &member_url) {
+        Some(resolution) => (resolution.hls_url, resolution.session_entry_url.as_str().to_string()),
+        None => (member_url.clone(), member_url.clone()),
+    };
+    let url_failover_provider =
+        hls_url_failover_provider_for_origin_context(&resolved.input, &raw_request_url, &entry_url, &member_url);
+    let new_source = build_hls_origin_source_for_playback(
+        &resolved.input,
+        resolved.member.input_stream_id.to_string(),
+        None,
+        Some(&member_url),
+    );
+    let generation = old_binding.as_ref().map_or(0, |binding| binding.generation.saturating_add(1));
+    let mut new_binding = HlsOriginAccountBinding::rebound(
+        Arc::clone(&resolved.input.name),
+        Arc::clone(&new_account),
+        session_owner.clone(),
+        generation,
+        now_ms,
+    );
+    new_binding.provider_binding_tag = resolved.acquired.handle.handle().and_then(|handle| handle.binding_tag);
+
+    let new_index = resolved.acquired.index;
+    let published = publish_hls_origin_account_with_status(app_state, session, |current| {
+        if !publish_hls_origin_member_handoff(
+            current,
+            old_binding.as_ref(),
+            expected_work_generation,
+            new_source.clone(),
+            new_binding.clone(),
+        ) {
+            return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+        }
+        Ok(HlsOriginAccountSnapshot::from_session(current))
+    })
+    .await;
+    let Ok(snapshot) = published else {
+        drop(resolved.acquired.handle);
+        return;
+    };
+
+    drop(prepare_guard);
+    member.store(Arc::new(AppHlsMemberBinding {
+        input_id: resolved.input.id,
+        input_name: Arc::clone(&resolved.input.name),
+        raw_request_url,
+        entry_url,
+    }));
+    let preacquired_handle = resolved.acquired.handle;
+    trigger_hls_group_member_handoff_refresh(
+        app_state,
+        session,
+        &member_url,
+        url_failover_provider,
+        Some(provider_config),
+        snapshot,
+        fingerprint,
+        preacquired_handle,
+        now_ms,
+    )
+    .await;
+
+    {
+        let mut guard = handoff_budget.lock().await;
+        if let Some(budget) = guard.as_mut() {
+            budget.on_switched(new_index, current_index.unwrap_or(new_index), Instant::now());
+        }
     }
 }
 

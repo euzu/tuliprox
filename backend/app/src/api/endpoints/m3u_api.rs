@@ -28,8 +28,8 @@ use crate::{
         parse_flat_flussonic_archive, parse_flussonic_archive_file, resolve_m3u_catchup_url, FlussonicArchiveKind,
         M3uCatchupToken,
     },
-    model::{ConfigTarget, ProxyUserCredentials},
-    repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist, storage_const},
+    model::{AppConfig, ConfigTarget, ProxyUserCredentials},
+    repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist, storage_const, PlaylistStorageState},
     utils::{debug_if_enabled, PROVIDER_SCHEME_PREFIX},
 };
 use axum::response::IntoResponse;
@@ -770,6 +770,60 @@ fn resolved_m3u_item_is_allowed(user: &ProxyUserCredentials, item_type: Playlist
     user.allows_item_type(item_type)
 }
 
+async fn resolve_m3u_stream_item_and_target(
+    app_config: &Arc<AppConfig>,
+    playlists: &PlaylistStorageState,
+    target: &ConfigTarget,
+    req_virtual_id: u32,
+) -> Result<(shared::model::M3uPlaylistItem, ResolvedStreamTarget), std::io::Error> {
+    let resolved_target =
+        classify_virtual_id(app_config, playlists, target, shared::model::VirtualId::new(req_virtual_id)).await;
+    let pli_res = m3u_get_item_for_stream_id(req_virtual_id, app_config.as_ref(), playlists, target).await;
+    let pli = match pli_res {
+        Ok(pli) => pli,
+        Err(err) => match &resolved_target {
+            ResolvedStreamTarget::Group(group) => member_to_m3u_item(group, 0),
+            ResolvedStreamTarget::Member { group, index } => member_to_m3u_item(group, *index),
+            ResolvedStreamTarget::Item => return Err(err),
+        },
+    };
+    Ok((pli, resolved_target))
+}
+
+fn live_group_playback_source(resolved_target: &ResolvedStreamTarget) -> Option<PlaybackSource<'static>> {
+    match resolved_target {
+        ResolvedStreamTarget::Group(group) => Some(PlaybackSource::Group {
+            group: Arc::clone(group),
+            mode: tuliprox_session::failover_group::SelectionMode::Live,
+            prefer: None,
+        }),
+        ResolvedStreamTarget::Member { group, index } => Some(PlaybackSource::Group {
+            group: Arc::clone(group),
+            mode: tuliprox_session::failover_group::SelectionMode::Live,
+            prefer: Some(*index),
+        }),
+        ResolvedStreamTarget::Item => None,
+    }
+}
+
+/// The group member that should serve an archive request starting at `start_ts`; `pli` when the target is no
+/// group or no member qualifies.
+fn archive_member_item(
+    app_state: &AppState,
+    target: &ConfigTarget,
+    resolved_target: &ResolvedStreamTarget,
+    pli: shared::model::M3uPlaylistItem,
+    start_ts: i64,
+) -> shared::model::M3uPlaylistItem {
+    if let Some(group) = resolved_target.group() {
+        let order = archive_member_order(app_state, target, group, start_ts);
+        if let Some(&best_idx) = order.first() {
+            return member_to_m3u_item(group, best_idx);
+        }
+    }
+    pli
+}
+
 #[allow(clippy::too_many_lines)]
 async fn m3u_api_stream(
     user: Arc<ProxyUserCredentials>,
@@ -836,21 +890,12 @@ async fn m3u_api_stream(
 
     let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let resolved_target = classify_virtual_id(
-        &app_state.app_config,
-        &app_state.playlists,
-        &target,
-        shared::model::VirtualId::new(req_virtual_id),
-    )
-    .await;
-    let pli_res =
-        m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await;
-    let pli = match pli_res {
-        Ok(pli) => pli,
-        Err(err) => match &resolved_target {
-            ResolvedStreamTarget::Group(group) => member_to_m3u_item(group, 0),
-            ResolvedStreamTarget::Member { group, index } => member_to_m3u_item(group, *index),
-            ResolvedStreamTarget::Item => {
+    let (pli, resolved_target) =
+        match resolve_m3u_stream_item_and_target(&app_state.app_config, &app_state.playlists, &target, req_virtual_id)
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
                 error!("Failed to read m3u item for stream id {req_virtual_id}: {err}");
                 if stream_ext == Some(HLS_EXT) {
                     return axum::http::StatusCode::NOT_FOUND.into_response();
@@ -862,28 +907,14 @@ async fn m3u_api_stream(
                 )
                 .into_response();
             }
-        },
-    };
+        };
 
     let (resolved_pli, archive_discriminator, input) = if has_m3u_catchup_marker(raw_query) {
-        let (catchup_pli, catchup_input) = if let Some(group) = resolved_target.group() {
-            let start_ts = crate::iptv::m3u::extract_m3u_catchup_start_ts(raw_query)
-                .unwrap_or_else(|| chrono::Utc::now().timestamp());
-            let order = archive_member_order(app_state, &target, group, start_ts);
-            if let Some(&best_idx) = order.first() {
-                let member_item = member_to_m3u_item(group, best_idx);
-                let member_input = app_state.app_config.get_input_by_name(&member_item.input_name);
-                (member_item, member_input)
-            } else {
-                let input = app_state.app_config.get_input_by_name(&pli.input_name);
-                (pli, input)
-            }
-        } else {
-            let input = app_state.app_config.get_input_by_name(&pli.input_name);
-            (pli, input)
-        };
+        let start_ts =
+            crate::iptv::m3u::extract_m3u_catchup_start_ts(raw_query).unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let catchup_pli = archive_member_item(app_state, &target, &resolved_target, pli, start_ts);
         let input = try_option_bad_request!(
-            catchup_input,
+            app_state.app_config.get_input_by_name(&catchup_pli.input_name),
             true,
             format!(
                 "Can't find input {} for target {target_name}, stream_id {}",
@@ -905,23 +936,7 @@ async fn m3u_api_stream(
         );
         (pli, None, input)
     };
-    let source = if archive_discriminator.is_some() {
-        None
-    } else {
-        match &resolved_target {
-            ResolvedStreamTarget::Group(group) => Some(PlaybackSource::Group {
-                group: Arc::clone(group),
-                mode: tuliprox_session::failover_group::SelectionMode::Live,
-                prefer: None,
-            }),
-            ResolvedStreamTarget::Member { group, index } => Some(PlaybackSource::Group {
-                group: Arc::clone(group),
-                mode: tuliprox_session::failover_group::SelectionMode::Live,
-                prefer: Some(*index),
-            }),
-            ResolvedStreamTarget::Item => None,
-        }
-    };
+    let source = if archive_discriminator.is_some() { None } else { live_group_playback_source(&resolved_target) };
     m3u_api_stream_loaded(
         user,
         target,
@@ -956,21 +971,42 @@ async fn m3u_api_stream_nested(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
     let req_virtual_id: u32 = try_result_bad_request!(stream_req.stream_id.trim().parse());
-    let pli =
-        match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
-            Ok(pli) => pli,
+    let (pli, resolved_target) =
+        match resolve_m3u_stream_item_and_target(&app_state.app_config, &app_state.playlists, &target, req_virtual_id)
+            .await
+        {
+            Ok(result) => result,
             Err(err) => {
                 error!("Failed to read M3U item for nested stream id {req_virtual_id}: {err}");
                 return axum::http::StatusCode::NOT_FOUND.into_response();
             }
         };
+    let stream_ext = extract_extension_from_url(file);
+    let archive = parse_flussonic_archive_file(file);
+    let is_catchup = archive.is_none() && is_flussonic_live_file(file) && has_m3u_catchup_marker(raw_query);
+    // Archive and catch-up requests of a group are served by the member that holds the archive.
+    let archive_start_ts = match &archive {
+        Some(FlussonicArchiveKind::Archive { start, .. } | FlussonicArchiveKind::TimeshiftAbs { start, .. }) => {
+            Some(start.parse::<i64>().unwrap_or_else(|_| chrono::Utc::now().timestamp()))
+        }
+        Some(FlussonicArchiveKind::TimeshiftRel { ago, .. }) => {
+            Some(chrono::Utc::now().timestamp().saturating_sub(ago.parse::<i64>().unwrap_or(0)))
+        }
+        None if is_catchup => Some(
+            crate::iptv::m3u::extract_m3u_catchup_start_ts(raw_query).unwrap_or_else(|| chrono::Utc::now().timestamp()),
+        ),
+        None => None,
+    };
+    let pli = match archive_start_ts {
+        Some(start_ts) => archive_member_item(app_state, &target, &resolved_target, pli, start_ts),
+        None => pli,
+    };
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
         true,
         format!("Can't find input {} for target {}, stream_id {}", pli.input_name, target.name, pli.virtual_id)
     );
-    let stream_ext = extract_extension_from_url(file);
-    let resolved = if let Some(archive) = parse_flussonic_archive_file(file) {
+    let resolved = if let Some(archive) = archive {
         let Some(mode) = playlist_item_flussonic_mode_or_default(&pli) else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         };
@@ -985,7 +1021,7 @@ async fn m3u_api_stream_nested(
         if !native_live_file_matches_mode(mode, file) {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
-        if has_m3u_catchup_marker(raw_query) {
+        if is_catchup {
             resolve_loaded_m3u_catchup(&pli, &input, raw_query).map(|(item, discriminator)| (item, Some(discriminator)))
         } else {
             Ok((pli, None))
@@ -1000,6 +1036,7 @@ async fn m3u_api_stream_nested(
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
     };
+    let source = if archive_discriminator.is_some() { None } else { live_group_playback_source(&resolved_target) };
     m3u_api_stream_loaded(
         user,
         target,
@@ -1011,8 +1048,8 @@ async fn m3u_api_stream_nested(
         stream_ext,
         archive_discriminator.as_deref(),
         None,
-        None,
-        None,
+        source,
+        Some(resolved_target),
     )
     .await
     .into_response()
@@ -1626,6 +1663,187 @@ mod tests {
         assert_eq!(
             legacy_archive.url.as_ref(),
             "http://pl.example.com/ChannelA/mono-1784898000-60.m3u8?token=fixture%2Btoken&keep=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_m3u_stream_item_and_target_for_group_member_and_plain_item() {
+        use super::{live_group_playback_source, resolve_m3u_stream_item_and_target};
+        use crate::api::api_utils::{tests::group_playback_support::GroupPlaybackEnv, PlaybackSource};
+        use tuliprox_repository::target_stream_item::ResolvedStreamTarget;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+
+        // 1. Group VID resolves to member 0 with prefer: None
+        let (group_item, group_target) = resolve_m3u_stream_item_and_target(
+            &env.app_state.app_config,
+            &env.app_state.playlists,
+            &env.target,
+            env.group_vid,
+        )
+        .await
+        .expect("group VID resolves");
+        assert_eq!(group_item.input_name.as_ref(), "solis");
+        assert!(matches!(&group_target, ResolvedStreamTarget::Group(_)));
+        let group_source = live_group_playback_source(&group_target);
+        assert!(matches!(
+            group_source,
+            Some(PlaybackSource::Group {
+                prefer: None,
+                mode: tuliprox_session::failover_group::SelectionMode::Live,
+                ..
+            })
+        ));
+
+        // 2. Member VID resolves to that member with prefer: Some(index)
+        let member_0_vid = env.group_record.members[0].member_vid.get();
+        let (m0_item, m0_target) = resolve_m3u_stream_item_and_target(
+            &env.app_state.app_config,
+            &env.app_state.playlists,
+            &env.target,
+            member_0_vid,
+        )
+        .await
+        .expect("member 0 VID resolves");
+        assert_eq!(m0_item.input_name.as_ref(), "solis");
+        assert!(matches!(&m0_target, ResolvedStreamTarget::Member { index: 0, .. }));
+        let m0_source = live_group_playback_source(&m0_target);
+        assert!(matches!(
+            m0_source,
+            Some(PlaybackSource::Group {
+                prefer: Some(0),
+                mode: tuliprox_session::failover_group::SelectionMode::Live,
+                ..
+            })
+        ));
+
+        let member_1_vid = env.group_record.members[1].member_vid.get();
+        let (m1_item, m1_target) = resolve_m3u_stream_item_and_target(
+            &env.app_state.app_config,
+            &env.app_state.playlists,
+            &env.target,
+            member_1_vid,
+        )
+        .await
+        .expect("member 1 VID resolves");
+        assert_eq!(m1_item.input_name.as_ref(), "korath");
+        assert!(matches!(&m1_target, ResolvedStreamTarget::Member { index: 1, .. }));
+        let m1_source = live_group_playback_source(&m1_target);
+        assert!(matches!(
+            m1_source,
+            Some(PlaybackSource::Group {
+                prefer: Some(1),
+                mode: tuliprox_session::failover_group::SelectionMode::Live,
+                ..
+            })
+        ));
+
+        // 3. Plain item resolves to Item with no group source
+        let (plain_item, plain_target) = resolve_m3u_stream_item_and_target(
+            &env.app_state.app_config,
+            &env.app_state.playlists,
+            &env.target,
+            env.plain_vid,
+        )
+        .await
+        .expect("plain VID resolves");
+        assert_eq!(plain_item.virtual_id.get(), env.plain_vid);
+        assert!(matches!(&plain_target, ResolvedStreamTarget::Item));
+        assert!(live_group_playback_source(&plain_target).is_none());
+
+        // 4. Unknown VID returns error (keeps 404 in handler)
+        assert!(resolve_m3u_stream_item_and_target(
+            &env.app_state.app_config,
+            &env.app_state.playlists,
+            &env.target,
+            999_999,
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn nested_m3u_stream_resolves_member_and_group_vids() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use axum::http::StatusCode;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let member_vid = env.group_record.members[1].member_vid.get();
+        let group_vid = env.group_vid;
+
+        // The item lookup used to fail with 404 for group and member VIDs. Now the item resolves and the
+        // request reaches the native file check, which rejects `live.m3u8` for a non-Flussonic item.
+        for vid in [member_vid, group_vid] {
+            let res = env.get(&format!("/m3u-stream/viewer/secret/{vid}/live.m3u8")).await;
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "vid {vid} must resolve before file validation");
+        }
+
+        let res = env.get("/m3u-stream/viewer/secret/999999/live.m3u8").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn archive_member_item_returns_pli_unchanged_for_non_group_target() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use tuliprox_repository::target_stream_item::ResolvedStreamTarget;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let pli = native_flussonic_item("flussonic", "http://provider/ch/index.m3u8");
+        let start_ts = chrono::Utc::now().timestamp() - 3600;
+
+        let result =
+            super::archive_member_item(&env.app_state, &env.target, &ResolvedStreamTarget::Item, pli.clone(), start_ts);
+        assert_eq!(result.url, pli.url);
+        assert_eq!(result.input_name, pli.input_name);
+    }
+
+    #[tokio::test]
+    async fn archive_member_item_selects_archive_capable_member() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use tuliprox_repository::target_stream_item::ResolvedStreamTarget;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+            .hls()
+            .without_plain_channel()
+            .with_member_archives(&[None, Some(7)])
+            .with_member_catchup_modes(&[None, Some("flussonic")])
+            .build()
+            .await;
+
+        let member_0_item = tuliprox_repository::target_stream_item::member_to_m3u_item(&env.group_record, 0);
+        let member_1_item = tuliprox_repository::target_stream_item::member_to_m3u_item(&env.group_record, 1);
+        let start_ts = chrono::Utc::now().timestamp() - 3600;
+
+        let result = super::archive_member_item(
+            &env.app_state,
+            &env.target,
+            &ResolvedStreamTarget::Group(env.group_record.clone()),
+            member_0_item,
+            start_ts,
+        );
+        assert_eq!(result.virtual_id, member_1_item.virtual_id);
+        assert_eq!(result.input_name, member_1_item.input_name);
+    }
+
+    #[tokio::test]
+    async fn nested_m3u_stream_selects_archive_capable_member_for_group_vid() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use axum::http::StatusCode;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+            .hls()
+            .without_plain_channel()
+            .with_member_archives(&[None, Some(7)])
+            .with_member_catchup_modes(&[None, Some("flussonic")])
+            .build()
+            .await;
+
+        let start_ts = chrono::Utc::now().timestamp() - 3600;
+        let res = env.get(&format!("/m3u-stream/viewer/secret/{}/archive-{start_ts}-3600.m3u8", env.group_vid)).await;
+        assert_ne!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "nested archive request for group VID must select archive-capable member instead of failing with 400"
         );
     }
 }

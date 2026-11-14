@@ -219,6 +219,16 @@
 
 ## 🌟 New Features
 
+- **Live HLS failover groups switch members while playing.** A running live HLS group stream now moves to the next
+  member when the bound member fails: two hard manifest refresh failures, a segment or initialization map that still
+  fails after its retries (`404`, `410`, `5xx`, transport), a stall, or (shared cache only) segments that arrive slower
+  than `failover.slow_source_pct` of real time. The player keeps its playlist URL; the playlist continues its media
+  sequence and marks the boundary with `EXT-X-DISCONTINUITY`. The existing `failover` limits apply
+  (`same_source_retries`, `stable_after_secs`, `max_outage_secs`, `max_switches`); there is no switch back to a
+  higher-priority member during playback. With the shared HLS cache, all viewers of a live group channel share one
+  origin session and switch together; without it, each player session switches on its own with a rebased media
+  sequence.
+
 - **Smart Match resolves channels by their channel number, not only by name.** A guide channel that publishes
   `<lcn>` now matches the playlist channel stating the same number. The number is read from the tuner stream URL
   (`.../auto/v5.2`) — not from a title, and not from `chno`, which the numbering stage fills with the output position.
@@ -1478,6 +1488,28 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Stalker members of failover groups play on the shared HLS cache.** A Stalker member has no stored stream URL, so
+  every playlist refresh of its shared cache session answered `503`. The session now reuses its resolved link and
+  resolves a new one for the session's account only when none is stored.
+
+- **Shared HLS cache accepts a live single-variant master playlist.** A live origin that answers with a master
+  playlist holding one variant was rejected (`segment_uri_without_extinf`); the cache now follows the variant like the
+  start probe does.
+
+- **HLS failover group members get QoS values.** Start probes, probe failures and playback of a native HLS member are
+  written to that member's stream history, so `qos_24h`, `qos_7d` and confidence are no longer empty for HLS members.
+
+- **Mapping scripts accept `@failover_group`.** `@failover_group = "..."` and reads of the field failed to parse,
+  although the failover group docs describe the field; `""` keeps a channel out of auto grouping.
+
+- **Nested M3U live stream endpoints resolve failover group and member channels.** Group and member virtual ids
+  resolve on `/m3u-stream/{user}/{pw}/{stream_id}/{file}`, live files play with group failover, and archive and
+  catch-up requests use the group member that holds the archive.
+
+- **Shared HLS cache sessions re-probe degraded or failing origins on reconnect.** Cached HLS group entry start checks now verify that
+  an active session has committed origin manifests without consecutive refresh failures and without origin path degradation or publication lateness
+  before skipping the probe.
 
 - **Shared HLS cache delivers the selected failover group member.** For failover groups, shared-cache manifest access
   previously fetched the representative member's origin URL while using the selected member's provider account. It now

@@ -153,5 +153,5 @@ mod terminal_tail_terminal_cutover;
 mod terminal_tail_terminal_fallback;
 mod terminal_tail_terminal_preflight;
 
-mod failover_group;
+pub(super) mod failover_group;
 mod recovery_binding_protection;

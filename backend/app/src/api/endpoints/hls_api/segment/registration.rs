@@ -3,7 +3,7 @@ use super::{
 };
 use crate::{
     api::{
-        api_utils::connection_priority_for_kind,
+        api_utils::{connection_priority_for_kind, failover_group::member_stream_channel},
         model::{AppState, ConnectionHistoryMode, UserSession},
     },
     auth::Fingerprint,
@@ -11,7 +11,7 @@ use crate::{
 use axum::http::{header, HeaderMap};
 use sha2::{Digest, Sha256};
 use shared::{
-    model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster},
+    model::{PlaylistItemType, StreamChannel, StreamInfo, VirtualId, XtreamCluster},
     utils::{is_m3u_catchup_session_token, Internable},
 };
 use std::{borrow::Cow, sync::Arc};
@@ -19,6 +19,7 @@ use tuliprox_core::utils::current_time_millis;
 use tuliprox_hls::api::{
     HlsAccessContext, HlsOriginAccountBinding, HlsOriginSource, HlsQosRuntimeConfig, HlsSessionHandle, ProxySessionId,
 };
+use tuliprox_repository::{classify_virtual_id, FailoverGroupRecord, GroupMember, ResolvedStreamTarget};
 
 pub(in crate::api::endpoints::hls_api) async fn ensure_hls_cache_stream_registered(
     app_state: &Arc<AppState>,
@@ -145,12 +146,15 @@ pub(in crate::api::endpoints::hls_api) async fn build_hls_cache_stream_channel(
     proxy_session_id: &ProxySessionId,
 ) -> StreamChannel {
     let mut channel = if let Some((_, target)) = app_state.app_config.get_target_for_username(&access.username) {
-        if let Some(mut channel) = get_stream_channel(app_state, &target, access.virtual_id).await {
-            channel.url = Arc::from(hls_cache_stream_stats_url(proxy_session_id));
-            channel
-        } else {
-            fallback_hls_cache_stream_channel(target.id, access.virtual_id, origin_source, proxy_session_id)
+        let mut channel = match get_stream_channel(app_state, &target, access.virtual_id).await {
+            Some(channel) => channel,
+            None => fallback_hls_cache_stream_channel(target.id, access.virtual_id, origin_source, proxy_session_id),
+        };
+        if let Some((group, member)) = hls_cache_live_group_member(app_state, &target, access, origin_source).await {
+            channel = member_stream_channel(&channel, &group, &member);
         }
+        channel.url = Arc::from(hls_cache_stream_stats_url(proxy_session_id));
+        channel
     } else {
         fallback_hls_cache_stream_channel(0, access.virtual_id, origin_source, proxy_session_id)
     };
@@ -173,6 +177,43 @@ pub(in crate::api::endpoints::hls_api) async fn build_hls_cache_stream_channel(
         channel.epg_reference_ts = None;
     }
     channel
+}
+
+/// Resolves the selected live failover-group member for a shared-cache HLS session.
+///
+/// The shared HLS session is keyed by the member's origin stream id (`origin_source.stream_ref`),
+/// while the entry URL still carries the group VID. Match the member back to its group record so
+/// the registered connection and its history records carry the member identity (input name,
+/// provider id, member VID) exactly like the MPEG-TS group path does.
+async fn hls_cache_live_group_member(
+    app_state: &Arc<AppState>,
+    target: &Arc<crate::model::ConfigTarget>,
+    access: &HlsAccessContext,
+    origin_source: &HlsOriginSource,
+) -> Option<(Arc<FailoverGroupRecord>, GroupMember)> {
+    if origin_source.archive_reference.is_some() {
+        return None;
+    }
+    let classified = classify_virtual_id(
+        &app_state.app_config,
+        &app_state.playlists,
+        target.as_ref(),
+        VirtualId::new(access.virtual_id),
+    )
+    .await;
+    let group = match classified {
+        ResolvedStreamTarget::Group(group) | ResolvedStreamTarget::Member { group, .. } => group,
+        ResolvedStreamTarget::Item => return None,
+    };
+    let member = group
+        .members
+        .iter()
+        .find(|member| {
+            member.input_name.as_ref() == origin_source.input_name.as_ref()
+                && member.input_stream_id.as_ref() == origin_source.stream_ref.as_str()
+        })
+        .cloned()?;
+    Some((group, member))
 }
 
 pub(in crate::api::endpoints::hls_api) fn fallback_hls_cache_stream_channel(

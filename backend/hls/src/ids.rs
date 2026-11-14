@@ -9,6 +9,9 @@ const PROXY_SESSION_ID_KEY_CONTEXT: &str = "tuliprox:hls-cache:proxy-session-id-
 /// `stream_ref` is the immutable input-stream ID captured before target mapping.
 /// Together with `input_id`, it identifies the origin content across targets;
 /// target IDs and virtual IDs must never be used as `stream_ref`.
+///
+/// A live failover-group shared-cache session is keyed by its logical group
+/// instead of by a member: see [`HlsSessionKey::for_group`].
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct HlsSessionKey {
     /// Internal ID of the configured Tuliprox input.
@@ -19,6 +22,13 @@ pub struct HlsSessionKey {
     pub archive_reference: Option<i64>,
     /// Opaque identity of the complete archive request; absent for live playback.
     pub archive_identity: Option<String>,
+    group_identity: Option<HlsGroupSessionIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+struct HlsGroupSessionIdentity {
+    target_id: u16,
+    group_vid: u32,
 }
 
 impl HlsSessionKey {
@@ -27,7 +37,33 @@ impl HlsSessionKey {
     /// Callers must pass the origin/provider ID captured before target mapping, not
     /// a target-specific or virtual ID.
     pub fn new(input_id: u16, stream_ref: impl Into<String>) -> Self {
-        Self { input_id, stream_ref: stream_ref.into(), archive_reference: None, archive_identity: None }
+        Self {
+            input_id,
+            stream_ref: stream_ref.into(),
+            archive_reference: None,
+            archive_identity: None,
+            group_identity: None,
+        }
+    }
+
+    /// Creates the logical-group key of a live failover-group shared-cache session.
+    ///
+    /// The bound member is session state, never part of this key. The group form is
+    /// deliberately disjoint from member/input keys (`input:...`) and archive keys.
+    pub fn for_group(target_id: u16, group_vid: u32) -> Self {
+        Self {
+            input_id: 0,
+            stream_ref: String::new(),
+            archive_reference: None,
+            archive_identity: None,
+            group_identity: Some(HlsGroupSessionIdentity { target_id, group_vid }),
+        }
+    }
+
+    pub const fn is_group_key(&self) -> bool { self.group_identity.is_some() }
+
+    pub fn group_identity(&self) -> Option<(u16, u32)> {
+        self.group_identity.map(|identity| (identity.target_id, identity.group_vid))
     }
 
     pub const fn with_archive_reference(mut self, archive_reference: i64) -> Self {
@@ -41,6 +77,9 @@ impl HlsSessionKey {
     }
 
     pub fn canonical(&self) -> String {
+        if let Some(group) = &self.group_identity {
+            return format!("group:{}|hls|{}", group.target_id, group.group_vid);
+        }
         self.archive_reference.map_or_else(
             || format!("input:{}|hls|{}", self.input_id, self.stream_ref),
             |timestamp| {
@@ -150,5 +189,22 @@ mod tests {
         let key = HlsSessionKey::new(7, "80510");
 
         assert_eq!(build_proxy_session_id(&key, b"0011223344556677").0.len(), 22);
+    }
+
+    #[test]
+    fn group_hls_session_key_never_collides_with_member_or_archive_keys() {
+        let group = HlsSessionKey::for_group(7, 80510);
+        let member = HlsSessionKey::new(7, "80510");
+        let archive =
+            HlsSessionKey::new(7, "80510").with_archive_reference(1_784_898_000).with_archive_identity("first");
+
+        assert_ne!(group, member);
+        assert_ne!(group, archive);
+        assert_ne!(group.stable_value(), member.stable_value());
+        assert_ne!(group.stable_value(), archive.stable_value());
+        assert_eq!(group.stable_value(), "group:7|hls|80510");
+        assert_eq!(group.group_identity(), Some((7, 80510)));
+        assert!(group.is_group_key());
+        assert!(!member.is_group_key());
     }
 }

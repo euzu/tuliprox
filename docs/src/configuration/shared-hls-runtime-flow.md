@@ -302,6 +302,15 @@ Identical origin key URLs therefore cannot inherit cached keys from the previous
 their original mappings and cached bytes; existing resource TTLs and metadata limits still govern retention. Rolling EVENT
 rewrites restart at handoff and preserve the new namespace when appending subsequent manifest lines.
 
+A live failover-group session is keyed by the logical group (target and group channel ID), not by a member; the bound
+member is session state. A member handoff is an account handoff that also replaces the bound member: it releases the old
+member's provider reservation before the next member is selected and probed, installs the new input, stream reference,
+entry URL and account under the same generation fence, and drops the old member's origin request headers. Because a
+different member publishes unrelated media, its first manifest is admitted as a fresh baseline (the provisioning-handoff
+acceptance mode) and starts a new origin epoch with `EXT-X-DISCONTINUITY`; content-anchor equality is not required.
+The HLS workers report manifest, segment/MAP, stall and slow-delivery signals of the bound member after they release the
+session lock; the app adapter applies the group's `failover` budget and runs at most one handoff per session.
+
 Origin account protection uses the first accepted live media manifest as a fixed start anchor, followed by authorized
 media activity. The start freezes `T`: hard-active through `1T`, soft-active through `3T`, provider TTL through `3T + 1s`.
 It is installed under provider capacity serialization before the final manifest allocation is released. Repeated manifests,

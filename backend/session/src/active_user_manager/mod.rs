@@ -1,6 +1,7 @@
 use crate::{
     active_provider_manager::{ConnectionKind, ProviderReleaseSnapshot},
     connection_manager::CleanupEvent,
+    failover_group::FailoverBudget,
     ActiveProviderManager, EventManager,
 };
 use arc_swap::ArcSwapOption;
@@ -132,6 +133,24 @@ impl MemberBinding {
     }
 }
 
+/// Per-user-session timeline rebase state for legacy (non-cache) HLS failover groups. After a
+/// member switch the client media sequence continues monotonically and a discontinuity marks the
+/// switch point; the discontinuity sequence advances once the boundary leaves the window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LegacyHlsRebase {
+    /// Added to the current member's upstream `EXT-X-MEDIA-SEQUENCE` to keep the client timeline
+    /// monotonic across a switch.
+    pub media_sequence_offset: i64,
+    /// Client media sequence of the last served segment; the next member starts at this + 1.
+    pub last_served_sequence: u64,
+    /// `EXT-X-DISCONTINUITY-SEQUENCE` value of the next inserted boundary.
+    pub discontinuity_sequence: u64,
+    /// Client media sequence of the last discontinuity boundary, while it is still in the window.
+    pub discontinuity_boundary_seq: Option<u64>,
+    /// Insert an `EXT-X-DISCONTINUITY` before the first segment of the next manifest serve.
+    pub insert_discontinuity: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct UserSession {
     pub token: String,
@@ -162,6 +181,15 @@ pub struct UserSession {
     pub connection_kind: Option<ConnectionKind>,
     pub lifecycle: PlaybackLifecycle,
     pub member_binding: Option<MemberBinding>,
+    /// Legacy HLS failover-group timeline rebase state, next to `member_binding`.
+    pub legacy_rebase: Option<LegacyHlsRebase>,
+    /// Incident budget for legacy HLS failover-group runtime switches.
+    pub legacy_failover_budget: Option<FailoverBudget>,
+    /// A legacy segment request of the bound member failed hard (404/410/5xx); the next manifest
+    /// refresh switches the member instead of serving it again.
+    pub member_failed_on_segment: bool,
+    /// Single-flight guard for the legacy runtime member switch; one switch per session at a time.
+    pub legacy_switch_in_flight: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

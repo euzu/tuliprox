@@ -65,6 +65,8 @@ mod archive_master;
 mod content_anchor;
 mod critical_handoff;
 mod headers_redirects;
+mod member_handoff;
+mod member_health;
 mod origin_binding;
 mod origin_restart;
 mod origin_telemetry;

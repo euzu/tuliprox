@@ -1,7 +1,7 @@
 use super::{
-    next_session_incarnation, remember_session_addr, ActiveUserManager, CreateUserSessionParams, MemberBinding,
-    PlaybackLifecycle, SessionChangeSignal, SessionIdentity, SocketRegistration, UserConnectionData, UserSession,
-    UserSessionParams,
+    next_session_incarnation, remember_session_addr, ActiveUserManager, CreateUserSessionParams, FailoverBudget,
+    LegacyHlsRebase, MemberBinding, PlaybackLifecycle, SessionChangeSignal, SessionIdentity, SocketRegistration,
+    UserConnectionData, UserSession, UserSessionParams,
 };
 use shared::{
     model::{ActiveUserConnectionChange, EventMessage, UserConnectionPermission},
@@ -41,6 +41,10 @@ impl ActiveUserManager {
             connection_kind: params.connection_kind,
             lifecycle: PlaybackLifecycle::Prepared,
             member_binding: None,
+            legacy_rebase: None,
+            legacy_failover_budget: None,
+            member_failed_on_segment: false,
+            legacy_switch_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -313,6 +317,37 @@ impl ActiveUserManager {
             user_connections
                 .pending_member_bindings
                 .insert(token.to_string(), (Instant::now() + Duration::from_secs(60), binding));
+        }
+    }
+
+    /// Replaces the legacy HLS failover state (timeline rebase, incident budget and the
+    /// segment-failure flag) of a session atomically under the write lock.
+    pub async fn replace_legacy_failover_state(
+        &self,
+        username: &str,
+        token: &str,
+        rebase: Option<LegacyHlsRebase>,
+        budget: Option<FailoverBudget>,
+        member_failed_on_segment: bool,
+    ) {
+        let mut user_connections = self.write_connections().await;
+        if let Some(connection_data) = user_connections.by_key.get_mut(username) {
+            if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
+                session.legacy_rebase = rebase;
+                session.legacy_failover_budget = budget;
+                session.member_failed_on_segment = member_failed_on_segment;
+            }
+        }
+    }
+
+    /// Marks the bound member of a legacy HLS group session failed by a hard segment request, so
+    /// the next manifest refresh switches instead of serving the failed member.
+    pub async fn mark_member_failed_on_segment(&self, username: &str, token: &str) {
+        let mut user_connections = self.write_connections().await;
+        if let Some(connection_data) = user_connections.by_key.get_mut(username) {
+            if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
+                session.member_failed_on_segment = true;
+            }
         }
     }
 }

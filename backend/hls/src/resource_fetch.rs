@@ -309,6 +309,22 @@ impl HlsOriginResourceFetchError {
             || matches!(self, Self::ProviderUnavailable(kind) if kind.is_retryable_resource_failure())
     }
 
+    /// The origin itself failed to deliver the object (status, transport, timeout, broken body).
+    /// Local cache problems, account allocation and superseded work say nothing about the member.
+    pub fn is_origin_delivery_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::PermanentStatus(_)
+                | Self::RetryableStatus(_)
+                | Self::NonRetryableStatus(_)
+                | Self::Transport(_)
+                | Self::Redirect
+                | Self::Timeout
+                | Self::ContentCoding(_)
+                | Self::ContentDecoding(_)
+        )
+    }
+
     pub fn permanent_status(&self) -> Option<StatusCode> {
         match self {
             Self::PermanentStatus(status) | Self::NonRetryableStatus(status) => Some(*status),

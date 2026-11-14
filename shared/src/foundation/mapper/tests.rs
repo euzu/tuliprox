@@ -707,3 +707,97 @@ fn eval_reports_changes_and_statement_failures() {
     assert_eq!(outcome.diagnostics[0].statement, 2);
     assert!(outcome.diagnostics[0].message.contains("has no field missing"));
 }
+
+#[test]
+fn failover_group_assignment_and_empty_string_set_header_field() {
+    let script = r#"@failover_group = "BackupGroup""#;
+    let mapper = MapperScript::parse(script, None).expect("script should parse");
+    let mut item = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+    mapper.eval(&mut accessor, None);
+    assert_eq!(accessor.pli.header.failover_group.as_deref(), Some("BackupGroup"));
+
+    let script_empty = r#"@failover_group = """#;
+    let mapper_empty = MapperScript::parse(script_empty, None).expect("empty assignment should parse");
+    let mut item_empty =
+        PlaylistItem { header: PlaylistItemHeader { failover_group: Some("Previous".intern()), ..Default::default() } };
+    let mut accessor_empty =
+        ValueAccessor { pli: &mut item_empty, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+    mapper_empty.eval(&mut accessor_empty, None);
+    assert_eq!(accessor_empty.pli.header.failover_group.as_deref(), Some(""));
+}
+
+#[test]
+fn failover_group_can_be_read_in_expressions_and_conditions() {
+    let script = r#"
+        @failover_group = "News"
+        @Title = concat(@failover_group, " HD")
+        is_news = @failover_group ~ "(?i)news"
+        mapped = map @failover_group {
+            "News" => "News Channels",
+            _ => "Other",
+        }
+        @Group = mapped
+    "#;
+    let mapper = MapperScript::parse(script, None).expect("script should parse");
+    let mut item = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+    mapper.eval(&mut accessor, None);
+    assert_eq!(accessor.pli.header.failover_group.as_deref(), Some("News"));
+    assert_eq!(accessor.pli.header.title.as_ref(), "News HD");
+    assert_eq!(accessor.pli.header.group.as_ref(), "News Channels");
+}
+
+#[test]
+fn script_mixing_failover_group_with_other_assignments_keeps_all_statements() {
+    let script = r#"
+        @Name = "Channel 1"
+        @failover_group = "MainGroup"
+        @Group = "Entertainment"
+        @Title = "Channel 1 HD"
+    "#;
+    let mapper = MapperScript::parse(script, None).expect("script should parse");
+    assert_eq!(mapper.statements.len(), 4);
+
+    let mut item = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+    let outcome = mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "Channel 1");
+    assert_eq!(accessor.pli.header.failover_group.as_deref(), Some("MainGroup"));
+    assert_eq!(accessor.pli.header.group.as_ref(), "Entertainment");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Channel 1 HD");
+    assert_eq!(outcome.changed_fields.len(), 4);
+    assert_eq!(outcome.diagnostics.len(), 0);
+}
+
+#[test]
+fn read_write_field_order_does_not_shadow_existing_fields() {
+    let fields = [
+        ("failover_group", "fg1"),
+        ("name", "n1"),
+        ("title", "t1"),
+        ("caption", "c1"),
+        ("group", "g1"),
+        ("id", "i1"),
+        ("chno", "10"),
+        ("logo_small", "ls1"),
+        ("logo", "l1"),
+        ("parent_code", "pc1"),
+        ("audio_track", "at1"),
+        ("time_shift", "ts1"),
+        ("rec", "r1"),
+        ("url", "http://example.com/stream"),
+        ("epg_channel_id", "ec1"),
+        ("epg_id", "ei1"),
+        ("genre", "ge1"),
+    ];
+
+    for (field, val) in fields {
+        let script = format!(r#"@{field} = "{val}""#);
+        assert!(MapperScript::parse(&script, None).is_ok(), "failed to parse @{field}");
+    }
+}
