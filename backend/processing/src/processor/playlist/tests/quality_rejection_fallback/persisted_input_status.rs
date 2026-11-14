@@ -570,6 +570,7 @@ async fn playlist_update_status_completion_covers_every_input_type_without_artif
         InputType::Plex,
         InputType::Emby,
         InputType::Jellyfin,
+        InputType::Silo,
         InputType::Staged,
     ]
     .into_iter()

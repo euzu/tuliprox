@@ -219,6 +219,31 @@
 
 ## 🌟 New Features
 
+- **Media-server REST routes and MCP tools.** `GET /api/v1/media-server/{input}/libraries` lists the libraries a
+  Plex, Emby, Jellyfin or Silo input can see, with a `selected` flag, even when the configured selection is stale.
+  `GET /api/v1/media-server/{input}/status` checks the connection, and `POST /api/v1/media-server/{input}/refresh`
+  queues a `normal` or `refresh` update of that input. All answers are redacted, and calls to the server are bounded
+  to 15 seconds (`504`). The MCP server offers them as `list_media_server_libraries`, `get_media_server_status` and
+  `refresh_media_server_input`, and `query_playlist_items` / `list_playlist_sources` now cover the stored catalog of
+  media-server inputs (`video`, `series`). See [MCP](docs/src/operator/mcp.md) and the
+  [REST API cookbook](docs/src/rest-api-cookbook.md).
+
+- **MCP tool results carry `structuredContent` and fuller annotations.** A successful tool result whose body is a
+  complete JSON object is also returned as `structuredContent`; truncated results stay text only. Built-in tools
+  declare `openWorldHint: false`, and the built-in write tools declare `destructiveHint: false`, so MCP clients no
+  longer treat `update_playlists` and `update_geoip` as destructive. See [MCP](docs/src/operator/mcp.md).
+
+- **Silo media server input (`type: silo`).** Import movie and TV libraries directly from the Silo media server
+  via its Jellyfin compatibility listener. Includes automatic user resolution via `GET /Users/Me` for API key
+  authentication, automatic series season synthesis from episode metadata when upstream season listings are omitted,
+  clear error feedback when pointed at Silo's web interface port instead of the compatibility port, and support
+  for direct playback redirects. See [Media server inputs](docs/src/configuration/source.md#27-media-server-inputs-plex-emby-jellyfin-silo).
+
+- **Unified media server block in the source editor.** The source editor now provides a single **Media server**
+  input block instead of separate blocks per server type. A flavor selector chooses between Jellyfin, Emby, Plex,
+  and Silo, showing only the parameters relevant to the selected server and clearing unused fields on switch while
+  keeping existing input configurations intact on save.
+
 - **Smart Match resolves channels by their channel number, not only by name.** A guide channel that publishes
   `<lcn>` now matches the playlist channel stating the same number. The number is read from the tuner stream URL
   (`.../auto/v5.2`) — not from a title, and not from `chno`, which the numbering stage fills with the output position.

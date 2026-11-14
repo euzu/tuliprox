@@ -539,6 +539,17 @@ pub fn media_server_stream_ref_to_internal_url(stream_ref: &MediaServerStreamRef
                     .unwrap_or_default()
             )
         }
+        MediaServerStreamRef::Silo { server_id, item_id, media_source_id, .. } => {
+            format!(
+                "media-server://silo/{}/{}{}",
+                encode_url_path_segment(server_id),
+                encode_url_path_segment(item_id),
+                media_source_id
+                    .as_ref()
+                    .map(|id| format!("?media_source_id={}", encode_url_path_segment(id)))
+                    .unwrap_or_default()
+            )
+        }
         MediaServerStreamRef::Plex { server_id, rating_key, part_key, .. } => format!(
             "media-server://plex/{}/{}?part_key={}",
             encode_url_path_segment(server_id),
@@ -560,6 +571,14 @@ pub fn media_server_image_ref_to_internal_url(image_ref: &MediaServerImageRef) -
         ),
         MediaServerImageRef::Jellyfin { input_name, server_id, item_id, image_kind, tag } => format!(
             "media-server://image/jellyfin/{}/{}/{}?image_kind={}{}",
+            encode_url_path_segment(input_name),
+            encode_url_path_segment(server_id),
+            encode_url_path_segment(item_id),
+            encode_url_path_segment(image_kind),
+            tag.as_ref().map(|tag| format!("&tag={}", encode_url_path_segment(tag))).unwrap_or_default()
+        ),
+        MediaServerImageRef::Silo { input_name, server_id, item_id, image_kind, tag } => format!(
+            "media-server://image/silo/{}/{}/{}?image_kind={}{}",
             encode_url_path_segment(input_name),
             encode_url_path_segment(server_id),
             encode_url_path_segment(item_id),
@@ -611,6 +630,7 @@ mod tests {
             server_id: "server".into(),
             library_id: "shows".into(),
             item_id: "episode".into(),
+            season_id: None,
             series_id: Some("series".into()),
             series_title: Some("Show".into()),
             title: "Episode".into(),

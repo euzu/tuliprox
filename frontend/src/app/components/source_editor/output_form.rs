@@ -25,9 +25,7 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
             BlockType::InputXtream
             | BlockType::InputM3u
             | BlockType::InputLibrary
-            | BlockType::InputEmby
-            | BlockType::InputJellyfin
-            | BlockType::InputPlex
+            | BlockType::InputMediaServer
             | BlockType::InputStalker
             | BlockType::InputStaged
             | BlockType::InputPlugin

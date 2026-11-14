@@ -136,6 +136,7 @@ pub(super) fn media_server_image_input_name(image_ref: &MediaServerImageRef) -> 
     match image_ref {
         MediaServerImageRef::Emby { input_name, .. }
         | MediaServerImageRef::Jellyfin { input_name, .. }
+        | MediaServerImageRef::Silo { input_name, .. }
         | MediaServerImageRef::Plex { input_name, .. } => input_name,
     }
 }

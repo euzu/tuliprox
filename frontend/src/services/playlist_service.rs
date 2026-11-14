@@ -621,6 +621,7 @@ mod tests {
             InputType::Staged,
             InputType::Plex,
             InputType::Jellyfin,
+            InputType::Silo,
             InputType::Emby,
         ] {
             let input = ConfigInputDto { id: 7, input_type, ..ConfigInputDto::default() };
@@ -675,6 +676,7 @@ mod tests {
             InputType::Library,
             InputType::Plex,
             InputType::Jellyfin,
+            InputType::Silo,
             InputType::Emby,
         ] {
             for enabled in [true, false] {

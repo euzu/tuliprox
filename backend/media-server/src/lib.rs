@@ -16,7 +16,10 @@ pub mod playback;
 pub mod playlist_mapper;
 pub mod plex;
 pub mod redaction;
+pub mod silo;
 pub mod types;
+
+pub use silo::{Silo, SiloCatalogClient};
 
 #[cfg(test)]
 pub mod test_fixtures;

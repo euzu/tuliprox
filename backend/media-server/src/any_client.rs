@@ -1,5 +1,5 @@
 use crate::{
-    emby::EmbyCatalogClient, jellyfin::JellyfinCatalogClient, plex::client::PlexCatalogClient,
+    emby::EmbyCatalogClient, jellyfin::JellyfinCatalogClient, plex::client::PlexCatalogClient, silo::SiloCatalogClient,
     MediaServerCatalogClient, MediaServerEpisode, MediaServerError, MediaServerImageRef, MediaServerLibrary,
     MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason,
     MediaServerSeries, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
@@ -13,6 +13,7 @@ pub enum AnyMediaServerCatalogClient {
     Plex(PlexCatalogClient),
     Emby(EmbyCatalogClient),
     Jellyfin(JellyfinCatalogClient),
+    Silo(SiloCatalogClient),
 }
 
 /// Forwards one trait method call to whichever client the enum holds.
@@ -22,6 +23,7 @@ macro_rules! dispatch {
             AnyMediaServerCatalogClient::Plex(client) => client.$method($($arg),*).await,
             AnyMediaServerCatalogClient::Emby(client) => client.$method($($arg),*).await,
             AnyMediaServerCatalogClient::Jellyfin(client) => client.$method($($arg),*).await,
+            AnyMediaServerCatalogClient::Silo(client) => client.$method($($arg),*).await,
         }
     };
 }
@@ -31,6 +33,10 @@ impl MediaServerCatalogClient for AnyMediaServerCatalogClient {
 
     async fn list_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
         dispatch!(self, list_libraries())
+    }
+
+    async fn list_available_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
+        dispatch!(self, list_available_libraries())
     }
 
     async fn list_movies(
@@ -76,6 +82,15 @@ impl MediaServerCatalogClient for AnyMediaServerCatalogClient {
     async fn open_image(&self, image_ref: &MediaServerImageRef) -> Result<MediaServerStreamResponse, MediaServerError> {
         dispatch!(self, open_image(image_ref))
     }
+
+    fn post_process_catalog(&self, snapshot: &mut crate::catalog::MediaServerCatalogSnapshot) {
+        match self {
+            Self::Plex(client) => client.post_process_catalog(snapshot),
+            Self::Emby(client) => client.post_process_catalog(snapshot),
+            Self::Jellyfin(client) => client.post_process_catalog(snapshot),
+            Self::Silo(client) => client.post_process_catalog(snapshot),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -115,7 +130,13 @@ mod tests {
             (
                 "jellyfin",
                 AnyMediaServerCatalogClient::Jellyfin(
-                    JellyfinCatalogClient::new(name, url, &emby_settings(), http()).expect("jellyfin client"),
+                    JellyfinCatalogClient::new(name.clone(), url, &emby_settings(), http()).expect("jellyfin client"),
+                ),
+            ),
+            (
+                "silo",
+                AnyMediaServerCatalogClient::Silo(
+                    SiloCatalogClient::new(name, url, &emby_settings(), http()).expect("silo client"),
                 ),
             ),
         ]
@@ -124,10 +145,11 @@ mod tests {
     fn foreign_stream_ref(provider: &str) -> MediaServerStreamRef {
         let (input_name, server_id, item_id): (Arc<str>, Arc<str>, Arc<str>) =
             (Arc::from(INPUT), Arc::from("server"), Arc::from("item"));
-        // Each client is handed a ref of the next kind in the Plex -> Emby -> Jellyfin cycle.
+        // Each client is handed a ref of the next kind in the Plex -> Emby -> Jellyfin -> Silo cycle.
         match provider {
             "plex" => MediaServerStreamRef::Emby { input_name, server_id, item_id, media_source_id: None },
             "emby" => MediaServerStreamRef::Jellyfin { input_name, server_id, item_id, media_source_id: None },
+            "jellyfin" => MediaServerStreamRef::Silo { input_name, server_id, item_id, media_source_id: None },
             _ => {
                 MediaServerStreamRef::Plex { input_name, server_id, rating_key: item_id, part_key: Arc::from("/part") }
             }

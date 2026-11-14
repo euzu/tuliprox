@@ -103,25 +103,28 @@ The Streamable HTTP transport requires servers to validate the `Origin` header.
 Tools marked **write** are only listed and callable when `read_only: false` and Web UI authentication is enabled.
 The permission column names the permission the REST route requires (see `groups.txt`).
 
-| Tool                         |  Kind | REST route                    | Required permission                                                                               | Arguments                                                                                                                                                                                                     |
-|:-----------------------------|:-----:|:------------------------------|:--------------------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `get_status`                 |  read | `GET /status`                 | `system.read`                                                                                     | none                                                                                                                                                                                                          |
-| `list_active_streams`        |  read | `GET /streams`                | `system.read`                                                                                     | none                                                                                                                                                                                                          |
-| `get_config`                 |  read | `GET /config`                 | any of `config.read`, `source.read`, `user.read`, `user.write`, `playlist.read`, `playlist.write` | none. Secrets are redacted (see 3.4). Filtered by the caller's permissions; can be large.                                                                                                                     |
-| `get_playlist_update_status` |  read | `GET /playlist/update/status` | `playlist.read`                                                                                   | none                                                                                                                                                                                                          |
-| `query_stream_history`       |  read | `GET /stream-history`         | `system.read`                                                                                     | optional `from`, `to` (date `YYYY-MM-DD` or datetime), `page` (integer >= 1), `page_size` (25, 50, 100 or 200), `search`, `search_mode` (`text` or `regex`), `search_field` (list of record fields to search) |
-| `get_stream_history_summary` |  read | `GET /stream-history/summary` | `system.read`                                                                                     | optional `from`, `to`, `provider_name`, `input_name`, `api_username`, `item_type`, `event_type`                                                                                                               |
-| `get_hls_origin_telemetry`   | read  | `GET /hls/origin-telemetry`   | `system.read`                                                                                     | none                                                                                                                                                                                                          |
-| `list_qos_snapshots`         |  read | `GET /qos-snapshots`          | `system.read`                                                                                     | optional `limit` (integer >= 1), `stream_identity_key`, `input_name`, `provider_name`, `item_type`, `target_name`                                                                                             |
-| `get_qos_snapshot`           |  read | `GET /qos-snapshots/{key}`    | `system.read`                                                                                     | required `stream_identity_key`                                                                                                                                                                                |
-| `get_event_stats`            |  read | `GET /events/stats`           | `system.read`                                                                                     | none                                                                                                                                                                                                          |
-| `get_ip_info`                |  read | `GET /ipinfo`                 | `system.read`                                                                                     | none                                                                                                                                                                                                          |
-| `list_playlist_sources`      | read  | `GET /playlist/sources`       | `playlist.read`                                                                                   | none. Lists targets and inputs by name (see 4.1).                                                                                                                                                             |
-| `query_playlist_items`       | read  | `GET /playlist/items`         | `playlist.read`                                                                                   | required `cluster`, exactly one of `target`/`input`; optional paging, filter and field projection (see 4.1).                                                                                                  |
-| `query_target_epg_channels`  | read  | `GET /playlist/epg/channels`  | `playlist.read`                                                                                   | required `target`; optional `output`, paging, `search`, `issue` (see 4.2).                                                                                                                                    |
-| `get_target_epg_channel`     | read  | `GET /playlist/epg/channel`   | `playlist.read`                                                                                   | required `target`, `channel_id`; optional `output`, `from`, `to`, `limit` (see 4.2).                                                                                                                          |
-| `update_playlists`           | write | `POST /playlist/update`       | `playlist.write`                                                                                  | optional `targets` (list of target names; omit or leave empty to update all targets)                                                                                                                          |
-| `update_geoip`               | write | `GET /geoip/update`           | `system.write`                                                                                    | none                                                                                                                                                                                                          |
+| Tool                          |  Kind | REST route                            | Required permission                                                                               | Arguments                                                                                                                                                                                                     |
+|:------------------------------|:-----:|:--------------------------------------|:--------------------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `get_status`                  |  read | `GET /status`                         | `system.read`                                                                                     | none                                                                                                                                                                                                          |
+| `list_active_streams`         |  read | `GET /streams`                        | `system.read`                                                                                     | none                                                                                                                                                                                                          |
+| `get_config`                  |  read | `GET /config`                         | any of `config.read`, `source.read`, `user.read`, `user.write`, `playlist.read`, `playlist.write` | none. Secrets are redacted (see 3.4). Filtered by the caller's permissions; can be large.                                                                                                                     |
+| `get_playlist_update_status`  |  read | `GET /playlist/update/status`         | `playlist.read`                                                                                   | none                                                                                                                                                                                                          |
+| `query_stream_history`        |  read | `GET /stream-history`                 | `system.read`                                                                                     | optional `from`, `to` (date `YYYY-MM-DD` or datetime), `page` (integer >= 1), `page_size` (25, 50, 100 or 200), `search`, `search_mode` (`text` or `regex`), `search_field` (list of record fields to search) |
+| `get_stream_history_summary`  |  read | `GET /stream-history/summary`         | `system.read`                                                                                     | optional `from`, `to`, `provider_name`, `input_name`, `api_username`, `item_type`, `event_type`                                                                                                               |
+| `get_hls_origin_telemetry`    |  read | `GET /hls/origin-telemetry`           | `system.read`                                                                                     | none                                                                                                                                                                                                          |
+| `list_qos_snapshots`          |  read | `GET /qos-snapshots`                  | `system.read`                                                                                     | optional `limit` (integer >= 1), `stream_identity_key`, `input_name`, `provider_name`, `item_type`, `target_name`                                                                                             |
+| `get_qos_snapshot`            |  read | `GET /qos-snapshots/{key}`            | `system.read`                                                                                     | required `stream_identity_key`                                                                                                                                                                                |
+| `get_event_stats`             |  read | `GET /events/stats`                   | `system.read`                                                                                     | none                                                                                                                                                                                                          |
+| `get_ip_info`                 |  read | `GET /ipinfo`                         | `system.read`                                                                                     | none                                                                                                                                                                                                          |
+| `list_playlist_sources`       |  read | `GET /playlist/sources`               | `playlist.read`                                                                                   | none. Lists targets and inputs by name (see 4.1).                                                                                                                                                             |
+| `query_playlist_items`        |  read | `GET /playlist/items`                 | `playlist.read`                                                                                   | required `cluster`, exactly one of `target`/`input`; optional paging, filter and field projection (see 4.1). Media-server inputs are read from their stored catalog.                                          |
+| `list_media_server_libraries` |  read | `GET /media-server/{input}/libraries` | `playlist.read`                                                                                   | required `input` (media-server input name). Contacts the media server once (15 s bound).                                                                                                                      |
+| `get_media_server_status`     |  read | `GET /media-server/{input}/status`    | `playlist.read`                                                                                   | required `input` (media-server input name). Contacts the media server once (15 s bound).                                                                                                                      |
+| `refresh_media_server_input`  | write | `POST /media-server/{input}/refresh`  | `playlist.write`                                                                                  | required `input`, `action` (`normal` or `refresh`). Queues the update, no server traffic during the call.                                                                                                     |
+| `query_target_epg_channels`   |  read | `GET /playlist/epg/channels`          | `playlist.read`                                                                                   | required `target`; optional `output`, paging, `search`, `issue` (see 4.2).                                                                                                                                    |
+| `get_target_epg_channel`      |  read | `GET /playlist/epg/channel`           | `playlist.read`                                                                                   | required `target`, `channel_id`; optional `output`, `from`, `to`, `limit` (see 4.2).                                                                                                                          |
+| `update_playlists`            | write | `POST /playlist/update`               | `playlist.write`                                                                                  | optional `targets` (list of target names; omit or leave empty to update all targets)                                                                                                                          |
+| `update_geoip`                | write | `GET /geoip/update`                   | `system.write`                                                                                    | none                                                                                                                                                                                                          |
 
 Notes:
 
@@ -131,9 +134,16 @@ Notes:
   `reverse_proxy.geoip` to be enabled. Otherwise the REST route answers with an error status that is returned as an
   `isError` result.
 * `update_playlists` queues a playlist update (the REST route answers `202` with a run id). A second request while one
-  is queued answers `409`.
-* The playlist and EPG tools read stored data only and never trigger provider traffic.
+  is queued answers `409`. `refresh_media_server_input` queues the same kind of update for one media-server input and
+  answers `202` with a run id as well.
+* The playlist and EPG tools read stored data only and never trigger provider traffic. `list_media_server_libraries`
+  and `get_media_server_status` are the exception: they contact the configured media server once, bounded by 15
+  seconds (a hanging server answers `504`). `refresh_media_server_input` only queues work.
 * Tools declare `readOnlyHint` in their annotations, so clients can ask for confirmation before calling write tools.
+  Built-in tools also declare `openWorldHint: false` (they act on tuliprox only), and the built-in write tools
+  declare `destructiveHint: false` (none of them deletes data). Plugin write tools keep the MCP defaults.
+* A successful result whose body is a complete JSON object is returned twice: as the `text` block and as
+  `structuredContent`. A truncated result has only the text block with the truncation marker.
 * Only the `tools` capability is implemented. Prompts and resources are not offered.
 
 ### 4.1 Reading stored playlists
@@ -153,10 +163,12 @@ Start with `list_playlist_sources`. It returns the names that the other tools ex
 ```
 
 `clusters` is empty for input types without a stored playlist database (for example `stalker`); `epg.available` tells
-whether the processed EPG database of that output exists.
+whether the processed EPG database of that output exists. Media-server inputs (`plex`, `emby`, `jellyfin`, `silo`)
+report `["video", "series"]`: `video` holds the movies, `series` the series entries.
 
 `query_playlist_items` reads the **stored** records (the same data the Web UI lists) of one target or one input. No
-provider is contacted. Parameters:
+provider is contacted. For a media-server input it reads the stored catalog: `video` lists the movies, `series` the
+series entries (episode rows stay hidden, like for a target). Parameters:
 
 | Parameter        | Meaning                                                                                                                               |
 |:-----------------|:--------------------------------------------------------------------------------------------------------------------------------------|
@@ -256,7 +268,22 @@ answered without a scan slot or opening the database, so repeated `epg_status` q
 Typical debugging flow: `list_playlist_sources`, then `query_playlist_items` with `epg_status=unmatched`, then
 `query_target_epg_channels` with `issue=expired` or `unreferenced`, then `get_target_epg_channel` for a suspicious id.
 
-### 4.3 What is never returned
+### 4.3 Media-server tools
+
+Three tools address one core media-server input by name (from `list_playlist_sources`). Inputs of other types answer
+`400`, unknown names `404`.
+
+* `list_media_server_libraries` contacts the server once and answers `[{id, name, kind, selected}]`. `kind` is
+  `movies`, `tvshows` or `unsupported`; `selected` marks the libraries the input imports, because `list_libraries`
+  returns only the configured selection while the route also reports the libraries visible on the server.
+* `get_media_server_status` contacts the server once and answers `{kind, server_id, name, version, reachable}`. A
+  failure answers an error result with the stable media-server failure kind and its redacted detail.
+* `refresh_media_server_input` queues a playlist update for that input (`normal` reuses a valid cached catalog,
+  `refresh` bypasses it) and answers `202` with a run id. Progress is read with `get_playlist_update_status`.
+
+No token, password or URL is returned by any of them.
+
+### 4.4 What is never returned
 
 * The provider `url` of a record is not selectable and never returned; Xtream provider URLs carry credentials in their
   path, which the generic redaction cannot detect.

@@ -149,6 +149,18 @@ pub trait EmbyFamilyFlavor: sealed::Sealed + Send + Sync + 'static {
 
     /// Endpoint listing the libraries visible to a user and how it is scoped to the user.
     fn user_views_path(user_id: &str) -> EmbyEndpoint<'_>;
+
+    /// Whether an API-key/token connection without a configured `user_id` resolves the user via `GET /Users/Me`.
+    const RESOLVES_USER_VIA_USERS_ME: bool = false;
+
+    /// Whether this server kind supports the admin-only `/Library/VirtualFolders` endpoint when no user is known.
+    const SUPPORTS_VIRTUAL_FOLDERS: bool = true;
+
+    /// Appended to a failed discovery (error status or undecodable body), e.g. to name the right port.
+    const DISCOVERY_HINT: Option<&'static str> = None;
+
+    /// Post-processes the catalog snapshot after movies, series, seasons, and episodes have been loaded.
+    fn post_process_catalog(snapshot: &mut crate::catalog::MediaServerCatalogSnapshot) { let _ = snapshot; }
 }
 
 pub(crate) mod sealed {

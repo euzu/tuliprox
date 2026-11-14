@@ -32,6 +32,7 @@ use tuliprox_media_server::{
     emby::{client::EmbyClientSettings, EmbyCatalogClient},
     jellyfin::JellyfinCatalogClient,
     plex::client::{PlexCatalogClient, PlexClientSettings},
+    silo::SiloCatalogClient,
     AnyMediaServerCatalogClient, MediaServerError, MediaServerErrorKind, MediaServerHttpClient,
 };
 use url::Url;
@@ -267,6 +268,15 @@ impl ConfigInput {
             InputType::Jellyfin => {
                 let settings = self.emby_client_settings(self.media_server_config("jellyfin")?);
                 Ok(AnyMediaServerCatalogClient::Jellyfin(JellyfinCatalogClient::new(
+                    self.name.clone(),
+                    self.url.as_str(),
+                    &settings,
+                    http,
+                )?))
+            }
+            InputType::Silo => {
+                let settings = self.emby_client_settings(self.media_server_config("silo")?);
+                Ok(AnyMediaServerCatalogClient::Silo(SiloCatalogClient::new(
                     self.name.clone(),
                     self.url.as_str(),
                     &settings,
@@ -801,7 +811,7 @@ impl ConfigInput {
         media_server: &MediaServerInputConfig,
     ) -> Result<(), TuliproxError> {
         match self.input_type {
-            InputType::Emby | InputType::Jellyfin => {
+            InputType::Emby | InputType::Jellyfin | InputType::Silo => {
                 if trimmed_url.is_empty() {
                     return Err(TuliproxError::ConfigInput(format!(
                         "url is mandatory for input type {} (input: {})",
@@ -1386,6 +1396,9 @@ mod tests {
         let jellyfin =
             media_server_input(InputType::Jellyfin, "http://jf.example.invalid:8096", with(None, Some("key")));
         assert!(matches!(jellyfin.media_server_catalog_client(http()), Ok(AnyMediaServerCatalogClient::Jellyfin(_))));
+
+        let silo = media_server_input(InputType::Silo, "http://silo.example.invalid:8096", with(None, Some("key")));
+        assert!(matches!(silo.media_server_catalog_client(http()), Ok(AnyMediaServerCatalogClient::Silo(_))));
     }
 
     #[test]
@@ -1403,9 +1416,12 @@ mod tests {
 
     #[test]
     fn media_server_catalog_client_requires_media_server_block() {
-        for (input_type, provider) in
-            [(InputType::Plex, "plex"), (InputType::Emby, "emby"), (InputType::Jellyfin, "jellyfin")]
-        {
+        for (input_type, provider) in [
+            (InputType::Plex, "plex"),
+            (InputType::Emby, "emby"),
+            (InputType::Jellyfin, "jellyfin"),
+            (InputType::Silo, "silo"),
+        ] {
             let input = media_server_input(input_type, "http://ms.example.invalid", None);
 
             let err = input

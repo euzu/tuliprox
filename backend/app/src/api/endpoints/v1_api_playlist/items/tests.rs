@@ -1,8 +1,8 @@
 use super::{
-    cluster_name, collect_page, drain_records, field_value, parse_cluster, project, read_stored,
-    sanitized_additional_properties, skipped_records_note, visible_in_target_listing, EpgLookup, EpgStatus, ItemField,
-    ItemFilter, ItemRow, ItemSearchField, ItemsQuery, ItemsResponse, SourceName, StoredPlaylistRecord,
-    ValidatedItemsQuery, DEFAULT_ITEM_FIELDS, DEFAULT_SEARCH_FIELDS, NO_STORED_PLAYLIST_NOTE,
+    cluster_name, collect_page, drain_records, field_value, parse_cluster, project, read_stored, run_items_query,
+    sanitized_additional_properties, skipped_records_note, summarize_input, visible_in_target_listing, EpgLookup,
+    EpgStatus, ItemField, ItemFilter, ItemRow, ItemSearchField, ItemsQuery, ItemsResponse, SourceName,
+    StoredPlaylistRecord, ValidatedItemsQuery, DEFAULT_ITEM_FIELDS, DEFAULT_SEARCH_FIELDS, NO_STORED_PLAYLIST_NOTE,
 };
 use crate::{
     api::endpoints::v1_api_playlist::inspect_common::{CaseInsensitiveNeedle, PageWindow},
@@ -15,7 +15,7 @@ use shared::{
     model::{
         CatchupAttribute, CatchupProperties, EpisodeStreamProperties, InputType, LiveStreamProperties, M3uPlaylistItem,
         PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamProperties,
-        StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, VirtualId, XtreamCluster,
+        StreamProperties, UUIDType, VideoStreamDetailProperties, VideoStreamProperties, VirtualId, XtreamCluster,
         XtreamPlaylistItem,
     },
     utils::{extract_id_from_url, Internable},
@@ -1074,4 +1074,105 @@ fn search_by_override_id_is_exact() {
     // Without the alias map the field cannot match anything.
     let filter = ItemFilter { needle: Some(&exact), search_fields: &by_override_id, ..no_filter() };
     assert!(!filter.matches(&xtream_item(1, 1042, "n", "g", None)));
+}
+
+fn media_server_record(
+    virtual_id: u32,
+    name: &str,
+    group: &str,
+    cluster: XtreamCluster,
+    item_type: PlaylistItemType,
+) -> XtreamPlaylistItem {
+    let mut item = xtream_item(virtual_id, virtual_id, name, group, None);
+    item.xtream_cluster = cluster;
+    item.item_type = item_type;
+    item
+}
+
+/// Persists a media-server catalog the way the processor does: one UUID-keyed
+/// `XtreamPlaylistItem` database in the input's storage directory.
+async fn seed_media_server_playlist(
+    app_state: &Arc<crate::api::model::AppState>,
+    input: &ConfigInput,
+    records: Vec<(UUIDType, XtreamPlaylistItem)>,
+) -> std::path::PathBuf {
+    let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+    let storage = crate::repository::get_input_storage_path(&input.name, &storage_dir).await.expect("storage dir");
+    let path = crate::repository::get_input_media_server_playlist_file_path(&storage, &input.name);
+    let mut tree = crate::repository::BPlusTree::<UUIDType, XtreamPlaylistItem>::new();
+    for (uuid, record) in records {
+        tree.insert(uuid, record);
+    }
+    tree.store(&path).expect("media-server catalog is written");
+    path
+}
+
+#[tokio::test]
+async fn media_server_input_is_queried_from_its_stored_catalog() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let storage_dir = temp.path().join("storage");
+    std::fs::create_dir_all(&storage_dir).expect("storage dir");
+    let config = crate::model::Config {
+        storage_dir: storage_dir.to_string_lossy().into_owned(),
+        ..crate::model::Config::default()
+    };
+    let app_state = crate::api::model::create_test_app_state(config);
+    let input = ConfigInput {
+        id: 4,
+        name: "ms_input".into(),
+        input_type: InputType::Jellyfin,
+        url: "http://127.0.0.1:1".into(),
+        enabled: true,
+        ..ConfigInput::default()
+    };
+    let sources =
+        crate::model::SourcesConfig { inputs: vec![Arc::new(input.clone())], ..crate::model::SourcesConfig::default() };
+    app_state.app_config.sources.store(Arc::new(sources));
+
+    let uuid = |suffix: u8| UUIDType::from_valid_uuid(&format!("00000000-0000-4000-8000-0000000000{suffix:02}"));
+    seed_media_server_playlist(
+        &app_state,
+        &input,
+        vec![
+            (uuid(1), media_server_record(100, "Movie A", "Movies", XtreamCluster::Video, PlaylistItemType::Video)),
+            (uuid(2), media_server_record(200, "Show B", "Shows", XtreamCluster::Series, PlaylistItemType::SeriesInfo)),
+            (
+                uuid(3),
+                media_server_record(201, "Show B S01E01", "Shows", XtreamCluster::Series, PlaylistItemType::Series),
+            ),
+        ],
+    )
+    .await;
+
+    let query = |cluster: &str| ItemsQuery {
+        input: Some("ms_input".to_string()),
+        cluster: Some(cluster.to_string()),
+        ..ItemsQuery::default()
+    };
+
+    let videos = run_items_query(&app_state, query("video")).await.expect("video query");
+    assert_eq!(videos["cluster"], "video");
+    assert_eq!(videos["total_matched"], 1);
+    assert_eq!(videos["items"][0]["name"], "Movie A");
+
+    let series = run_items_query(&app_state, query("series")).await.expect("series query");
+    assert_eq!(series["cluster"], "series");
+    assert_eq!(series["total_matched"], 1, "episode rows stay hidden like in the target listing");
+    assert_eq!(series["items"][0]["name"], "Show B");
+
+    let live = run_items_query(&app_state, query("live")).await.expect("live query");
+    assert_eq!(live["total_matched"], 0, "a media-server catalog has no live channels");
+}
+
+#[test]
+fn summarize_input_reports_media_server_clusters() {
+    let media_server =
+        ConfigInput { name: "ms_input".into(), input_type: InputType::Jellyfin, ..ConfigInput::default() };
+    assert_eq!(summarize_input(&media_server).clusters, ["video", "series"]);
+
+    let m3u = ConfigInput { name: "m3u".into(), input_type: InputType::M3u, ..ConfigInput::default() };
+    assert_eq!(summarize_input(&m3u).clusters, ["live", "video", "series"]);
+
+    let plugin = ConfigInput { name: "plugin".into(), input_type: InputType::Plugin, ..ConfigInput::default() };
+    assert_eq!(summarize_input(&plugin).clusters.len(), 0);
 }

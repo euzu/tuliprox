@@ -347,7 +347,8 @@ mod tests {
                 input(9, "library", InputType::Library),
                 input(10, "plex", InputType::Plex),
                 input(11, "jellyfin", InputType::Jellyfin),
-                input(12, "emby", InputType::Emby),
+                input(12, "silo", InputType::Silo),
+                input(13, "emby", InputType::Emby),
             ],
             sources: Vec::new(),
             ..SourcesConfigDto::default()
@@ -359,7 +360,7 @@ mod tests {
 
         let cards = build_input_update_card_models(&sources, &PlaylistUpdateStatusDto::default());
 
-        assert_eq!(cards.iter().map(|card| card.input_id).collect::<Vec<_>>(), (1..=12).collect::<Vec<_>>());
+        assert_eq!(cards.iter().map(|card| card.input_id).collect::<Vec<_>>(), (1..=13).collect::<Vec<_>>());
         assert_eq!(cards[1].capabilities, InputUpdateCapabilities::Disabled);
         for card in &cards {
             assert_eq!(card.targets.iter().map(|target| target.id).collect::<Vec<_>>(), vec![2, 1]);
@@ -374,7 +375,7 @@ mod tests {
                 .filter(|card| card.capabilities.supports(InputRefreshPolicy::NORMAL))
                 .map(|card| card.input_id)
                 .collect::<Vec<_>>(),
-            vec![1, 3, 4, 5, 6, 7, 10, 11, 12]
+            vec![1, 3, 4, 5, 6, 7, 10, 11, 12, 13]
         );
     }
 

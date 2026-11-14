@@ -171,7 +171,9 @@ async fn playlist_download_from_input<E: EventSink, P: PluginHost>(
             StalkerProvider::new(stalker_refresh_mode, !config.disk_based_processing).fetch(&request).await
         }
         InputType::Library => LibraryProvider.fetch(&request).await,
-        InputType::Plex | InputType::Emby | InputType::Jellyfin => MediaServerProvider.fetch(&request).await,
+        InputType::Plex | InputType::Emby | InputType::Jellyfin | InputType::Silo => {
+            MediaServerProvider.fetch(&request).await
+        }
         InputType::Plugin => plugin_playlist_fetch(plugins, input).await,
         InputType::Staged => {
             UnsupportedProvider::new(

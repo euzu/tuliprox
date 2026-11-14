@@ -44,6 +44,8 @@ Debug EPG: query_playlist_items with epg_status=unmatched (or missing_id) finds 
 database; query_target_epg_channels with issue=unreferenced, expired, no_programmes, not_current or no_title finds broken \
 EPG channels; get_target_epg_channel shows the programmes of one channel. An empty EPG result with a `note` means no \
 EPG data exists, not that everything is fine.
+Media servers (plex, emby, jellyfin, silo): list_media_server_libraries and get_media_server_status contact the \
+server once; refresh_media_server_input only queues an update. query_playlist_items reads their stored catalog.
 The server is read-only by default; update tools are listed only when write access is enabled.";
 
 const PARSE_ERROR: i32 = -32700;
@@ -263,10 +265,23 @@ fn tools_list(view: &ToolView, read_only: bool) -> Vec<Value> {
                 "name": tool.name(),
                 "description": tool.description(),
                 "inputSchema": tool.schema(),
-                "annotations": { "readOnlyHint": tool.kind() == McpToolKind::Read },
+                "annotations": tool_annotations(&tool),
             })
         })
         .collect()
+}
+
+/// MCP tool annotations. The spec defaults a non-read-only tool to destructive
+/// and every tool to open-world, so both are stated where they are known: a
+/// built-in tool only acts on tuliprox itself and none of them deletes data.
+/// A plugin's write tool keeps the spec defaults.
+fn tool_annotations(tool: &McpToolRef<'_>) -> Value {
+    let read_only = tool.kind() == McpToolKind::Read;
+    match tool {
+        McpToolRef::Builtin(_) if read_only => json!({ "readOnlyHint": true, "openWorldHint": false }),
+        McpToolRef::Builtin(_) => json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }),
+        McpToolRef::Plugin(_) => json!({ "readOnlyHint": read_only }),
+    }
 }
 
 /// `Err` is a JSON-RPC protocol error (-32602); everything the REST route
@@ -352,7 +367,13 @@ async fn call_tool_in(
         String::new()
     };
     let mut result = if status.is_success() {
-        tool_result(false, &text)
+        let mut result = tool_result(false, &text);
+        // A complete JSON object answer is also given as `structuredContent`; a
+        // truncated answer carries a marker and no longer parses.
+        if let Ok(object @ Value::Object(_)) = serde_json::from_str::<Value>(&text) {
+            result["structuredContent"] = object;
+        }
+        result
     } else {
         let mut message = if text.is_empty() { format!("HTTP {status}") } else { format!("HTTP {status}: {text}") };
         if let Some(seconds) = retry_after {
@@ -1242,7 +1263,7 @@ mod tests {
         let instructions = reply["result"]["instructions"].as_str().expect("instructions");
         assert_eq!(instructions, MCP_INSTRUCTIONS);
         assert_ne!(instructions.trim(), "");
-        assert!(instructions.len() <= 1300, "instructions are too long: {}", instructions.len());
+        assert!(instructions.len() <= 1500, "instructions are too long: {}", instructions.len());
     }
 
     #[test]
@@ -1752,6 +1773,17 @@ mod tests {
         let (_, reply) = post(&router, &call("get_status", json!({})), &[]).await;
         assert_eq!(reply["result"]["isError"], false);
         assert!(tool_text(&reply).contains("[truncated: response exceeded 16 bytes]"), "{}", tool_text(&reply));
+        assert!(reply["result"].get("structuredContent").is_none(), "a truncated answer has no structured copy");
+    }
+
+    #[tokio::test]
+    async fn a_json_object_result_is_also_structured_content() {
+        let router = mcp_router(config_with_mcp(false, enabled(true)));
+        let (_, reply) = post(&router, &call("get_status", json!({})), &[]).await;
+        assert_eq!(reply["result"]["isError"], false);
+        let text: Value = serde_json::from_str(tool_text(&reply)).expect("status is JSON");
+        assert!(text.is_object());
+        assert_eq!(reply["result"]["structuredContent"], text);
     }
 
     #[tokio::test]
@@ -1935,6 +1967,14 @@ mod tests {
         assert_eq!(ping["annotations"]["readOnlyHint"], true);
         let reset = list.iter().find(|tool| tool["name"] == "plugin_demo_reset").expect("listed");
         assert_eq!(reset["annotations"]["readOnlyHint"], false);
+        assert!(reset["annotations"].get("destructiveHint").is_none(), "plugin writes keep the spec default");
+        let status = list.iter().find(|tool| tool["name"] == "get_status").expect("listed");
+        assert_eq!(status["annotations"], json!({ "readOnlyHint": true, "openWorldHint": false }));
+        let update = list.iter().find(|tool| tool["name"] == "update_playlists").expect("listed");
+        assert_eq!(
+            update["annotations"],
+            json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false })
+        );
         assert!(listed(&view, false).contains(&"get_status".to_string()));
     }
 
@@ -2143,5 +2183,110 @@ mod tests {
         // A body that is not an rpc error (a permission layer's) is not forwarded.
         let reply = call_plugin(&state, &view, "plugin_demo_denied", json!({})).await.unwrap();
         assert_eq!(result_text(&reply), "HTTP 403 Forbidden");
+    }
+    #[test]
+    fn media_server_tools_are_listed_with_schemas_and_annotations() {
+        let view = ToolView::default();
+        let list = tools_list(&view, false);
+        let find = |name: &str| list.iter().find(|tool| tool["name"] == name).expect("listed");
+
+        for name in ["list_media_server_libraries", "get_media_server_status"] {
+            let tool = find(name);
+            assert_eq!(tool["inputSchema"]["properties"]["input"]["type"], "string", "{name}");
+            assert_eq!(tool["inputSchema"]["required"], json!(["input"]), "{name}");
+            assert_eq!(tool["annotations"], json!({ "readOnlyHint": true, "openWorldHint": false }), "{name}");
+        }
+
+        let refresh = find("refresh_media_server_input");
+        assert_eq!(refresh["inputSchema"]["properties"]["action"]["enum"], json!(["normal", "refresh"]));
+        assert_eq!(refresh["inputSchema"]["required"], json!(["input", "action"]));
+        assert_eq!(
+            refresh["annotations"],
+            json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false })
+        );
+        assert_eq!(tool("refresh_media_server_input").path, "/media-server/{input}/refresh");
+
+        let read_only = listed(&view, true);
+        assert!(read_only.contains(&"list_media_server_libraries".to_string()));
+        assert!(read_only.contains(&"get_media_server_status".to_string()));
+        assert!(!read_only.contains(&"refresh_media_server_input".to_string()));
+    }
+
+    #[tokio::test]
+    async fn media_server_read_tools_reach_their_routes() {
+        use crate::api::endpoints::media_server_api::test_support::{
+            app_state_with_inputs, emby_input, start_emby_server, EMBY_TOKEN,
+        };
+        let (base_url, server) = start_emby_server().await;
+        let app_state = app_state_with_inputs(vec![emby_input("emby_input", 1, base_url)]);
+        let dto = shared::model::McpConfigDto { enabled: true, ..Default::default() };
+        let v1 = v1_api_register(false, &app_state, "").with_state(Arc::clone(&app_state));
+        let state = McpState::new(v1, &McpConfig::from(dto), true, "", Arc::clone(&app_state));
+        let view = state.tool_view().await;
+
+        let call_media = |name: &str| {
+            let params = json!({ "name": name, "arguments": { "input": "emby_input" } });
+            let state = &state;
+            let view = &view;
+            async move { call_tool_in(state, view, &HeaderMap::new(), Some(&params)).await }
+        };
+
+        let reply = call_media("list_media_server_libraries").await.expect("tool result");
+        assert_eq!(reply["isError"], false, "{reply}");
+        let libraries: Value = serde_json::from_str(result_text(&reply)).expect("library list");
+        assert_eq!(libraries[0]["id"], "lib-movies");
+        assert_eq!(libraries[0]["selected"], true);
+        assert_eq!(libraries[1]["id"], "lib-tv");
+        assert_eq!(libraries[1]["selected"], false);
+        assert!(!result_text(&reply).contains(EMBY_TOKEN));
+
+        let reply = call_media("get_media_server_status").await.expect("tool result");
+        assert_eq!(reply["isError"], false, "{reply}");
+        assert_eq!(reply["structuredContent"]["kind"], "emby");
+        assert_eq!(reply["structuredContent"]["server_id"], "server-1");
+        assert_eq!(reply["structuredContent"]["reachable"], true);
+
+        let params = json!({ "name": "refresh_media_server_input", "arguments": { "input": "emby_input", "action": "refresh" } });
+        let err = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params)).await.expect_err("read-only");
+        assert!(err.contains("read-only"), "{err}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_media_server_input_reaches_the_refresh_route() {
+        use crate::{
+            api::{
+                endpoints::media_server_api::test_support::config_input,
+                model::create_test_app_state_with_manual_update_sender,
+            },
+            model::SourcesConfig,
+        };
+        use shared::model::{InputRefreshPolicy, InputType};
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let dto = shared::model::McpConfigDto { enabled: true, read_only: false, ..Default::default() };
+        let config = Config { mcp: Some(McpConfig::from(dto.clone())), ..Config::default() };
+        let app_state = create_test_app_state_with_manual_update_sender(config, sender);
+        let sources = SourcesConfig {
+            inputs: vec![Arc::new(config_input("emby_input", 9, InputType::Emby, "http://127.0.0.1:1".into()))],
+            ..SourcesConfig::default()
+        };
+        app_state.app_config.sources.store(Arc::new(sources));
+        let v1 = v1_api_register(false, &app_state, "").with_state(Arc::clone(&app_state));
+        let state = McpState::new(v1, &McpConfig::from(dto), false, "", Arc::clone(&app_state));
+        let view = state.tool_view().await;
+
+        let params = json!({ "name": "refresh_media_server_input", "arguments": { "input": "emby_input", "action": "refresh" } });
+        let reply = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params)).await.expect("tool result");
+
+        assert_eq!(reply["isError"], false, "{reply}");
+        assert!(reply["structuredContent"]["run_id"].is_string(), "{reply}");
+        let request = receiver.try_recv().expect("the refresh was queued");
+        assert_eq!(
+            request.input_action,
+            Some(shared::model::InputUpdateRequest {
+                input_id: 9,
+                action: shared::model::InputUpdateAction::Provider(InputRefreshPolicy::REFRESH)
+            })
+        );
     }
 }

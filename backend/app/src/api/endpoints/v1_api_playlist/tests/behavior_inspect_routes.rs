@@ -330,7 +330,7 @@ async fn items_unknown_source_is_404_and_stalker_input_is_400() {
 
     let (status, body) = fixture.get("/playlist/items?input=stalker-input&cluster=live").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("only xtream and m3u inputs"), "{body}");
+    assert!(body["error"].as_str().unwrap().contains("only xtream, m3u and media-server inputs"), "{body}");
 }
 
 #[tokio::test]

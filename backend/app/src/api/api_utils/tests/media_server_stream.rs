@@ -97,3 +97,83 @@ async fn emby_stream_forwards_range_and_strips_credentials_from_the_response() {
     assert!(stream_request.contains("range: bytes=4-14"), "{stream_request}");
     assert!(stream_request.contains("x-emby-token: emby-secret"), "{stream_request}");
 }
+
+#[tokio::test]
+async fn media_server_stream_follows_307_redirect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("test server binds");
+    let addr = listener.local_addr().expect("test server address");
+    let task = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for _ in 0..4 {
+            let Ok((mut socket, _)) = listener.accept().await else { break };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 1024];
+                let Ok(read) = socket.read(&mut chunk).await else { break };
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let req_str = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            let response = if req_str.starts_with("get /system/info/public") {
+                let body = r#"{"Id":"server-1","ServerName":"Mock"}"#;
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            } else if req_str.starts_with("get /users/me") {
+                let body = r#"{"Id":"user-1","Name":"Admin"}"#;
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            } else if req_str.starts_with("get /videos/item-1/stream") {
+                format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{addr}/redirected-stream\r\nConnection: close\r\n\r\n"
+                )
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    MEDIA_BODY.len(),
+                    String::from_utf8_lossy(MEDIA_BODY)
+                )
+            };
+            requests.push(req_str);
+            socket.write_all(response.as_bytes()).await.expect("test server writes response");
+        }
+        requests
+    });
+
+    let app_state = create_test_app_state();
+    let media_server = MediaServerInputConfig::from(&MediaServerInputConfigDto {
+        token: Some("silo-secret".to_string()),
+        libraries: vec![MediaServerLibrarySelector::Name("Movies".to_string())],
+        ..MediaServerInputConfigDto::default()
+    });
+    let input = ConfigInput {
+        name: "silo_input".into(),
+        input_type: InputType::Silo,
+        url: format!("http://{addr}"),
+        media_server: Some(media_server),
+        enabled: true,
+        ..ConfigInput::default()
+    };
+    let request_headers = HeaderMap::new();
+
+    let (stream, info) =
+        open_media_server_stream_for_input(&app_state, &input, "media-server://silo/server-1/item-1", &request_headers)
+            .await
+            .expect("silo stream opens following redirect");
+
+    let (_, status, _, _) = info.expect("response info is present");
+    assert_eq!(status, StatusCode::OK);
+    let body: Vec<u8> = stream.map(|chunk| chunk.expect("stream chunk").to_vec()).concat().await;
+    assert_eq!(body, MEDIA_BODY);
+
+    let requests = task.await.expect("test server finishes");
+    assert_eq!(requests.len(), 4);
+    assert!(requests[1].starts_with("get /users/me"));
+    assert!(requests[2].starts_with("get /videos/item-1/stream"));
+    assert!(requests[3].starts_with("get /redirected-stream"));
+}

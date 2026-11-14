@@ -10,6 +10,7 @@ pub enum MediaServerKind {
     Emby,
     Jellyfin,
     Plex,
+    Silo,
 }
 
 impl MediaServerKind {
@@ -18,6 +19,7 @@ impl MediaServerKind {
             Self::Emby => InputType::Emby,
             Self::Jellyfin => InputType::Jellyfin,
             Self::Plex => InputType::Plex,
+            Self::Silo => InputType::Silo,
         }
     }
 }
@@ -30,6 +32,7 @@ impl TryFrom<InputType> for MediaServerKind {
             InputType::Emby => Ok(Self::Emby),
             InputType::Jellyfin => Ok(Self::Jellyfin),
             InputType::Plex => Ok(Self::Plex),
+            InputType::Silo => Ok(Self::Silo),
             InputType::M3u
             | InputType::Xtream
             | InputType::M3uBatch
@@ -251,6 +254,7 @@ pub struct MediaServerEpisode {
     pub server_id: Arc<str>,
     pub library_id: Arc<str>,
     pub item_id: Arc<str>,
+    pub season_id: Option<Arc<str>>,
     pub series_id: Option<Arc<str>>,
     pub series_title: Option<Arc<str>>,
     pub title: Arc<str>,
@@ -270,6 +274,7 @@ pub enum MediaServerStreamRef {
     Emby { input_name: Arc<str>, server_id: Arc<str>, item_id: Arc<str>, media_source_id: Option<Arc<str>> },
     Jellyfin { input_name: Arc<str>, server_id: Arc<str>, item_id: Arc<str>, media_source_id: Option<Arc<str>> },
     Plex { input_name: Arc<str>, server_id: Arc<str>, rating_key: Arc<str>, part_key: Arc<str> },
+    Silo { input_name: Arc<str>, server_id: Arc<str>, item_id: Arc<str>, media_source_id: Option<Arc<str>> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +298,13 @@ pub enum MediaServerImageRef {
         server_id: Arc<str>,
         rating_key: Arc<str>,
         image_path: Arc<str>,
+    },
+    Silo {
+        input_name: Arc<str>,
+        server_id: Arc<str>,
+        item_id: Arc<str>,
+        image_kind: Arc<str>,
+        tag: Option<Arc<str>>,
     },
 }
 

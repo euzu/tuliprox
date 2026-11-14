@@ -540,7 +540,7 @@ fn task_needs_provider_connection_skips_media_server_probe_stream() {
         delay: 0,
     };
 
-    for input_type in [InputType::Emby, InputType::Jellyfin, InputType::Plex] {
+    for input_type in [InputType::Emby, InputType::Jellyfin, InputType::Silo, InputType::Plex] {
         assert!(!InputWorker::task_needs_provider_connection(&task, input_type));
     }
     assert!(InputWorker::task_needs_provider_connection(&task, InputType::M3u));

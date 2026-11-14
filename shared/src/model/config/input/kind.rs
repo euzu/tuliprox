@@ -33,6 +33,7 @@ pub enum InputType {
     Emby,
     Jellyfin,
     Plex,
+    Silo,
     Staged,
     /// Provided by a plugin: `type: plugin` plus `plugin: <id>` (plan §18 Q6).
     ///
@@ -88,7 +89,7 @@ impl InputType {
         )
     }
     pub fn is_library(&self) -> bool { matches!(self, Self::Library) }
-    pub fn is_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
+    pub fn is_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex | Self::Silo) }
     pub fn is_batch(&self) -> bool { matches!(self, Self::M3uBatch | Self::XtreamBatch | Self::StalkerBatch) }
     pub fn is_staged(&self) -> bool { matches!(self, Self::Staged) }
     pub fn is_plugin(&self) -> bool { matches!(self, Self::Plugin) }
@@ -123,7 +124,7 @@ impl InputType {
                 requires_provider_connection_for_probe: false,
                 served_on_custom_provider_endpoint: false,
             },
-            Self::Emby | Self::Jellyfin | Self::Plex => InputCapabilities {
+            Self::Emby | Self::Jellyfin | Self::Plex | Self::Silo => InputCapabilities {
                 persistence: InputPersistence::MediaServer,
                 requires_provider_connection_for_probe: false,
                 served_on_custom_provider_endpoint: false,
@@ -199,4 +200,24 @@ pub enum InputFetchMethod {
 
 impl InputFetchMethod {
     pub fn is_default(value: &InputFetchMethod) -> bool { matches!(value, Self::GET) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_type_silo_roundtrips_json_and_yaml() {
+        assert_eq!(serde_json::to_string(&InputType::Silo).unwrap(), "\"silo\"");
+        assert_eq!(serde_json::from_str::<InputType>("\"silo\"").unwrap(), InputType::Silo);
+
+        assert_eq!(serde_saphyr::to_string(&InputType::Silo).unwrap().trim(), "silo");
+        assert_eq!(serde_saphyr::from_str::<InputType>("silo").unwrap(), InputType::Silo);
+
+        assert!(InputType::Silo.is_media_server());
+        assert_eq!(InputType::Silo.persistence(), InputPersistence::MediaServer);
+        let caps = InputType::Silo.capabilities();
+        assert!(!caps.requires_provider_connection_for_probe);
+        assert!(!caps.served_on_custom_provider_endpoint);
+    }
 }

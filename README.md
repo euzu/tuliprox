@@ -40,7 +40,7 @@ Tuliprox is built for more than playlist conversion. It is designed to become th
 
 | Area           | What Tuliprox gives you                                                                                      |
 |----------------|--------------------------------------------------------------------------------------------------------------|
-| **Inputs**     | Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, local libraries, staged sources                    |
+| **Inputs**     | Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, Silo, local libraries, staged sources              |
 | **Outputs**    | M3U/M3U8, Xtream Codes API, HDHomeRun, STRM                                                                  |
 | **Processing** | Filtering, mapping DSL, sorting, templates, EPG matching, metadata enrichment, curation                      |
 | **Streaming**  | Reverse proxy, redirects, shared MPEG-TS/HLS, HLS cache/prefetch, catchup proxying, failover                 |
@@ -76,7 +76,7 @@ Use different upstream technologies without forcing every downstream player to u
 - **M3U/M3U8** — remote or local playlists with headers, credentials, EPG sources, and CSV batch inputs
 - **Stalker & Ministra** — full portal catalogs with MAC, credential or combined authentication, configurable MAG profiles,  
   `create_link` playback resolution, resumable refreshes, and per-alias configuration
-- **Plex, Emby & Jellyfin** — import selected movie and TV libraries, each as its own category, and resolve protected playback  
+- **Plex, Emby, Jellyfin & Silo** — import selected movie and TV libraries, each as its own category, and resolve protected playback  
   and artwork through Tuliprox
 - **Local Media Library** — scan movies and series from disk and enrich them with NFO or TMDB metadata
 - **Staged Sources** — overlay a prepared Live, VOD, or Series catalog while keeping the original provider responsible for  
@@ -232,7 +232,7 @@ Tuliprox can be configured and monitored directly from the browser.
 - **Dashboard** with backend status, active streams, system metrics, and provider capacity
 - **Maintenance card** on the dashboard that turns red while inputs are in maintenance, with a dialog to put inputs
   into or take them out of maintenance with a remark
-- **Source Editor** for M3U, Xtream, Stalker, Plex, Emby, Jellyfin, local-library, and target configuration
+- **Source Editor** for M3U, Xtream, Stalker, Plex, Emby, Jellyfin, Silo, local-library, and target configuration
 - Drag & drop, block selection, batch editing, and target bouquet whitelist/blacklist editing
 - **Input-focused Update view** with per-input actions, affected-target selection, status, last update time, and  
   capability-aware Update/Refresh/Force Update/Rescan actions

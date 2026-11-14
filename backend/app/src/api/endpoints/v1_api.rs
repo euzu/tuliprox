@@ -6,6 +6,7 @@ use crate::{
             extract_accept_header::ExtractAcceptHeader,
             failover_api::{failover_api_register_unprotected, failover_api_register_with_permissions},
             library_api::library_api_register,
+            media_server_api::{media_server_api_register_protected, media_server_api_register_with_permissions},
             rbac_api::{rbac_api_register, rbac_api_register_unprotected},
             recording_api::{recording_api_register, recording_availability_register, recording_enabled_layer},
             recording_media_api::recording_media_api_register,
@@ -208,6 +209,7 @@ pub fn v1_api_register(
             .merge(v1_api_config_register_with_permissions(app_state))
             .merge(v1_api_user_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
+            .merge(media_server_api_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
             .merge(target_bouquet_api_register_with_permissions(app_state))
             .merge(failover_api_register_with_permissions(app_state))
@@ -233,6 +235,7 @@ pub fn v1_api_register(
             .merge(v1_api_config_register(axum::routing::Router::new()))
             .merge(v1_api_user_register(axum::routing::Router::new()))
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
+            .merge(media_server_api_register_protected(axum::routing::Router::new()))
             .merge(library_api_register(axum::routing::Router::new(), None))
             .merge(target_bouquet_api_register_unprotected())
             .merge(failover_api_register_unprotected())

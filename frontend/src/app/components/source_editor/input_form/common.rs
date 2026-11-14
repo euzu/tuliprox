@@ -51,6 +51,10 @@ pub(super) struct CommonInputFormProps {
     #[prop_or_default]
     pub extra: Html,
     #[prop_or_default]
+    pub lead: Html,
+    #[prop_or_default]
+    pub url_hint_key: Option<String>,
+    #[prop_or_default]
     pub exp_date_tool_action: Option<ToolAction>,
 }
 
@@ -69,10 +73,12 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
     let csv_batch = state.form.url.starts_with(BATCH_SCHEME_PREFIX);
     let credentials = props.credentials && !csv_batch;
     let connection = props.connection && !csv_batch;
+    let url_hint = props.url_hint_key.clone().unwrap_or_else(|| input_url_hint_key(props.simple_url).to_string());
 
     if !props.allow_write {
         return html! {
             <Card class="tp__config-view__card">
+                { props.lead.clone() }
                 <div class="tp__config-view__cols-2">
                     { config_field!(state.form, translate.t(LABEL_NAME), name) }
                     { config_field_bool!(state.form, translate.t(LABEL_ENABLED), enabled) }
@@ -83,7 +89,7 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
                     </div>
                 })}
                 if props.show_url {
-                    { config_field!(state.form, translate.t(LABEL_URL), url, Some(input_url_hint_key(props.simple_url).to_string())) }
+                    { config_field!(state.form, translate.t(LABEL_URL), url, Some(url_hint.clone())) }
                     { html_if!(credentials, {
                         <div class="tp__config-view__cols-2">
                             { config_field_optional!(state.form, translate.t(LABEL_USERNAME), username) }
@@ -120,6 +126,7 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
 
     html! {
         <Card class="tp__config-view__card">
+            { props.lead.clone() }
             <div class="tp__config-view__cols-2">
                 { edit_field_text!(state, translate.t(LABEL_NAME), name, ConfigInputFormAction::Name) }
                 { edit_field_bool!(state, translate.t(LABEL_ENABLED), enabled, ConfigInputFormAction::Enabled) }
@@ -130,7 +137,7 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
                 </div>
             })}
             if props.show_url {
-                { edit_field_text!(state, translate.t(LABEL_URL), url, ConfigInputFormAction::Url, false, Some(input_url_hint_key(props.simple_url).to_string())) }
+                { edit_field_text!(state, translate.t(LABEL_URL), url, ConfigInputFormAction::Url, false, Some(url_hint)) }
                 { html_if!(credentials, {
                     <div class="tp__config-view__cols-2">
                         { edit_field_text_option!(state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }

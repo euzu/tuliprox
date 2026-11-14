@@ -57,6 +57,7 @@ mod tests {
             InputType::Plex,
             InputType::Library,
             InputType::Jellyfin,
+            InputType::Silo,
             InputType::Emby,
             InputType::M3uBatch,
             InputType::XtreamBatch,

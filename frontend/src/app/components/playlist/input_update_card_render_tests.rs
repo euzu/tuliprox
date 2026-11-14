@@ -403,7 +403,7 @@ fn update_overview_badges_no_generic_accepted_for_cluster_content() {
 
 #[test]
 fn update_overview_badges_catalog_content_never_invents_live_or_cluster_success() {
-    for input_type in [InputType::Library, InputType::Plex, InputType::Emby, InputType::Jellyfin] {
+    for input_type in [InputType::Library, InputType::Plex, InputType::Emby, InputType::Jellyfin, InputType::Silo] {
         let (card, view) = card_view(input_type);
         let view = view.with_library_catalog(Some(&LibraryStatus {
             enabled: true,

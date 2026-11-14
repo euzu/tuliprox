@@ -172,7 +172,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
     },
     McpTool {
         name: "list_playlist_sources",
-        description: "Start here for playlist questions. Lists the playlist sources whose stored data can be read: targets (by name, with their outputs xtream/m3u and per-output EPG availability) and inputs (by name, with input_type and the clusters they hold). Use the returned names as the `target` or `input` argument of query_playlist_items and as `target` of the EPG tools. Small response, no credentials, no URLs.",
+        description: "Start here for playlist questions. Lists the playlist sources whose stored data can be read: targets (by name, with their outputs xtream/m3u and per-output EPG availability) and inputs (by name, with input_type and the clusters they hold; media-server inputs report video and series). Use the returned names as the `target` or `input` argument of query_playlist_items, as `input` of the media-server tools and as `target` of the EPG tools. Reads stored data only. Small response, no credentials, no URLs.",
         input_schema: NO_ARGUMENTS,
         method: McpToolMethod::Get,
         path: "/playlist/sources",
@@ -181,7 +181,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
     },
     McpTool {
         name: "query_playlist_items",
-        description: "Read the stored playlist records of ONE target or ONE input (give exactly one of `target`/`input`, addressed by NAME; call list_playlist_sources first) for one `cluster`, with substring search, group filter, EPG-match filter, field projection and paging. Returns {source, cluster, total_matched, skipped_records, offset, limit, returned, has_more, items}. total_matched counts all records matching the filter (not just this page); continue with offset += returned while has_more is true. skipped_records is the number of stored records that could not be read: when it is greater than 0 they are missing from the listing and from total_matched, and a `note` says so. limit defaults to 50 and is clamped to 500 (the applied value is echoed and limit_clamped is true). Only stored data is read, no provider traffic is triggered; inputs without a stored database (e.g. stalker) answer an error. The provider `url` of a record is never returned. `fields: override_id` returns the id the override tools take for an item (equal to provider_id for most items; for M3U items without a numeric id a urlhash-v1:… value), and search_field override_id finds an item by exactly that id. `epg_status` works for targets only and answers an error for inputs or targets without an EPG database.",
+        description: "Read the stored playlist records of ONE target or ONE input (give exactly one of `target`/`input`, addressed by NAME; call list_playlist_sources first) for one `cluster`, with substring search, group filter, EPG-match filter, field projection and paging. Returns {source, cluster, total_matched, skipped_records, offset, limit, returned, has_more, items}. total_matched counts all records matching the filter (not just this page); continue with offset += returned while has_more is true. skipped_records is the number of stored records that could not be read: when it is greater than 0 they are missing from the listing and from total_matched, and a `note` says so. limit defaults to 50 and is clamped to 500 (the applied value is echoed and limit_clamped is true). Only stored data is read, no provider traffic is triggered; media-server inputs (plex, emby, jellyfin, silo) are read from their stored catalog (video = movies, series = series without episode rows); inputs without a stored database (e.g. stalker) answer an error. The provider `url` of a record is never returned. `fields: override_id` returns the id the override tools take for an item (equal to provider_id for most items; for M3U items without a numeric id a urlhash-v1:… value), and search_field override_id finds an item by exactly that id. `epg_status` works for targets only and answers an error for inputs or targets without an EPG database.",
         input_schema: concat!(
             r#"{"type":"object","properties":{"#,
             r#""target":{"type":"string","description":"Target name (from list_playlist_sources). Exactly one of `target` or `input` is required."},"#,
@@ -200,6 +200,33 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/items",
         kind: McpToolKind::Read,
         redact_secrets: true,
+    },
+    McpTool {
+        name: "list_media_server_libraries",
+        description: "Libraries of ONE media-server input (plex, emby, jellyfin or silo; name from list_playlist_sources). Unlike the playlist tools this contacts the configured media server once, with a 15 second bound. Returns [{id, name, kind, selected}] where kind is movies, tvshows or unsupported and selected marks the libraries the input imports. An unknown input answers 404, an input that is not a media server 400, an unreachable or rejecting server 502.",
+        input_schema: r#"{"type":"object","properties":{"input":{"type":"string","description":"Media-server input name (from list_playlist_sources)."}},"required":["input"],"additionalProperties":false}"#,
+        method: McpToolMethod::Get,
+        path: "/media-server/{input}/libraries",
+        kind: McpToolKind::Read,
+        redact_secrets: false,
+    },
+    McpTool {
+        name: "get_media_server_status",
+        description: "Connection check for ONE media-server input (plex, emby, jellyfin or silo; name from list_playlist_sources). Unlike the playlist tools this contacts the configured media server once, with a 15 second bound, and answers {kind, server_id, name, version, reachable: true}. A failure answers an error with the redacted media-server kind and detail; no token, password or URL is returned.",
+        input_schema: r#"{"type":"object","properties":{"input":{"type":"string","description":"Media-server input name (from list_playlist_sources)."}},"required":["input"],"additionalProperties":false}"#,
+        method: McpToolMethod::Get,
+        path: "/media-server/{input}/status",
+        kind: McpToolKind::Read,
+        redact_secrets: false,
+    },
+    McpTool {
+        name: "refresh_media_server_input",
+        description: "Queue a playlist update for ONE media-server input (plex, emby, jellyfin or silo; name from list_playlist_sources). action normal reuses a valid cached catalog when possible, refresh bypasses the cache and fetches from the server. Answers 202 with a run id; 409 while another playlist update is queued. Only queues the update: no server traffic happens during this call, and progress is read with get_playlist_update_status.",
+        input_schema: r#"{"type":"object","properties":{"input":{"type":"string","description":"Media-server input name (from list_playlist_sources)."},"action":{"type":"string","enum":["normal","refresh"],"description":"normal = reuse a valid cached catalog when possible; refresh = bypass the cache and fetch from the media server."}},"required":["input","action"],"additionalProperties":false}"#,
+        method: McpToolMethod::Post,
+        path: "/media-server/{input}/refresh",
+        kind: McpToolKind::Write,
+        redact_secrets: false,
     },
     McpTool {
         name: "query_target_epg_channels",

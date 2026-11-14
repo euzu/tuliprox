@@ -12,7 +12,7 @@ use shared::{
 };
 use std::collections::HashMap;
 
-const INPUTS: [(u16, InputType, &[&str]); 11] = [
+const INPUTS: [(u16, InputType, &[&str]); 12] = [
     (41, InputType::M3u, &["normal", "refresh", "force"]),
     (7, InputType::Xtream, &["normal", "refresh", "force"]),
     (19, InputType::Stalker, &["normal", "refresh", "force"]),
@@ -23,6 +23,7 @@ const INPUTS: [(u16, InputType, &[&str]); 11] = [
     (15, InputType::Library, &["rescan"]),
     (4, InputType::Plex, &["normal", "refresh"]),
     (28, InputType::Jellyfin, &["normal", "refresh"]),
+    (42, InputType::Silo, &["normal", "refresh"]),
     (9, InputType::Emby, &["normal", "refresh"]),
 ];
 
@@ -114,7 +115,7 @@ fn playlist_update_view_configured_cards_keep_identity_order_context_and_capabil
     let cards = build_input_update_card_models(&sources, &status);
     assert_eq!(
         cards.iter().map(|card| card.input_id).collect::<Vec<_>>(),
-        [41, 7, 19, 3, 11, 2, 33, 15, 4, 28, 9, 100, 101]
+        [41, 7, 19, 3, 11, 2, 33, 15, 4, 28, 42, 9, 100, 101]
     );
     for ((input_id, input_type, expected_modes), card) in INPUTS.iter().zip(&cards) {
         assert_eq!(card.input_id, *input_id);
@@ -132,13 +133,13 @@ fn playlist_update_view_configured_cards_keep_identity_order_context_and_capabil
     }
     assert_eq!(cards[0].last_update(860).relative, LastUpdateRelative::Minutes(1));
     assert_eq!(cards[8].last_update(860).title_timestamp, Some(600));
-    for card in &cards[11..] {
+    for card in &cards[12..] {
         assert!(!can_start_update(&InputUpdateCardInteractionState::from_model(card), card, true));
         assert_eq!(card.last_update(860).relative, LastUpdateRelative::Never);
     }
     let scope = playlist_update_bulk_scope(&sources, &cards);
     assert!(scope.can_submit);
-    assert_eq!(scope.visible_input_ids, [41, 7, 19, 3, 11, 2, 33, 15, 4, 28, 9]);
+    assert_eq!(scope.visible_input_ids, [41, 7, 19, 3, 11, 2, 33, 15, 4, 28, 42, 9]);
 }
 
 #[test]

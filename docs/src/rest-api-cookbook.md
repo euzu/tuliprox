@@ -700,6 +700,18 @@ form's scheduled interval, never as a hard block.
 | `POST` | `/api/v1/playlist/filter/preview` | Dry-run a filter DSL expression against a target's stored playlist |
 | `GET` | `/api/v1/playlist/resource/{resource}` | Public resource access for playlist-related assets |
 
+### Media-server inputs
+
+The routes address one core media-server input (`plex`, `emby`, `jellyfin`, `silo`) by name. An unknown name answers
+`404`, an input of another type `400`. The two read routes contact the configured server once with a 15 second bound
+(a hanging server answers `504`) and never return tokens, passwords or URLs.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/media-server/{input}/libraries` | Visible libraries as `[{id, name, kind, selected}]`, `selected` marking the libraries the input imports (`playlist.read`) |
+| `GET` | `/api/v1/media-server/{input}/status` | Discovered server as `{kind, server_id, name, version, reachable}` (`playlist.read`) |
+| `POST` | `/api/v1/media-server/{input}/refresh` | Queue a playlist update for that input; body `{"action": "normal"}` or `{"action": "refresh"}`; answers `202` with a run id (`playlist.write`) |
+
 ### Failover groups
 
 | Method | Path | Purpose |

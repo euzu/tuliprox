@@ -96,6 +96,12 @@ pub fn parse_media_server_stream_ref(
             item_id: Arc::<str>::from(parts[2].as_str()),
             media_source_id: query_value(query, "media_source_id").map(Arc::<str>::from),
         }),
+        "silo" => Ok(MediaServerStreamRef::Silo {
+            input_name: input_name.clone(),
+            server_id: Arc::<str>::from(parts[1].as_str()),
+            item_id: Arc::<str>::from(parts[2].as_str()),
+            media_source_id: query_value(query, "media_source_id").map(Arc::<str>::from),
+        }),
         "plex" => Ok(MediaServerStreamRef::Plex {
             input_name: input_name.clone(),
             server_id: Arc::<str>::from(parts[1].as_str()),
@@ -140,6 +146,16 @@ pub fn parse_media_server_image_ref(resource_url: &str) -> Result<MediaServerIma
             image_kind: query_value(query, "image_kind").map(Arc::<str>::from).ok_or_else(|| {
                 MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
                     .detail("jellyfin media-server image URL is missing image_kind")
+            })?,
+            tag: query_value(query, "tag").map(Arc::<str>::from),
+        }),
+        "silo" => Ok(MediaServerImageRef::Silo {
+            input_name: Arc::<str>::from(parts[1].as_str()),
+            server_id: Arc::<str>::from(parts[2].as_str()),
+            item_id: Arc::<str>::from(parts[3].as_str()),
+            image_kind: query_value(query, "image_kind").map(Arc::<str>::from).ok_or_else(|| {
+                MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                    .detail("silo media-server image URL is missing image_kind")
             })?,
             tag: query_value(query, "tag").map(Arc::<str>::from),
         }),
@@ -205,6 +221,11 @@ mod tests {
             std::future::pending::<Result<MediaServerStatus, MediaServerError>>()
         }
         fn list_libraries(
+            &self,
+        ) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
+            std::future::ready(Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)))
+        }
+        fn list_available_libraries(
             &self,
         ) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
             std::future::ready(Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)))
@@ -322,6 +343,21 @@ mod tests {
             }
         );
 
+        let silo_stream = parse_media_server_stream_ref(
+            &input_name,
+            "media-server://silo/server%2Fone/item%3Fone?media_source_id=media%2Fsource%3Fone",
+        )
+        .expect("silo media_server ref parses");
+        assert_eq!(
+            silo_stream,
+            MediaServerStreamRef::Silo {
+                input_name: input_name.clone(),
+                server_id: "server/one".into(),
+                item_id: "item?one".into(),
+                media_source_id: Some("media/source?one".into()),
+            }
+        );
+
         let unavailable = parse_media_server_stream_ref(&input_name, "media-server://unavailable/server/library/item")
             .expect_err("unavailable sentinel should map to a stable playback error");
         assert_eq!(unavailable.kind, MediaServerErrorKind::NoDirectPlayableMediaServerSource);
@@ -357,6 +393,19 @@ mod tests {
             parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&jellyfin))
                 .expect("jellyfin image ref parses"),
             jellyfin
+        );
+
+        let silo = MediaServerImageRef::Silo {
+            input_name: "silo/input".into(),
+            server_id: "server/four+".into(),
+            item_id: "item?four".into(),
+            image_kind: "Primary".into(),
+            tag: Some("tag/four+?".into()),
+        };
+        assert_eq!(
+            parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&silo))
+                .expect("silo image ref parses"),
+            silo
         );
 
         let plex = MediaServerImageRef::Plex {

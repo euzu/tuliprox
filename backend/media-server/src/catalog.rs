@@ -127,6 +127,7 @@ where
         }
     }
 
+    client.post_process_catalog(&mut snapshot);
     Ok(snapshot)
 }
 
@@ -189,6 +190,12 @@ mod tests {
         }
 
         fn list_libraries(
+            &self,
+        ) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
+            std::future::ready(Ok(self.libraries.clone()))
+        }
+
+        fn list_available_libraries(
             &self,
         ) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
             std::future::ready(Ok(self.libraries.clone()))
@@ -348,6 +355,7 @@ mod tests {
             server_id: "server".into(),
             library_id: "shows".into(),
             item_id: Arc::<str>::from(id),
+            season_id: None,
             series_id: Some("series".into()),
             series_title: Some("Show Redacted".into()),
             title: "Episode Redacted".into(),

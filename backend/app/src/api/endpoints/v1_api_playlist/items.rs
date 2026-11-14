@@ -18,8 +18,9 @@ use crate::{
     },
     model::{ConfigInput, ConfigTarget},
     repository::{
-        iter_raw_m3u_input_playlist, iter_raw_m3u_target_playlist, iter_raw_xtream_input_playlist,
-        iter_raw_xtream_target_playlist, LockedReceiverStream,
+        get_input_media_server_playlist_file_path, get_input_storage_path, iter_raw_m3u_input_playlist,
+        iter_raw_m3u_target_playlist, iter_raw_playlist, iter_raw_xtream_input_playlist,
+        iter_raw_xtream_target_playlist, LockedReceiverStream, Xtream,
     },
     utils::{with_folded_epg_id, EpgIdOutputCase},
 };
@@ -30,12 +31,13 @@ use serde_json::Value;
 use shared::{
     error::TuliproxError,
     model::{
-        InputType, M3uPlaylistItem, PlaylistItemType, StreamProperties, TargetType, XtreamCluster, XtreamPlaylistItem,
+        InputType, M3uPlaylistItem, PlaylistItemType, StreamProperties, TargetType, UUIDType, XtreamCluster,
+        XtreamPlaylistItem,
     },
 };
 use std::{borrow::Cow, future::Future, sync::Arc};
 use tokio_stream::StreamExt;
-use tuliprox_core::model::{override_key_for, InputAliasMap};
+use tuliprox_core::model::{override_key_for, AppConfig, InputAliasMap};
 
 query_enum! {
     /// Record fields a client can project with `fields`.
@@ -743,15 +745,46 @@ async fn read_input_page(
     } else if input.input_type.is_m3u() {
         let records = iter_raw_m3u_input_playlist(app_config, input, Some(cluster)).await;
         collect_stored_page(records, |_: &M3uPlaylistItem| true, &filter, &query.fields, query.window).await
+    } else if input.input_type.is_media_server() {
+        // The stored media-server catalog is one file for every cluster: movies
+        // carry `Video`, series roots `SeriesInfo` and episodes `Series`. Episode
+        // rows stay hidden like in the target listing, so a series query returns
+        // the series entries (`Series` cluster mapping of the catalog mapper).
+        let records = iter_media_server_input_playlist(app_config, input).await;
+        collect_stored_page(
+            records,
+            |record: &XtreamPlaylistItem| {
+                record.xtream_cluster == cluster && visible_in_target_listing(cluster, record)
+            },
+            &filter,
+            &query.fields,
+            query.window,
+        )
+        .await
     } else {
         return Err(InspectError::bad_request(unsupported_input_message(input)));
     };
     page.map_err(|err| read_failure(&format!("input '{}'", input.name), &err))
 }
 
+/// Streams the stored media-server catalog of `input`.
+///
+/// The catalog is persisted as one `XtreamPlaylistItem` database keyed by UUID
+/// (the layout `MediaServerDiskPlaylistSource` reads), so the Xtream backend
+/// reads it and the cluster is taken from each record.
+async fn iter_media_server_input_playlist(
+    app_config: &AppConfig,
+    input: &ConfigInput,
+) -> Option<LockedReceiverStream<Result<XtreamPlaylistItem, TuliproxError>>> {
+    let storage_dir = app_config.config.load().storage_dir.clone();
+    let storage_path = get_input_storage_path(&input.name, &storage_dir).await.ok()?;
+    let file_path = get_input_media_server_playlist_file_path(&storage_path, &input.name);
+    iter_raw_playlist::<Xtream, UUIDType, _>(app_config, &file_path, |_| true).await
+}
+
 fn unsupported_input_message(input: &ConfigInput) -> String {
     format!(
-        "Input '{}' has type '{}'; only xtream and m3u inputs have a stored playlist database to inspect",
+        "Input '{}' has type '{}'; only xtream, m3u and media-server inputs have a stored playlist database to inspect",
         input.name, input.input_type
     )
 }
@@ -849,14 +882,18 @@ struct SourcesResponse<'a> {
 
 const QUERYABLE_CLUSTERS: &[&str] = &["live", "video", "series"];
 
+/// A media-server catalog holds movies and series only; there are no live channels.
+const MEDIA_SERVER_QUERYABLE_CLUSTERS: &[&str] = &["video", "series"];
+
 fn summarize_input(input: &ConfigInput) -> InputSummary<'_> {
-    let queryable = input.input_type.is_xtream() || input.input_type.is_m3u();
-    InputSummary {
-        id: input.id,
-        name: &input.name,
-        input_type: input.input_type,
-        clusters: if queryable { QUERYABLE_CLUSTERS } else { &[] },
-    }
+    let clusters = if input.input_type.is_media_server() {
+        MEDIA_SERVER_QUERYABLE_CLUSTERS
+    } else if input.input_type.is_xtream() || input.input_type.is_m3u() {
+        QUERYABLE_CLUSTERS
+    } else {
+        &[]
+    };
+    InputSummary { id: input.id, name: &input.name, input_type: input.input_type, clusters }
 }
 
 fn summarize_target<'a>(config: &crate::model::Config, target: &'a ConfigTarget) -> TargetSummary<'a> {

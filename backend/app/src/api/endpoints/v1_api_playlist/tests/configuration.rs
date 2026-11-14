@@ -145,6 +145,7 @@ async fn playlist_update_status_exposes_last_input_results_and_legacy_default_wi
             InputType::Plex,
             InputType::Emby,
             InputType::Jellyfin,
+            InputType::Silo,
             InputType::Staged,
         ]
         .into_iter()
