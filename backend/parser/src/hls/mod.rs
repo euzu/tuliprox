@@ -209,6 +209,49 @@ pub struct RewriteHlsProps<'a> {
     pub origin_provider: Option<&'a str>,
     /// Kind of `content` when the caller has classified it already; classified here otherwise.
     pub playlist_kind: Option<HlsPlaylistKind>,
+    /// Opt-in timeline rebase for a switched failover-group member's media playlist. `None` keeps
+    /// the rewrite byte-identical for everyone else (archive, single-item and first serves).
+    pub rebase: Option<HlsMediaSequenceRebase>,
+}
+
+/// Timeline rebase of a media playlist after a failover-group member switch: the client media
+/// sequence continues monotonically, a discontinuity marks the switch point and the
+/// discontinuity sequence is advanced once the boundary leaves the playlist window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HlsMediaSequenceRebase {
+    /// Value written into `EXT-X-MEDIA-SEQUENCE` of the media playlist.
+    pub media_sequence: u64,
+    /// Insert a bare `EXT-X-DISCONTINUITY` before the first media segment.
+    pub insert_discontinuity: bool,
+    /// Value written into `EXT-X-DISCONTINUITY-SEQUENCE` (inserted when absent and a discontinuity
+    /// is added).
+    pub discontinuity_sequence: u64,
+}
+
+/// `EXT-X-MEDIA-SEQUENCE` value of a media playlist; `None` when the tag is absent.
+pub fn media_playlist_media_sequence(content: &str) -> Option<u64> {
+    normalize_hls_playlist(content)
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:").and_then(|value| value.trim().parse().ok()))
+}
+
+/// `EXT-X-DISCONTINUITY-SEQUENCE` value of a media playlist; `None` when the tag is absent (RFC 8216
+/// section 4.3.3.3 then defines it as 0). It counts the upstream discontinuities that already left
+/// the window, so a rebase caller adds its advance to the upstream value instead of replacing it.
+pub fn media_playlist_discontinuity_sequence(content: &str) -> Option<u64> {
+    normalize_hls_playlist(content).lines().map(str::trim).find_map(|line| {
+        line.strip_prefix("#EXT-X-DISCONTINUITY-SEQUENCE:").and_then(|value| value.trim().parse().ok())
+    })
+}
+
+/// Number of media segment URI lines (non-empty lines that do not start with `#`).
+pub fn media_playlist_segment_count(content: &str) -> u64 {
+    normalize_hls_playlist(content)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .count() as u64
 }
 
 fn is_direct_archive_start_query_key(key: &str) -> bool {
@@ -392,7 +435,21 @@ fn rewrite_resource_uri(
 pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> String {
     let content = normalize_hls_playlist(props.content);
     let playlist_kind = props.playlist_kind.unwrap_or_else(|| classify_hls_playlist(content));
+    let rebase = (playlist_kind == HlsPlaylistKind::Media).then_some(props.rebase).flatten();
+    let has_media_sequence = rebase.is_some() && content.lines().any(|line| line.starts_with("#EXT-X-MEDIA-SEQUENCE:"));
+    let has_discontinuity_sequence =
+        rebase.is_some() && content.lines().any(|line| line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:"));
+    // Without an explicit IV, the client derives the AES IV from the media sequence number. A rebased
+    // sequence would change it, so the upstream sequence is pinned as an explicit IV per segment.
+    let pinned_iv_base = rebase
+        .map(|rebase| (rebase, media_playlist_media_sequence(content).unwrap_or(0)))
+        .filter(|(rebase, upstream_sequence)| rebase.media_sequence != *upstream_sequence)
+        .map(|(_, upstream_sequence)| upstream_sequence);
+    let mut implicit_iv_key: Option<String> = None;
+    let mut segment_index = 0_u64;
+    let mut keyed_segment_index: Option<u64> = None;
     let mut result = Vec::new();
+    let mut inserted_rebase_header = false;
     for line in content.lines() {
         if line.trim().is_empty() {
             continue;
@@ -400,12 +457,62 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
 
         // skip comments
         if line.starts_with('#') {
+            if let Some(rebase) = rebase {
+                if line.starts_with("#EXT-X-MEDIA-SEQUENCE:") {
+                    result.push(format!("#EXT-X-MEDIA-SEQUENCE:{}", rebase.media_sequence));
+                    continue;
+                }
+                if line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:") {
+                    result.push(format!("#EXT-X-DISCONTINUITY-SEQUENCE:{}", rebase.discontinuity_sequence));
+                    continue;
+                }
+                // A switch marks the first segment with a discontinuity; the rebased sequence and
+                // discontinuity tags are emitted before the segment's own tags (`#EXTINF`) and before
+                // any upstream `#EXT-X-DISCONTINUITY`, which must follow the discontinuity sequence.
+                if !inserted_rebase_header && (line.starts_with("#EXTINF") || line.starts_with("#EXT-X-DISCONTINUITY"))
+                {
+                    push_rebase_header(&mut result, rebase, has_media_sequence, has_discontinuity_sequence);
+                    inserted_rebase_header = true;
+                }
+            }
             let rewritten = rewrite_uri_attrib(line, props, user, playlist_kind);
+            if pinned_iv_base.is_some() && line.starts_with("#EXT-X-KEY:") {
+                match identity_key_iv(line) {
+                    IdentityKeyIv::Implicit => {
+                        implicit_iv_key = Some(rewritten.into_owned());
+                        continue;
+                    }
+                    IdentityKeyIv::Explicit => implicit_iv_key = None,
+                    IdentityKeyIv::Other => {}
+                }
+            }
+            if line.starts_with("#EXTINF") {
+                if let Some(base) = pinned_iv_base {
+                    if let Some(key) = &implicit_iv_key {
+                        result.push(format!("{key},IV=0x{:032X}", u128::from(base) + u128::from(segment_index)));
+                        keyed_segment_index = Some(segment_index);
+                    }
+                }
+            }
             result.push(rewritten.to_string());
             continue;
         }
 
         // target url
+        if let Some(rebase) = rebase {
+            if !inserted_rebase_header {
+                push_rebase_header(&mut result, rebase, has_media_sequence, has_discontinuity_sequence);
+                inserted_rebase_header = true;
+            }
+        }
+        if let Some(base) = pinned_iv_base {
+            if keyed_segment_index != Some(segment_index) {
+                if let Some(key) = &implicit_iv_key {
+                    result.push(format!("{key},IV=0x{:032X}", u128::from(base) + u128::from(segment_index)));
+                }
+            }
+            segment_index = segment_index.saturating_add(1);
+        }
         let target_url = rewrite_hls_resource_url(props, line, &user.username);
         result.push(rewrite_resource_uri(props, user, &target_url, uri_line_resource_kind(playlist_kind)));
     }
@@ -413,12 +520,57 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
     result.join("\r\n")
 }
 
+/// How an `EXT-X-KEY` tag of the `identity` key format derives its IV (RFC 8216 section 5.2).
+enum IdentityKeyIv {
+    /// `AES-128` or `SAMPLE-AES` without `IV`: the media sequence number is the IV.
+    Implicit,
+    /// An explicit IV or `METHOD=NONE`: the key does not depend on the media sequence number.
+    Explicit,
+    /// Another key format, or an attribute list that does not parse: left untouched.
+    Other,
+}
+
+fn identity_key_iv(line: &str) -> IdentityKeyIv {
+    let Some(attributes) = line.strip_prefix("#EXT-X-KEY:").and_then(origin_manifest::parse_attribute_list) else {
+        return IdentityKeyIv::Other;
+    };
+    if attributes.get("KEYFORMAT").is_some_and(|format| !format.eq_ignore_ascii_case("identity")) {
+        return IdentityKeyIv::Other;
+    }
+    match attributes.get("METHOD").map(String::as_str) {
+        Some("AES-128" | "SAMPLE-AES") if !attributes.contains_key("IV") => IdentityKeyIv::Implicit,
+        Some("AES-128" | "SAMPLE-AES" | "NONE") => IdentityKeyIv::Explicit,
+        _ => IdentityKeyIv::Other,
+    }
+}
+
+/// Emits the rebased sequence/discontinuity tags that the upstream playlist omits, before the
+/// first media segment: the continuing `EXT-X-MEDIA-SEQUENCE`, the `EXT-X-DISCONTINUITY-SEQUENCE`
+/// (kept monotonic across a switch) and, at a switch, the `EXT-X-DISCONTINUITY` boundary.
+fn push_rebase_header(
+    result: &mut Vec<String>,
+    rebase: HlsMediaSequenceRebase,
+    has_media_sequence: bool,
+    has_discontinuity_sequence: bool,
+) {
+    if !has_media_sequence {
+        result.push(format!("#EXT-X-MEDIA-SEQUENCE:{}", rebase.media_sequence));
+    }
+    if !has_discontinuity_sequence {
+        result.push(format!("#EXT-X-DISCONTINUITY-SEQUENCE:{}", rebase.discontinuity_sequence));
+    }
+    if rebase.insert_discontinuity {
+        result.push("#EXT-X-DISCONTINUITY".to_string());
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::{
-        classify_hls_playlist, create_hls_resource_token, get_hls_session_token_and_url_from_token, rewrite_hls,
-        rewrite_hls_resource_url, rewrite_hls_url, HlsManifestSource, HlsPlaylistKind, HlsResourceKind,
-        HlsResourceToken, RewriteHlsProps, TOKEN_SEPARATOR_STR,
+        classify_hls_playlist, create_hls_resource_token, get_hls_session_token_and_url_from_token,
+        media_playlist_discontinuity_sequence, media_playlist_media_sequence, media_playlist_segment_count,
+        rewrite_hls, rewrite_hls_resource_url, rewrite_hls_url, HlsManifestSource, HlsMediaSequenceRebase,
+        HlsPlaylistKind, HlsResourceKind, HlsResourceToken, RewriteHlsProps, TOKEN_SEPARATOR_STR,
     };
     use rand::Rng;
     use shared::{
@@ -493,6 +645,7 @@ mod test {
             user_token: Some("m3u-catchup|fp|alice|42|archive|1717200000|3600"),
             origin_provider: None,
             playlist_kind: None,
+            rebase: None,
         };
         assert_eq!(
             rewrite_hls_resource_url(&props, "segment.ts", "alice"),
@@ -522,6 +675,7 @@ mod test {
             user_token: None,
             origin_provider: None,
             playlist_kind: None,
+            rebase: None,
         };
         for (token, username) in [
             ("m3u-catchup|fp|alice|42|archive|42|3600", "alice|42|archive"),
@@ -682,6 +836,7 @@ mod test {
             user_token: None,
             origin_provider: None,
             playlist_kind: None,
+            rebase: None,
         };
 
         let rewritten = rewrite_hls(&user, &props);
@@ -723,6 +878,7 @@ mod test {
             user_token,
             origin_provider: Some("provider_a"),
             playlist_kind: None,
+            rebase: None,
         }
     }
 
@@ -904,5 +1060,284 @@ mod test {
             super::build_hls_resource_uri("http://proxy", &test_user(), 9, 11, 101, "tok.m3u8"),
             "http://proxy/hls/u/p/9/11/101/tok.m3u8"
         );
+    }
+
+    #[test]
+    fn rebase_continues_media_sequence_and_inserts_discontinuity_once() {
+        let user = test_user();
+        let content =
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n#EXTINF:4.0,\n5000.ts\n#EXTINF:4.0,\n5001.ts\n";
+        let props = RewriteHlsProps {
+            rebase: Some(HlsMediaSequenceRebase {
+                media_sequence: 7,
+                insert_discontinuity: true,
+                discontinuity_sequence: 2,
+            }),
+            ..rewrite_props(content, Some("s"))
+        };
+        let rewritten = rewrite_hls(&user, &props);
+        assert!(rewritten.lines().any(|line| line == "#EXT-X-MEDIA-SEQUENCE:7"), "{rewritten}");
+        assert_eq!(rewritten.lines().filter(|line| *line == "#EXT-X-DISCONTINUITY").count(), 1, "{rewritten}");
+        assert!(rewritten.lines().any(|line| line == "#EXT-X-DISCONTINUITY-SEQUENCE:2"), "{rewritten}");
+        let mut saw_discontinuity = false;
+        for line in rewritten.lines() {
+            if line == "#EXT-X-DISCONTINUITY" {
+                saw_discontinuity = true;
+            } else if !line.starts_with('#') {
+                assert!(saw_discontinuity, "the first segment must follow the discontinuity: {rewritten}");
+                break;
+            }
+        }
+        assert!(saw_discontinuity, "{rewritten}");
+    }
+
+    #[test]
+    fn rebase_rewrites_existing_discontinuity_sequence() {
+        let user = test_user();
+        let content =
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n#EXT-X-DISCONTINUITY-SEQUENCE:1\n#EXTINF:4.0,\n5000.ts\n";
+        let props = RewriteHlsProps {
+            rebase: Some(HlsMediaSequenceRebase {
+                media_sequence: 9,
+                insert_discontinuity: true,
+                discontinuity_sequence: 3,
+            }),
+            ..rewrite_props(content, Some("s"))
+        };
+        let rewritten = rewrite_hls(&user, &props);
+        assert!(rewritten.lines().any(|line| line == "#EXT-X-MEDIA-SEQUENCE:9"), "{rewritten}");
+        assert!(rewritten.lines().any(|line| line == "#EXT-X-DISCONTINUITY-SEQUENCE:3"), "{rewritten}");
+        assert_eq!(
+            rewritten.lines().filter(|line| line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")).count(),
+            1,
+            "{rewritten}"
+        );
+    }
+
+    #[test]
+    fn rebase_rewrites_discontinuity_sequence_without_discontinuity() {
+        let user = test_user();
+        let content =
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n#EXT-X-DISCONTINUITY-SEQUENCE:1\n#EXTINF:4.0,\n5000.ts\n";
+        let props = RewriteHlsProps {
+            rebase: Some(HlsMediaSequenceRebase {
+                media_sequence: 9,
+                insert_discontinuity: false,
+                discontinuity_sequence: 3,
+            }),
+            ..rewrite_props(content, Some("s"))
+        };
+        let rewritten = rewrite_hls(&user, &props);
+        assert!(rewritten.lines().any(|line| line == "#EXT-X-MEDIA-SEQUENCE:9"), "{rewritten}");
+        assert!(
+            rewritten.lines().any(|line| line == "#EXT-X-DISCONTINUITY-SEQUENCE:3"),
+            "the tracked discontinuity sequence must be emitted on every rebased poll: {rewritten}"
+        );
+        assert!(!rewritten.lines().any(|line| line == "#EXT-X-DISCONTINUITY"), "{rewritten}");
+    }
+
+    #[test]
+    fn rebase_emits_media_sequence_and_discontinuity_sequence_when_absent() {
+        let user = test_user();
+        let content =
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg.ts\n#EXTINF:4.0,\nseg2.ts\n";
+        let props = RewriteHlsProps {
+            rebase: Some(HlsMediaSequenceRebase {
+                media_sequence: 11,
+                insert_discontinuity: false,
+                discontinuity_sequence: 4,
+            }),
+            ..rewrite_props(content, Some("s"))
+        };
+        let rewritten = rewrite_hls(&user, &props);
+        assert!(rewritten.lines().any(|line| line == "#EXT-X-MEDIA-SEQUENCE:11"), "{rewritten}");
+        assert!(rewritten.lines().any(|line| line == "#EXT-X-DISCONTINUITY-SEQUENCE:4"), "{rewritten}");
+        assert!(!rewritten.lines().any(|line| line == "#EXT-X-DISCONTINUITY"), "{rewritten}");
+    }
+
+    #[test]
+    fn rebase_places_discontinuity_before_the_first_extinf() {
+        let user = test_user();
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n#EXTINF:4.0,\n5000.ts\n";
+        let props = RewriteHlsProps {
+            rebase: Some(HlsMediaSequenceRebase {
+                media_sequence: 9,
+                insert_discontinuity: true,
+                discontinuity_sequence: 2,
+            }),
+            ..rewrite_props(content, Some("s"))
+        };
+        let rewritten = rewrite_hls(&user, &props);
+        let lines: Vec<&str> = rewritten.lines().collect();
+        let discontinuity = lines.iter().position(|line| *line == "#EXT-X-DISCONTINUITY").expect("discontinuity");
+        let extinf = lines.iter().position(|line| line.starts_with("#EXTINF")).expect("extinf");
+        assert!(discontinuity < extinf, "discontinuity must precede the segment's #EXTINF: {rewritten}");
+    }
+
+    fn rebase_with(
+        media_sequence: u64,
+        insert_discontinuity: bool,
+        discontinuity_sequence: u64,
+    ) -> HlsMediaSequenceRebase {
+        HlsMediaSequenceRebase { media_sequence, insert_discontinuity, discontinuity_sequence }
+    }
+
+    #[test]
+    fn rebase_emits_discontinuity_sequence_before_a_leading_discontinuity_tag() {
+        let user = test_user();
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n#EXT-X-DISCONTINUITY\n#EXTINF:4.0,\n5000.ts\n";
+        let props = RewriteHlsProps { rebase: Some(rebase_with(9, false, 2)), ..rewrite_props(content, Some("s")) };
+        let rewritten = rewrite_hls(&user, &props);
+        let lines: Vec<&str> = rewritten.lines().collect();
+        let sequence = lines.iter().position(|line| *line == "#EXT-X-DISCONTINUITY-SEQUENCE:2").expect("sequence");
+        let discontinuity = lines.iter().position(|line| *line == "#EXT-X-DISCONTINUITY").expect("discontinuity");
+        assert!(sequence < discontinuity, "the sequence must precede the first discontinuity: {rewritten}");
+        assert_eq!(lines.iter().filter(|line| line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")).count(), 1);
+    }
+
+    #[test]
+    fn rebase_synthetic_discontinuity_follows_the_sequence_before_a_leading_upstream_tag() {
+        let user = test_user();
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-DISCONTINUITY\n#EXTINF:4.0,\n5000.ts\n";
+        let props = RewriteHlsProps { rebase: Some(rebase_with(9, true, 2)), ..rewrite_props(content, Some("s")) };
+        let rewritten = rewrite_hls(&user, &props);
+        let lines: Vec<&str> = rewritten.lines().collect();
+        let media = lines.iter().position(|line| *line == "#EXT-X-MEDIA-SEQUENCE:9").expect("media sequence");
+        let sequence = lines.iter().position(|line| *line == "#EXT-X-DISCONTINUITY-SEQUENCE:2").expect("sequence");
+        let first_discontinuity = lines.iter().position(|line| *line == "#EXT-X-DISCONTINUITY").expect("discontinuity");
+        assert!(media < first_discontinuity && sequence < first_discontinuity, "{rewritten}");
+    }
+
+    fn key_lines(rewritten: &str) -> Vec<&str> {
+        rewritten.lines().filter(|line| line.starts_with("#EXT-X-KEY")).collect()
+    }
+
+    #[test]
+    fn rebase_pins_implicit_aes_iv_to_the_upstream_sequence() {
+        let user = test_user();
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\n5000.ts\n#EXTINF:4.0,\n5001.ts\n";
+        let props = RewriteHlsProps { rebase: Some(rebase_with(7, false, 0)), ..rewrite_props(content, Some("s")) };
+        let rewritten = rewrite_hls(&user, &props);
+        let keys = key_lines(&rewritten);
+        assert_eq!(keys.len(), 2, "{rewritten}");
+        assert!(keys[0].ends_with(&format!(",IV=0x{:032X}", 5000)), "{}", keys[0]);
+        assert!(keys[1].ends_with(&format!(",IV=0x{:032X}", 5001)), "{}", keys[1]);
+        assert!(keys[0].starts_with("#EXT-X-KEY:METHOD=AES-128,URI=\"http://proxy/hls/"), "{}", keys[0]);
+        // each pinned key stays in front of its own segment
+        let lines: Vec<&str> = rewritten.lines().collect();
+        let first_key = lines.iter().position(|line| line.starts_with("#EXT-X-KEY")).expect("key");
+        let first_extinf = lines.iter().position(|line| line.starts_with("#EXTINF")).expect("extinf");
+        let first_segment = lines.iter().position(|line| line.starts_with("http://proxy/hls/")).expect("segment");
+        assert!(first_key < first_extinf && first_extinf < first_segment, "{rewritten}");
+    }
+
+    #[test]
+    fn rebase_keeps_explicit_iv_none_and_unchanged_sequence_keys_untouched() {
+        let user = test_user();
+        let explicit = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",IV=0x00000000000000000000000000000009\n#EXTINF:4.0,\n5000.ts\n";
+        let none = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:4.0,\n5000.ts\n";
+        let implicit = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\n5000.ts\n";
+        for (content, media_sequence, expected_keys) in [(explicit, 7, 1), (none, 7, 1), (implicit, 5000, 1)] {
+            let props = RewriteHlsProps {
+                rebase: Some(rebase_with(media_sequence, true, 1)),
+                ..rewrite_props(content, Some("s"))
+            };
+            let rewritten = rewrite_hls(&user, &props);
+            let keys = key_lines(&rewritten);
+            assert_eq!(keys.len(), expected_keys, "{rewritten}");
+            if content == implicit {
+                assert!(!keys[0].contains("IV="), "{}", keys[0]);
+            }
+            if content == explicit {
+                assert_eq!(keys[0].matches("IV=").count(), 1, "{}", keys[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn rebase_tracks_the_active_implicit_key_across_key_changes() {
+        let user = test_user();
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n\
+            #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k1.bin\",KEYFORMAT=\"identity\"\n#EXTINF:4,\na.ts\n\
+            #EXT-X-KEY:METHOD=NONE\n#EXTINF:4,\nb.ts\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"k2.bin\"\n#EXTINF:4,\nc.ts\n";
+        let props = RewriteHlsProps { rebase: Some(rebase_with(7, false, 0)), ..rewrite_props(content, Some("s")) };
+        let rewritten = rewrite_hls(&user, &props);
+        let keys = key_lines(&rewritten);
+        assert_eq!(keys.len(), 3, "{rewritten}");
+        assert!(
+            keys[0].starts_with("#EXT-X-KEY:METHOD=SAMPLE-AES") && keys[0].ends_with(&format!(",IV=0x{:032X}", 100))
+        );
+        assert_eq!(keys[1], "#EXT-X-KEY:METHOD=NONE");
+        assert!(keys[2].starts_with("#EXT-X-KEY:METHOD=AES-128") && keys[2].ends_with(&format!(",IV=0x{:032X}", 102)));
+    }
+
+    #[test]
+    fn rebase_ignores_non_identity_drm_keyformats() {
+        let user = test_user();
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n\
+            #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://drm.example.com\",KEYFORMAT=\"com.apple.streamingkeydelivery\"\n\
+            #EXTINF:4,\na.ts\n";
+        let props = RewriteHlsProps { rebase: Some(rebase_with(7, false, 0)), ..rewrite_props(content, Some("s")) };
+        let rewritten = rewrite_hls(&user, &props);
+        let keys = key_lines(&rewritten);
+        assert_eq!(keys.len(), 1, "{rewritten}");
+        assert!(!keys[0].contains("IV="), "{}", keys[0]);
+        assert!(keys[0].contains("com.apple.streamingkeydelivery"), "{}", keys[0]);
+    }
+
+    #[test]
+    fn rebase_pins_implicit_key_on_bare_segment_without_extinf() {
+        let user = test_user();
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:50\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n50.ts\n";
+        let props = RewriteHlsProps { rebase: Some(rebase_with(5, false, 0)), ..rewrite_props(content, Some("s")) };
+        let rewritten = rewrite_hls(&user, &props);
+        let keys = key_lines(&rewritten);
+        assert_eq!(keys.len(), 1, "{rewritten}");
+        assert!(keys[0].ends_with(&format!(",IV=0x{:032X}", 50)), "{}", keys[0]);
+    }
+
+    #[test]
+    fn rebase_rewrites_existing_discontinuity_sequence_before_discontinuity() {
+        let user = test_user();
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n\
+            #EXT-X-DISCONTINUITY-SEQUENCE:1\n#EXT-X-DISCONTINUITY\n#EXTINF:4.0,\n5000.ts\n";
+        let props = RewriteHlsProps { rebase: Some(rebase_with(9, false, 4)), ..rewrite_props(content, Some("s")) };
+        let rewritten = rewrite_hls(&user, &props);
+        let lines: Vec<&str> = rewritten.lines().collect();
+        let sequence = lines.iter().position(|line| *line == "#EXT-X-DISCONTINUITY-SEQUENCE:4").expect("sequence");
+        let discontinuity = lines.iter().position(|line| *line == "#EXT-X-DISCONTINUITY").expect("discontinuity");
+        assert!(sequence < discontinuity, "sequence must precede discontinuity: {rewritten}");
+        assert_eq!(lines.iter().filter(|line| line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")).count(), 1);
+    }
+
+    #[test]
+    fn rebase_none_keeps_playlist_byte_identical() {
+        let user = test_user();
+        let content =
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:12\n#EXTINF:6,\nseg.ts\n";
+        let without = rewrite_hls(&user, &rewrite_props(content, None));
+        let with_none = rewrite_hls(&user, &RewriteHlsProps { rebase: None, ..rewrite_props(content, None) });
+        assert_eq!(without, with_none);
+        assert!(with_none.lines().any(|line| line == "#EXT-X-MEDIA-SEQUENCE:12"), "{with_none}");
+        assert!(!with_none.lines().any(|line| line == "#EXT-X-DISCONTINUITY"), "{with_none}");
+    }
+
+    #[test]
+    fn media_playlist_sequence_and_segment_count_helpers() {
+        let content = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:42\n#EXTINF:6,\na.ts\n#EXTINF:6,\nb.ts\n";
+        assert_eq!(media_playlist_media_sequence(content), Some(42));
+        assert_eq!(media_playlist_segment_count(content), 2);
+        assert_eq!(media_playlist_media_sequence("#EXTM3U\n#EXTINF:6,\na.ts"), None);
+        assert_eq!(media_playlist_segment_count("#EXTM3U\n#EXT-X-VERSION:3"), 0);
+        assert_eq!(
+            media_playlist_discontinuity_sequence("#EXTM3U\n#EXT-X-DISCONTINUITY-SEQUENCE:3\n#EXTINF:6,\na.ts"),
+            Some(3)
+        );
+        assert_eq!(media_playlist_discontinuity_sequence(content), None);
     }
 }

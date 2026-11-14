@@ -8,6 +8,7 @@ mod admission;
 mod behavior;
 mod lifecycle;
 mod live_window;
+mod member_health;
 mod persistence;
 mod protocol;
 mod query;

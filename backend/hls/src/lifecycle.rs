@@ -13,6 +13,7 @@ pub enum HlsLifecycleEventKey {
     AccessLeaseValidity { lease_id: HlsAccessLeaseId, proxy_session_id: ProxySessionId },
     SessionIdle { proxy_session_id: ProxySessionId },
     OriginBindingProtection { proxy_session_id: ProxySessionId },
+    MemberHealthStall { proxy_session_id: ProxySessionId },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

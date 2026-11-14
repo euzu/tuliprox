@@ -475,6 +475,9 @@ impl TargetReplacement {
                 }
                 Ok::<_, io::Error>(())
             })();
+            // Remove the remaining staging artifacts (sidecar lock, WAL) before the publication guard
+            // reports completion; a drained deadline must find no staging files left behind.
+            drop(files);
             if let Some(publication) = publication.as_mut() {
                 publication.result = Some((target_name, result.as_ref().copied().map_err(ToString::to_string)));
             }

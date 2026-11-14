@@ -981,6 +981,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn member_identity_records_yield_non_null_qos() {
+        let temp = tempdir().expect("tempdir should succeed");
+        let history_dir = temp.path().join("stream_history");
+        let today = current_utc_day();
+
+        let mut connect = base_record(StreamHistoryEventType::Connect);
+        connect.partition_day_utc = today.clone();
+        connect.input_name = Some("solis".intern());
+        connect.provider_name = Some("solis".intern());
+        connect.provider_id = Some(1);
+        connect.virtual_id = Some(101);
+        connect.item_type = Some(PlaylistItemType::Live);
+        connect.stream_identity_key = Some("member-a".to_string());
+        connect.shared_joined_existing = Some(false);
+
+        let mut failed = base_record(StreamHistoryEventType::ConnectFailed);
+        failed.partition_day_utc = today.clone();
+        failed.input_name = Some("solis".intern());
+        failed.provider_name = Some("solis".intern());
+        failed.provider_id = Some(1);
+        failed.virtual_id = Some(101);
+        failed.item_type = Some(PlaylistItemType::Live);
+        failed.stream_identity_key = Some("member-a".to_string());
+        failed.connect_failure_reason = Some(ConnectFailureReason::ChannelUnavailable);
+        failed.failure_stage = Some(FailureStage::ProviderOpen);
+        write_pending_history_records(&history_dir, &[connect, failed]);
+
+        let repo = std::sync::Arc::new(QosSnapshotRepository::open(temp.path()).expect("repo should open"));
+        let repo_c = repo.clone();
+        let h_dir = history_dir.clone();
+        let now = today.clone();
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c, &h_dir, &now, 0))
+            .await
+            .unwrap()
+            .expect("aggregation should succeed");
+
+        let snapshot =
+            repo.get_snapshot("member-a").expect("load snapshot should succeed").expect("snapshot should exist");
+        assert_eq!(snapshot.window_24h.connect_count, 1);
+        assert_eq!(snapshot.window_24h.connect_failed_count, 1);
+        assert!(snapshot.window_24h.score > 0);
+        assert!(snapshot.window_24h.confidence > 0);
+    }
+
+    #[tokio::test]
     async fn run_aggregation_once_advances_checkpoint_across_multiple_completed_days() {
         let temp = tempdir().expect("tempdir should succeed");
         let history_dir = temp.path().join("stream_history");

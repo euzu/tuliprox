@@ -6,7 +6,7 @@ use crate::{
     auth::Fingerprint,
     model::{
         AppConfig, Config, ConfigInput, ConfigInputAlias, ConfigTarget, MediaToolCapabilities, NetworkAccess,
-        ProxyUserCredentials, SourcesConfig, StreamHistoryConfig,
+        ProxyUserCredentials, SourcesConfig,
     },
     repository::GeoIp,
     utils::FileLockManager,
@@ -116,6 +116,17 @@ pub(crate) enum FakeOriginMode {
         bytes: Vec<u8>,
     },
     Hls,
+    /// Live HLS media playlist whose media sequence advances on every manifest request.
+    HlsAdvancing,
+    /// Like [`FakeOriginMode::HlsAdvancing`], but the media sequence starts after the given value.
+    HlsAdvancingFrom(usize),
+    /// Like [`FakeOriginMode::HlsAdvancingFrom`], with switchable faults: a non-zero status answers every
+    /// manifest (or segment) request with that status instead of serving it. Zero serves normally.
+    HlsAdvancingWithFault {
+        start: usize,
+        manifest_status: Arc<std::sync::atomic::AtomicU16>,
+        segment_status: Arc<std::sync::atomic::AtomicU16>,
+    },
     /// MPEG-TS bytes, then an open connection without data.
     TsThenStall(Vec<u8>),
     /// The bytes repeated every 50 ms until the client disconnects.
@@ -228,7 +239,11 @@ pub(in crate::api::api_utils::tests) async fn spawn_controlled_fake_origin(
                     let _ = socket.write_all(bytes).await;
                     let _ = socket.shutdown().await;
                 }
-                FakeOriginMode::Hls | FakeOriginMode::StalkerRetry { .. } => {
+                FakeOriginMode::Hls
+                | FakeOriginMode::HlsAdvancing
+                | FakeOriginMode::HlsAdvancingFrom(_)
+                | FakeOriginMode::HlsAdvancingWithFault { .. }
+                | FakeOriginMode::StalkerRetry { .. } => {
                     let head = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = socket.write_all(head.as_bytes()).await;
                     let _ = socket.shutdown().await;
@@ -505,18 +520,18 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-    let history_config = Some(StreamHistoryConfig::default());
+    let config = app_cfg.config.load();
+    let history_config = config.reverse_proxy.as_ref().and_then(|proxy| proxy.stream_history.as_ref());
     active_provider.set_shared_stream_manager(&shared_stream_manager);
 
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-    let config = app_cfg.config.load();
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     let connection_manager = Arc::new(ConnectionManager::new(
         &active_users,
         &active_provider,
         &shared_stream_manager,
         &event_manager,
-        history_config.as_ref(),
+        history_config,
     ));
 
     let tokens = CancelTokens::default();

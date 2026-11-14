@@ -579,3 +579,67 @@ async fn canonical_recovery_from_provisioning_marks_transient_handoff_boundary()
     assert!(body.contains("#EXT-X-DISCONTINUITY\n#EXTINF:4.0,"));
     assert!(!app_state.hls.provisioning.has_consumer(&input.name, 12345, super::super::current_time_millis()));
 }
+
+#[tokio::test]
+async fn stale_group_binding_from_handoff_returns_retry_after_instead_of_not_found() {
+    use tuliprox_hls::api::{HlsOriginSource, HlsOriginSourceKind, HlsSessionKey};
+    let input = ConfigInput {
+        id: 1,
+        name: Arc::from("test-input"),
+        input_type: InputType::Xtream,
+        url: "http://example.com".to_string(),
+        enabled: true,
+        ..ConfigInput::default()
+    };
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    enable_hls_cache(&app_state);
+
+    let session_key = HlsSessionKey::for_group(1, 100);
+    let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
+    let origin_source_a =
+        HlsOriginSource::new(1, Arc::from("test-input"), "1001", HlsOriginSourceKind::M3uMediaPlaylist);
+    let origin_source_b =
+        HlsOriginSource::new(1, Arc::from("test-input"), "1002", HlsOriginSourceKind::M3uMediaPlaylist);
+
+    let (_session, _) = app_state
+        .hls
+        .proxy
+        .get_or_create_session_with_source_and_outcome(
+            session_key.clone(),
+            origin_source_b.clone(),
+            &app_state.get_encrypt_secret(),
+            app_state.hls.proxy.now_ms(),
+        )
+        .await;
+
+    let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+    let access_context = test_hls_access_context(proxy_session_id.clone(), access_lease_id.clone());
+
+    let response = super::super::try_hls_cache_canonical_manifest_response(
+        &app_state,
+        &test_fingerprint(),
+        &access_context,
+        &proxy_session_id,
+        &access_lease_id,
+        HlsAccessLeaseState::Activated,
+        super::super::HlsCacheManifestOrigin {
+            raw_request_url: "http://example.com/live/1001.m3u8",
+            session_entry_url: super::super::HlsOriginEntryUrl::direct_http("http://example.com/live/1001.m3u8"),
+            input: &input,
+            origin_source: origin_source_a,
+        },
+        HeaderMap::new(),
+        None,
+        "/live/user/pass/100.m3u8",
+        super::super::HlsManifestRefreshOrdering::Background,
+    )
+    .await
+    .expect("stale binding response");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "stale binding after handoff must return 503 retry response, not 404"
+    );
+    assert!(response.headers().contains_key(axum::http::header::RETRY_AFTER));
+}

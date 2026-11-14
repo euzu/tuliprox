@@ -8,7 +8,7 @@ use std::{
 const FRESH_BUDGET_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum BudgetDecision {
+pub enum BudgetDecision {
     /// Reopen the current member, it played long enough to deserve another try.
     RetrySame,
     /// Select another member, excluding the ones already tried in this incident.
@@ -21,7 +21,8 @@ pub(crate) enum BudgetDecision {
 /// first trigger and ends after `stable_after_secs` of playback without a new one. Each stretch
 /// without playback is bounded by `max_outage_secs`, and `max_switches` bounds the switches within
 /// `max_switches_window_secs` across incidents.
-pub(crate) struct FailoverBudget {
+#[derive(Clone, Debug)]
+pub struct FailoverBudget {
     budget: Duration,
     stable_reset: Duration,
     flap_window: Duration,
@@ -36,7 +37,7 @@ pub(crate) struct FailoverBudget {
 }
 
 impl FailoverBudget {
-    pub(crate) fn new(failover: &FailoverGroupRuntimeConfig) -> Self {
+    pub fn new(failover: &FailoverGroupRuntimeConfig) -> Self {
         Self {
             budget: Duration::from_secs(failover.max_outage_secs),
             stable_reset: Duration::from_secs(failover.stable_after_secs),
@@ -52,7 +53,7 @@ impl FailoverBudget {
         }
     }
 
-    pub(crate) fn on_trigger(&mut self, current: usize, member_count: usize, now: Instant) -> BudgetDecision {
+    pub fn on_trigger(&mut self, current: usize, member_count: usize, now: Instant) -> BudgetDecision {
         self.last_trigger = Some(now);
         let started = *self.incident_started.get_or_insert(now);
         if now.saturating_duration_since(started) >= self.budget {
@@ -82,7 +83,7 @@ impl FailoverBudget {
     }
 
     /// Whether a trigger now would give up, without starting or changing an incident.
-    pub(crate) fn would_give_up(&self, now: Instant) -> bool {
+    pub fn would_give_up(&self, now: Instant) -> bool {
         let budget_spent =
             self.incident_started.is_some_and(|started| now.saturating_duration_since(started) >= self.budget);
         let flapping = self.flap_max_switches > 0
@@ -91,7 +92,7 @@ impl FailoverBudget {
         budget_spent || flapping
     }
 
-    pub(crate) fn on_switched(&mut self, index: usize, previous: usize, now: Instant) {
+    pub fn on_switched(&mut self, index: usize, previous: usize, now: Instant) {
         if self.flap_max_switches > 0 {
             self.switches.push_back(now);
         }
@@ -102,7 +103,7 @@ impl FailoverBudget {
     }
 
     /// Called for packets sent to the client.
-    pub(crate) fn on_data(&mut self, now: Instant) {
+    pub fn on_data(&mut self, now: Instant) {
         let first_data = *self.member_first_data.get_or_insert(now);
         // The budget bounds the time without playback: a member that really plays restarts it,
         // while the members tried in this incident stay excluded until it ends. A member that
@@ -121,7 +122,7 @@ impl FailoverBudget {
     }
 
     /// End of the current incident's switch budget.
-    pub(crate) fn deadline(&self) -> Option<Instant> { self.incident_started.map(|started| started + self.budget) }
+    pub fn deadline(&self) -> Option<Instant> { self.incident_started.map(|started| started + self.budget) }
 }
 
 #[cfg(test)]

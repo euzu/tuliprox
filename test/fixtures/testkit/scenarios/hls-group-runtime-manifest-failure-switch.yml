@@ -1,0 +1,59 @@
+schema_version: 1
+name: hls-group-runtime-manifest-failure-switch
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: true
+    share_live_mpeg_ts: false
+    hls_startup_mode: conservative
+  failover_groups:
+    inputs: [input-a, input-b]
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}", "--failover", "{run_directory}/failover.d"]
+    readiness_url: "{base_url}/healthcheck"
+    extra_config_files:
+      - source: fixtures/failover-group-auto.yml
+        destination: failover.d/testkit.yml
+origin:
+  run_id: hls-group-runtime-manifest-failure-switch
+  hls_profile:
+    prefix_delay_millis: 1000
+    window_segments: 6
+    missing_head_segments: 0
+actors:
+  - id: viewer
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/viewer
+channels:
+  failover-channel: { origin_marker: 17, protocol: hls }
+steps:
+  - command_id: start-playback
+    start:
+      actor: viewer
+      playback_id: playback-1
+      session_group: group-1
+      channel: failover-channel
+    await: { valid_frames: 2 }
+    assert_origin:
+      latest_segment_account: input-a
+  - command_id: arm-manifest-fault
+    origin_fault:
+      set:
+        id: a-manifest
+        kind: hls_manifest_status
+        account: input-a
+        status: 500
+  - command_id: wait-for-failover
+    pause_millis: 10000
+  - command_id: stop-playback
+    stop: { playback_id: playback-1 }
+    assert_origin:
+      latest_segment_account: input-b
+policy_contract:
+  user_access_control: true
+  users:
+    viewer: { max_connections: 2 }
+  admission_strategies: []

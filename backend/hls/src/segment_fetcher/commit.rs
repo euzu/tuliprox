@@ -47,6 +47,8 @@ pub(super) struct SegmentFetchCompletion {
     pub(super) scheduled_retry: Option<ScheduledSegmentRetry>,
     pub(super) evidence_changed_for: Option<ProxySessionId>,
     pub(super) recovery_generation: Option<u64>,
+    /// Group-member health signal, sent by the worker once the session lock is released.
+    pub(super) member_unhealthy: Option<crate::member_health::HlsMemberUnhealthyNotice>,
 }
 
 pub(super) struct SegmentFetchCommit {
@@ -111,13 +113,32 @@ impl HlsSegmentWorkerPool {
         } else {
             None
         };
+        let mut member_unhealthy = None;
         if generation_valid {
             if let Err(error) = &result {
                 session.record_start_provider_failure(error);
             }
             match result {
-                Ok(commit) => self.commit_successful_segment_fetch(session, snapshot, &commit, finished_at_ms),
-                Err(err) => commit_failed_segment_fetch(session, snapshot, policy, &err, finished_at_ms),
+                Ok(commit) => {
+                    self.commit_successful_segment_fetch(session, snapshot, &commit, finished_at_ms);
+                    let media_ms = session.segments.get(&snapshot.proxy_seq).map_or(0, |entry| entry.duration_ms);
+                    // `started_at_ms` is the dispatch time, so this measures effective delivery
+                    // (queue + origin permit + key-dependency waits + the HTTP transfer), not the
+                    // bare download rate. Keeping the shared retry loop unchanged is deliberate.
+                    member_unhealthy = session.member_unhealthy_after_segment_ready(
+                        finished_at_ms,
+                        media_ms,
+                        finished_at_ms.saturating_sub(snapshot.started_at_ms),
+                    );
+                }
+                Err(err) => {
+                    if matches!(
+                        commit_failed_segment_fetch(session, snapshot, policy, &err, finished_at_ms),
+                        SegmentFetchOriginFailure::Permanent
+                    ) {
+                        member_unhealthy = session.member_unhealthy_after_media_failure(&err);
+                    }
+                }
             }
         } else if !stale_commit_cleanup_reserved {
             if let Some(entry) = session
@@ -153,6 +174,7 @@ impl HlsSegmentWorkerPool {
             scheduled_retry,
             evidence_changed_for,
             recovery_generation: generation_valid.then_some(session.activity.origin_work_generation),
+            member_unhealthy,
         }
     }
 
@@ -173,6 +195,11 @@ impl HlsSegmentWorkerPool {
         }
         recompute_unpublished_live_head(session);
         let reset_failures = session.record_successful_segment_fetch();
+        // Only this object's own retry run ends; the runs of other objects stay untouched.
+        session.forget_segment_object_failures(&HlsSegmentFailureObject::Normal {
+            proxy_seq: snapshot.proxy_seq,
+            origin_seq: snapshot.origin_seq,
+        });
         self.metrics.record_segment_cached();
         if log::log_enabled!(log::Level::Debug) {
             let identity = super::super::HlsLogIdentity::from_session(session);
@@ -193,13 +220,29 @@ impl HlsSegmentWorkerPool {
     }
 }
 
+/// Member-health classification of a failed segment fetch, after the object's own retries.
+///
+/// A retryable origin error (`RetryableStatus`, `Transport`, `Timeout`, a decoding failure) that
+/// exhausted only the intra-fetch retry loop is still `Transient`: the scheduler retries the object
+/// up to `permanent_failure_segment_threshold` times, so it is not yet evidence against the member.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SegmentFetchOriginFailure {
+    /// The object became permanently failed: a non-retryable error or the temporary-failure threshold.
+    Permanent,
+    /// The origin failed but a scheduler retry is still pending.
+    Transient,
+    /// A local capacity problem or an expected 404 at the unpublished live head: not the origin.
+    NotOrigin,
+}
+
+/// Records a failed segment fetch and classifies it for the member-health trigger.
 pub(super) fn commit_failed_segment_fetch(
     session: &mut super::super::HlsSession,
     snapshot: &SegmentFetchSnapshot,
     policy: &SegmentFetchPolicy,
     error: &SegmentFetchError,
     finished_at_ms: u64,
-) {
+) -> SegmentFetchOriginFailure {
     let missing_candidate = !session.uses_fast_start_live_window()
         && session.origin_source.archive_reference.is_none()
         && session
@@ -207,7 +250,8 @@ pub(super) fn commit_failed_segment_fetch(
             .is_some_and(|head| snapshot.proxy_seq >= head && snapshot.proxy_seq <= missing_head_bound(session, head))
         && session.segments.get(&snapshot.proxy_seq).is_some_and(|entry| entry.last_rendered_at_ms.is_none())
         && error.permanent_status().is_some_and(is_missing_origin_status);
-    if !error.is_local_cache_capacity() && !missing_candidate {
+    let origin_path_failed = !error.is_local_cache_capacity() && !missing_candidate;
+    if origin_path_failed {
         session.origin_control.path_condition =
             super::super::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure;
     }
@@ -224,6 +268,14 @@ pub(super) fn commit_failed_segment_fetch(
         if let Some(entry) = session.segments.get_mut(&snapshot.proxy_seq) {
             entry.status = SegmentCacheStatus::FailedPermanent { failed_at_ms: finished_at_ms, status: None };
         }
+    }
+    if !origin_path_failed {
+        return SegmentFetchOriginFailure::NotOrigin;
+    }
+    if !error.retryable_failure() || invalidate_queued_origin_work {
+        SegmentFetchOriginFailure::Permanent
+    } else {
+        SegmentFetchOriginFailure::Transient
     }
 }
 
@@ -259,6 +311,11 @@ pub(crate) fn recompute_unpublished_live_head(session: &mut super::super::HlsSes
     let Some(head) = session.publishable_origin_head_proxy_seq else { return };
     let Some(tail) = session.publishable_origin_tail_proxy_seq else { return };
     let bound = missing_head_bound(session, head).min(tail);
+    if head > bound {
+        // Every segment of the origin window is missing: nothing left to skip, and an inverted range
+        // would panic in `BTreeMap::range`.
+        return;
+    }
     if session.missing_head_limit.is_none_or(|limit| limit < head)
         && session.segments.range(head..=bound).any(|(_, entry)| is_missing_origin_segment(&entry.status))
     {
@@ -311,13 +368,13 @@ fn failed_segment_status(
         );
     }
     let threshold = policy.permanent_failure_segment_threshold.max(1);
-    let transition = session.record_temporary_segment_fetch_failure(
-        finished_at_ms,
-        HlsSegmentFailureObject::Normal { proxy_seq: snapshot.proxy_seq, origin_seq: snapshot.origin_seq },
-        threshold,
-    );
+    let object = HlsSegmentFailureObject::Normal { proxy_seq: snapshot.proxy_seq, origin_seq: snapshot.origin_seq };
+    let transition = session.record_temporary_segment_fetch_failure(finished_at_ms, object.clone(), threshold);
+    // Every delivered segment resets the session-wide counter, so a success on another object must
+    // not hide that this object already burned its own retries: judge the object's own run too.
+    let object_exhausted = session.take_exhausted_segment_object(&object, threshold);
     match transition {
-        HlsSegmentFailureTransition::StillRetryable { failures, threshold } => {
+        HlsSegmentFailureTransition::StillRetryable { failures, threshold } if !object_exhausted => {
             if log::log_enabled!(log::Level::Debug) {
                 let identity = super::super::HlsLogIdentity::from_session(session);
                 debug!(
@@ -331,7 +388,9 @@ fn failed_segment_status(
             }
             (SegmentCacheStatus::FailedRetryable { failed_at_ms: finished_at_ms, retry_after_ms: 1_000 }, false)
         }
-        HlsSegmentFailureTransition::BecamePermanentlyFailed { failures, threshold } => {
+        HlsSegmentFailureTransition::StillRetryable { failures, threshold }
+        | HlsSegmentFailureTransition::BecamePermanentlyFailed { failures, threshold } => {
+            session.forget_segment_object_failures(&object);
             if log::log_enabled!(log::Level::Warn) {
                 let identity = super::super::HlsLogIdentity::from_session(session);
                 warn!(
