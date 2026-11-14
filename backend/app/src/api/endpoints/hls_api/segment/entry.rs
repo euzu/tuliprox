@@ -1,27 +1,28 @@
 use super::{
     append_user_session_provider_headers, build_hls_manifest_request_headers, build_hls_origin_resolution,
     build_hls_origin_source_for_playback, create_hls_cache_entry_master_playlist_response,
-    download_legacy_hls_manifest, ensure_hls_manifest_extension, hls_cache_enabled_for_user,
-    hls_custom_video_manifest_response, hls_entry_user_session_token, hls_media_playlist_wrap_enabled,
-    hls_panel_provisioning_or_status_response, hls_playback_kind, hls_response, m3u_archive_epg_reference_ts,
-    m3u_catchup_epg_reference_from_session_token, normalize_xtream_live_hls_url, release_prepared_hls_manifest_session,
-    stalker_hls_stream, stalker_manifest_url, terminate_failed_hls_manifest_session,
-    try_reserve_hls_entry_origin_account_for_redirect, wrap_media_playlist, HlsEntryStreamContext,
-    HlsMediaPlaylistWrap, HlsOriginEntryUrl, HlsRequestStage, StalkerManifestUrl,
+    create_hls_cache_entry_master_playlist_response_with_key, download_legacy_hls_manifest,
+    ensure_hls_manifest_extension, hls_cache_enabled_for_user, hls_custom_video_manifest_response,
+    hls_entry_user_session_token, hls_media_playlist_wrap_enabled, hls_panel_provisioning_or_status_response,
+    hls_playback_kind, hls_response, m3u_archive_epg_reference_ts, m3u_catchup_epg_reference_from_session_token,
+    normalize_xtream_live_hls_url, release_prepared_hls_manifest_session, stalker_hls_stream, stalker_manifest_url,
+    terminate_failed_hls_manifest_session, try_reserve_hls_entry_origin_account_for_redirect, wrap_media_playlist,
+    HlsEntryStreamContext, HlsMediaPlaylistWrap, HlsOriginEntryUrl, HlsRequestStage, StalkerManifestUrl,
 };
 use crate::{
     api::{
         api_utils::{
-            blocks_new_playback, connection_priority_for_kind, get_hls_playback_ttl_secs, group_playback_settings,
-            is_running_playback, resolve_stalker_stream_for_account, select_provider_stream_url, stalker_stream_kind,
-            GroupSelectionRequest,
+            blocks_new_playback, connection_priority_for_kind, failover_group::record_member_failure,
+            get_hls_playback_ttl_secs, group_playback_settings, is_running_playback,
+            resolve_stalker_stream_for_account, select_provider_stream_url, stalker_stream_kind, GroupSelectionRequest,
         },
         model::{AppState, CustomVideoStreamType, PlaybackLeaseRef, UserSession},
     },
     auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, InputSource, ProxyUserCredentials},
     processing::parser::hls::{
-        classify_hls_playlist, rewrite_hls, HlsManifestSource, HlsPlaylistKind, RewriteHlsProps,
+        classify_hls_playlist, media_playlist_media_sequence, media_playlist_segment_count, rewrite_hls,
+        HlsManifestSource, HlsMediaSequenceRebase, HlsPlaylistKind, RewriteHlsProps,
     },
     repository::{m3u_get_item_for_stream_id, storage_const, xtream_get_item_for_stream_id},
     utils::{debug_if_enabled, request},
@@ -36,19 +37,22 @@ use shared::{
     model::{PlaylistItemType, StreamChannel, TargetType, UserConnectionPermission, VirtualId},
     utils::sanitize_sensitive_info,
 };
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tuliprox_core::model::PlaybackKind;
 use tuliprox_hls::api::{
-    build_hls_origin_session_owner, build_proxy_session_id, extract_hls_provider_session_headers, HlsOriginSource,
-    HlsSessionKey,
+    build_hls_origin_session_owner, build_proxy_session_id, extract_hls_provider_session_headers,
+    HlsMemberUnhealthyReason, HlsOriginSource, HlsSessionKey,
 };
 use tuliprox_repository::{
     target_stream_item::{classify_virtual_id, ResolvedStreamTarget},
     FailoverGroupRecord,
 };
 use tuliprox_session::{
-    failover_group::{FailureClass, HalfOpenGuard, SelectionMode},
-    MemberBinding,
+    failover_group::{BudgetDecision, FailoverBudget, FailureClass, HalfOpenGuard, SelectionMode},
+    LegacyHlsRebase, MemberBinding,
 };
 
 pub(in crate::api::endpoints::hls_api) struct HlsCacheManifestOrigin<'a> {
@@ -212,6 +216,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 false,
                 None,
                 true,
+                fingerprint,
             )
             .await
             else {
@@ -236,53 +241,150 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 .unwrap_or_else(|| Arc::clone(&resolved.member.input_name));
             app_state.connection_manager.release_provider_handle(selection_handle.take());
 
-            let Some(member_url) = (if let Some(ref probed) = probed {
-                Some(probed.request_url.clone())
+            // A live group session is keyed by the logical group. Once it exists, every viewer joins
+            // it and reuses its bound member (`origin_source`), so `prefer` only affects the first
+            // creation. Archive group playback keeps the per-member key below.
+            let existing_group_session = if archive_reference.is_none() {
+                super::group_start::shared_cache_group_session_origin(app_state, target, &group, group.group_vid.get())
+                    .await
             } else {
-                super::group_start::build_hls_group_member_origin_url(
-                    app_state,
-                    target,
-                    &resolved.input,
-                    &resolved.member,
-                    &allocated,
-                    None,
-                )
-                .await
-            }) else {
-                return hls_panel_provisioning_or_status_response(
-                    app_state,
-                    user,
-                    input,
-                    virtual_id,
-                    original_hls_entry_path,
-                    server_info.path.as_deref(),
-                    StatusCode::SERVICE_UNAVAILABLE,
-                )
-                .await;
+                None
             };
 
-            let member_origin = build_hls_origin_resolution(&resolved.input, &member_url);
-            let member_source = build_hls_origin_source_for_playback(
-                &resolved.input,
-                resolved.member.input_stream_id.to_string(),
-                archive_reference,
-                Some(member_url.as_str()),
-            );
-            return create_hls_cache_entry_master_playlist_response(
+            let selected_matches_bound = existing_group_session.as_ref().is_some_and(|(bound_source, _)| {
+                bound_source.input_name.as_ref() == resolved.member.input_name.as_ref()
+                    && bound_source.stream_ref.as_str() == resolved.member.input_stream_id.as_ref()
+            });
+
+            let (member_source, member_url, member_input) = if let Some((bound_source, bound_url)) =
+                existing_group_session
+            {
+                if selected_matches_bound {
+                    let Some(bound_input) = app_state.app_config.get_input_by_name(&bound_source.input_name) else {
+                        return hls_panel_provisioning_or_status_response(
+                            app_state,
+                            user,
+                            input,
+                            virtual_id,
+                            original_hls_entry_path,
+                            server_info.path.as_deref(),
+                            StatusCode::SERVICE_UNAVAILABLE,
+                        )
+                        .await;
+                    };
+                    (bound_source, bound_url, bound_input)
+                } else {
+                    // R2: a fresh selection disagreed with the bound member of a non-reusable group
+                    // session. Trigger the member handoff (single-flight, coalesced with R3 triggers)
+                    // and serve the freshly selected member for this entry response.
+                    if probed.is_some() {
+                        let session_key = HlsSessionKey::for_group(target.id, group.group_vid.get());
+                        if let Some(group_session) = app_state.hls.proxy.sessions().get_by_key(&session_key).await {
+                            let runtime = group_session.read().await.origin_account_runtime.clone();
+                            if let Some(runtime) = runtime {
+                                runtime
+                                    .notify_member_unhealthy(&group_session, HlsMemberUnhealthyReason::ManifestFailure);
+                            }
+                        }
+                    }
+                    let Some(member_url) = (if let Some(ref probed) = probed {
+                        Some(probed.request_url.clone())
+                    } else {
+                        super::group_start::build_hls_group_member_origin_url(
+                            app_state,
+                            target,
+                            &resolved.input,
+                            &resolved.member,
+                            &allocated,
+                            None,
+                        )
+                        .await
+                    }) else {
+                        return hls_panel_provisioning_or_status_response(
+                            app_state,
+                            user,
+                            input,
+                            virtual_id,
+                            original_hls_entry_path,
+                            server_info.path.as_deref(),
+                            StatusCode::SERVICE_UNAVAILABLE,
+                        )
+                        .await;
+                    };
+                    let member_source = build_hls_origin_source_for_playback(
+                        &resolved.input,
+                        resolved.member.input_stream_id.to_string(),
+                        archive_reference,
+                        Some(member_url.as_str()),
+                    );
+                    (member_source, member_url, Arc::clone(&resolved.input))
+                }
+            } else {
+                let Some(member_url) = (if let Some(ref probed) = probed {
+                    Some(probed.request_url.clone())
+                } else {
+                    super::group_start::build_hls_group_member_origin_url(
+                        app_state,
+                        target,
+                        &resolved.input,
+                        &resolved.member,
+                        &allocated,
+                        None,
+                    )
+                    .await
+                }) else {
+                    return hls_panel_provisioning_or_status_response(
+                        app_state,
+                        user,
+                        input,
+                        virtual_id,
+                        original_hls_entry_path,
+                        server_info.path.as_deref(),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                    )
+                    .await;
+                };
+                let member_source = build_hls_origin_source_for_playback(
+                    &resolved.input,
+                    resolved.member.input_stream_id.to_string(),
+                    archive_reference,
+                    Some(member_url.as_str()),
+                );
+                (member_source, member_url, Arc::clone(&resolved.input))
+            };
+
+            if archive_reference.is_some() {
+                return create_hls_cache_entry_master_playlist_response(
+                    app_state,
+                    fingerprint,
+                    user,
+                    member_source,
+                    virtual_id,
+                    user_session,
+                    stream_context.known_bitrate_bps(),
+                    session_token_hint,
+                    member_url.as_str(),
+                    &member_input,
+                    connection_permission,
+                    connection_kind,
+                    server_info.path.as_deref(),
+                )
+                .await;
+            }
+
+            let member_origin = build_hls_origin_resolution(&member_input, &member_url);
+            return create_hls_cache_entry_master_playlist_response_with_key(
                 app_state,
                 fingerprint,
                 user,
                 member_source,
-                virtual_id,
+                HlsSessionKey::for_group(target.id, group.group_vid.get()),
+                group.group_vid.get(),
                 user_session,
                 stream_context.known_bitrate_bps(),
                 session_token_hint,
-                if archive_reference.is_some() {
-                    member_url.as_str()
-                } else {
-                    member_origin.as_ref().map_or(member_url.as_str(), |origin| origin.session_entry_url.as_str())
-                },
-                &resolved.input,
+                member_origin.as_ref().map_or(member_url.as_str(), |origin| origin.session_entry_url.as_str()),
+                &member_input,
                 connection_permission,
                 connection_kind,
                 server_info.path.as_deref(),
@@ -441,6 +543,13 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 }
                 None => None,
             }
+        } else if let Some((member_vid, member_input, _, _)) = bound_member_info.as_ref() {
+            // A bound group member resolves its own playlist URL from the group record on every
+            // refresh. The sealed entry URL belongs to the member at entry time and cannot be
+            // mapped across inputs after a runtime member switch.
+            resolve_bound_group_member_stream(app_state, target, *member_vid, member_input, &selected_provider_config)
+                .await
+                .map(|stream_url| (Arc::clone(&selected_provider_config.name), stream_url))
         } else {
             select_provider_stream_url(
                 &url,
@@ -546,6 +655,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             true,
             Some((&user.username, user_session_token.as_str())),
             false,
+            fingerprint,
         )
         .await
         else {
@@ -750,6 +860,10 @@ pub(in crate::api) async fn handle_hls_stream_request(
     };
     let provider_request_id = provider_handle.as_ref().and_then(|handle| handle.playback_request_id);
     let selected_provider_name = selected_provider_config.as_ref().map(|cfg| Arc::clone(&cfg.name));
+    // A legacy failover-group session holds a member binding; the timeline rebase and the runtime
+    // switch apply only to its live media playlist polls.
+    let legacy_group_session = bound_member_info.is_some();
+    let base_url = server_info.get_base_url();
 
     // The entry request already downloaded this playlist; serve it once to the immediate variant
     // request when it is still bound to the same provider binding.
@@ -802,6 +916,30 @@ pub(in crate::api) async fn handle_hls_stream_request(
     // Holding the provider slot until the first segment request causes stale active connections and
     // breaks forced same-account reuse on the next HLS/Catchup stream request.
     app_state.connection_manager.release_provider_handle(provider_handle);
+
+    // A segment failure of the bound member marked it failed; the next manifest poll switches
+    // without retrying the failed member.
+    if is_live_hls && legacy_group_session && user_session.is_some_and(|session| session.member_failed_on_segment) {
+        if let (Some(session), Some(session_token)) = (user_session, session_token.as_deref()) {
+            if let Some(response) = try_switch_legacy_hls_member(
+                app_state,
+                fingerprint,
+                user,
+                target,
+                &base_url,
+                req_headers,
+                session,
+                session_token,
+                FailureClass::Stream,
+                false,
+                fallback_connection_kind,
+            )
+            .await
+            {
+                return response;
+            }
+        }
+    }
 
     let mut download_result = if let Some(probed) = probed_manifest {
         Ok((probed.content, probed.response_url, probed.response_headers, probed.playlist_kind))
@@ -876,7 +1014,36 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 app_state.member_health.record_success_with(guard);
             }
             let encrypt_secret = app_state.get_encrypt_secret();
-            let base_url = server_info.get_base_url();
+            // A live legacy group media playlist continues the client timeline and feeds the
+            // switch budget with every successful serve.
+            let mut rebase_props = None;
+            if legacy_group_session && is_live_hls && playlist_kind == HlsPlaylistKind::Media {
+                if let Some(session_token) = session_token.as_deref() {
+                    // Re-read the persisted timeline state: a segment-triggered switch attempt
+                    // earlier in this request may already have advanced the incident budget, and
+                    // the request snapshot must not overwrite it.
+                    let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+                    let mut rebase_state =
+                        fresh.as_ref().and_then(|session| session.legacy_rebase.clone()).unwrap_or_default();
+                    rebase_props = plan_legacy_rebase(&mut rebase_state, &content, playlist_kind);
+                    let playback = group_playback_settings(app_state, target);
+                    let mut budget = fresh
+                        .as_ref()
+                        .and_then(|session| session.legacy_failover_budget.clone())
+                        .unwrap_or_else(|| FailoverBudget::new(&playback.failover));
+                    budget.on_data(std::time::Instant::now());
+                    app_state
+                        .active_users
+                        .replace_legacy_failover_state(
+                            &user.username,
+                            session_token,
+                            Some(rebase_state),
+                            Some(budget),
+                            false,
+                        )
+                        .await;
+                }
+            }
             let rewrite_hls_props = RewriteHlsProps {
                 secret: &encrypt_secret,
                 base_url: &base_url,
@@ -888,6 +1055,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 user_token: session_token.as_deref(),
                 origin_provider: selected_provider_name.as_deref(),
                 playlist_kind: Some(playlist_kind),
+                rebase: rebase_props,
             };
             let hls_content = rewrite_hls(user, &rewrite_hls_props);
             if let Some(session_token) = session_token.as_deref() {
@@ -935,6 +1103,32 @@ pub(in crate::api) async fn handle_hls_stream_request(
             hls_response(hls_content).into_response()
         }
         Err(err) => {
+            // A hard failure of the bound member switches a running legacy group playback to the
+            // next member and answers this poll with the rebased manifest.
+            if is_live_hls && legacy_group_session {
+                let class = super::group_start::classify_hls_download_error(&err);
+                if is_legacy_manifest_failover_class(class) {
+                    if let (Some(session), Some(session_token)) = (user_session, session_token.as_deref()) {
+                        if let Some(response) = try_switch_legacy_hls_member(
+                            app_state,
+                            fingerprint,
+                            user,
+                            target,
+                            &base_url,
+                            req_headers,
+                            session,
+                            session_token,
+                            class,
+                            true,
+                            fallback_connection_kind,
+                        )
+                        .await
+                        {
+                            return response;
+                        }
+                    }
+                }
+            }
             if let Some(guard) = half_open_guard {
                 app_state.member_health.record_classified_failure_with(
                     guard,
@@ -964,6 +1158,409 @@ pub(in crate::api) async fn handle_hls_stream_request(
             .await
         }
     }
+}
+
+/// Whether a legacy manifest download failure triggers a runtime member switch: stream errors
+/// (404/410/5xx) and transport errors. Account (401/403) and capacity (429) errors keep the
+/// existing per-account behavior.
+fn is_legacy_manifest_failover_class(class: FailureClass) -> bool {
+    matches!(class, FailureClass::Stream | FailureClass::Transport)
+}
+
+/// Client timeline rebase for one media playlist serve, updating the per-session state in place.
+fn plan_legacy_rebase(
+    state: &mut LegacyHlsRebase,
+    content: &str,
+    playlist_kind: HlsPlaylistKind,
+) -> Option<HlsMediaSequenceRebase> {
+    if playlist_kind != HlsPlaylistKind::Media {
+        return None;
+    }
+    let upstream_seq = media_playlist_media_sequence(content).unwrap_or(0);
+    let segment_count = media_playlist_segment_count(content);
+    let mut served_seq = upstream_seq.saturating_add_signed(state.media_sequence_offset);
+    // An upstream restart moves the whole window behind what the client already played. Rebase it
+    // after the last served segment with a discontinuity, as after a member switch.
+    if !state.insert_discontinuity
+        && segment_count > 0
+        && served_seq.saturating_add(segment_count - 1) < state.last_served_sequence
+    {
+        let next_seq = state.last_served_sequence.saturating_add(1);
+        state.media_sequence_offset =
+            i64::try_from(next_seq).unwrap_or(i64::MAX).saturating_sub(i64::try_from(upstream_seq).unwrap_or(i64::MAX));
+        state.insert_discontinuity = true;
+        served_seq = next_seq;
+    }
+    let insert_discontinuity = state.insert_discontinuity;
+    if insert_discontinuity {
+        state.discontinuity_boundary_seq = Some(served_seq);
+        state.insert_discontinuity = false;
+    } else if let Some(boundary) = state.discontinuity_boundary_seq {
+        if served_seq > boundary {
+            state.discontinuity_sequence = state.discontinuity_sequence.saturating_add(1);
+            state.discontinuity_boundary_seq = None;
+        }
+    }
+    // Read after the advance above so the poll where the boundary leaves the window emits the
+    // incremented `EXT-X-DISCONTINUITY-SEQUENCE`.
+    let discontinuity_sequence = state.discontinuity_sequence;
+    if segment_count > 0 {
+        state.last_served_sequence = served_seq.saturating_add(segment_count - 1);
+    }
+    if insert_discontinuity || state.media_sequence_offset != 0 {
+        Some(HlsMediaSequenceRebase { media_sequence: served_seq, insert_discontinuity, discontinuity_sequence })
+    } else {
+        None
+    }
+}
+
+/// Switches a running legacy HLS group playback to the next member after a hard failure, rebinds
+/// the user session, and serves the new member's manifest (rebased). Returns `None` when the
+/// switch budget is exhausted or no candidate member can serve.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn switch_legacy_hls_group_member(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    user: &ProxyUserCredentials,
+    target: &ConfigTarget,
+    base_url: &str,
+    req_headers: &HeaderMap,
+    group: Arc<FailoverGroupRecord>,
+    session: &UserSession,
+    session_token: &str,
+    failed_index: usize,
+    failure_class: FailureClass,
+    record_failure: bool,
+    playback: shared::model::FailoverGroupPlayback,
+    connection_kind: crate::api::model::ConnectionKind,
+) -> Option<axum::response::Response> {
+    let now = std::time::Instant::now();
+
+    // A one-member group cannot switch; keep the current member and its reservation so the
+    // existing error/terminal response is served without dropping the lease.
+    if group.members.len() <= 1 {
+        if record_failure {
+            if let Some(member) = group.members.first() {
+                record_member_failure(&app_state.member_health, member, None, failure_class);
+            }
+        }
+        return None;
+    }
+
+    if record_failure {
+        if let Some(member) = group.members.get(failed_index) {
+            record_member_failure(&app_state.member_health, member, None, failure_class);
+        }
+    }
+
+    let mut budget = session.legacy_failover_budget.clone().unwrap_or_else(|| FailoverBudget::new(&playback.failover));
+    let decision = budget.on_trigger(failed_index, group.members.len(), now);
+    let exclude = match decision {
+        BudgetDecision::GiveUp | BudgetDecision::RetrySame => {
+            app_state
+                .active_users
+                .replace_legacy_failover_state(
+                    &user.username,
+                    session_token,
+                    session.legacy_rebase.clone(),
+                    Some(budget),
+                    false,
+                )
+                .await;
+            return None;
+        }
+        BudgetDecision::Next { exclude } => exclude,
+    };
+
+    // Select the next member, excluding the failed one, and probe its manifest. The new
+    // reservation replaces the old one atomically in `begin_owner`; releasing the old lease
+    // first would drop it with no replacement when no candidate remains.
+    let req = GroupSelectionRequest {
+        mode: SelectionMode::Live,
+        prefer: None,
+        lease: Some(PlaybackLeaseRef::new(session_token, PlaybackKind::LiveHls)),
+        allow_provider_grace: playback.allow_provider_grace,
+        bypass_maintenance: user.is_recording_proxy_user(),
+        exclude: &exclude,
+        demoted_inputs: &[],
+        allow_preempt: false,
+        ..GroupSelectionRequest::new(
+            target.name.as_str(),
+            &group,
+            playback.start,
+            &fingerprint.addr,
+            &user.username,
+            connection_priority_for_kind(user, connection_kind),
+            connection_kind,
+        )
+    };
+    let Ok((resolved, probed)) = super::group_start::resolve_checked_hls_group_entry(
+        app_state,
+        target,
+        Arc::clone(&group),
+        req,
+        req_headers,
+        true,
+        None,
+        false,
+        fingerprint,
+    )
+    .await
+    else {
+        app_state
+            .active_users
+            .replace_legacy_failover_state(
+                &user.username,
+                session_token,
+                session.legacy_rebase.clone(),
+                Some(budget),
+                false,
+            )
+            .await;
+        return None;
+    };
+
+    let mut acquired_handle = resolved.acquired.handle;
+    let selected_provider_config = acquired_handle.handle().and_then(|handle| handle.allocation.get_provider_config());
+    let allocated = selected_provider_config
+        .as_ref()
+        .map_or_else(|| Arc::clone(&resolved.member.input_name), |cfg| Arc::clone(&cfg.name));
+    let member_url = if let Some(probed) = probed.as_ref() {
+        Some(probed.request_url.clone())
+    } else {
+        super::group_start::build_hls_group_member_origin_url(
+            app_state,
+            target,
+            &resolved.input,
+            &resolved.member,
+            &allocated,
+            selected_provider_config.as_ref(),
+        )
+        .await
+    };
+    let Some(member_url) = member_url else {
+        drop(acquired_handle);
+        app_state
+            .active_users
+            .replace_legacy_failover_state(
+                &user.username,
+                session_token,
+                session.legacy_rebase.clone(),
+                Some(budget),
+                false,
+            )
+            .await;
+        return None;
+    };
+
+    let provider_name = selected_provider_config
+        .as_ref()
+        .map_or_else(|| Arc::clone(&resolved.member.input_name), |cfg| Arc::clone(&cfg.name));
+
+    // Rebind the user session to the new member.
+    app_state
+        .active_users
+        .bind_member(
+            &user.username,
+            session_token,
+            MemberBinding {
+                group_vid: group.group_vid.get(),
+                member_vid: resolved.member.member_vid.get(),
+                member_index: resolved.acquired.index,
+                input_name: Arc::clone(&resolved.member.input_name),
+                member_title: Arc::clone(&resolved.member.title),
+                provider: Arc::clone(&provider_name),
+            },
+        )
+        .await;
+    app_state
+        .active_users
+        .update_session_provider_binding(
+            &user.username,
+            session_token,
+            Arc::clone(&provider_name),
+            Arc::from(member_url.as_str()),
+        )
+        .await;
+    app_state.active_provider.refresh_adaptive_playback_lease(
+        &provider_name,
+        session_token,
+        PlaybackKind::LiveHls,
+        get_hls_playback_ttl_secs(app_state, PlaybackKind::LiveHls),
+    );
+
+    let provider_handle = acquired_handle.take();
+    app_state.connection_manager.release_provider_handle(provider_handle);
+
+    let (content, response_url, response_headers, playlist_kind) = if let Some(probed) = probed {
+        (probed.content, probed.response_url, probed.response_headers, probed.playlist_kind)
+    } else {
+        let source = InputSource::for_request_url(&resolved.input, member_url.clone());
+        let Ok((content, response_url, response_headers)) =
+            download_legacy_hls_manifest(app_state, &source, req_headers).await
+        else {
+            app_state
+                .active_users
+                .replace_legacy_failover_state(
+                    &user.username,
+                    session_token,
+                    session.legacy_rebase.clone(),
+                    Some(budget),
+                    false,
+                )
+                .await;
+            return None;
+        };
+        let playlist_kind = classify_hls_playlist(&content);
+        (content, response_url, response_headers, playlist_kind)
+    };
+
+    // Bridge the timeline to the new member and serve its manifest with the rebase.
+    let mut rebase_state = session.legacy_rebase.clone().unwrap_or_default();
+    let rebase_props = if playlist_kind == HlsPlaylistKind::Media {
+        let new_upstream = media_playlist_media_sequence(&content).unwrap_or(0);
+        let next_seq = rebase_state.last_served_sequence.saturating_add(1);
+        let offset = i128::from(next_seq) - i128::from(new_upstream);
+        rebase_state.media_sequence_offset =
+            i64::try_from(offset).unwrap_or(if offset > 0 { i64::MAX } else { i64::MIN });
+        rebase_state.insert_discontinuity = true;
+        plan_legacy_rebase(&mut rebase_state, &content, playlist_kind)
+    } else {
+        None
+    };
+
+    budget.on_switched(resolved.acquired.index, failed_index, now);
+    app_state
+        .active_users
+        .replace_legacy_failover_state(&user.username, session_token, Some(rebase_state), Some(budget), false)
+        .await;
+
+    let encrypt_secret = app_state.get_encrypt_secret();
+    let rewrite_hls_props = RewriteHlsProps {
+        secret: &encrypt_secret,
+        base_url,
+        content: &content,
+        hls_url: response_url,
+        target_id: target.id,
+        virtual_id: resolved.member.member_vid.get(),
+        input_id: resolved.input.id,
+        user_token: Some(session_token),
+        origin_provider: Some(&provider_name),
+        playlist_kind: Some(playlist_kind),
+        rebase: rebase_props,
+    };
+    let hls_content = rewrite_hls(user, &rewrite_hls_props);
+
+    let session_headers = extract_hls_provider_session_headers(&response_headers);
+    if !session_headers.is_empty() {
+        if let Some(identity) = app_state.active_users.session_identity(&user.username, session_token).await {
+            app_state
+                .active_users
+                .update_current_session_provider_response_headers_from(
+                    &user.username,
+                    session_token,
+                    identity,
+                    &session_headers,
+                    &rewrite_hls_props.hls_url,
+                )
+                .await;
+        }
+    }
+    release_prepared_hls_manifest_session(app_state, &user.username, session_token, &fingerprint.addr).await;
+
+    Some(hls_response(hls_content).into_response())
+}
+
+/// Attempts a legacy runtime member switch and serves the new member's manifest, or returns
+/// `None` when no switch happened (budget exhausted, single member, or not a group).
+#[allow(clippy::too_many_arguments)]
+async fn try_switch_legacy_hls_member(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    user: &ProxyUserCredentials,
+    target: &ConfigTarget,
+    base_url: &str,
+    req_headers: &HeaderMap,
+    session: &UserSession,
+    session_token: &str,
+    failure_class: FailureClass,
+    record_failure: bool,
+    connection_kind: crate::api::model::ConnectionKind,
+) -> Option<axum::response::Response> {
+    let binding = session.member_binding.clone()?;
+    let ResolvedStreamTarget::Group(group) =
+        classify_virtual_id(&app_state.app_config, &app_state.playlists, target, VirtualId::new(binding.group_vid))
+            .await
+    else {
+        return None;
+    };
+    // A removed/reordered member after a config reload must never index out of bounds.
+    let failed_index = group
+        .members
+        .iter()
+        .position(|member| member.member_vid.get() == binding.member_vid)
+        .or_else(|| (binding.member_index < group.members.len()).then_some(binding.member_index))?;
+    let playback = group_playback_settings(app_state, target);
+
+    // Single-flight: only one concurrent poll switches the session. The flag is shared across
+    // session clones via its `Arc`, and the guard resets it even if the switch future is dropped.
+    if session.legacy_switch_in_flight.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+        return None;
+    }
+    let _guard = LegacySwitchGuard { flag: Arc::clone(&session.legacy_switch_in_flight) };
+    switch_legacy_hls_group_member(
+        app_state,
+        fingerprint,
+        user,
+        target,
+        base_url,
+        req_headers,
+        group,
+        session,
+        session_token,
+        failed_index,
+        failure_class,
+        record_failure,
+        playback,
+        connection_kind,
+    )
+    .await
+}
+
+/// Resets the per-session legacy switch guard on drop, including when a switch future is
+/// cancelled by a client disconnect.
+struct LegacySwitchGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for LegacySwitchGuard {
+    fn drop(&mut self) { self.flag.store(false, Ordering::Release); }
+}
+
+/// Resolves the playlist URL of the bound group member on a refresh, from the group record.
+/// The sealed entry URL belongs to the member at entry time and cannot be mapped across inputs
+/// after a runtime member switch.
+async fn resolve_bound_group_member_stream(
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
+    member_vid: u32,
+    member_input: &Arc<ConfigInput>,
+    selected_provider_config: &Arc<crate::model::ProviderConfig>,
+) -> Option<String> {
+    let classified =
+        classify_virtual_id(&app_state.app_config, &app_state.playlists, target, VirtualId::new(member_vid)).await;
+    let ResolvedStreamTarget::Member { group, index } = classified else { return None };
+    let member = &group.members[index];
+    let allocated = Arc::clone(&selected_provider_config.name);
+    super::group_start::build_hls_group_member_origin_url(
+        app_state,
+        target,
+        member_input,
+        member,
+        &allocated,
+        Some(selected_provider_config),
+    )
+    .await
 }
 
 /// Portal stream id of the failover group member a session is bound to. The group entry's own
@@ -1234,5 +1831,40 @@ mod playback_provider_tests {
         assert_eq!(env.origin_hits("solis"), 0);
         assert_eq!(env.origin_hits("korath"), 1);
         assert_eq!(env.bound_member_input("viewer").await, "korath");
+    }
+}
+
+#[cfg(test)]
+mod legacy_rebase_tests {
+    use super::*;
+
+    fn media(sequence: u64, segments: u64) -> String {
+        let header = format!("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n");
+        (sequence..sequence + segments).fold(header, |body, seq| body + format!("#EXTINF:4,\nseg{seq}.ts\n").as_str())
+    }
+
+    #[test]
+    fn upstream_restart_continues_after_the_last_served_segment_with_a_discontinuity() {
+        let mut state = LegacyHlsRebase::default();
+        assert!(plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media).is_none());
+        assert!(plan_legacy_rebase(&mut state, &media(101, 3), HlsPlaylistKind::Media).is_none());
+        assert_eq!(state.last_served_sequence, 103);
+
+        let rebase = plan_legacy_rebase(&mut state, &media(0, 3), HlsPlaylistKind::Media).expect("restart rebases");
+        assert_eq!(rebase.media_sequence, 104);
+        assert!(rebase.insert_discontinuity);
+        assert_eq!(state.last_served_sequence, 106);
+
+        let next = plan_legacy_rebase(&mut state, &media(1, 3), HlsPlaylistKind::Media).expect("offset stays");
+        assert_eq!(next.media_sequence, 105);
+        assert!(!next.insert_discontinuity);
+    }
+
+    #[test]
+    fn unchanged_window_is_not_a_restart() {
+        let mut state = LegacyHlsRebase::default();
+        plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media);
+        assert!(plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media).is_none());
+        assert_eq!(state.media_sequence_offset, 0);
     }
 }

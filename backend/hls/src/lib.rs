@@ -63,6 +63,7 @@ mod map;
 mod map_fetcher;
 mod master_playlist;
 mod media_reserve;
+mod member_health;
 mod observability;
 mod origin;
 mod origin_account_runtime;
@@ -181,7 +182,8 @@ pub mod api {
             HlsOriginSourceKind, HlsOriginStartProtection, HlsOriginWorkClass,
         },
         origin_account_runtime::{
-            HlsOriginAccountRuntime, HlsOriginAccountSnapshot, HlsOriginAccountWork, HlsPreparedOriginAccount,
+            HlsMemberHealthPolicy, HlsMemberUnhealthyReason, HlsOriginAccountRuntime, HlsOriginAccountSnapshot,
+            HlsOriginAccountWork, HlsPreparedOriginAccount,
         },
         origin_progress::{publication_late_after_ms, HlsOriginPathCondition},
         paths::{HlsMapFile, HlsSegmentFile, TransientResourceFile},

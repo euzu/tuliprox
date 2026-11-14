@@ -1,0 +1,66 @@
+schema_version: 1
+name: hls-group-shared-origin-two-viewers
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: true
+    share_live_mpeg_ts: false
+    hls_startup_mode: conservative
+  failover_groups:
+    inputs: [input-a, input-b]
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: hls-group-shared-origin-two-viewers
+  hls_profile:
+    prefix_delay_millis: 1000
+    window_segments: 6
+    missing_head_segments: 0
+actors:
+  - id: viewer-1
+    agent: local
+    username: viewer-1
+    user_agent: tuliprox-testkit/viewer-1
+  - id: viewer-2
+    agent: local
+    username: viewer-2
+    user_agent: tuliprox-testkit/viewer-2
+channels:
+  failover-channel: { origin_marker: 17, protocol: hls }
+steps:
+  - command_id: viewer-1-starts
+    start:
+      actor: viewer-1
+      playback_id: playback-1
+      session_group: group-1
+      channel: failover-channel
+    await: { valid_frames: 2 }
+    assert_origin:
+      max_active_body: 3
+      latest_segment_account: input-a
+  - command_id: viewer-2-joins
+    start:
+      actor: viewer-2
+      playback_id: playback-2
+      session_group: group-2
+      channel: failover-channel
+    await: { valid_frames: 2 }
+    assert_origin:
+      max_active_body: 3
+      latest_segment_account: input-a
+  - command_id: viewer-1-stops
+    stop: { playback_id: playback-1 }
+  - command_id: viewer-2-stops
+    stop: { playback_id: playback-2 }
+    assert_runtime:
+      active_users: 0
+      active_user_connections: 0
+policy_contract:
+  user_access_control: true
+  users:
+    viewer-1: { max_connections: 2 }
+    viewer-2: { max_connections: 2 }
+  admission_strategies: []

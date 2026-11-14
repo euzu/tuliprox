@@ -2,6 +2,7 @@
 
 use super::*;
 use tuliprox_core::model::{resolve_provider_scheme_url_with_provider_index, AppConfig, ProviderBindingTag};
+use tuliprox_hls::api::HlsSessionKey;
 
 #[derive(Clone, Debug)]
 pub(super) enum HlsOriginEntryUrl {
@@ -1684,6 +1685,47 @@ pub(super) async fn create_hls_cache_entry_master_playlist_response(
     connection_kind: Option<crate::api::model::ConnectionKind>,
     server_path: Option<&str>,
 ) -> axum::response::Response {
+    let session_key = origin_source.session_key();
+    create_hls_cache_entry_master_playlist_response_with_key(
+        app_state,
+        fingerprint,
+        user,
+        origin_source,
+        session_key,
+        virtual_id,
+        existing_user_session,
+        known_bitrate_bps,
+        session_token_hint,
+        request_url,
+        input,
+        connection_permission,
+        connection_kind,
+        server_path,
+    )
+    .await
+}
+
+/// Entry response for an explicit session key; a live failover-group shared-cache session passes its group key.
+///
+/// A group key keeps the bound member (`origin_source`) as session state; `virtual_id` stays the
+/// logical group VID for blocking, authorization, history and the entry path.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn create_hls_cache_entry_master_playlist_response_with_key(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    user: &ProxyUserCredentials,
+    origin_source: HlsOriginSource,
+    session_key: HlsSessionKey,
+    virtual_id: u32,
+    existing_user_session: Option<&UserSession>,
+    known_bitrate_bps: Option<u32>,
+    session_token_hint: Option<&str>,
+    request_url: &str,
+    input: &ConfigInput,
+    connection_permission: UserConnectionPermission,
+    connection_kind: Option<crate::api::model::ConnectionKind>,
+    server_path: Option<&str>,
+) -> axum::response::Response {
     let item_bandwidth = HlsMasterBandwidth::new(known_bitrate_bps);
     let database_bitrate_bps = if item_bandwidth.is_unknown() {
         match load_input_live_bitrate_bps(&app_state.app_config, input, &origin_source.stream_ref).await {
@@ -1699,7 +1741,6 @@ pub(super) async fn create_hls_cache_entry_master_playlist_response(
     let bandwidth = HlsMasterBandwidthSelection::resolve(known_bitrate_bps, database_bitrate_bps);
     let known_bitrate_bps = bandwidth.known_bitrate_bps();
 
-    let session_key = origin_source.session_key();
     let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
     let family_key = HlsPlaybackFamilyKey::new(user.username.clone(), fingerprint.key.clone());
     let now_ms = current_time_millis();

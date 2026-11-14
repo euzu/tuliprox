@@ -254,8 +254,9 @@ With 6 members and `max_attempts: 4`, at most the 4 best-ranked members are trie
 ## Failover while watching
 
 When the playing member fails, Tuliprox opens the next member and continues the **same** response, so the player
-does not notice more than a short freeze. This works for MPEG-TS streams (direct and shared); HLS streams change the
-member only when a new stream starts. Changes apply to the next stream start.
+does not notice more than a short freeze. This works for MPEG-TS streams (direct and shared) and for live HLS streams,
+where the playlist continues with a discontinuity (see
+[HLS behavior](failover-groups.md#hls-behavior)). Changes apply to the next stream start.
 
 ### `failover.enabled`
 

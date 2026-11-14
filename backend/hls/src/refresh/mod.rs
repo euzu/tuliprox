@@ -65,7 +65,7 @@ use self::{
         commit_fetched_manifest_with_acceptance_mode, ensure_refresh_origin_work_generation_is_current,
         refresh_origin_work_generation_is_current, HlsManifestCommitProgressEvidence,
     },
-    failure::{apply_manifest_fetch_failure_signal, refresh_failure_backoff_schedule},
+    failure::{apply_manifest_fetch_failure_signal, member_origin_failure, refresh_failure_backoff_schedule},
     switch_staging::{
         critical_handoff_snapshot_is_current, prepare_critical_handoff, remove_uncommitted_staged_switch_files,
         stage_alternative_manifest_switch, switch_staging_error, verify_content_anchor,
@@ -563,6 +563,7 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
         .await;
     }
     let metrics = Arc::clone(request.segment_worker_pool.metrics());
+    let mut member_notice = None;
     let (
         should_wake_segment_scheduler,
         should_wake_map_scheduler,
@@ -612,6 +613,7 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
                     fetch_finished_at_ms,
                 );
                 log_manifest_refresh_timing(&session, refresh_timing, applied_refresh_interval_ms);
+                member_notice = session.member_unhealthy_after_manifest_success(fetch_finished_at_ms);
                 metrics.record_refresh_completed();
                 for _ in 1..fetched.attempts {
                     metrics.record_refresh_retried();
@@ -665,6 +667,8 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
                 session.origin_refresh.mark_failure(fetch_finished_at_ms);
                 metrics.record_refresh_failed();
                 let post_refresh_action = apply_manifest_fetch_failure_signal(&mut session, &err, fetch_finished_at_ms);
+                member_notice =
+                    session.member_unhealthy_after_manifest_failure(member_origin_failure(&err), fetch_finished_at_ms);
                 warn!(
                     "HLS origin manifest refresh completed: session={} proxy_session={} result=failed error={}",
                     safe_session_key(&session.key),
@@ -698,6 +702,10 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
         }
         completion
     };
+    if let Some(notice) = member_notice {
+        notice.send(&request.session);
+    }
+    request.hls_proxy.schedule_member_health_stall(&request.session, fetch_finished_at_ms).await;
     if let Some(owner) = request.work_owner.as_ref() {
         owner.disarm();
     }

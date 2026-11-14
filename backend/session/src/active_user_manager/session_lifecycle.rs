@@ -88,6 +88,10 @@ impl Default for UserSession {
             connection_kind: None,
             lifecycle: PlaybackLifecycle::default(),
             member_binding: None,
+            legacy_rebase: None,
+            legacy_failover_budget: None,
+            member_failed_on_segment: false,
+            legacy_switch_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 }

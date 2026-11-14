@@ -375,6 +375,7 @@ async fn legacy_hls_token_route_renders_channel_unavailable_inline_when_target_h
             user_token: Some("legacy-session-token"),
             origin_provider: None,
             playlist_kind: None,
+            rebase: None,
         },
     );
     let token = legacy_manifest

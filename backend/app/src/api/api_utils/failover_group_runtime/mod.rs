@@ -1,7 +1,6 @@
 //! Runtime failover of failover group playback: the provider body behind an open client response
 //! is replaced by another member when it fails, stalls or delivers slower than real time.
 
-mod budget;
 mod registry;
 #[cfg(test)]
 mod tests;
@@ -21,7 +20,6 @@ use crate::{
     utils::debug_if_enabled,
 };
 use axum::http::HeaderMap;
-pub(crate) use budget::{BudgetDecision, FailoverBudget};
 use bytes::Bytes;
 use futures::Future;
 pub use registry::FailoverSwitchRegistry;
@@ -45,6 +43,7 @@ use tuliprox_mpegts::{
     splice::{RealtimeMeter, SpliceOutput, TsSpliceAligner},
 };
 use tuliprox_repository::failover_group_repository::FailoverGroupRecord;
+pub(crate) use tuliprox_session::failover_group::{BudgetDecision, FailoverBudget};
 use tuliprox_session::{
     active_provider_manager::{ConnectionKind, ManagedProviderHandle},
     failover_group::{AudioSignature, FailureClass, SelectionMode},

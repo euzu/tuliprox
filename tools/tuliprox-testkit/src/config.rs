@@ -1,4 +1,5 @@
 use crate::{
+    faults::{OriginFault, OriginFaultKind},
     oracle::{AdmissionStrategy, GraceMode},
     TestkitError,
 };
@@ -338,6 +339,8 @@ pub struct Step {
     pub assert_origin: Option<AssertOrigin>,
     #[serde(default)]
     pub assert_runtime: Option<RuntimeAssertions>,
+    #[serde(default)]
+    pub origin_fault: Option<OriginFaultStep>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,6 +426,10 @@ pub struct AssertOrigin {
     pub no_limit_rejections: Option<bool>,
     #[serde(default)]
     pub latest_request_account: Option<String>,
+    /// Account of the latest HLS segment request for the scoped marker, proving segment-level
+    /// failover independently of manifest requests.
+    #[serde(default)]
+    pub latest_segment_account: Option<String>,
     /// Portal handshakes the emulated Stalker portal answered at least.
     #[serde(default)]
     pub stalker_handshakes_at_least: Option<u64>,
@@ -503,6 +510,41 @@ pub struct Stop {
     pub playback_id: String,
 }
 
+/// A controller-side step that arms or disarms one origin fault mid-scenario.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginFaultStep {
+    pub set: Option<OriginFaultSet>,
+    pub clear: Option<String>,
+}
+
+/// `set` parameters for one origin fault. The fault id is origin-global and is not prefixed
+/// when a step is expanded inside a `repeat`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginFaultSet {
+    pub id: String,
+    pub kind: OriginFaultKind,
+    pub account: String,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub bytes_per_second: Option<u64>,
+}
+
+/// JSON body accepted by `PUT /v1/runs/{run_id}/faults/{fault_id}` for the parameterised
+/// faults. The id travels in the path, so it is not part of the body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginFaultSpec {
+    pub kind: OriginFaultKind,
+    pub account: String,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub bytes_per_second: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Repeat {
@@ -556,6 +598,10 @@ impl Scenario {
         for step in &steps {
             if !command_ids.insert(step.command_id.as_str()) || step.command_id.is_empty() {
                 return Err(TestkitError::Configuration("command IDs must be unique and non-empty".to_owned()));
+            }
+            if step.origin_fault.is_some() {
+                validate_origin_fault_step(step)?;
+                continue;
             }
             if step.pause_millis.is_some() {
                 if !step.expect.is_streaming()
@@ -783,6 +829,42 @@ pub fn is_confined_relative_path(path: &str) -> bool {
         && Path::new(path).components().all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
+/// A fault step is a controller-side control-plane action, so it cannot be combined with
+/// playback start/stop, pauses, expectations, or assertions.
+fn validate_origin_fault_step(step: &Step) -> Result<(), TestkitError> {
+    let Some(fault) = &step.origin_fault else {
+        return Ok(());
+    };
+    if step.pause_millis.is_some()
+        || step.start.is_some()
+        || step.stop.is_some()
+        || step.repeat.is_some()
+        || step.await_frames.is_some()
+        || step.await_condition.is_some()
+        || step.assert_origin.is_some()
+        || step.assert_runtime.is_some()
+    {
+        return Err(TestkitError::Configuration(
+            "origin_fault cannot be combined with playback steps or checks".to_owned(),
+        ));
+    }
+    if fault.set.is_some() == fault.clear.is_some() {
+        return Err(TestkitError::Configuration("origin_fault requires exactly one of set or clear".to_owned()));
+    }
+    if let Some(set) = &fault.set {
+        if set.id.is_empty() {
+            return Err(TestkitError::Configuration("origin_fault set requires a non-empty id".to_owned()));
+        }
+        OriginFault::from_parts(set.kind, set.account.clone(), set.status, set.bytes_per_second)?;
+    }
+    if let Some(clear_id) = &fault.clear {
+        if clear_id.is_empty() {
+            return Err(TestkitError::Configuration("origin_fault clear requires a non-empty id".to_owned()));
+        }
+    }
+    Ok(())
+}
+
 fn validate_provider_pool_contract(contract: &PolicyContract) -> Result<(), TestkitError> {
     if contract.provider_max_connections.is_some() && !contract.provider_pool.is_empty() {
         return Err(TestkitError::Configuration(
@@ -808,6 +890,13 @@ fn expand_steps(steps: &[Step], prefix: &str, expanded: &mut Vec<Step>) -> Resul
     for step in steps {
         if step.command_id.is_empty() {
             return Err(TestkitError::Configuration("command IDs must be unique and non-empty".to_owned()));
+        }
+        if step.origin_fault.is_some() {
+            validate_origin_fault_step(step)?;
+            let mut child = step.clone();
+            child.command_id = format!("{prefix}{}", step.command_id);
+            expanded.push(child);
+            continue;
         }
         if let Some(pause_millis) = step.pause_millis {
             if step.start.is_some() || step.stop.is_some() || step.repeat.is_some() {
@@ -948,6 +1037,7 @@ steps:
                     await_condition: None,
                     assert_origin: None,
                     assert_runtime: None,
+                    origin_fault: None,
                 })
                 .collect(),
         };
@@ -1011,6 +1101,57 @@ steps:
         ] {
             let yaml = format!(
                 "schema_version: 1\nname: pause-invalid\ntuliprox: {{ base_url: http://example.invalid, execution_mode: existing_instance }}\nactors: [{{ id: a, agent: local }}]\nsteps: [{invalid_step}]\n"
+            );
+            let scenario: Scenario = serde_saphyr::from_str(&yaml).unwrap();
+            assert!(scenario.validate().is_err(), "{invalid_step}");
+        }
+    }
+
+    #[test]
+    fn origin_fault_step_parses_and_validates() {
+        let scenario: Scenario = serde_saphyr::from_str(
+            r"
+schema_version: 1
+name: origin-fault-validation
+tuliprox:
+  base_url: http://example.invalid
+  execution_mode: existing_instance
+actors: []
+steps:
+  - command_id: break-input-a-manifest
+    origin_fault: { set: { id: a-manifest, kind: hls_manifest_status, account: input-a, status: 404 } }
+  - command_id: break-input-a-segment
+    origin_fault: { set: { id: a-segment, kind: hls_segment_status, account: input-a, status: 503 } }
+  - command_id: slow-input-a
+    origin_fault: { set: { id: a-slow, kind: slow_segment_body, account: input-a, bytes_per_second: 8 } }
+  - command_id: heal-input-a
+    origin_fault: { clear: a-manifest }
+",
+        )
+        .unwrap();
+        assert!(scenario.validate().is_ok());
+        let expanded = scenario.expanded_steps().unwrap();
+        assert_eq!(expanded.len(), 4);
+        assert!(expanded[0].origin_fault.as_ref().unwrap().set.is_some());
+        assert_eq!(
+            expanded[1].origin_fault.as_ref().unwrap().set.as_ref().map(|set| set.kind),
+            Some(OriginFaultKind::HlsSegmentStatus)
+        );
+        assert_eq!(expanded[3].origin_fault.as_ref().unwrap().clear.as_deref(), Some("a-manifest"));
+    }
+
+    #[test]
+    fn origin_fault_step_rejects_invalid_shapes() {
+        for invalid_step in [
+            "{ command_id: both, origin_fault: { set: { id: a, kind: hls_manifest_status, account: x, status: 404 }, clear: a } }",
+            "{ command_id: neither, origin_fault: {} }",
+            "{ command_id: missing-status, origin_fault: { set: { id: a, kind: hls_manifest_status, account: x } } }",
+            "{ command_id: bad-rate, origin_fault: { set: { id: a, kind: slow_segment_body, account: x, bytes_per_second: 0 } } }",
+            "{ command_id: combined, origin_fault: { set: { id: a, kind: hls_manifest_status, account: x, status: 404 } }, pause_millis: 10 }",
+            "{ command_id: combined-start, origin_fault: { clear: a }, start: { actor: a, playback_id: p, session_group: s, url: http://x } }",
+        ] {
+            let yaml = format!(
+                "schema_version: 1\nname: origin-fault-invalid\ntuliprox: {{ base_url: http://example.invalid, execution_mode: existing_instance }}\nactors: [{{ id: a, agent: local }}]\nsteps: [{invalid_step}]\n"
             );
             let scenario: Scenario = serde_saphyr::from_str(&yaml).unwrap();
             assert!(scenario.validate().is_err(), "{invalid_step}");

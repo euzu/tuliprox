@@ -289,6 +289,7 @@ pub struct HlsSession {
     pub origin_account_prepare_lock: Arc<tokio::sync::Mutex<()>>,
     pub origin_account_runtime: Option<Arc<dyn crate::origin_account_runtime::HlsOriginAccountRuntime>>,
     pub origin_account_manifest_pending: Option<u64>,
+    pub(crate) member_health: crate::member_health::HlsMemberHealth,
     pub effective_origin_acquire_policy: Option<HlsEffectiveOriginAcquirePolicyState>,
     pub mode: HlsSessionMode,
     pub transient: TransientPassthroughState,
@@ -392,6 +393,7 @@ impl HlsSession {
             origin_account_prepare_lock: Arc::new(tokio::sync::Mutex::new(())),
             origin_account_runtime: None,
             origin_account_manifest_pending: None,
+            member_health: crate::member_health::HlsMemberHealth::default(),
             effective_origin_acquire_policy: None,
             mode: HlsSessionMode::NormalCacheTimeline,
             transient: TransientPassthroughState::default(),
@@ -485,6 +487,14 @@ impl HlsSession {
 
     pub const fn origin_manifest_commits(&self) -> u64 { self.origin_manifest_commits }
 
+    /// Whether this session has committed at least one origin manifest and its origin
+    /// path and refresh cycle are currently healthy at `now_ms`.
+    pub fn origin_reusable_at(&self, now_ms: u64) -> bool {
+        self.origin_manifest_commits > 0
+            && self.origin_refresh.consecutive_failures == 0
+            && !self.origin_control.path_is_degraded_at(now_ms)
+    }
+
     pub(crate) fn record_origin_manifest_commit(&mut self) {
         self.origin_manifest_commits = self.origin_manifest_commits.saturating_add(1);
     }
@@ -565,6 +575,14 @@ impl HlsSession {
 
     /// Invalidates account-dependent work while preserving published media and host/content anchors.
     pub fn handoff_origin_account(&mut self, binding: HlsOriginAccountBinding) {
+        self.handoff_origin_member(self.origin_source.clone(), binding);
+    }
+
+    /// Invalidates account-dependent work and swaps the bound origin source (member) under the
+    /// same generation fence as an account handoff. Timeline, epoch, discontinuity, key namespace
+    /// and init-map guarantees are identical to [`HlsSession::handoff_origin_account`]; only the
+    /// member identity carried by `origin_source` changes.
+    pub fn handoff_origin_member(&mut self, source: HlsOriginSource, binding: HlsOriginAccountBinding) {
         self.invalidate_queued_origin_work();
         self.origin_account_io_lease = None;
         self.origin_provider_session_headers.clear();
@@ -573,6 +591,7 @@ impl HlsSession {
         self.origin_control.acceptance_generation.0 = self.origin_control.acceptance_generation.0.saturating_add(1);
         self.origin_control.qualification = crate::short_manifest::HlsOriginQualification::default();
         self.origin_refresh = OriginRefreshState::default();
+        self.member_health.reset_for_handoff(tuliprox_core::utils::current_time_millis());
         self.origin_account_manifest_pending = Some(binding.generation);
         self.transient.invalidate_origin_resources();
         for segment in self.segments.values_mut() {
@@ -592,6 +611,18 @@ impl HlsSession {
                 }
             }
         }
+        if self.origin_source != source {
+            // Member inputs and stream references differ; drop the old member's user agent so
+            // the next manifest request rebuilds origin headers for the new bound member.
+            self.origin_request_headers.clear();
+            // A different member publishes unrelated media by design, so it can neither continue the
+            // old member's media sequence nor prove content-anchor equality. Admit its first manifest
+            // as a fresh baseline (the provisioning-handoff acceptance mode) and cut over to a new
+            // origin epoch with an EXT-X-DISCONTINUITY; key namespace and init maps follow the epoch.
+            self.require_fresh_manifest_commit(HlsFreshManifestRequiredReason::ProvisioningHandoff);
+            self.mark_pending_origin_epoch_handoff_discontinuity(0);
+        }
+        self.origin_source = source;
         self.replace_origin_account_binding(Some(binding));
     }
 
@@ -1100,6 +1131,7 @@ impl fmt::Debug for HlsSession {
             .field("origin_work_cancellation", &self.origin_work_cancellation)
             .field("origin_account_rebind", &self.origin_account_rebind)
             .field("origin_account_prepare_lock", &self.origin_account_prepare_lock)
+            .field("member_health", &self.member_health)
             .field("origin_account_runtime", &self.origin_account_runtime)
             .field("origin_account_manifest_pending", &self.origin_account_manifest_pending)
             .field("effective_origin_acquire_policy", &self.effective_origin_acquire_policy)
@@ -2000,6 +2032,44 @@ mod tests {
         assert_eq!(fallback.connection_kind, ConnectionKind::Normal);
         assert_eq!(fallback.priority, 0);
     }
+    fn member_handoff_binding(session: &HlsSession) -> crate::origin::HlsOriginAccountBinding {
+        crate::origin::HlsOriginAccountBinding::rebound(
+            Arc::from("member-b"),
+            Arc::from("account-b"),
+            crate::origin::build_hls_origin_session_owner(&session.proxy_session_id),
+            1,
+            10,
+        )
+    }
+
+    #[test]
+    fn member_handoff_to_a_different_source_starts_a_fresh_baseline_epoch_with_discontinuity() {
+        let mut session = recovery_eligible_session();
+        let mut source = session.origin_source.clone();
+        source.input_name = Arc::from("member-b");
+        source.stream_ref = "member-b-stream".to_string();
+        let binding = member_handoff_binding(&session);
+        session.handoff_origin_member(source.clone(), binding);
+        assert_eq!(session.origin_source, source);
+        assert_eq!(
+            session.fresh_manifest_commit_required,
+            Some(crate::HlsFreshManifestRequiredReason::ProvisioningHandoff)
+        );
+        assert!(session.pending_origin_epoch_handoff);
+        assert_eq!(session.pending_handoff_discontinuity_sequence, Some(0));
+        assert_eq!(session.origin_account_manifest_pending, Some(1));
+    }
+
+    #[test]
+    fn account_handoff_within_one_source_keeps_the_timeline_continuous() {
+        let mut session = recovery_eligible_session();
+        let binding = member_handoff_binding(&session);
+        session.handoff_origin_account(binding);
+        assert_eq!(session.fresh_manifest_commit_required, None);
+        assert!(!session.pending_origin_epoch_handoff);
+        assert_eq!(session.pending_handoff_discontinuity_sequence, None);
+    }
+
     #[test]
     fn account_handoff_invalidates_work_and_recovery_but_preserves_timeline_and_archive() {
         let mut session = recovery_eligible_session();
@@ -2039,5 +2109,52 @@ mod tests {
         assert!(session.origin_control.acceptance_episode.is_none());
         assert!(session.origin_provider_session_headers.is_empty());
         assert!(matches!(session.segments[&10].status, SegmentCacheStatus::Ready { content_length: 32, .. }));
+    }
+
+    #[test]
+    fn origin_reusable_at_checks_commits_refresh_failures_and_path_condition() {
+        use crate::origin_progress::{publication_late_after_ms, HlsOriginPathCondition};
+
+        let now_ms = 100_000;
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "reusable-test"), b"secret", now_ms);
+
+        // 1. No commits: not reusable
+        assert_eq!(session.origin_manifest_commits(), 0);
+        assert!(!session.origin_reusable_at(now_ms));
+
+        // 2. Commit + healthy: reusable
+        session.record_origin_manifest_commit();
+        assert_eq!(session.origin_manifest_commits(), 1);
+        assert_eq!(session.origin_refresh.consecutive_failures, 0);
+        assert!(!session.origin_control.path_is_degraded_at(now_ms));
+        assert!(session.origin_reusable_at(now_ms));
+
+        // 3. Commit + consecutive refresh failures: not reusable
+        session.origin_refresh.consecutive_failures = 1;
+        assert!(!session.origin_reusable_at(now_ms));
+        session.origin_refresh.consecutive_failures = 0;
+        assert!(session.origin_reusable_at(now_ms));
+
+        // 4. Commit + degraded path condition: not reusable
+        session.origin_control.path_condition = HlsOriginPathCondition::HardFetchFailure;
+        assert!(!session.origin_reusable_at(now_ms));
+        session.origin_control.path_condition = HlsOriginPathCondition::RetryableFetchFailure;
+        assert!(!session.origin_reusable_at(now_ms));
+        session.origin_control.path_condition = HlsOriginPathCondition::ProgressExpected;
+        assert!(session.origin_reusable_at(now_ms));
+
+        // 5. Commit + publication late: not reusable
+        let target_duration_ms = 2_000;
+        let late_after_ms = publication_late_after_ms(target_duration_ms);
+        session.origin_control.target_duration_snapshot_ms = Some(target_duration_ms);
+        session.origin_control.last_media_progress_at_ms = Some(now_ms);
+
+        // At now_ms, elapsed is 0, so not late
+        assert!(session.origin_reusable_at(now_ms));
+        // Just before late threshold: still reusable
+        assert!(session.origin_reusable_at(now_ms + late_after_ms - 1));
+        // At or after late threshold: publication is late, path is degraded, not reusable
+        assert!(!session.origin_reusable_at(now_ms + late_after_ms));
+        assert!(!session.origin_reusable_at(now_ms + late_after_ms + 1_000));
     }
 }

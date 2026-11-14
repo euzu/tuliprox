@@ -2,19 +2,25 @@ use crate::{
     api::{
         api_utils::{
             failover_group::{
-                member_needs_stalker_resolution, resolve_hls_group_entry, resolve_hls_group_entry_with_probe,
-                GroupSelectionFailure, GroupSelectionRequest, ResolvedGroupPlayback, SelectionMode,
+                member_needs_stalker_resolution, member_stream_channel, resolve_hls_group_entry,
+                resolve_hls_group_entry_with_probe, GroupSelectionFailure, GroupSelectionRequest,
+                ResolvedGroupPlayback, SelectionMode,
             },
-            member_playback_url, resolve_stalker_stream_for_account, select_provider_stream_url, stalker_stream_kind,
+            member_playback_url, record_connect_failed_attempt, resolve_stalker_stream_for_account,
+            select_provider_stream_url, stalker_stream_kind, ConnectFailedAttempt,
         },
         model::AppState,
     },
+    auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, InputSource, ProviderConfig},
     processing::parser::hls::{classify_hls_playlist, HlsPlaylistKind},
 };
 use axum::http::{header, HeaderMap, HeaderValue};
+use shared::model::{ConnectFailureReason, FailureStage, StreamChannel};
 use std::{borrow::Cow, sync::Arc};
-use tuliprox_hls::api::{extract_hls_provider_session_headers, merge_hls_provider_session_headers};
+use tuliprox_hls::api::{
+    extract_hls_provider_session_headers, merge_hls_provider_session_headers, HlsOriginSource, HlsSessionKey,
+};
 use tuliprox_repository::{failover_group_repository::GroupMember, FailoverGroupRecord};
 use tuliprox_session::{failover_group::FailureClass, ProviderSessionCookieStore};
 use url::Url;
@@ -118,20 +124,59 @@ pub(in crate::api::endpoints::hls_api) async fn build_hls_group_member_origin_ur
     )
 }
 
-/// Checks if an active shared cache session already committed an origin manifest for the member.
-/// Only committed sessions provide verified evidence that the member origin works, justifying
-/// skipping the probe and recording member success.
+/// Checks if a live failover-group shared cache session is currently reusable.
+/// The session is keyed by the logical group (`target_id` + `group_vid`), not by a member.
+/// Only sessions with committed origin manifests and currently healthy origin paths
+/// (no consecutive refresh failures, origin path not degraded, and no publication lateness)
+/// provide verified evidence that the bound member origin works, justifying skipping the probe
+/// and recording member success.
 pub(in crate::api::endpoints::hls_api) async fn has_active_shared_cache_session(
     app_state: &Arc<AppState>,
-    input_id: u16,
-    stream_ref: &str,
+    target_id: u16,
+    group_vid: u32,
 ) -> bool {
-    let session_key = tuliprox_hls::api::HlsSessionKey::new(input_id, stream_ref);
+    let session_key = HlsSessionKey::for_group(target_id, group_vid);
     let Some(session) = app_state.hls.proxy.sessions().get_by_key(&session_key).await else {
         return false;
     };
     let s = session.read().await;
-    s.origin_manifest_commits() > 0
+    s.origin_reusable_at(app_state.hls.proxy.now_ms())
+}
+
+/// The bound member origin and its entry URL of an existing live failover-group shared cache
+/// session. The session is keyed by the logical group, so viewers joining the group all reuse the
+/// same bound member regardless of the member they entered through.
+pub(in crate::api::endpoints::hls_api) async fn shared_cache_group_session_origin(
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
+    group: &FailoverGroupRecord,
+    group_vid: u32,
+) -> Option<(HlsOriginSource, String)> {
+    let session_key = HlsSessionKey::for_group(target.id, group_vid);
+    let session = app_state.hls.proxy.sessions().get_by_key(&session_key).await?;
+    let (origin_source, stored_entry_url) = {
+        let session = session.read().await;
+        let origin_source = session.origin_source.clone();
+        let stored_entry_url = session
+            .origin_account_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.entry_url().or_else(|| runtime.raw_request_url()))
+            .filter(|url| !url.is_empty());
+        (origin_source, stored_entry_url)
+    };
+
+    let entry_url = if let Some(url) = stored_entry_url {
+        url
+    } else {
+        let input = app_state.app_config.get_input_by_name(&origin_source.input_name)?;
+        let member = group.members.iter().find(|member| {
+            member.input_name.as_ref() == origin_source.input_name.as_ref()
+                && member.input_stream_id.as_ref() == origin_source.stream_ref.as_str()
+        })?;
+        let account = Arc::clone(&origin_source.input_name);
+        build_hls_group_member_origin_url(app_state, target, &input, member, &account, None).await?
+    };
+    Some((origin_source, entry_url))
 }
 
 /// Whether a media playlist has at least one segment URI line.
@@ -374,60 +419,113 @@ pub(in crate::api::endpoints::hls_api) async fn resolve_checked_hls_group_entry(
     map_account: bool,
     user_session: Option<(&str, &str)>,
     check_active_cache: bool,
+    fingerprint: &Fingerprint,
 ) -> Result<(ResolvedGroupPlayback, Option<ProbedManifest>), GroupSelectionFailure> {
     if !matches!(req.mode, SelectionMode::Live) {
         let resolved = resolve_hls_group_entry(app_state, group, req).await?;
         return Ok((resolved, None));
     }
 
+    let username = req.username;
+    let group_for_connect_failed = Arc::clone(&group);
+
     resolve_hls_group_entry_with_probe(
         app_state,
         group,
         req,
-        Some(|resolved: &ResolvedGroupPlayback, deadline| {
-            let input = Arc::clone(&resolved.input);
-            let member = resolved.member.clone();
-            let selected_provider_config =
-                resolved.acquired.handle.handle().and_then(|handle| handle.allocation.get_provider_config());
-            let stream_ref = Arc::clone(&member.input_stream_id);
+        Some({
+            let group = &group_for_connect_failed;
+            move |resolved: &ResolvedGroupPlayback, deadline| {
+                let input = Arc::clone(&resolved.input);
+                let member = resolved.member.clone();
+                let selected_provider_config =
+                    resolved.acquired.handle.handle().and_then(|handle| handle.allocation.get_provider_config());
 
-            async move {
-                if check_active_cache && has_active_shared_cache_session(app_state, input.id, stream_ref.as_ref()).await
-                {
-                    return Ok(None);
-                }
+                async move {
+                    if check_active_cache
+                        && has_active_shared_cache_session(app_state, target.id, group.group_vid.get()).await
+                    {
+                        return Ok(None);
+                    }
 
-                let user_agent_stream_index = if let Some((username, session_token)) = user_session {
-                    crate::api::api_utils::resolve_stream_user_agent_index(
+                    let user_agent_stream_index = if let Some((username, session_token)) = user_session {
+                        crate::api::api_utils::resolve_stream_user_agent_index(
+                            app_state,
+                            &input,
+                            selected_provider_config.is_some(),
+                            username,
+                            Some(session_token),
+                        )
+                        .await
+                    } else {
+                        None
+                    };
+
+                    match probe_selected_manifest(
                         app_state,
+                        target,
                         &input,
-                        selected_provider_config.is_some(),
-                        username,
-                        Some(session_token),
+                        &member,
+                        selected_provider_config.as_ref(),
+                        request_headers,
+                        map_account,
+                        user_agent_stream_index,
+                        deadline,
                     )
                     .await
-                } else {
-                    None
-                };
-
-                probe_selected_manifest(
-                    app_state,
-                    target,
-                    &input,
-                    &member,
-                    selected_provider_config.as_ref(),
-                    request_headers,
-                    map_account,
-                    user_agent_stream_index,
-                    deadline,
-                )
-                .await
-                .map(Some)
+                    {
+                        Ok(manifest) => Ok(Some(manifest)),
+                        Err(class) => {
+                            record_probe_member_connect_failed(
+                                app_state,
+                                target,
+                                group,
+                                fingerprint,
+                                &member,
+                                &input,
+                                username,
+                                request_headers,
+                            );
+                            Err(class)
+                        }
+                    }
+                }
             }
         }),
     )
     .await
     .map(|(resolved, probed)| (resolved, probed.flatten()))
+}
+
+/// Writes the per-member `ConnectFailed` history row for a failed HLS start probe, mirroring the
+/// MPEG-TS provider-open failure path (`record_provider_open_failure`): reason `ChannelUnavailable`
+/// and stage `ProviderOpen`.
+#[allow(clippy::too_many_arguments)]
+fn record_probe_member_connect_failed(
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
+    group: &FailoverGroupRecord,
+    fingerprint: &Fingerprint,
+    member: &GroupMember,
+    input: &Arc<ConfigInput>,
+    username: &str,
+    request_headers: &HeaderMap,
+) {
+    let Some(user) = app_state.app_config.get_user_credentials(username) else {
+        return;
+    };
+    let base = StreamChannel { target_id: target.id, virtual_id: group.group_vid.get(), ..StreamChannel::default() };
+    let stream_channel = member_stream_channel(&base, group, member);
+    record_connect_failed_attempt(ConnectFailedAttempt {
+        app_state,
+        fingerprint,
+        user: &user,
+        stream_channel,
+        provider_name: Arc::clone(&input.name),
+        req_headers: request_headers,
+        reason: ConnectFailureReason::ChannelUnavailable,
+        failure_stage: FailureStage::ProviderOpen,
+    });
 }
 
 #[cfg(test)]

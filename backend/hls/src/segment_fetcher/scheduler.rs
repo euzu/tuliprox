@@ -449,10 +449,13 @@ impl HlsSegmentWorkerPool {
     ) {
         let result = fetch_segment_into_cache(&context, &snapshot, &policy).await;
         let finished_at_ms = current_time_millis();
-        let completion = {
+        let mut completion = {
             let mut session = context.session.write().await;
             self.apply_segment_fetch_result(&mut session, &snapshot, &policy, result, finished_at_ms)
         };
+        if let Some(notice) = completion.member_unhealthy.take() {
+            notice.send(&context.session);
+        }
         if let Some(generation) = completion.recovery_generation {
             // A terminal failure can invalidate queued work during this commit.
             // Cleanup belongs to its resulting generation, not the old fetch.

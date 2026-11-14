@@ -1,5 +1,6 @@
 use super::{
     super::origin_refresh_request::{hls_origin_refresh_request, HlsOriginRefreshOptions},
+    access::hls_cache_session_key_for_origin,
     clear_hls_provisioning_handoff_consumer, duration_to_millis_saturating,
     effective_hls_url_failover_provider_for_fetch_url, hls_access_lease_timing_for_session, hls_access_lease_ttl_ms,
     hls_availability_reevaluation_registration_failure_response, hls_cache_configured,
@@ -189,15 +190,30 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
     if !hls_cache_configured(app_state) {
         return None;
     }
-    if origin.origin_source.input_id != context.input_id || origin.origin_source.stream_ref != context.stream_ref {
-        return Some(StatusCode::NOT_FOUND.into_response());
-    }
-
-    let session_key = origin.origin_source.session_key();
+    let session_key = hls_cache_session_key_for_origin(app_state, context, &origin.origin_source).await;
     let expected_proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
     if &expected_proxy_session_id != path_proxy_session_id {
         return Some(StatusCode::NOT_FOUND.into_response());
     }
+
+    // For group sessions the bound member is `HlsSession.origin_source`; the sealed access context
+    // member may go stale after a handoff (R2), so validate against the live session state. Before
+    // the session exists the sealed member is the only authority and must match the origin source.
+    let live_group_session = if session_key.is_group_key() {
+        app_state.hls.proxy.sessions().get_by_proxy_session_id(path_proxy_session_id).await
+    } else {
+        None
+    };
+    let origin_mismatch = match live_group_session {
+        Some(session) => session.read().await.origin_source != origin.origin_source,
+        None => {
+            origin.origin_source.input_id != context.input_id || origin.origin_source.stream_ref != context.stream_ref
+        }
+    };
+    if origin_mismatch {
+        return Some(StatusCode::NOT_FOUND.into_response());
+    }
+
     let now_ms = app_state.hls.proxy.now_ms();
     let rewrite_secret = app_state.get_encrypt_secret();
     let (session, session_outcome) = app_state

@@ -79,7 +79,7 @@ pub async fn fetch_hls_origin_manifest_request(
         HlsOriginManifestFetchMode::RecoveryDirectTarget { binding, reason, log_context } => {
             match fetch_hls_origin_manifest_recovery_direct_target(request.context, binding, reason, log_context).await
             {
-                Ok(fetched) => resolve_archive_master_manifest(request.context, fetched).await,
+                Ok(fetched) => resolve_single_variant_master_manifest(request.context, fetched).await,
                 Err(error)
                     if recovery_profile_failover_allowed(
                         &request.context.origin_entry,
@@ -228,7 +228,7 @@ async fn fetch_hls_origin_manifest_global_policy(
         .await;
         context.ensure_current_origin().await?;
         let fetch_result = match fetch_result {
-            Ok(fetched) => resolve_archive_master_manifest(context, fetched).await,
+            Ok(fetched) => resolve_single_variant_master_manifest(context, fetched).await,
             Err(err) => Err(err),
         };
         let fetch_result = match fetch_result {
@@ -269,17 +269,15 @@ async fn fetch_hls_origin_manifest_global_policy(
     Err(OriginManifestFetchError::RetryExhausted)
 }
 
-/// The shared cache timeline only consumes media playlists, but a bounded archive may answer
-/// with a master that wraps exactly one variant. Follow that variant so its media playlist feeds
-/// the timeline. Live sessions, media playlists and masters with several variants or separate
+/// The shared cache timeline only consumes media playlists, but a live or bounded archive origin
+/// may answer with a master that wraps exactly one variant. Follow that variant so its media
+/// playlist feeds the timeline. Media playlists and masters with several variants or separate
 /// renditions are returned unchanged.
-async fn resolve_archive_master_manifest(
+async fn resolve_single_variant_master_manifest(
     context: &HlsOriginManifestFetchContext,
     master: FetchedOriginManifest,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    if classify_hls_playlist(&master.body) != HlsPlaylistKind::Master
-        || context.session.read().await.key.archive_reference.is_none()
-    {
+    if classify_hls_playlist(&master.body) != HlsPlaylistKind::Master {
         return Ok(master);
     }
     let (Ok(master_url), Some(variant_url)) =
@@ -288,7 +286,7 @@ async fn resolve_archive_master_manifest(
         return Ok(master);
     };
     let entry_request_url = Url::parse(&master.resolved_request_url).ok();
-    let headers = archive_variant_request_headers(
+    let headers = master_variant_request_headers(
         &context.headers,
         entry_request_url.as_ref(),
         &master_url,
@@ -314,10 +312,12 @@ async fn resolve_archive_master_manifest(
     )
     .await?;
     if classify_hls_playlist(&variant.body) != HlsPlaylistKind::Media {
-        return Err(OriginManifestFetchError::Request("archive master variant is not a media playlist".to_string()));
+        return Err(OriginManifestFetchError::Request(
+            "single-variant master variant is not a media playlist".to_string(),
+        ));
     }
     debug!(
-        "HLS archive master resolved to its single variant: master_url={} variant_url={}",
+        "HLS single-variant master resolved to its variant: master_url={} variant_url={}",
         hls_origin_log_value(&master.final_manifest_url),
         hls_origin_log_value(&variant.final_manifest_url)
     );
@@ -342,7 +342,7 @@ async fn resolve_archive_master_manifest(
 /// Configured outbound headers only travel to the origin the entry request already targeted, and
 /// master session cookies only to the master's own origin; anything else is scrubbed like a
 /// cross-origin redirect.
-pub(super) fn archive_variant_request_headers(
+pub(super) fn master_variant_request_headers(
     source_headers: &HeaderMap,
     entry_request_url: Option<&Url>,
     master_url: &Url,

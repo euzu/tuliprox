@@ -980,6 +980,52 @@ mod tests {
         assert_eq!(snapshot.daily_buckets.get(&today).map(|bucket| bucket.connect_count), Some(1));
     }
 
+    #[test]
+    fn member_identity_records_yield_non_null_qos() {
+        let mut bucket = QosSnapshotDailyBucket::default();
+
+        let mut connect = base_record(StreamHistoryEventType::Connect);
+        connect.input_name = Some("solis".intern());
+        connect.provider_name = Some("solis".intern());
+        connect.provider_id = Some(1);
+        connect.virtual_id = Some(101);
+        connect.item_type = Some(PlaylistItemType::Live);
+        connect.shared_joined_existing = Some(false);
+        fold_record_into_bucket(&mut bucket, &connect);
+
+        let mut failed = base_record(StreamHistoryEventType::ConnectFailed);
+        failed.input_name = Some("solis".intern());
+        failed.provider_name = Some("solis".intern());
+        failed.provider_id = Some(1);
+        failed.virtual_id = Some(101);
+        failed.item_type = Some(PlaylistItemType::Live);
+        failed.connect_failure_reason = Some(ConnectFailureReason::ChannelUnavailable);
+        failed.failure_stage = Some(FailureStage::ProviderOpen);
+        fold_record_into_bucket(&mut bucket, &failed);
+
+        let mut snapshot = QosSnapshotRecord {
+            stream_identity_key: "member-a".to_string(),
+            input_name: "solis".intern(),
+            target_name: "test_target".intern(),
+            provider_name: "solis".intern(),
+            provider_id: 1,
+            virtual_id: 101,
+            item_type: PlaylistItemType::Live,
+            updated_at: 1,
+            last_event_at: 1,
+            window_24h: QosSnapshotWindow::default(),
+            window_7d: QosSnapshotWindow::default(),
+            window_30d: QosSnapshotWindow::default(),
+            daily_buckets: BTreeMap::from([("2026-04-02".to_string(), bucket)]),
+        };
+        rebuild_windows(&mut snapshot, "2026-04-02");
+
+        assert_eq!(snapshot.window_24h.connect_count, 1);
+        assert_eq!(snapshot.window_24h.connect_failed_count, 1);
+        assert!(snapshot.window_24h.score > 0);
+        assert!(snapshot.window_24h.confidence > 0);
+    }
+
     #[tokio::test]
     async fn run_aggregation_once_advances_checkpoint_across_multiple_completed_days() {
         let temp = tempdir().expect("tempdir should succeed");

@@ -46,7 +46,8 @@ use shared::{
     },
 };
 use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
-use tuliprox_session::{ProviderSessionHeaders, SessionProviderHeaders};
+use tuliprox_repository::target_stream_item::{classify_virtual_id, ResolvedStreamTarget};
+use tuliprox_session::{failover_group::FailureClass, ProviderSessionHeaders, SessionProviderHeaders};
 use url::Url;
 
 pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
@@ -738,6 +739,40 @@ pub(super) async fn reject_hls_resource(
     response
 }
 
+/// Statuses that mark a legacy HLS segment request of the bound member as a hard failure: a
+/// 404/410 or any 5xx after the segment retries. The request keeps its status; only the next
+/// manifest poll switches.
+fn is_legacy_segment_failover_status(status: StatusCode) -> bool {
+    status == StatusCode::NOT_FOUND || status == StatusCode::GONE || status.is_server_error()
+}
+
+/// Records a hard segment failure against the group member bound to `user_session` and flags the
+/// session so its next manifest poll switches members. Sessions without a member binding are ignored.
+async fn record_legacy_segment_member_failure(
+    app_state: &Arc<AppState>,
+    username: &str,
+    user_session: &UserSession,
+    target_id: u16,
+) {
+    let Some(binding) = user_session.member_binding.as_ref() else {
+        return;
+    };
+    let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
+        return;
+    };
+    let ResolvedStreamTarget::Group(group) =
+        classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, VirtualId::new(binding.group_vid))
+            .await
+    else {
+        return;
+    };
+    let Some(member) = group.members.iter().find(|member| member.member_vid.get() == binding.member_vid) else {
+        return;
+    };
+    super::failover_group::record_member_failure(&app_state.member_health, member, None, FailureClass::Stream);
+    app_state.active_users.mark_member_failed_on_segment(username, &user_session.token).await;
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn force_stream_response(
     fingerprint: &Fingerprint,
@@ -896,6 +931,17 @@ pub(super) async fn force_stream_response(
             grace_admitted: user_session.permission == UserConnectionPermission::GracePeriod,
         });
         if let Some(status) = hls_resource_failure_status(&stream_details) {
+            // A hard segment failure of the bound member marks it failed; the next manifest poll
+            // switches. This single segment request keeps its existing status.
+            if is_legacy_segment_failover_status(status) {
+                record_legacy_segment_member_failure(
+                    app_state,
+                    &ctx.user.username,
+                    user_session,
+                    stream_channel.target_id,
+                )
+                .await;
+            }
             return reject_hls_resource(app_state, &ctx.user.username, &user_session.token, stream_details, status)
                 .await;
         }

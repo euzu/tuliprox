@@ -9,6 +9,7 @@ use super::{
     episode::candidate_resource_timeline_evidence,
     error::{HlsManifestRejectLogReason, OriginManifestFetchError},
     fetch::cap_manifest_retry_after_ms,
+    fetch_hls_origin_manifest_request,
     fingerprint::{
         build_manifest_timeline_fingerprint, deterministic_conflict_fingerprint,
         deterministic_timeline_conflict_from_rejection, HlsManifestCandidateFingerprint,
@@ -19,31 +20,38 @@ use super::{
     },
     recovery::{acceptance_attempt_may_start, attempt_limit_for_started_requalification, selected_manifest_candidate},
     selection_log::ManifestRetryLogKind,
-    FetchedOriginManifest, HlsManifestFetchSelection, RetryPolicy, TimelineMapError, MAX_HLS_MANIFEST_BYTES,
+    FetchedOriginManifest, HlsManifestFetchSelection, HlsOriginManifestFetchContext, HlsOriginManifestFetchRequest,
+    LiveHlsOriginEntry, RetryPolicy, TimelineMapError, MAX_HLS_MANIFEST_BYTES,
 };
 use crate::{
     manifest_acceptance::{
         HlsEmergencyLiveHandoffCompatibility, HlsManifestCommitKind, HlsManifestCommitPlan,
         HlsResourceTimelineEvidence, HlsTerminalAlternativeCompatibility,
     },
-    recovery_timing::HlsAcceptanceDeadlineMs,
+    origin_telemetry::OriginTelemetryRecorder,
+    recovery_timing::{HlsAcceptanceDeadlineMs, HlsOperationTimeoutMs, HlsRecoveryEtaMs, HlsRecoveryTimingPolicy},
     resource_identity::{HlsMediaResourceIdentity, HlsMediaResourceSemanticKey},
     timeline::HlsResourceReplayDecision,
     HlsSession, HlsSessionKey,
 };
+use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use flate2::{
     write::{DeflateEncoder, GzEncoder},
     Compression,
 };
 use reqwest::{redirect::Policy, Client};
-use std::{io, io::Write, time::Duration};
+use shared::model::ConfigPaths;
+use std::{io, io::Write, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::oneshot,
+    sync::{oneshot, RwLock},
 };
-use tuliprox_core::utils::content_coding::{ContentCoding, ContentCodingError};
+use tuliprox_core::{
+    model::{AppConfig, Config, HlsManifestRecoveryBurstConfig, MediaToolCapabilities, SourcesConfig},
+    utils::content_coding::{ContentCoding, ContentCodingError},
+};
 use tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome;
 use url::Url;
 
@@ -343,6 +351,118 @@ async fn spawn_test_origin(response: TestOriginResponse) -> (Url, oneshot::Recei
         let _ = socket.write_all(&response.body).await;
     });
     (Url::parse(&format!("http://{address}/manifest.m3u8")).expect("test origin URL"), request_receiver)
+}
+
+struct PathOriginServer {
+    base_url: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for PathOriginServer {
+    fn drop(&mut self) { self.task.abort(); }
+}
+
+/// Serves one response per request, dispatching on the request path. Used for
+/// master-then-variant follow tests, which need more than one origin request.
+async fn spawn_path_origin(handler: impl Fn(&str) -> TestOriginResponse + Send + Sync + 'static) -> PathOriginServer {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind path origin");
+    let address = listener.local_addr().expect("path origin address");
+    let handler = Arc::new(handler);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let handler = Arc::clone(&handler);
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let Ok(count) = socket.read(&mut buffer).await else {
+                        return;
+                    };
+                    if count == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let request = String::from_utf8_lossy(&request);
+                let path = request.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/");
+                let response = handler(path);
+                let mut head = format!(
+                    "HTTP/1.1 {}\r\nConnection: close\r\nContent-Length: {}\r\n",
+                    response.status,
+                    response.body.len()
+                );
+                for (name, value) in response.headers {
+                    head.push_str(name);
+                    head.push_str(": ");
+                    head.push_str(&value);
+                    head.push_str("\r\n");
+                }
+                head.push_str("\r\n");
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&response.body).await;
+            });
+        }
+    });
+    PathOriginServer { base_url: format!("http://{address}"), task }
+}
+
+fn test_app_config() -> Arc<AppConfig> {
+    Arc::new(AppConfig {
+        config: Arc::new(ArcSwap::from_pointee(Config::default())),
+        sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+        hdhomerun: Arc::new(ArcSwapOption::empty()),
+        plugins: Arc::default(),
+        api_proxy: Arc::new(ArcSwapOption::empty()),
+        file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
+        paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+            home_path: String::new(),
+            config_path: String::new(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            failover_file_path: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        })),
+        custom_stream_response: Arc::new(ArcSwapOption::empty()),
+        access_token_secret: [0; 32],
+        encrypt_secret: [0; 16],
+        media_tools: Arc::new(MediaToolCapabilities::default()),
+        failover: Arc::default(),
+    })
+}
+
+fn live_test_fetch_context(entry_url: &str, headers: HeaderMap) -> HlsOriginManifestFetchContext {
+    HlsOriginManifestFetchContext {
+        origin_account_snapshot: None,
+        attempt: None,
+        app_config: test_app_config(),
+        availability_runtime: None,
+        session: Arc::new(RwLock::new(HlsSession::new(HlsSessionKey::new(1, "live-master"), b"secret", 0))),
+        origin_entry: LiveHlsOriginEntry::parse(entry_url).expect("entry url"),
+        headers,
+        client: Client::builder().no_proxy().build().expect("client"),
+        no_redirect_client: Client::builder().no_proxy().redirect(Policy::none()).build().expect("no-redirect client"),
+        use_manual_redirects: false,
+        origin_manifest_timeout_ms: 2_000,
+        manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
+        retry_policy: RetryPolicy { delays_ms: [0, 0, 0, 0, 0], jitter_max_ms: 0 },
+        recovery_timing_policy: HlsRecoveryTimingPolicy::new(
+            HlsOperationTimeoutMs::from_millis(2_000),
+            HlsOperationTimeoutMs::from_millis(2_000),
+            HlsRecoveryEtaMs::from_millis(2_000),
+            HlsRecoveryEtaMs::from_millis(2_000),
+        ),
+        acceptance_timing_seed: None,
+        origin_telemetry: OriginTelemetryRecorder::disabled(),
+    }
 }
 
 fn gzip(input: &[u8]) -> Vec<u8> {
@@ -722,7 +842,7 @@ fn single_variant_url_refuses_ambiguous_or_rendition_masters() {
 }
 
 #[test]
-fn archive_variant_request_headers_only_send_credentials_to_origins_that_received_them() {
+fn master_variant_request_headers_only_send_credentials_to_origins_that_received_them() {
     let url = |value: &str| url::Url::parse(value).expect("url");
     let mut source = HeaderMap::new();
     source.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic entry"));
@@ -732,7 +852,7 @@ fn archive_variant_request_headers_only_send_credentials_to_origins_that_receive
     let entry = url("https://entry.example.invalid/archive-1-2.m3u8");
     let cdn = url("https://cdn.example.invalid/archive-1-2.m3u8");
     let headers = |entry_url: &url::Url, master_url: &url::Url, variant: &str| {
-        super::fetch::archive_variant_request_headers(
+        super::fetch::master_variant_request_headers(
             &source,
             Some(entry_url),
             master_url,
@@ -753,7 +873,7 @@ fn archive_variant_request_headers_only_send_credentials_to_origins_that_receive
     assert!(!foreign_variant.contains_key(header::AUTHORIZATION));
     assert!(!foreign_variant.contains_key(header::COOKIE));
 
-    let unknown_entry = super::fetch::archive_variant_request_headers(
+    let unknown_entry = super::fetch::master_variant_request_headers(
         &source,
         None,
         &entry,
@@ -762,4 +882,76 @@ fn archive_variant_request_headers_only_send_credentials_to_origins_that_receive
     );
     assert!(!unknown_entry.contains_key(header::AUTHORIZATION));
     assert!(!unknown_entry.contains_key(header::COOKIE));
+}
+
+#[tokio::test]
+async fn live_session_follows_single_variant_master_to_its_media_playlist() {
+    let origin = spawn_path_origin(|path| {
+        if path.starts_with("/live/child.m3u8") {
+            TestOriginResponse::ok(TEST_MANIFEST.to_vec())
+        } else {
+            let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nchild.m3u8?token=abc\n";
+            TestOriginResponse::ok(master.as_bytes().to_vec())
+        }
+    })
+    .await;
+    let entry_url = format!("{}/live/index.m3u8", origin.base_url);
+    let context = live_test_fetch_context(&entry_url, HeaderMap::new());
+
+    let fetched = fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::initial_global_policy(&context))
+        .await
+        .expect("live single-variant master follows its variant");
+
+    assert_eq!(fetched.body.as_bytes(), TEST_MANIFEST);
+    assert_eq!(fetched.final_manifest_url, format!("{}/live/child.m3u8?token=abc", origin.base_url));
+}
+
+#[tokio::test]
+async fn live_session_leaves_multi_variant_master_unchanged() {
+    let master_body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\na.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2000\nb.m3u8\n";
+    let origin = spawn_path_origin({
+        let body = master_body.to_string();
+        move |_path| TestOriginResponse::ok(body.as_bytes().to_vec())
+    })
+    .await;
+    let entry_url = format!("{}/live/index.m3u8", origin.base_url);
+    let context = live_test_fetch_context(&entry_url, HeaderMap::new());
+
+    let fetched = fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::initial_global_policy(&context))
+        .await
+        .expect("multi-variant master fetch succeeds");
+
+    assert_eq!(fetched.body, master_body);
+    assert_eq!(fetched.final_manifest_url, entry_url);
+}
+
+#[tokio::test]
+async fn live_single_variant_master_resolves_relative_variant_against_redirected_master_url() {
+    let master = spawn_path_origin(|path| {
+        if path.starts_with("/cdn/live/child.m3u8") {
+            TestOriginResponse::ok(TEST_MANIFEST.to_vec())
+        } else {
+            let body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nchild.m3u8?token=abc\n";
+            TestOriginResponse::ok(body.as_bytes().to_vec())
+        }
+    })
+    .await;
+    let master_url = format!("{}/cdn/live/master.m3u8", master.base_url);
+    let entry = spawn_path_origin(move |_path| TestOriginResponse {
+        status: "302 Found",
+        headers: vec![("Location", master_url.clone())],
+        body: Vec::new(),
+        body_delay: Duration::ZERO,
+    })
+    .await;
+    let entry_url = format!("{}/live/entry.m3u8", entry.base_url);
+    let context = live_test_fetch_context(&entry_url, HeaderMap::new());
+
+    let fetched = fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::initial_global_policy(&context))
+        .await
+        .expect("redirected single-variant master follows its variant");
+
+    assert_eq!(fetched.body.as_bytes(), TEST_MANIFEST);
+    assert_eq!(fetched.final_manifest_url, format!("{}/cdn/live/child.m3u8?token=abc", master.base_url));
+    assert_eq!(fetched.resolved_request_url, entry_url);
 }
