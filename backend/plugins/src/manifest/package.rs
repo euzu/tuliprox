@@ -247,21 +247,10 @@ fn check_no_options_rpc(schema: &Value, label: &str, problems: &mut Vec<String>)
     walk(schema, label, problems, 0);
 }
 
-/// The secret property paths declared across all `ui.input_form` sections of `manifest`.
-pub(crate) fn input_form_secret_paths(dir: &Path, manifest: &Manifest) -> Vec<String> {
-    let mut paths = Vec::new();
-    for section in &manifest.ui.input_form {
-        if let Ok(schema) = read_json(dir, &section.schema, "input form schema") {
-            if let Ok(secrets) = secret_property_paths(&schema) {
-                for secret in secrets {
-                    if !paths.contains(&secret) {
-                        paths.push(secret);
-                    }
-                }
-            }
-        }
-    }
-    paths
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct PackageSecrets {
+    pub(crate) settings: Vec<String>,
+    pub(crate) input_forms: Vec<String>,
 }
 
 /// The rpc exports named in `x-options-rpc` annotations of `ui.input_form` sections.
@@ -309,9 +298,9 @@ fn read_locale(dir: &Path, locale: &str) -> Result<Map<String, Value>, String> {
 
 /// The package-level validation over the files of the package at `dir`.
 ///
-/// Returns the secret property paths of the settings (schemas and
-/// extensions), or **every** problem found.
-pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<String>, Vec<String>> {
+/// Returns the secret property paths of the settings and input forms, or **every** problem found.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<PackageSecrets, Vec<String>> {
     let mut problems = Vec::new();
 
     // `ui/_sdk/` is where the host serves the frame bridge (`_sdk/bridge.js`).
@@ -341,13 +330,21 @@ pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<Strin
 
     // Input form schemas: secrets are allowed (but must not carry a `default`),
     // and `x-options-rpc` annotations are validated against `ui.rpc_exports`.
+    let mut input_form_secrets = Vec::new();
     for section in &manifest.ui.input_form {
         let label = format!("input form schema `{}` (`{}`)", section.schema, section.id);
         match read_json(dir, &section.schema, &label) {
             Ok(schema) => {
                 check_schema(&schema, &label, &mut problems);
-                if let Err(problem) = secret_property_paths(&schema) {
-                    problems.push(format!("{label}: {problem}"));
+                match secret_property_paths(&schema) {
+                    Ok(secrets) => {
+                        for secret in secrets {
+                            if !input_form_secrets.contains(&secret) {
+                                input_form_secrets.push(secret);
+                            }
+                        }
+                    }
+                    Err(problem) => problems.push(format!("{label}: {problem}")),
                 }
                 check_options_rpc_annotations(&schema, manifest, &label, &mut problems);
             }
@@ -417,7 +414,7 @@ pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<Strin
     }
 
     if problems.is_empty() {
-        Ok(secret_paths)
+        Ok(PackageSecrets { settings: secret_paths, input_forms: input_form_secrets })
     } else {
         Err(problems)
     }
@@ -467,7 +464,7 @@ mod tests {
     #[test]
     fn a_known_section_passes() {
         let manifest = manifest("ui:\n  config_extensions:\n    - section: messaging\n      schema: {type: object}\n");
-        assert_eq!(check_package(package(&[]).path(), &manifest).unwrap(), Vec::<String>::new());
+        assert_eq!(check_package(package(&[]).path(), &manifest).unwrap(), PackageSecrets::default());
     }
 
     #[test]
@@ -500,7 +497,7 @@ mod tests {
             "ui:\n  config_extensions:\n    - section: proxy\n      schema:\n        type: object\n        properties:\n          key: {type: string, writeOnly: true}\n",
         );
         let paths = check_package(package(&[]).path(), &manifest).unwrap();
-        assert_eq!(paths, ["ext.proxy.key"]);
+        assert_eq!(paths.settings, ["ext.proxy.key"]);
     }
 
     #[test]
@@ -543,7 +540,7 @@ mod tests {
             "forms/input.json",
             r#"{"type":"object","properties":{"mode":{"type":"string","enum":["a","b"]}}}"#,
         )]);
-        assert_eq!(check_package(good.path(), &manifest(extra)).unwrap(), Vec::<String>::new());
+        assert_eq!(check_package(good.path(), &manifest(extra)).unwrap(), PackageSecrets::default());
 
         let nested = package(&[("forms/input.json", r#"{"type":"object","properties":{"a":{"oneOf":[]}}}"#)]);
         let problems = check_package(nested.path(), &manifest(extra)).unwrap_err();
@@ -554,7 +551,8 @@ mod tests {
             "forms/input.json",
             r#"{"type":"object","properties":{"token":{"type":"string","writeOnly":true}}}"#,
         )]);
-        assert!(check_package(secret_ok.path(), &manifest(extra)).is_ok());
+        let secrets = check_package(secret_ok.path(), &manifest(extra)).unwrap();
+        assert_eq!(secrets.input_forms, ["token"]);
 
         // Secret with default is refused in input forms.
         let secret_with_default = package(&[(

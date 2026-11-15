@@ -286,7 +286,9 @@ fn tool_annotations(tool: &McpToolRef<'_>) -> Value {
         McpToolRef::Builtin(builtin) if builtin.kind == McpToolKind::Read => {
             json!({ "readOnlyHint": true, "openWorldHint": false })
         }
-        McpToolRef::Builtin(_) => json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }),
+        McpToolRef::Builtin(builtin) => {
+            json!({ "readOnlyHint": false, "destructiveHint": builtin.destructive, "openWorldHint": false })
+        }
         McpToolRef::Plugin(plugin) if plugin.kind == McpToolKind::Read => {
             json!({ "readOnlyHint": true, "openWorldHint": true })
         }
@@ -2178,11 +2180,19 @@ mod tests {
             find("plugin_demo_drop")["annotations"],
             json!({ "readOnlyHint": false, "destructiveHint": true, "openWorldHint": true })
         );
-        // The built-in annotations are unchanged.
+        // The built-in annotations are unchanged, except destructive tools.
         assert_eq!(find("get_status")["annotations"], json!({ "readOnlyHint": true, "openWorldHint": false }));
         assert_eq!(
             find("update_playlists")["annotations"],
             json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false })
+        );
+        assert_eq!(
+            find("save_overrides")["annotations"],
+            json!({ "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false })
+        );
+        assert_eq!(
+            find("discard_overrides")["annotations"],
+            json!({ "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false })
         );
     }
 
@@ -2209,6 +2219,7 @@ mod tests {
         assert!(result_text(&reply).contains(r#""items""#));
     }
 
+    #[cfg(feature = "plugins")]
     #[tokio::test]
     async fn a_result_outside_the_output_schema_is_an_error_and_discarded() {
         let body = r#"{"items":"not a list","leak":"SECRET-VALUE"}"#;

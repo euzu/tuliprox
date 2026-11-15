@@ -113,9 +113,56 @@ const SECRET_OPTION_KEY_PARTS: [&str; 9] =
 /// Exact lowercase option keys that hold a credential identity.
 const CREDENTIAL_OPTION_KEYS: [&str; 2] = ["username", "user"];
 
-fn option_is_secret(key: &str) -> bool {
+pub(crate) fn option_is_secret(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     SECRET_OPTION_KEY_PARTS.iter().any(|part| key.contains(part)) || CREDENTIAL_OPTION_KEYS.contains(&key.as_str())
+}
+
+/// Collects every secret that must not appear in a result or log line:
+/// password, username, secret-looking option values, and writeOnly form-secret values.
+pub(crate) fn collect_call_secrets(
+    username: Option<&str>,
+    password: Option<&str>,
+    options: &[(String, String)],
+    form_secret_paths: &[String],
+) -> Vec<String> {
+    let form_secrets = if form_secret_paths.is_empty() {
+        Vec::new()
+    } else {
+        let options_map: serde_json::Map<String, Value> =
+            options.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
+        crate::settings::secret_values(&Value::Object(options_map), form_secret_paths)
+    };
+    collect_call_secrets_from_values(username, password, options, &form_secrets)
+}
+
+pub(crate) fn collect_call_secrets_from_values(
+    username: Option<&str>,
+    password: Option<&str>,
+    options: &[(String, String)],
+    form_secrets: &[String],
+) -> Vec<String> {
+    let mut secrets = Vec::new();
+    let mut push = |secret: &str| {
+        if !secret.is_empty() && !secrets.iter().any(|known| known == secret) {
+            secrets.push(secret.to_string());
+        }
+    };
+    if let Some(password) = password {
+        push(password);
+    }
+    if let Some(username) = username {
+        push(username);
+    }
+    for (key, value) in options {
+        if option_is_secret(key) {
+            push(value);
+        }
+    }
+    for secret in form_secrets {
+        push(secret);
+    }
+    secrets
 }
 
 /// A configured `type: plugin` input, resolved by the caller of an
@@ -143,27 +190,12 @@ impl RpcInput {
     /// Every value that must not appear in a result or a log line: the
     /// password, the username, and any option whose key looks secret.
     fn secrets(&self) -> Vec<String> {
-        let mut secrets = Vec::new();
-        let mut push = |secret: &str| {
-            if !secret.is_empty() && !secrets.iter().any(|known| known == secret) {
-                secrets.push(secret.to_string());
-            }
-        };
-        if let Some(password) = self.password.as_deref() {
-            push(password);
-        }
-        if let Some(username) = self.username.as_deref() {
-            push(username);
-        }
-        for (key, value) in &self.options {
-            if option_is_secret(key) {
-                push(value);
-            }
-        }
-        for secret in &self.form_secrets {
-            push(secret);
-        }
-        secrets
+        collect_call_secrets_from_values(
+            self.username.as_deref(),
+            self.password.as_deref(),
+            &self.options,
+            &self.form_secrets,
+        )
     }
 
     /// The context object the guest reads: `{name, url, username, password, options}`.
@@ -415,7 +447,16 @@ fn redact_value(value: &mut Value, secrets: &[String]) {
             }
         }
         Value::Array(items) => items.iter_mut().for_each(|item| redact_value(item, secrets)),
-        Value::Object(map) => map.values_mut().for_each(|item| redact_value(item, secrets)),
+        Value::Object(map) => {
+            let entries = std::mem::take(map);
+            for (mut key, mut val) in entries {
+                if secrets.iter().any(|secret| !secret.is_empty() && key.contains(secret.as_str())) {
+                    key = redact(&key, secrets);
+                }
+                redact_value(&mut val, secrets);
+                map.insert(key, val);
+            }
+        }
         _ => {}
     }
 }
@@ -806,7 +847,25 @@ mod tests {
         let value: Value = serde_json::from_str(&scrubbed).unwrap();
         assert_eq!(value["k"][0], format!("token {REDACTED_SECRET}!"));
         assert_eq!(value["k"][1], 3);
-        assert!(!scrubbed.contains("token s3cr3t"));
+        assert_eq!(value[REDACTED_SECRET], true);
+        assert!(!scrubbed.contains("s3cr3t"));
+    }
+
+    #[test]
+    fn object_keys_and_values_with_secrets_are_redacted_in_rpc_result() {
+        let secrets = vec!["super_secret_key".to_string(), "my_password".to_string()];
+        let input_json = json!({
+            "key_with_super_secret_key_inside": {
+                "nested_my_password": "value containing super_secret_key",
+                "normal_key": "normal_val"
+            },
+            "array": [
+                { "key_with_my_password": 123 }
+            ]
+        });
+        let result = vet_result(input_json.to_string(), &secrets).expect("valid json");
+        assert!(!result.contains("super_secret_key"), "secret found in keys or values: {result}");
+        assert!(!result.contains("my_password"), "password found in keys or values: {result}");
     }
 
     fn scoped_export() -> RpcExport { RpcExport { input_scoped: true, ..export(RpcKind::Read, Some("rpc/in.json")) } }
@@ -970,5 +1029,21 @@ mod tests {
         let scrubbed = vet_result(text.to_string(), &secrets).unwrap();
         assert!(!scrubbed.contains("my_form_secret_123"));
         assert!(scrubbed.contains(REDACTED_SECRET));
+    }
+
+    #[test]
+    fn collect_call_secrets_collects_credentials_options_and_form_secrets() {
+        let options = vec![
+            ("token".to_string(), "tok-sec".to_string()),
+            ("plain_opt".to_string(), "not-a-secret".to_string()),
+            ("nested".to_string(), "form-secret-val".to_string()),
+        ];
+        let form_paths = vec!["nested".to_string()];
+        let secrets = collect_call_secrets(Some("my_user"), Some("my_pass"), &options, &form_paths);
+        assert!(secrets.contains(&"my_user".to_string()));
+        assert!(secrets.contains(&"my_pass".to_string()));
+        assert!(secrets.contains(&"tok-sec".to_string()));
+        assert!(secrets.contains(&"form-secret-val".to_string()));
+        assert!(!secrets.contains(&"not-a-secret".to_string()));
     }
 }

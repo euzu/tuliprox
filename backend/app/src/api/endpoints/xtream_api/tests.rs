@@ -668,6 +668,18 @@ fn media_server_xtream_playback_uses_internal_stream_ref_even_with_direct_pms_ur
 }
 
 #[test]
+fn media_plugin_xtream_playback_uses_internal_stream_ref() {
+    let input =
+        ConfigInput { input_type: InputType::Plugin, plugin: Some("my-media-plugin".into()), ..ConfigInput::default() };
+    let fallback = Arc::<str>::from("media-server://plugin/my-media-plugin/movie-1?stream_key=stream-1");
+
+    let resolved = get_xtream_player_api_stream_url(&input, ApiStreamContext::Movie, "813563.mkv", &fallback)
+        .expect("media plugin fallback should be preserved");
+
+    assert_eq!(resolved, fallback);
+}
+
+#[test]
 fn live_playback_extension_keeps_client_requested_extension() {
     let mut pli = create_test_vod_item("provider://strong/live/user/pass/813563.ts", "ts", PlaylistItemType::Live);
     pli.xtream_cluster = XtreamCluster::Live;

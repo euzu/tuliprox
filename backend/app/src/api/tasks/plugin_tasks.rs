@@ -108,7 +108,7 @@ pub(crate) async fn run_plugin_task(
     PluginTaskResult::Unknown("this build has no plugin support".to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "plugins"))]
 mod tests {
     use super::*;
     use crate::{api::model::create_test_app_state_with_plugins, model::Config};

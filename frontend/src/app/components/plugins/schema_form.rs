@@ -37,7 +37,10 @@ use shared::{
 };
 use std::rc::Rc;
 use web_sys::{HtmlInputElement, InputEvent, MouseEvent};
-use yew::{classes, component, html, use_context, use_effect_with, use_state, Callback, Html, Properties, TargetCast};
+use yew::{
+    classes, component, html, use_context, use_effect_with, use_mut_ref, use_state, Callback, Html, Properties,
+    TargetCast,
+};
 
 // ---------------------------------------------------------------------------
 // Schema analysis (pure)
@@ -1125,10 +1128,11 @@ fn OptionsRpcField(props: &OptionsRpcFieldProps) -> Html {
         ui_ctx.as_ref().map(|c| c.service.clone()).unwrap_or_else(|| Rc::new(crate::services::PluginUiService::new()));
     let field_id = field_dom_id(&props.field.path);
 
-    let options = use_state(|| None::<Rc<Vec<DropDownOption>>>);
+    let options = use_state(|| None::<Rc<Vec<ParsedRpcOption>>>);
     let loading = use_state(|| false);
     let fetch_error = use_state(|| None::<String>);
     let fallback_text = use_state(|| false);
+    let request_gen = use_mut_ref(|| 0u64);
 
     let current_val = props.value.as_ref().and_then(Value::as_str).unwrap_or_default().to_string();
 
@@ -1140,20 +1144,23 @@ fn OptionsRpcField(props: &OptionsRpcFieldProps) -> Html {
         let plugin_id = props.plugin_id.clone();
         let rpc_name = props.rpc_name.clone();
         let input_draft = props.input_draft.clone();
-        let current_val = current_val.clone();
         let service = service.clone();
+        let request_gen = request_gen.clone();
 
         Callback::from(move |()| {
             let Some(plugin_id) = plugin_id.clone() else {
                 return;
             };
+            *request_gen.borrow_mut() += 1;
+            let my_gen = *request_gen.borrow();
+            let request_gen = request_gen.clone();
+
             let options = options.clone();
             let loading = loading.clone();
             let fetch_error = fetch_error.clone();
             let fallback_text = fallback_text.clone();
             let rpc_name = rpc_name.clone();
             let service = service.clone();
-            let current_val = current_val.clone();
 
             let mut payload_map = serde_json::Map::new();
             if let Some(draft) = input_draft.clone() {
@@ -1165,17 +1172,14 @@ fn OptionsRpcField(props: &OptionsRpcFieldProps) -> Html {
             fetch_error.set(None);
 
             wasm_bindgen_futures::spawn_local(async move {
-                match service.rpc(&plugin_id, &rpc_name, &payload).await {
+                let outcome = service.rpc(&plugin_id, &rpc_name, &payload).await;
+                if *request_gen.borrow() != my_gen {
+                    return;
+                }
+                match outcome {
                     Ok(result) => match parse_options_result(&result) {
                         Ok(opts) => {
-                            let dropdown_opts: Vec<DropDownOption> = opts
-                                .into_iter()
-                                .map(|opt| {
-                                    let selected = opt.value == current_val;
-                                    DropDownOption::new(&opt.value, html! { { opt.label } }, selected)
-                                })
-                                .collect();
-                            options.set(Some(Rc::new(dropdown_opts)));
+                            options.set(Some(Rc::new(opts)));
                             fallback_text.set(false);
                         }
                         Err(err) => {
@@ -1193,12 +1197,18 @@ fn OptionsRpcField(props: &OptionsRpcFieldProps) -> Html {
         })
     };
 
-    // Load options on first mount if not yet loaded
+    // Load options on first mount or when plugin_id / rpc_name changes
     {
         let fetch_options = fetch_options.clone();
         let options = options.clone();
-        use_effect_with((), move |()| {
-            if (*options).is_none() {
+        let fallback_text = fallback_text.clone();
+        let fetch_error = fetch_error.clone();
+        let deps = (props.plugin_id.clone(), props.rpc_name.clone());
+        use_effect_with(deps, move |(plugin_id, _)| {
+            options.set(None);
+            fallback_text.set(false);
+            fetch_error.set(None);
+            if plugin_id.is_some() {
                 fetch_options.emit(());
             }
         });
@@ -1235,6 +1245,17 @@ fn OptionsRpcField(props: &OptionsRpcFieldProps) -> Html {
         all_errors.push(format!("{}: {}", translate.t("MESSAGES.PLUGIN_OPTIONS_ERROR"), err));
     }
 
+    let dropdown_options = (*options).as_ref().map(|opts| {
+        let items: Vec<DropDownOption> = opts
+            .iter()
+            .map(|opt| {
+                let selected = opt.value == current_val;
+                DropDownOption::new(&opt.value, html! { { &opt.label } }, selected)
+            })
+            .collect();
+        Rc::new(items)
+    });
+
     html! {
         <div class="tp__schema-form__field tp__schema-form__options-rpc">
             <div class="tp__schema-form__options-rpc-header">
@@ -1247,13 +1268,13 @@ fn OptionsRpcField(props: &OptionsRpcFieldProps) -> Html {
                 <div class="tp__schema-form__options-loading">
                     <span>{ translate.t("MESSAGES.PLUGIN_OPTIONS_LOADING") }</span>
                 </div>
-            } else if *fallback_text || (*options).is_none() {
+            } else if *fallback_text || dropdown_options.is_none() {
                 <Input name={props.field.path.clone()} field_id={Some(field_id.clone())}
                     value={current_val}
                     placeholder={props.field.placeholder.clone()}
                     on_change={Some(on_text_input)}
                     error={joined_error(&all_errors)} />
-            } else if let Some(opts) = (*options).clone() {
+            } else if let Some(opts) = dropdown_options {
                 <Select name={field_id} options={opts} on_select={on_select}
                     required={props.field.required}
                     error={joined_error(&all_errors)} />

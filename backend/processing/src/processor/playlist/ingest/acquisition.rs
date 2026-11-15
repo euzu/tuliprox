@@ -37,8 +37,8 @@ use tuliprox_iptv::{
     xtream,
 };
 use tuliprox_repository::{
-    load_input_playlist_as, persist_input_playlist_with_options, InputPlaylistPersistOptions, MemoryPlaylistSource,
-    PlaylistSource,
+    get_input_media_server_playlist_file_path, load_input_playlist_as, persist_input_playlist_with_options,
+    InputPlaylistPersistOptions, MemoryPlaylistSource, PlaylistSource,
 };
 
 /// Local discovery is not a provider Refresh policy. Both can require a fresh read.
@@ -322,7 +322,17 @@ async fn load_stored_input_playlist<P: PluginHost>(
     plugins: &P,
     input: &ConfigInput,
 ) -> Result<PlaylistSource, TuliproxError> {
-    let persistence = input.persistence_with_plugins(plugins);
+    let mut persistence = input.persistence_with_plugins(plugins);
+    if persistence != shared::model::InputPersistence::MediaServer
+        && input.input_type == shared::model::InputType::Plugin
+    {
+        let storage_dir = { app_config.config.load().storage_dir.clone() };
+        let storage_path = input_cache::resolve_input_storage_path(&storage_dir, &input.name).await;
+        let media_file = get_input_media_server_playlist_file_path(&storage_path, &input.name);
+        if tokio::fs::try_exists(&media_file).await.unwrap_or(false) {
+            persistence = shared::model::InputPersistence::MediaServer;
+        }
+    }
     load_input_playlist_as(app_config, input, None, persistence).await
 }
 
@@ -1014,5 +1024,61 @@ mod tests {
         .await;
         let message = fetch.errors.first().map(ToString::to_string).unwrap_or_default();
         assert!(message.contains("does not name a plugin"), "{message}");
+    }
+
+    fn test_app_config(storage_dir: &std::path::Path) -> Arc<AppConfig> {
+        use arc_swap::{ArcSwap, ArcSwapOption};
+        use shared::model::ConfigPaths;
+        use tuliprox_core::{
+            model::{Config, MediaToolCapabilities, SourcesConfig},
+            utils::FileLockManager,
+        };
+        Arc::new(AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config {
+                storage_dir: storage_dir.to_string_lossy().into_owned(),
+                ..Config::default()
+            })),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            failover: Arc::default(),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: storage_dir.to_string_lossy().into_owned(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                failover_file_path: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn load_stored_input_playlist_detects_media_server_layout_on_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_config = test_app_config(temp.path());
+
+        let input = plugin_input(Some("media-plugin"));
+        let storage_path = input_cache::resolve_input_storage_path(&temp.path().to_string_lossy(), &input.name).await;
+        let media_file = get_input_media_server_playlist_file_path(&storage_path, &input.name);
+        let (_, persist_res) =
+            tuliprox_repository::persist_input_media_server_playlist(&app_config, &media_file, Vec::new()).await;
+        assert!(persist_res.is_ok(), "persist_input_media_server_playlist failed: {persist_res:?}");
+        assert!(media_file.exists(), "media server file must exist after persist");
+
+        let result = load_stored_input_playlist(&app_config, &NoPlugins, &input).await;
+        assert!(result.is_ok(), "failed to load media server layout from disk: {:?}", result.as_ref().err());
     }
 }

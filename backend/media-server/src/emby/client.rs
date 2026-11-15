@@ -242,7 +242,7 @@ impl<F: EmbyFamilyFlavor> EmbyFamilyCatalogClient<F> {
             if let Some(token) = self.config.token.as_ref().or(self.config.api_key.as_ref()) {
                 validate_token(token, F::PROVIDER)?;
                 let user_id = if F::RESOLVES_USER_VIA_USERS_ME && self.config.user_id.is_none() {
-                    self.fetch_current_user_id(token).await?
+                    Some(self.fetch_current_user_id(token).await?)
                 } else {
                     None
                 };
@@ -281,7 +281,7 @@ impl<F: EmbyFamilyFlavor> EmbyFamilyCatalogClient<F> {
         Ok(EmbyConnectionState { status, token, user_id, origin })
     }
 
-    async fn fetch_current_user_id(&self, token: &str) -> Result<Option<Arc<str>>, MediaServerError> {
+    async fn fetch_current_user_id(&self, token: &str) -> Result<Arc<str>, MediaServerError> {
         let url = self.url(&["Users", "Me"], &[])?;
         let headers = F::auth_headers(&self.identity, Some(token))?;
         let response = self
@@ -291,7 +291,11 @@ impl<F: EmbyFamilyFlavor> EmbyFamilyCatalogClient<F> {
             .send_with_error_detail(format!("{} current user request failed", F::PROVIDER))
             .await?;
         let user: EmbyUserDto = self.read_json(response, MediaServerOperation::Discovery, "current user").await?;
-        Ok(non_blank_arc(user.id.as_deref()))
+        non_blank_arc(user.id.as_deref()).ok_or_else(|| {
+            MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
+                .provider(F::PROVIDER)
+                .detail("current user request did not return a user id")
+        })
     }
 
     async fn discover_public_info(&self) -> Result<EmbyPublicSystemInfoDto, MediaServerError> {
@@ -727,6 +731,7 @@ mod tests {
         movie_total: Option<usize>,
         last_range: StdMutex<Option<String>>,
         discovery_body: StdMutex<Option<String>>,
+        users_me_body: StdMutex<Option<String>>,
     }
 
     impl MockServer {
@@ -743,6 +748,7 @@ mod tests {
                 movie_total: None,
                 last_range: StdMutex::new(None),
                 discovery_body: StdMutex::new(None),
+                users_me_body: StdMutex::new(None),
             }
         }
 
@@ -760,6 +766,8 @@ mod tests {
             *self.discovery_body.lock().expect("lock") = Some(body.into());
             self
         }
+
+        fn set_users_me_body(&self, body: Option<String>) { *self.users_me_body.lock().expect("lock") = body; }
 
         fn set_valid_token(&self, token: &str) { *self.valid_token.lock().expect("lock") = token.to_string(); }
 
@@ -837,7 +845,13 @@ mod tests {
                     respond(StatusCode::UNAUTHORIZED, "{}")
                 }
                 ("GET", ["Library", "VirtualFolders"]) => respond(StatusCode::OK, EMBY_VIRTUAL_FOLDERS_JSON),
-                ("GET", ["Users", "Me"]) => respond(StatusCode::OK, r#"{"Id":"mock-user-me","Name":"Admin"}"#),
+                ("GET", ["Users", "Me"]) => {
+                    if let Some(body) = self.users_me_body.lock().expect("lock").as_ref() {
+                        respond(StatusCode::OK, body)
+                    } else {
+                        respond(StatusCode::OK, r#"{"Id":"mock-user-me","Name":"Admin"}"#)
+                    }
+                }
                 ("GET", ["UserViews"] | ["Users", _, "Views"]) => respond(StatusCode::OK, JELLYFIN_VIEWS_JSON),
                 ("GET", ["Items"] | ["Users", _, "Items"]) => respond(StatusCode::OK, &self.items_body(&query)),
                 ("GET", ["Videos", _, "stream"]) => {
@@ -1819,5 +1833,28 @@ mod tests {
             ),
             "clear error message: {detail}"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_current_user_id_returns_error_and_retries_without_caching() {
+        let server = Arc::new(MockServer::new("silo", "token-valid"));
+        server.set_users_me_body(Some(r#"{"Id":"","Name":"Admin"}"#.to_string()));
+        let (url, _handle) = serve(&server).await;
+        let mut settings = token_settings("token-valid");
+        settings.api_key = Some("token-valid".to_string());
+        settings.token = None;
+        settings.user_id = None;
+        let client = client::<Silo>("silo-key", &url, &settings);
+
+        // First attempt fails because user id is blank
+        let err = client.list_libraries().await.expect_err("should fail when user id is blank");
+        assert_eq!(err.kind, MediaServerErrorKind::MediaServerDiscoveryFailed);
+
+        // Server now returns a valid user id
+        server.set_users_me_body(Some(r#"{"Id":"mock-user-me","Name":"Admin"}"#.to_string()));
+
+        // Retry succeeds - state was not cached
+        let libraries = client.list_libraries().await.expect("retry should succeed");
+        assert_eq!(libraries.len(), 1);
     }
 }

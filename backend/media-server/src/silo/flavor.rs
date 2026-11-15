@@ -43,11 +43,24 @@ impl_emby_family_flavor!(Silo, "silo", {
     }
 });
 
-type SeasonKey = (Arc<str>, Arc<str>, Arc<str>);
+type SeriesKey = (Arc<str>, Arc<str>, Arc<str>);
+
+struct SynthesizedSeason {
+    season: MediaServerSeason,
+    has_real_id: bool,
+}
+
+fn season_title(season_num: Option<u32>) -> Arc<str> {
+    match season_num {
+        Some(0) => Arc::from("Specials"),
+        Some(n) => Arc::from(format!("Season {n}")),
+        None => Arc::from("Season"),
+    }
+}
 
 /// Synthesizes season catalog entries from episode metadata when a server returns an empty season list.
 pub fn synthesize_seasons_from_episodes(episodes: &[MediaServerEpisode]) -> Vec<MediaServerSeason> {
-    let mut seasons_map: HashMap<SeasonKey, MediaServerSeason> = HashMap::new();
+    let mut seasons_by_series: HashMap<SeriesKey, Vec<SynthesizedSeason>> = HashMap::new();
 
     for ep in episodes {
         let Some(series_id) = ep.series_id.as_ref() else { continue };
@@ -59,19 +72,53 @@ pub fn synthesize_seasons_from_episodes(episodes: &[MediaServerEpisode]) -> Vec<
             continue;
         }
 
-        // Without a season id the season number is only unique within its series.
-        let key_id = season_id
-            .cloned()
-            .unwrap_or_else(|| Arc::from(format!("{series_id}-season-{}", season_num.unwrap_or_default())));
-        let map_key = (Arc::clone(&ep.server_id), Arc::clone(&ep.library_id), Arc::clone(&key_id));
+        let series_key = (Arc::clone(&ep.server_id), Arc::clone(&ep.library_id), Arc::clone(series_id));
+        let series_seasons = seasons_by_series.entry(series_key).or_default();
 
-        let entry = seasons_map.entry(map_key).or_insert_with(|| {
-            let title = match season_num {
-                Some(0) => Arc::from("Specials"),
-                Some(n) => Arc::from(format!("Season {n}")),
-                None => Arc::from("Season"),
-            };
-            MediaServerSeason {
+        let matched = series_seasons.iter_mut().find(|s| {
+            // Both have real season_id: must match exactly
+            if let (Some(ep_sid), true) = (season_id, s.has_real_id) {
+                return s.season.item_id.as_ref() == ep_sid.as_ref();
+            }
+            // Same season number within the series
+            if let (Some(ep_snum), Some(s_num)) = (season_num, s.season.season) {
+                if ep_snum == s_num {
+                    return true;
+                }
+            }
+            // Same item_id (e.g. synthetic or matching)
+            if let Some(ep_sid) = season_id {
+                if s.season.item_id.as_ref() == ep_sid.as_ref() {
+                    return true;
+                }
+            }
+            false
+        });
+
+        if let Some(s) = matched {
+            // If the existing season had a synthetic ID and this episode has a real season_id, adopt it
+            if let Some(ep_sid) = season_id {
+                if !s.has_real_id {
+                    s.season.item_id = Arc::clone(ep_sid);
+                    s.has_real_id = true;
+                }
+            }
+            // If created without season number, adopt later episode's number and title
+            if s.season.season.is_none() && season_num.is_some() {
+                s.season.season = season_num;
+                s.season.title = season_title(season_num);
+            }
+            if let Some(count) = s.season.episode_count.as_mut() {
+                *count = count.saturating_add(1);
+            }
+        } else {
+            let title = season_title(season_num);
+            let has_real_id = season_id.is_some();
+            let key_id = season_id
+                .cloned()
+                .unwrap_or_else(|| Arc::from(format!("{series_id}-season-{}", season_num.unwrap_or_default())));
+
+            let season = MediaServerSeason {
                 input_name: Arc::clone(&ep.input_name),
                 server_id: Arc::clone(&ep.server_id),
                 library_id: Arc::clone(&ep.library_id),
@@ -85,17 +132,15 @@ pub fn synthesize_seasons_from_episodes(episodes: &[MediaServerEpisode]) -> Vec<
                 source_version_hint: ep.source_version_hint.clone(),
                 provider_hints: Vec::new(),
                 descriptive_facts: None,
-                episode_count: Some(0),
+                episode_count: Some(1),
                 image_ref: None,
-            }
-        });
-
-        if let Some(count) = entry.episode_count.as_mut() {
-            *count = count.saturating_add(1);
+            };
+            series_seasons.push(SynthesizedSeason { season, has_real_id });
         }
     }
 
-    let mut result: Vec<MediaServerSeason> = seasons_map.into_values().collect();
+    let mut result: Vec<MediaServerSeason> =
+        seasons_by_series.into_values().flat_map(|seasons| seasons.into_iter().map(|s| s.season)).collect();
     result.sort_by(|a, b| {
         a.season.unwrap_or_default().cmp(&b.season.unwrap_or_default()).then_with(|| a.item_id.cmp(&b.item_id))
     });
@@ -268,5 +313,57 @@ mod tests {
         };
         assert_eq!(count_of("show_a"), Some(1));
         assert_eq!(count_of("show_b"), Some(2));
+    }
+
+    #[test]
+    fn season_identity_normalized_when_episode_with_season_id_comes_first() {
+        let episodes = vec![
+            sample_episode("e1", Some("show1"), Some("real_s1"), Some(1), Some(1)),
+            sample_episode("e2", Some("show1"), None, Some(1), Some(2)),
+        ];
+        let seasons = synthesize_seasons_from_episodes(&episodes);
+        assert_eq!(seasons.len(), 1, "both episodes must merge into one season");
+        assert_eq!(seasons[0].item_id.as_ref(), "real_s1");
+        assert_eq!(seasons[0].season, Some(1));
+        assert_eq!(seasons[0].title.as_ref(), "Season 1");
+        assert_eq!(seasons[0].episode_count, Some(2));
+    }
+
+    #[test]
+    fn season_identity_normalized_when_episode_without_season_id_comes_first() {
+        let episodes = vec![
+            sample_episode("e1", Some("show1"), None, Some(1), Some(1)),
+            sample_episode("e2", Some("show1"), Some("real_s1"), Some(1), Some(2)),
+        ];
+        let seasons = synthesize_seasons_from_episodes(&episodes);
+        assert_eq!(seasons.len(), 1, "both episodes must merge into one season");
+        assert_eq!(seasons[0].item_id.as_ref(), "real_s1", "must adopt real season_id");
+        assert_eq!(seasons[0].season, Some(1));
+        assert_eq!(seasons[0].title.as_ref(), "Season 1");
+        assert_eq!(seasons[0].episode_count, Some(2));
+    }
+
+    #[test]
+    fn entry_created_without_season_number_adopts_later_episode_season_number_and_title() {
+        let episodes = vec![
+            sample_episode("e1", Some("show1"), Some("real_s2"), None, Some(1)),
+            sample_episode("e2", Some("show1"), Some("real_s2"), Some(2), Some(2)),
+        ];
+        let seasons = synthesize_seasons_from_episodes(&episodes);
+        assert_eq!(seasons.len(), 1);
+        assert_eq!(seasons[0].item_id.as_ref(), "real_s2");
+        assert_eq!(seasons[0].season, Some(2));
+        assert_eq!(seasons[0].title.as_ref(), "Season 2");
+        assert_eq!(seasons[0].episode_count, Some(2));
+    }
+
+    #[test]
+    fn distinct_real_seasons_stay_distinct_even_if_season_number_matches() {
+        let episodes = vec![
+            sample_episode("e1", Some("show1"), Some("s1_a"), Some(1), Some(1)),
+            sample_episode("e2", Some("show1"), Some("s1_b"), Some(1), Some(2)),
+        ];
+        let seasons = synthesize_seasons_from_episodes(&episodes);
+        assert_eq!(seasons.len(), 2, "distinct real season IDs must stay distinct");
     }
 }

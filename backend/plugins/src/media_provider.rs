@@ -80,7 +80,7 @@ pub(crate) async fn fetch_media_catalog_snapshot(
 ) -> Result<MediaServerCatalogSnapshot, String> {
     let (record, loaded) = provider(dispatcher, plugin)?;
     let started = Instant::now();
-    let outcome = call_fetch_media_catalog(dispatcher, loaded, &record.id, request).await;
+    let outcome = call_fetch_media_catalog(dispatcher, loaded, record, request).await;
     let kept = outcome.as_ref().map_or(0, MediaServerCatalogSnapshot::item_count);
     close(record, loaded, ctx, kept, started, &outcome);
     outcome.map_err(|err| err.to_string())
@@ -102,6 +102,7 @@ async fn call_one_page(
     loaded: &LoadedPlugin,
     request: &PluginInputRequest<'_>,
     cursor: Option<String>,
+    secrets: &[String],
 ) -> Result<MediaCatalogPage, CallError> {
     let indices = loaded
         .media_provider
@@ -109,6 +110,7 @@ async fn call_one_page(
         .ok_or_else(|| CallError::Instantiate("does not export media-provider-v1-1".into()))?;
     let exec = loaded.prepared.limits().provider_exec(dispatcher.runtime().config());
     let mut live = dispatcher.open_with(loaded, exec).await?;
+    live.store_mut().data_mut().host.set_call_secrets(secrets.to_vec());
     let instance = live.instance();
     let guest = indices.load(live.store_mut(), &instance).map_err(|err| CallError::Trap(format!("{err:#}")))?;
     let limits = live.limits();
@@ -126,9 +128,15 @@ fn catalog_item_count(c: &MediaCatalog) -> usize {
 async fn call_fetch_media_catalog(
     dispatcher: &HookDispatcher<'_>,
     loaded: &LoadedPlugin,
-    plugin_id: &str,
+    record: &PluginRecord,
     request: &PluginInputRequest<'_>,
 ) -> Result<MediaServerCatalogSnapshot, CallError> {
+    let secrets = crate::rpc::collect_call_secrets(
+        request.username,
+        request.password,
+        request.options,
+        record.input_form_secret_paths(),
+    );
     let mut catalogs = Vec::new();
     let mut cursor: Option<String> = None;
     let mut seen_cursors: HashSet<String> = HashSet::new();
@@ -141,7 +149,7 @@ async fn call_fetch_media_catalog(
             }
         }
 
-        let page = call_one_page(dispatcher, loaded, request, cursor.take()).await?;
+        let page = call_one_page(dispatcher, loaded, request, cursor.take(), &secrets).await?;
         let page_items = catalog_item_count(&page.catalog);
         total_items = total_items.saturating_add(page_items);
         if total_items > MAX_MEDIA_ITEMS {
@@ -165,5 +173,5 @@ async fn call_fetch_media_catalog(
         }
     }
 
-    convert_media_catalog(request.input_name, plugin_id, catalogs).map_err(CallError::Trap)
+    convert_media_catalog(request.input_name, &record.id, catalogs).map_err(CallError::Trap)
 }

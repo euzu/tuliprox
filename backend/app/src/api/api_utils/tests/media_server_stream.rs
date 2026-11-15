@@ -1,11 +1,16 @@
-use super::{create_test_app_state, open_media_server_image_resource, open_media_server_stream_for_input};
+#[cfg(feature = "plugins")]
+use super::open_media_server_image_resource;
+use super::{create_test_app_state, open_media_server_stream_for_input};
+use crate::model::{ConfigInput, MediaServerInputConfig};
+#[cfg(feature = "plugins")]
 use crate::{
     api::model::create_test_app_state_with_plugins,
-    model::{Config, ConfigInput, MediaServerInputConfig, SourcesConfig},
+    model::{Config, SourcesConfig},
 };
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use futures::StreamExt;
 use shared::model::{InputType, MediaServerInputConfigDto, MediaServerLibrarySelector};
+#[cfg(feature = "plugins")]
 use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -182,6 +187,7 @@ async fn media_server_stream_follows_307_redirect() {
     assert!(requests[3].starts_with("get /redirected-stream"));
 }
 
+#[cfg(feature = "plugins")]
 fn load_media_probe_system() -> Option<(tempfile::TempDir, tuliprox_plugins::PluginSystem)> {
     use sha2::Digest;
     use std::{fs, path::PathBuf};
@@ -190,20 +196,20 @@ fn load_media_probe_system() -> Option<(tempfile::TempDir, tuliprox_plugins::Plu
     if !fixtures_dir.join("plugin.wasm").is_file() {
         return None;
     }
-    let root = tempfile::tempdir().ok()?;
+    let root = tempfile::tempdir().expect("tempdir");
     let plugins_dir = root.path().join("plugins/media-probe");
-    fs::create_dir_all(&plugins_dir).ok()?;
-    let wasm = fs::read(fixtures_dir.join("plugin.wasm")).ok()?;
-    fs::write(plugins_dir.join("plugin.wasm"), &wasm).ok()?;
-    let manifest = fs::read(fixtures_dir.join("manifest.yml")).ok()?;
-    fs::write(plugins_dir.join("manifest.yml"), manifest).ok()?;
+    fs::create_dir_all(&plugins_dir).expect("create_dir_all");
+    let wasm = fs::read(fixtures_dir.join("plugin.wasm")).expect("read plugin.wasm");
+    fs::write(plugins_dir.join("plugin.wasm"), &wasm).expect("write plugin.wasm");
+    let manifest = fs::read(fixtures_dir.join("manifest.yml")).expect("read manifest.yml");
+    fs::write(plugins_dir.join("manifest.yml"), manifest).expect("write manifest.yml");
 
     let hash = sha2::Sha256::digest(&wasm).iter().fold(String::new(), |mut hex, byte| {
         let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
         hex
     });
     let data = root.path().join("data");
-    fs::create_dir(&data).ok()?;
+    fs::create_dir(&data).expect("create data dir");
     fs::write(
         data.join("approvals.json"),
         serde_json::json!({
@@ -214,7 +220,7 @@ fn load_media_probe_system() -> Option<(tempfile::TempDir, tuliprox_plugins::Plu
         })
         .to_string(),
     )
-    .ok()?;
+    .expect("write approvals.json");
 
     let config = tuliprox_core::model::PluginsConfig {
         enabled: true,
@@ -230,10 +236,13 @@ fn load_media_probe_system() -> Option<(tempfile::TempDir, tuliprox_plugins::Plu
         ..Default::default()
     };
     let services = tuliprox_plugins::PluginServices::new(reqwest::Client::new(), data);
-    let system = tuliprox_plugins::PluginSystem::load(&config, services).ok()??;
+    let system = tuliprox_plugins::PluginSystem::load(&config, services)
+        .expect("load media-probe plugin")
+        .expect("plugin system loaded");
     Some((root, system))
 }
 
+#[cfg(feature = "plugins")]
 /// Answers `max_requests` requests, then ends and returns them.
 async fn spawn_media_test_server(max_requests: usize) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("test server binds");
@@ -278,6 +287,7 @@ async fn spawn_media_test_server(max_requests: usize) -> (std::net::SocketAddr, 
     (addr, task)
 }
 
+#[cfg(feature = "plugins")]
 #[tokio::test]
 async fn plugin_stream_forwards_range_and_safe_headers_and_isolates_plugin_headers() {
     let Some((_root, system)) = load_media_probe_system() else {
@@ -337,6 +347,7 @@ async fn plugin_stream_forwards_range_and_safe_headers_and_isolates_plugin_heade
     assert!(req.contains("x-media-probe-auth: probe-secret-token"), "{req}");
 }
 
+#[cfg(feature = "plugins")]
 #[tokio::test]
 async fn plugin_image_resource_resolves_and_forwards_safely() {
     let Some((_root, system)) = load_media_probe_system() else {
@@ -381,6 +392,7 @@ async fn plugin_image_resource_resolves_and_forwards_safely() {
     assert!(requests[0].contains("x-media-probe-auth: probe-secret-token"));
 }
 
+#[cfg(feature = "plugins")]
 #[tokio::test]
 async fn plugin_stream_client_abort_mid_stream_cancels_cleanly_without_leak() {
     let Some((_root, system)) = load_media_probe_system() else {
@@ -417,6 +429,7 @@ async fn plugin_stream_client_abort_mid_stream_cancels_cleanly_without_leak() {
     drop(stream);
 }
 
+#[cfg(feature = "plugins")]
 #[tokio::test]
 async fn plugin_stream_error_handling() {
     let Some((_root, system)) = load_media_probe_system() else {

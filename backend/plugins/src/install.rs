@@ -718,7 +718,8 @@ impl PluginSystem {
         if let Some(problem) = host_version_problem(&manifest) {
             return Err(vec![problem]);
         }
-        let secret_paths = check_package(dir, &manifest)?;
+        let package_secrets = check_package(dir, &manifest)?;
+        let secret_paths = package_secrets.settings;
 
         let mut warnings = Vec::new();
         let wasm = match fs::read(dir.join(WASM_FILE)) {

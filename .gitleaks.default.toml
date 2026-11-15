@@ -24,7 +24,7 @@ regexes = ['''[/]home[/](?:m3u-filter|tuliprox|tp|user|vscode)$''']
 [[rules.allowlists]]
 description = "Known Emby API endpoints and encoded user IDs"
 regexTarget = "match"
-regexes = ['''[/]Users[/](?:AuthenticateByName|user|user%201|a%2Fb%3Fc)$''']
+regexes = ['''[/]Users[/](?:AuthenticateByName|Me:?|user|user%201|a%2Fb%3Fc)$''']
 
 [[rules.allowlists]]
 description = "Relative web-root suffix in runtime configuration tests"

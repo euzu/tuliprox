@@ -28,6 +28,7 @@ version: 0.1.0
 api_version: 1
 hooks:
   - media.fetch
+  - rpc.call
 provides:
   input_type: true
 capabilities:
@@ -121,6 +122,19 @@ mod plugin {
             })
         }
     }
+
+    impl Rpc for MyServer {
+        fn call(method: &str, payload: &str) -> Result<String, String> {
+            rpc::Router::new()
+                .route_scoped("libraries", |req: rpc::ScopedRequest| {
+                    let libraries = api::list_libraries(req.input.url.as_deref().unwrap_or_default())?;
+                    Ok::<_, String>(
+                        libraries.into_iter().map(|lib| rpc::RpcOption::new(lib.id, lib.name)).collect::<Vec<_>>(),
+                    )
+                })
+                .dispatch(method, payload)
+        }
+    }
 }
 ```
 
@@ -162,29 +176,19 @@ Mark secret fields with `writeOnly: true` in the input form schema:
 - The Web UI and the config API show a secret as `********`. Saving the masked value keeps the stored one.
 - An `${env:VAR}` reference stays visible, because it names a variable and not a secret. Saving a literal secret
   logs a warning that recommends `${env:VAR}`.
-- The host removes the resolved secrets, the password and the username from every answer and log line of the
-  plugin.
+- For input-scoped RPC calls (`x-options-rpc` and MCP), the host scrubs credentials (`username`, `password`),
+  secret-looking options, and `writeOnly` form secrets from the JSON answer and from guest log lines.
+- For catalog updates (`fetch-catalog`) and media resolution (`resolve-stream`, `resolve-image`), the host redacts
+  the same call secrets from guest log lines. Upstream stream and image targets (URLs and headers) stay hidden from
+  clients.
 - A `writeOnly` field must not have a `default`.
 
 ## Dynamic options (`x-options-rpc`)
 
 `x-options-rpc` turns a string field into a select whose options come from your plugin, for example the libraries
-the server offers. The named export must be `kind: read` and `input_scoped: true`:
-
-```rust
-impl Rpc for MyServer {
-    fn call(method: &str, payload: &str) -> Result<String, String> {
-        rpc::Router::new()
-            .route_scoped("libraries", |req: rpc::ScopedRequest| {
-                let libraries = api::list_libraries(req.input.url.as_deref().unwrap_or_default())?;
-                Ok::<_, String>(
-                    libraries.into_iter().map(|lib| rpc::RpcOption::new(lib.id, lib.name)).collect::<Vec<_>>(),
-                )
-            })
-            .dispatch(method, payload)
-    }
-}
-```
+the server offers. The named export must be `kind: read` and `input_scoped: true`. Implement `Rpc` on your plugin
+struct inside the `#[tuliprox_plugin] mod plugin { ... }` module, as the `impl Rpc for MyServer` block in the SDK
+example above shows. Its `libraries` route answers the `x-options-rpc: libraries` field.
 
 - The answer is a list of `{"value", "label"}` objects (or `{"options": [...]}`), at most 1000 entries and 1024
   characters per value or label. Anything else shows an error in the form and a text field as fallback.
@@ -211,9 +215,14 @@ and other streams keep running.
 
 ## Images with headers
 
-If you prefer the host image cache to resolving images on every request, call
-`images::cache_with_headers(url, &headers)` during `fetch-catalog` and store the returned local URL. It needs the
-capabilities `image_cache` and `network`; denylisted headers are dropped.
+Media catalog items reference artwork with `image_key` and always resolve artwork on demand through `resolve-image`.
+The target returned by `resolve-image` must be an absolute `http` or `https` URL with a host; the host proxies it
+and caches targets for up to 1 hour based on `ttl_secs`.
+
+The host API `images::cache_with_headers(url, &headers)` (from `host-v1-1`) fetches an image once through the host
+cache and returns a host-local relative URL (such as `/api/v1/playlist/resource/...`). This local URL is designed for
+channel logos and icons in classic playlists (`input-provider`), not for media catalog items or `resolve-image`
+targets (which require absolute URLs).
 
 ## Testing
 

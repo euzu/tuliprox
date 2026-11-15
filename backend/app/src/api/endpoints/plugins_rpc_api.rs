@@ -113,6 +113,7 @@ fn body_error(rejection: &BytesRejection) -> Response {
     }
 }
 
+#[cfg(feature = "plugins")]
 fn clean_redacted_secrets(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
@@ -151,7 +152,7 @@ fn resolve_input(
     let Ok(payload) = serde_json::from_slice::<serde_json::Value>(body) else { return Ok(None) };
     let Some(plugins) = app_state.plugins.as_ref() else { return Ok(None) };
     let sources = app_state.app_config.sources.load();
-    let secret_paths = plugins.input_form_secret_paths(plugin_id);
+    let secret_paths = plugins.input_form_secret_paths(plugin_id).unwrap_or_default();
 
     if let Some(draft) = payload.get("input_draft").and_then(serde_json::Value::as_object) {
         if !may_write() {

@@ -703,8 +703,9 @@ form's scheduled interval, never as a hard block.
 ### Media-server inputs
 
 The routes address one core media-server input (`plex`, `emby`, `jellyfin`, `silo`) by name. An unknown name answers
-`404`, an input of another type `400`. The two read routes contact the configured server once with a 15 second bound
-(a hanging server answers `504`) and never return tokens, passwords or URLs.
+`404`, an input of another type `400`. The status route contacts the configured server once (15 s bound), while the
+libraries route makes two sequential calls, each with a 15-second bound (total up to ~30 s). A hanging server
+answers `504`. The routes never return tokens, passwords or URLs.
 
 | Method | Path | Purpose |
 | --- | --- | --- |

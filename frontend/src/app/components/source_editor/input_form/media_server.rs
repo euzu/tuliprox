@@ -388,7 +388,7 @@ pub(super) fn MediaServerSettingsForm(props: &MediaServerSettingsFormProps) -> H
                         <div class="tp__config-view__cols-2">
                             <NumberInput name="media_server_page_size" field_id={Some("MEDIA_SERVER.PAGE_SIZE".to_string())}
                                 label={Some(translate.t(LABEL_PAGE_SIZE))} value={Some(i64::from(page_size))}
-                                min_u64={Some(1)}
+                                min_i64={Some(1)} max_i64={Some(i64::from(u16::MAX))}
                                 on_change={Callback::from({
                                     let state = state.clone();
                                     move |value: Option<i64>| {
@@ -402,7 +402,7 @@ pub(super) fn MediaServerSettingsForm(props: &MediaServerSettingsFormProps) -> H
                                 })} />
                             <NumberInput name="media_server_request_delay_ms" field_id={Some("MEDIA_SERVER.REQUEST_DELAY_MS".to_string())}
                                 label={Some(translate.t(LABEL_REQUEST_DELAY_MS))} value={Some(i64::try_from(request_delay_ms).unwrap_or(0))}
-                                min_u64={Some(0)}
+                                min_i64={Some(0)}
                                 on_change={Callback::from({
                                     let state = state.clone();
                                     move |value: Option<i64>| {

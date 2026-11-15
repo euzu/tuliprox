@@ -328,9 +328,11 @@ ui:
   input's `plugin_config`. On read routes, the API masks stored literal secrets with `********` (`REDACTED_SECRET`).
   On save, a masked sentinel value is merged with the stored value from `source.yml`; entering a new literal string
   produces a literal secret warning in the log. Values referencing `${env:VAR}` are kept as references in the API and
-  are resolved when handed to the plugin (during fetch, resolve, or RPC input context). Resolved secrets are scrubbed
-  from guest RPC results, MCP tool answers, and host logs. Output forms (`ui.output_form`) keep refusing secrets:
-  a target secret belongs in the plugin's settings.
+  are resolved when handed to the plugin (during fetch, resolve, or RPC input context). The host scrubs these
+  credentials, secret-looking options, and `writeOnly` form secrets from guest RPC results and MCP tool answers. It
+  also redacts them from guest log lines during RPC calls, catalog updates (`fetch-catalog`), and media resolution
+  (`resolve-stream`, `resolve-image`). Output forms (`ui.output_form`) keep refusing secrets: a target secret belongs
+  in the plugin's settings.
 - Dynamic options via `x-options-rpc`: A string property in `ui.input_form` can specify `"x-options-rpc": "<export>"`.
   The named export must exist in `ui.rpc_exports`, have `kind: read`, and specify `input_scoped: true`. The export
   returns a list of option objects `[{"value": string, "label": string}]` (or `{"options": [...]}`). The host caps

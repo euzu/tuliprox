@@ -11,6 +11,7 @@ use tuliprox_media_server::{
 use tuliprox_plugin_api::bindings::tuliprox::plugin::media_types_v1_1 as wit;
 
 pub const MAX_MEDIA_ITEMS: usize = 1_000_000;
+pub const MAX_ID_LEN: usize = 128;
 pub const MAX_TITLE_LEN: usize = 512;
 pub const MAX_TEXT_LEN: usize = 16_384;
 pub const MAX_HINT_LEN: usize = 128;
@@ -124,6 +125,10 @@ fn convert_libraries(
             if lib.id.is_empty() {
                 continue;
             }
+            if lib.id.len() > MAX_ID_LEN {
+                log::warn!("plugin `{plugin_id}`: dropping library `{}` exceeding id limit", lib.id);
+                continue;
+            }
             if known.insert(lib.id.clone()) {
                 let kind = match lib.kind {
                     wit::LibraryKind::Movies => MediaServerLibraryKind::Movies,
@@ -157,6 +162,14 @@ fn convert_series(
     for s in raw_series {
         if s.item_id.is_empty() {
             log::warn!("plugin `{plugin_id}`: dropping series with empty item id");
+            continue;
+        }
+        if s.item_id.len() > MAX_ID_LEN {
+            log::warn!("plugin `{plugin_id}`: dropping series `{}` exceeding id limit", s.item_id);
+            continue;
+        }
+        if s.library_id.len() > MAX_ID_LEN {
+            log::warn!("plugin `{plugin_id}`: dropping series `{}` with library id exceeding limit", s.item_id);
             continue;
         }
         if !seen_ids.insert(s.item_id.clone()) {
@@ -216,6 +229,18 @@ fn convert_seasons(
             log::warn!("plugin `{plugin_id}`: dropping season with empty item id");
             continue;
         }
+        if s.item_id.len() > MAX_ID_LEN {
+            log::warn!("plugin `{plugin_id}`: dropping season `{}` exceeding id limit", s.item_id);
+            continue;
+        }
+        if s.library_id.len() > MAX_ID_LEN {
+            log::warn!("plugin `{plugin_id}`: dropping season `{}` with library id exceeding limit", s.item_id);
+            continue;
+        }
+        if s.series_id.as_deref().is_some_and(|id| id.len() > MAX_ID_LEN) {
+            log::warn!("plugin `{plugin_id}`: dropping season `{}` with series id exceeding limit", s.item_id);
+            continue;
+        }
         if !seen_ids.insert(s.item_id.clone()) {
             log::warn!("plugin `{plugin_id}`: dropping duplicate season id `{}`", s.item_id);
             continue;
@@ -252,7 +277,7 @@ fn convert_seasons(
             server_id: Arc::clone(plugin_id),
             library_id: Arc::from(s.library_id.as_str()),
             item_id: Arc::from(s.item_id.as_str()),
-            series_id: cap_opt_str(s.series_id, MAX_HINT_LEN),
+            series_id: s.series_id.map(Arc::from),
             series_title: cap_opt_str(s.series_title, MAX_TITLE_LEN),
             title,
             season: s.season,
@@ -282,6 +307,22 @@ fn convert_episodes(
     for e in raw_episodes {
         if e.item_id.is_empty() {
             log::warn!("plugin `{plugin_id}`: dropping episode with empty item id");
+            continue;
+        }
+        if e.item_id.len() > MAX_ID_LEN {
+            log::warn!("plugin `{plugin_id}`: dropping episode `{}` exceeding id limit", e.item_id);
+            continue;
+        }
+        if e.library_id.len() > MAX_ID_LEN {
+            log::warn!("plugin `{plugin_id}`: dropping episode `{}` with library id exceeding limit", e.item_id);
+            continue;
+        }
+        if e.series_id.as_deref().is_some_and(|id| id.len() > MAX_ID_LEN) {
+            log::warn!("plugin `{plugin_id}`: dropping episode `{}` with series id exceeding limit", e.item_id);
+            continue;
+        }
+        if e.season_id.as_deref().is_some_and(|id| id.len() > MAX_ID_LEN) {
+            log::warn!("plugin `{plugin_id}`: dropping episode `{}` with season id exceeding limit", e.item_id);
             continue;
         }
         if !seen_ids.insert(e.item_id.clone()) {
@@ -334,8 +375,8 @@ fn convert_episodes(
             server_id: Arc::clone(plugin_id),
             library_id: Arc::from(e.library_id.as_str()),
             item_id: Arc::from(e.item_id.as_str()),
-            season_id: cap_opt_str(e.season_id, MAX_HINT_LEN),
-            series_id: cap_opt_str(e.series_id, MAX_HINT_LEN),
+            season_id: e.season_id.map(Arc::from),
+            series_id: e.series_id.map(Arc::from),
             series_title: cap_opt_str(e.series_title, MAX_TITLE_LEN),
             title,
             season: e.season,
@@ -364,6 +405,14 @@ fn convert_movies(
     for m in raw_movies {
         if m.item_id.is_empty() {
             log::warn!("plugin `{plugin_id}`: dropping movie with empty item id");
+            continue;
+        }
+        if m.item_id.len() > MAX_ID_LEN {
+            log::warn!("plugin `{plugin_id}`: dropping movie `{}` exceeding id limit", m.item_id);
+            continue;
+        }
+        if m.library_id.len() > MAX_ID_LEN {
+            log::warn!("plugin `{plugin_id}`: dropping movie `{}` with library id exceeding limit", m.item_id);
             continue;
         }
         if !seen_ids.insert(m.item_id.clone()) {
@@ -453,4 +502,58 @@ pub fn convert_media_catalog(
     let movies = convert_movies(&input_name_arc, &plugin_id_arc, raw_movies, &known_libraries);
 
     Ok(MediaServerCatalogSnapshot { libraries, movies, series, seasons, episodes, unsupported_libraries: Vec::new() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn items_with_ids_exceeding_max_id_len_are_dropped_and_valid_ids_kept_intact() {
+        let long_id = "a".repeat(MAX_ID_LEN + 1);
+        let normal_id = "valid-id";
+        let catalog = wit::MediaCatalog {
+            libraries: vec![
+                wit::MediaLibrary { id: "lib-1".into(), name: "Movies".into(), kind: wit::LibraryKind::Movies },
+                wit::MediaLibrary { id: long_id.clone(), name: "Too Long".into(), kind: wit::LibraryKind::Movies },
+            ],
+            movies: vec![
+                wit::MediaMovie {
+                    library_id: "lib-1".into(),
+                    item_id: normal_id.into(),
+                    title: "Good Movie".into(),
+                    year: None,
+                    release_date: None,
+                    source_version_hint: None,
+                    provider_ids: vec![],
+                    descriptive: None,
+                    technical: None,
+                    stream_key: None,
+                    image_key: None,
+                },
+                wit::MediaMovie {
+                    library_id: "lib-1".into(),
+                    item_id: long_id.clone(),
+                    title: "Bad Movie".into(),
+                    year: None,
+                    release_date: None,
+                    source_version_hint: None,
+                    provider_ids: vec![],
+                    descriptive: None,
+                    technical: None,
+                    stream_key: None,
+                    image_key: None,
+                },
+            ],
+            series: vec![],
+            seasons: vec![],
+            episodes: vec![],
+        };
+
+        let snapshot = convert_media_catalog("test_input", "test_plugin", vec![catalog]).unwrap();
+        assert_eq!(snapshot.libraries.len(), 1);
+        assert_eq!(&*snapshot.libraries[0].reference.library_id, "lib-1");
+        assert_eq!(snapshot.movies.len(), 1);
+        assert_eq!(&*snapshot.movies[0].item_id, normal_id);
+    }
 }

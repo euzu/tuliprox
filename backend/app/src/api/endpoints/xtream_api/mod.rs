@@ -195,7 +195,7 @@ pub(in crate::api) fn get_xtream_player_api_stream_url(
         return Some(fallback_url.clone());
     }
 
-    if input.input_type.is_media_server() {
+    if input.input_type.is_media_server() || fallback_url.starts_with("media-server://") {
         return (!fallback_url.is_empty()).then(|| fallback_url.clone());
     }
 

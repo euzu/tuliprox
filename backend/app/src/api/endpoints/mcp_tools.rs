@@ -39,6 +39,8 @@ pub(super) struct McpTool {
     pub kind: McpToolKind,
     /// Scrub secrets from the JSON result before it leaves the server.
     pub redact_secrets: bool,
+    /// `destructiveHint` of a write tool.
+    pub destructive: bool,
 }
 
 impl McpTool {
@@ -79,6 +81,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/status",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "list_active_streams",
@@ -88,6 +91,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/streams",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_config",
@@ -97,6 +101,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/config",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "get_playlist_update_status",
@@ -106,6 +111,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/update/status",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "query_stream_history",
@@ -115,6 +121,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/stream-history",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_stream_history_summary",
@@ -124,6 +131,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/stream-history/summary",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_hls_origin_telemetry",
@@ -133,6 +141,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/hls/origin-telemetry",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "list_qos_snapshots",
@@ -142,6 +151,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/qos-snapshots",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_qos_snapshot",
@@ -151,6 +161,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/qos-snapshots/{stream_identity_key}",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_event_stats",
@@ -160,6 +171,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/events/stats",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_ip_info",
@@ -169,6 +181,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/ipinfo",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "list_playlist_sources",
@@ -178,6 +191,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/sources",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "query_playlist_items",
@@ -200,15 +214,17 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/items",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "list_media_server_libraries",
-        description: "Libraries of ONE media-server input (plex, emby, jellyfin or silo; name from list_playlist_sources). Unlike the playlist tools this contacts the configured media server once, with a 15 second bound. Returns [{id, name, kind, selected}] where kind is movies, tvshows or unsupported and selected marks the libraries the input imports. An unknown input answers 404, an input that is not a media server 400, an unreachable or rejecting server 502.",
+        description: "Libraries of ONE media-server input (plex, emby, jellyfin or silo; name from list_playlist_sources). Unlike the playlist tools this contacts the configured media server with two sequential calls, each with a 15 second bound (total up to ~30 seconds). Returns [{id, name, kind, selected}] where kind is movies, tvshows or unsupported and selected marks the libraries the input imports. An unknown input answers 404, an input that is not a media server 400, an unreachable or rejecting server 502.",
         input_schema: r#"{"type":"object","properties":{"input":{"type":"string","description":"Media-server input name (from list_playlist_sources)."}},"required":["input"],"additionalProperties":false}"#,
         method: McpToolMethod::Get,
         path: "/media-server/{input}/libraries",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_media_server_status",
@@ -218,6 +234,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/media-server/{input}/status",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "refresh_media_server_input",
@@ -227,6 +244,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/media-server/{input}/refresh",
         kind: McpToolKind::Write,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "query_target_epg_channels",
@@ -245,6 +263,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/epg/channels",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "get_target_epg_channel",
@@ -263,6 +282,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/epg/channel",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "get_overrides",
@@ -277,6 +297,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "get_override_item",
@@ -293,6 +314,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides/item",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "list_override_orphans",
@@ -302,6 +324,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides/orphans",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "search_epg_ids",
@@ -318,6 +341,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/epg/search",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "update_playlists",
@@ -327,6 +351,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/update",
         kind: McpToolKind::Write,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "save_overrides",
@@ -369,6 +394,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides",
         kind: McpToolKind::Write,
         redact_secrets: false,
+        destructive: true,
     },
     McpTool {
         name: "discard_overrides",
@@ -389,6 +415,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides/discard",
         kind: McpToolKind::Write,
         redact_secrets: false,
+        destructive: true,
     },
     McpTool {
         name: "update_geoip",
@@ -398,6 +425,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/geoip/update",
         kind: McpToolKind::Write,
         redact_secrets: false,
+        destructive: false,
     },
 ];
 
@@ -431,6 +459,7 @@ pub(super) struct OwnedMcpTool {
     pub output_schema: Option<serde_json::Value>,
     /// The export's `input_scoped`: the tool takes an `input` name, and the
     /// host passes the resolved input to the guest beside the arguments.
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub input_scoped: bool,
 }
 
@@ -623,12 +652,19 @@ pub(super) fn plugin_tools(app_state: &crate::api::model::AppState) -> Vec<Owned
 }
 
 /// Add the required `input` selector to an `input_scoped` tool's schema.
-/// `false` when the schema is not an object with a `properties` object: the
-/// tool is then not offered instead of being offered unusably.
+/// `false` when the schema is not an object or has a non-object `properties`.
+/// When `properties` is absent from an object schema, an empty object is inserted.
 fn add_input_selector(schema: &mut serde_json::Value, names: &[String]) -> bool {
     let Some(object) = schema.as_object_mut() else {
         return false;
     };
+    if let Some(prop_val) = object.get("properties") {
+        if !prop_val.is_object() {
+            return false;
+        }
+    } else {
+        object.insert("properties".to_string(), serde_json::json!({}));
+    }
     let Some(properties) = object.get_mut("properties").and_then(serde_json::Value::as_object_mut) else {
         return false;
     };
@@ -677,8 +713,13 @@ mod tests {
         assert!(add_input_selector(&mut schema, &names));
         assert!(add_input_selector(&mut schema, &names));
         assert_eq!(schema["required"], json!(["query", "input"]));
-        // A schema with no `properties` object cannot describe the selector.
-        assert!(!add_input_selector(&mut json!({ "type": "object" }), &names));
+        // A schema with no `properties` object gains one.
+        let mut no_props = json!({ "type": "object" });
+        assert!(add_input_selector(&mut no_props, &names));
+        assert_eq!(no_props["properties"]["input"]["enum"], json!(names));
+        assert_eq!(no_props["required"], json!(["input"]));
+        // A schema with a present non-object `properties` is rejected.
+        assert!(!add_input_selector(&mut json!({ "type": "object", "properties": "not-an-object" }), &names));
         assert!(!add_input_selector(&mut json!({ "type": "object", "required": "input" }), &names));
     }
 }

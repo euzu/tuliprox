@@ -237,6 +237,15 @@
     servers that need authentication. Plugins without the import keep loading unchanged.
   - **Stored catalogs everywhere:** the playlist explorer, the REST/MCP playlist readers and the Xtream info routes
     treat a plugin media input like a built-in media-server input.
+  - **Resolution caching by Range:** stream resolution cache keys distinguish client byte ranges, preventing stale
+    responses across seeks.
+  - **Comprehensive secret scrubbing:** guest log lines during catalog fetching and stream or image resolution redact
+    input credentials, secret options, and form fields marked `writeOnly`.
+  - **Header-hashed image cache:** `cache-image-with-headers` distinguishes cached images by request headers using a
+    SHA-256 digest without exposing secrets in cache keys.
+  - **Fail-closed input form masking:** when a plugin's form schema is unavailable, every `plugin_config` value
+    except `${env:VAR}` references is shown masked. Saving a masked value without a stored value to restore is
+    refused with `400`.
 
   See [Connecting a Media Server as a Plugin](docs/src/plugins/media-server-plugins.md).
 

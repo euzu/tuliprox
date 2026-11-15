@@ -54,7 +54,7 @@ pub const MAX_TARGET_HEADER_TOTAL_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResolveTargetKey {
-    Stream(Option<String>),
+    Stream { stream_key: Option<String>, range: Option<String> },
     Image(String),
 }
 
@@ -96,6 +96,12 @@ impl Default for ResolveCache {
 
 impl ResolveCache {
     pub fn new() -> Self { Self::default() }
+
+    /// Clears all cached entries, leaving in-flight resolutions to finish.
+    pub fn clear(&self) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        entries.clear();
+    }
 
     /// Retrieve a cached target or execute `resolve_fn` with concurrency coalescing.
     ///
@@ -267,6 +273,7 @@ async fn call_guest_resolve_stream(
     loaded: &LoadedPlugin,
     plugin_id: &str,
     request: &PluginStreamRequest<'_>,
+    secrets: &[String],
 ) -> Result<PluginStreamTarget, CallError> {
     let indices = loaded
         .media_provider
@@ -274,6 +281,7 @@ async fn call_guest_resolve_stream(
         .ok_or_else(|| CallError::Instantiate("does not export media-provider-v1-1".into()))?;
     let exec = loaded.prepared.limits().resolve_exec();
     let mut live = dispatcher.open_with(loaded, exec).await?;
+    live.store_mut().data_mut().host.set_call_secrets(secrets.to_vec());
     let instance = live.instance();
     let guest = indices.load(live.store_mut(), &instance).map_err(|err| CallError::Trap(format!("{err:#}")))?;
     let limits = live.limits();
@@ -301,6 +309,7 @@ async fn call_guest_resolve_image(
     loaded: &LoadedPlugin,
     plugin_id: &str,
     request: &PluginImageRequest<'_>,
+    secrets: &[String],
 ) -> Result<PluginStreamTarget, CallError> {
     let indices = loaded
         .media_provider
@@ -308,6 +317,7 @@ async fn call_guest_resolve_image(
         .ok_or_else(|| CallError::Instantiate("does not export media-provider-v1-1".into()))?;
     let exec = loaded.prepared.limits().resolve_exec();
     let mut live = dispatcher.open_with(loaded, exec).await?;
+    live.store_mut().data_mut().host.set_call_secrets(secrets.to_vec());
     let instance = live.instance();
     let guest = indices.load(live.store_mut(), &instance).map_err(|err| CallError::Trap(format!("{err:#}")))?;
     let limits = live.limits();
@@ -338,16 +348,25 @@ pub(crate) async fn resolve_stream(
     request: &PluginStreamRequest<'_>,
 ) -> Result<PluginStreamTarget, String> {
     let (record, loaded) = provider(dispatcher, plugin)?;
+    let secrets = crate::rpc::collect_call_secrets(
+        request.username,
+        request.password,
+        request.options,
+        record.input_form_secret_paths(),
+    );
     let key = ResolveKey {
         input: request.input_name.to_string(),
         plugin: Arc::from(plugin),
         item_id: request.item_id.to_string(),
-        target: ResolveTargetKey::Stream(request.stream_key.map(ToString::to_string)),
+        target: ResolveTargetKey::Stream {
+            stream_key: request.stream_key.map(ToString::to_string),
+            range: request.range.map(ToString::to_string),
+        },
     };
     cache
         .get_or_resolve(key, || async {
             let started = Instant::now();
-            let outcome = call_guest_resolve_stream(dispatcher, loaded, &record.id, request).await;
+            let outcome = call_guest_resolve_stream(dispatcher, loaded, &record.id, request, &secrets).await;
             close(record, loaded, ctx, usize::from(outcome.is_ok()), started, &outcome);
             outcome.map_err(|err| err.to_string())
         })
@@ -363,6 +382,12 @@ pub(crate) async fn resolve_image(
     request: &PluginImageRequest<'_>,
 ) -> Result<PluginStreamTarget, String> {
     let (record, loaded) = provider(dispatcher, plugin)?;
+    let secrets = crate::rpc::collect_call_secrets(
+        request.username,
+        request.password,
+        request.options,
+        record.input_form_secret_paths(),
+    );
     let key = ResolveKey {
         input: request.input_name.to_string(),
         plugin: Arc::from(plugin),
@@ -372,7 +397,7 @@ pub(crate) async fn resolve_image(
     cache
         .get_or_resolve(key, || async {
             let started = Instant::now();
-            let outcome = call_guest_resolve_image(dispatcher, loaded, &record.id, request).await;
+            let outcome = call_guest_resolve_image(dispatcher, loaded, &record.id, request, &secrets).await;
             close(record, loaded, ctx, usize::from(outcome.is_ok()), started, &outcome);
             outcome.map_err(|err| err.to_string())
         })
@@ -465,7 +490,7 @@ mod tests {
             input: "input1".into(),
             plugin: Arc::from("plug1"),
             item_id: "item1".into(),
-            target: ResolveTargetKey::Stream(Some("stream1".into())),
+            target: ResolveTargetKey::Stream { stream_key: Some("stream1".into()), range: None },
         };
 
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -514,7 +539,7 @@ mod tests {
             input: "input1".into(),
             plugin: Arc::from("plug1"),
             item_id: "item1".into(),
-            target: ResolveTargetKey::Stream(None),
+            target: ResolveTargetKey::Stream { stream_key: None, range: None },
         };
         let pending = cache.get_or_resolve(key.clone(), std::future::pending);
         assert!(tokio::time::timeout(Duration::from_millis(20), pending).await.is_err(), "leader is cancelled");
@@ -535,7 +560,7 @@ mod tests {
             input: "input1".into(),
             plugin: Arc::from("plug1"),
             item_id: "item1".into(),
-            target: ResolveTargetKey::Stream(None),
+            target: ResolveTargetKey::Stream { stream_key: None, range: None },
         };
 
         // Failure
@@ -563,5 +588,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res3.url, "http://example.com/new");
+    }
+
+    #[tokio::test]
+    async fn resolve_stream_range_distinguishes_cache_keys() {
+        let cache = ResolveCache::new();
+        let key_range1 = ResolveKey {
+            input: "input1".into(),
+            plugin: Arc::from("plug1"),
+            item_id: "item1".into(),
+            target: ResolveTargetKey::Stream { stream_key: Some("stream1".into()), range: Some("bytes=0-100".into()) },
+        };
+        let key_range2 = ResolveKey {
+            input: "input1".into(),
+            plugin: Arc::from("plug1"),
+            item_id: "item1".into(),
+            target: ResolveTargetKey::Stream {
+                stream_key: Some("stream1".into()),
+                range: Some("bytes=100-200".into()),
+            },
+        };
+
+        let target1 = cache
+            .get_or_resolve(key_range1, || async {
+                Ok(PluginStreamTarget { url: "http://example.com/range1".into(), headers: vec![], ttl_secs: Some(60) })
+            })
+            .await
+            .unwrap();
+        let target2 = cache
+            .get_or_resolve(key_range2, || async {
+                Ok(PluginStreamTarget { url: "http://example.com/range2".into(), headers: vec![], ttl_secs: Some(60) })
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(target1.url, "http://example.com/range1");
+        assert_eq!(target2.url, "http://example.com/range2");
+    }
+
+    #[tokio::test]
+    async fn resolve_cache_clear_drops_cached_entries() {
+        let cache = ResolveCache::new();
+        let key = ResolveKey {
+            input: "input1".into(),
+            plugin: Arc::from("plug1"),
+            item_id: "item1".into(),
+            target: ResolveTargetKey::Stream { stream_key: None, range: None },
+        };
+
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = Arc::clone(&counter);
+        cache
+            .get_or_resolve(key.clone(), || async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(PluginStreamTarget { url: "http://example.com/1".into(), headers: vec![], ttl_secs: Some(60) })
+            })
+            .await
+            .unwrap();
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        cache.clear();
+
+        let c = Arc::clone(&counter);
+        let target = cache
+            .get_or_resolve(key, || async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(PluginStreamTarget { url: "http://example.com/2".into(), headers: vec![], ttl_secs: Some(60) })
+            })
+            .await
+            .unwrap();
+        assert_eq!(target.url, "http://example.com/2");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

@@ -248,6 +248,8 @@ pub(crate) struct PluginRecord {
     pub(crate) loaded: Option<LoadedPlugin>,
     /// RPC exports named in `x-options-rpc` annotations of `ui.input_form`.
     pub(crate) options_rpc_exports: Vec<String>,
+    /// Secret property paths declared across `ui.input_form` sections.
+    pub(crate) input_form_secret_paths: Vec<String>,
     /// The `version` of the package's settings schema (1 without one).
     pub(crate) settings_version: u32,
     /// Set when the stored settings were written for another schema version
@@ -274,6 +276,7 @@ impl PluginRecord {
             exports: Vec::new(),
             loaded: None,
             options_rpc_exports: Vec::new(),
+            input_form_secret_paths: Vec::new(),
             settings_version: DEFAULT_PLUGIN_SETTINGS_VERSION,
             settings_block: None,
             state: PluginState::Discovered,
@@ -296,6 +299,8 @@ impl PluginRecord {
     }
 
     pub(crate) fn is_options_rpc(&self, method: &str) -> bool { self.options_rpc_exports.iter().any(|m| m == method) }
+
+    pub(crate) fn input_form_secret_paths(&self) -> &[String] { &self.input_form_secret_paths }
 
     /// Why the plugin is `Invalid`, `PendingApproval` or `Failed`.
     pub(crate) fn failure(&self) -> Option<String> {
@@ -894,8 +899,10 @@ fn evaluate(
         return Err(Rejection::invalid(problem));
     }
     // Validate the schemas, the locale files and the extension sections.
-    let secret_paths =
+    let package_secrets =
         check_package(&record.dir, &manifest).map_err(|problems| Rejection::invalid(problems.join("; ")))?;
+    record.input_form_secret_paths = package_secrets.input_forms;
+    let secret_paths = package_secrets.settings;
     record.options_rpc_exports = crate::manifest::package::input_form_options_rpc_exports(&record.dir, &manifest);
     let settings_schema = read_settings_schema(&record.dir, &manifest);
     record.settings_version = settings_schema

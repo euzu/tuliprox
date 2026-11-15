@@ -200,12 +200,16 @@ at load time.
 
 - **`fetch_catalog(req)` contract & paging**: Fetches the catalog page by page until `next-cursor` is `None`.
   The guest receives a `media-request` record containing:
+  - `input-name`: the configured input name.
+  - `url`: the configured provider URL.
+  - `username` and `password`: optional credentials for the media server.
+  - `options`: input configuration key-value pairs (`plugin_config`).
   - `refresh`: a boolean set to `true` when the input update runs under the `REFRESH` policy (bypassing caches and
     forcing full upstream fetching), or `false` under `NORMAL` incremental updates.
   - `last-success-at`: optional Unix timestamp (seconds) of the input's last successful complete catalog fetch, sourced
-    from the persisted input status, or `none` on the first run. Guests can use this timestamp to perform differential
-    syncs.
-  - `options` and `secrets`: input configuration key-value pairs and resolved secrets.
+    from the persisted input status, or `none` on the first run. The timestamp can help a guest skip unnecessary
+    upstream work, but every successful fetch must still return the complete catalog: the host replaces the input's
+    catalog with the returned pages and removes omitted items.
   - `cursor`: pagination cursor passed back to subsequent pages (`none` for the first page).
 
   Each page returns a `media-catalog` containing libraries, movies, series, seasons, and episodes. The host enforces
@@ -221,10 +225,11 @@ at load time.
   are safely dropped and logged without crashing or panicking the host.
 - **Stream and image resolution**: playlist items of a media provider plugin carry internal `media-server://plugin/...`
   references. When a client plays an item or loads its artwork, the host calls `resolve_stream` (with the client's
-  `Range` header in `range`) or `resolve_image` and proxies the returned target like a Jellyfin or Emby stream: the
-  `Range` header is forwarded, `206` and `416` pass through, and only safe response headers (`Content-Type`,
-  `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag`, `Last-Modified`) reach the client. The target's headers
-  go upstream only; the client never sees them.
+  `Range` header in `range`) or `resolve_image` and proxies the returned target like a Jellyfin or Emby stream. The
+  client's `Range` header is forwarded only for streams (`resolve-stream` gets `range`); image requests do not forward
+  Range. For streams, `206` and `416` pass through. Only safe response headers (`Content-Type`, `Content-Length`,
+  `Content-Range`, `Accept-Ranges`, `ETag`, `Last-Modified`) reach the client. The target's headers go upstream only;
+  the client never sees them.
 
 #### Resolution limits
 
@@ -422,8 +427,9 @@ The guest sees a different payload than for a plain export:
 - The caller may only name an input of this plugin. An unknown name, an input bound to another plugin, or an input that
   is not `type: plugin` is a tool error (`400` on the rpc route) and the guest is not called.
 - The host scrubs the resolved secrets from the answer and from the log lines of the call: the password, the username,
-  and every option value whose key looks secret (`password`, `passwd`, `secret`, `token`, `api_key`, `apikey`,
-  `api-key`, `authorization`, `cookie`, `username`, `user`). A plugin that echoes its input context never leaks it.
+  values of fields marked `writeOnly: true` in the input form (`form_secrets`), and every option value whose key looks
+  secret (`password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, `api-key`, `authorization`, `cookie`,
+  `username`, `user`). A plugin that echoes its input context never leaks it.
 
 An export without the flag receives its payload exactly as before; the flag changes nothing for old plugins.
 

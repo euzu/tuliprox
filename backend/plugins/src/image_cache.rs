@@ -20,8 +20,10 @@
 use crate::{http::PluginHttp, state::SealResourceUrl};
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
@@ -112,6 +114,30 @@ pub const MAX_IMAGE_HEADER_TOTAL_BYTES: usize = 16 * 1024;
 pub const MAX_IMAGE_HEADER_NAME_BYTES: usize = 256;
 pub const MAX_IMAGE_HEADER_VALUE_BYTES: usize = 4096;
 
+pub(crate) fn image_cache_key(url: &str, headers: &[(String, String)]) -> String {
+    if headers.is_empty() {
+        return url.to_string();
+    }
+    let mut normalized: Vec<(String, String)> =
+        headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect();
+    normalized.sort();
+
+    let mut hasher = Sha256::new();
+    for (k, v) in &normalized {
+        hasher.update(k.as_bytes());
+        hasher.update(b":");
+        hasher.update(v.as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize();
+    let mut hex_hash = String::with_capacity(64);
+    for b in digest {
+        let _ = write!(hex_hash, "{b:02x}");
+    }
+    let sep = if url.contains('#') { "&h=" } else { "#h=" };
+    format!("{url}{sep}{hex_hash}")
+}
+
 impl PluginImages {
     /// `granted` = the `image_cache` and `network` capabilities.
     pub(crate) fn new(cache: &ImageCache, plugin: &Arc<str>, granted: bool) -> Self {
@@ -146,13 +172,14 @@ impl PluginImages {
         let Some(cache) = self.inner.cache.load_full() else {
             return Err("the resource cache is disabled".to_string());
         };
-        let sealed = (self.inner.seal)(url);
+        let cache_key = image_cache_key(url, headers);
+        let sealed = (self.inner.seal)(&cache_key);
         if sealed.is_empty() {
             return Err("resource URLs cannot be sealed".to_string());
         }
 
         // Already cached: no download, no accounting.
-        if cache.write().await.get_content(url).is_some() {
+        if cache.write().await.get_content(&cache_key).is_some() {
             return Ok(sealed);
         }
 
@@ -167,7 +194,7 @@ impl PluginImages {
 
         let (bytes, content_type) = http.fetch_with_headers(url, &valid_headers, MAX_IMAGE_BYTES).await?;
         let mime = image_mime(content_type.as_deref())?;
-        self.admit(&cache, url, &mime, bytes, IMAGE_QUOTA_BYTES).await?;
+        self.admit(&cache, &cache_key, &mime, bytes, IMAGE_QUOTA_BYTES).await?;
         Ok(sealed)
     }
 
@@ -551,5 +578,37 @@ mod tests {
         let err =
             images.cache_image_with_headers(&http(&id, true), "http://127.0.0.1:1/a.png", &long_val).await.unwrap_err();
         assert!(err.contains("oversized header set"), "{err}");
+    }
+
+    #[test]
+    fn image_cache_key_preserves_url_when_headers_empty_and_hashes_when_present() {
+        let url = "http://example.com/logo.png";
+        assert_eq!(image_cache_key(url, &[]), url);
+
+        let headers_a = vec![
+            ("X-Auth".to_string(), "secret-token-1".to_string()),
+            ("User-Agent".to_string(), "CustomAgent".to_string()),
+        ];
+        let key_a = image_cache_key(url, &headers_a);
+        assert!(key_a.starts_with("http://example.com/logo.png#h="));
+        assert!(!key_a.contains("secret-token-1"));
+        assert!(!key_a.contains("CustomAgent"));
+
+        let headers_b = vec![
+            ("user-agent".to_string(), "CustomAgent".to_string()),
+            ("x-auth".to_string(), "secret-token-1".to_string()),
+        ];
+        let key_b = image_cache_key(url, &headers_b);
+        assert_eq!(key_a, key_b, "header names are case-insensitive and order-independent");
+        let headers_case = vec![("X-Auth".to_string(), "SECRET-TOKEN-1".to_string())];
+        assert_ne!(image_cache_key(url, &headers_case), image_cache_key(url, &headers_a[..1]), "values keep case");
+
+        let headers_c = vec![("X-Auth".to_string(), "different-token".to_string())];
+        let key_c = image_cache_key(url, &headers_c);
+        assert_ne!(key_a, key_c);
+
+        let url_with_hash = "http://example.com/logo.png#section";
+        let key_with_hash = image_cache_key(url_with_hash, &headers_a);
+        assert!(key_with_hash.starts_with("http://example.com/logo.png#section&h="));
     }
 }

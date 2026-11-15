@@ -89,6 +89,9 @@ async fn open_plugin_target(
         request = request.header(header::RANGE, range);
     }
     for (name, value) in &target.headers {
+        if range.is_some() && name.eq_ignore_ascii_case("range") {
+            continue;
+        }
         if let (Ok(name), Ok(value)) = (HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(value)) {
             request = request.header(name, value);
         }
@@ -292,5 +295,82 @@ pub(super) fn media_server_image_input_name(image_ref: &MediaServerImageRef) -> 
         | MediaServerImageRef::Silo { input_name, .. }
         | MediaServerImageRef::Plex { input_name, .. }
         | MediaServerImageRef::Plugin { input_name, .. } => input_name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::api_utils::tests::create_test_app_state;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    async fn spawn_single_request_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test server binds");
+        let addr = listener.local_addr().expect("test server address");
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+            String::from_utf8_lossy(&request).to_lowercase()
+        });
+        (addr, task)
+    }
+
+    #[tokio::test]
+    async fn open_plugin_target_drops_plugin_range_when_client_range_present() {
+        let app_state = create_test_app_state();
+        let (addr, server_task) = spawn_single_request_server().await;
+
+        let target = PluginStreamTarget {
+            url: format!("http://{addr}/stream"),
+            headers: vec![("Range".into(), "bytes=0-10".into()), ("RANGE".into(), "bytes=50-60".into())],
+            ttl_secs: None,
+        };
+
+        let result = open_plugin_target(&app_state, &target, Some("bytes=100-200")).await;
+        assert!(result.is_ok());
+
+        let req = tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+            .await
+            .expect("server completed")
+            .expect("server ok");
+        assert!(req.contains("range: bytes=100-200"), "client range should be present: {req}");
+        assert!(!req.contains("range: bytes=0-10"), "plugin range 0-10 should be dropped: {req}");
+        assert!(!req.contains("range: bytes=50-60"), "plugin range 50-60 should be dropped: {req}");
+    }
+
+    #[tokio::test]
+    async fn open_plugin_target_keeps_plugin_range_when_no_client_range() {
+        let app_state = create_test_app_state();
+        let (addr, server_task) = spawn_single_request_server().await;
+
+        let target = PluginStreamTarget {
+            url: format!("http://{addr}/stream"),
+            headers: vec![("Range".into(), "bytes=0-10".into())],
+            ttl_secs: None,
+        };
+
+        let result = open_plugin_target(&app_state, &target, None).await;
+        assert!(result.is_ok());
+
+        let req = tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+            .await
+            .expect("server completed")
+            .expect("server ok");
+        assert!(req.contains("range: bytes=0-10"), "plugin range should be kept: {req}");
     }
 }

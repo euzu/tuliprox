@@ -100,6 +100,7 @@ impl PluginSystem {
     /// Synchronous like [`PluginSystem::load`].
     pub fn reload(&self, config: &PluginsConfig) {
         self.inner.headers.set_ttl(config);
+        self.inner.resolve_cache.clear();
         self.inner.registry.reload(config);
     }
 
@@ -158,15 +159,11 @@ impl PluginSystem {
         crate::media_resolve::resolve_image(&self.dispatcher(), &self.inner.resolve_cache, plugin, ctx, request).await
     }
 
-    pub fn input_form_secret_paths(&self, plugin_id: &str) -> Vec<String> {
+    pub fn input_form_secret_paths(&self, plugin_id: &str) -> Option<Vec<String>> {
         let snapshot = self.registry().snapshot();
-        let Some(record) = snapshot.get(plugin_id) else {
-            return Vec::new();
-        };
-        let Some(manifest) = record.manifest.as_deref() else {
-            return Vec::new();
-        };
-        crate::manifest::package::input_form_secret_paths(&record.dir, manifest)
+        let record = snapshot.get(plugin_id)?;
+        record.manifest.as_ref()?;
+        Some(record.input_form_secret_paths.clone())
     }
 
     pub fn is_options_rpc(&self, plugin_id: &str, method: &str) -> bool {

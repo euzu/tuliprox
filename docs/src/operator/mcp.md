@@ -118,7 +118,7 @@ The permission column names the permission the REST route requires (see `groups.
 | `get_ip_info`                 |  read | `GET /ipinfo`                         | `system.read`                                                                                     | none                                                                                                                                                                                                          |
 | `list_playlist_sources`       |  read | `GET /playlist/sources`               | `playlist.read`                                                                                   | none. Lists targets and inputs by name (see 4.1).                                                                                                                                                             |
 | `query_playlist_items`        |  read | `GET /playlist/items`                 | `playlist.read`                                                                                   | required `cluster`, exactly one of `target`/`input`; optional paging, filter and field projection (see 4.1). Media-server inputs are read from their stored catalog.                                          |
-| `list_media_server_libraries` |  read | `GET /media-server/{input}/libraries` | `playlist.read`                                                                                   | required `input` (media-server input name). Contacts the media server once (15 s bound).                                                                                                                      |
+| `list_media_server_libraries` |  read | `GET /media-server/{input}/libraries` | `playlist.read`                                                                                   | required `input` (media-server input name). Contacts the server twice sequentially (each 15 s bound, total up to ~30 s).                                                                                      |
 | `get_media_server_status`     |  read | `GET /media-server/{input}/status`    | `playlist.read`                                                                                   | required `input` (media-server input name). Contacts the media server once (15 s bound).                                                                                                                      |
 | `refresh_media_server_input`  | write | `POST /media-server/{input}/refresh`  | `playlist.write`                                                                                  | required `input`, `action` (`normal` or `refresh`). Queues the update, no server traffic during the call.                                                                                                     |
 | `query_target_epg_channels`   |  read | `GET /playlist/epg/channels`          | `playlist.read`                                                                                   | required `target`; optional `output`, paging, `search`, `issue` (see 4.2).                                                                                                                                    |
@@ -137,11 +137,13 @@ Notes:
   is queued answers `409`. `refresh_media_server_input` queues the same kind of update for one media-server input and
   answers `202` with a run id as well.
 * The playlist and EPG tools read stored data only and never trigger provider traffic. `list_media_server_libraries`
-  and `get_media_server_status` are the exception: they contact the configured media server once, bounded by 15
-  seconds (a hanging server answers `504`). `refresh_media_server_input` only queues work.
+  and `get_media_server_status` are the exception: `get_media_server_status` contacts the configured server once with a
+  15-second bound, while `list_media_server_libraries` makes two sequential calls, each with a 15-second bound (total
+  up to ~30 seconds; a hanging server answers `504`). `refresh_media_server_input` only queues work.
 * Tools declare `readOnlyHint` in their annotations, so clients can ask for confirmation before calling write tools.
-  Built-in tools also declare `openWorldHint: false` (they act on tuliprox only), and the built-in write tools
-  declare `destructiveHint: false` (none of them deletes data).
+  Built-in tools also declare `openWorldHint: false` (they act on tuliprox only). The built-in write tools
+  `save_overrides` and `discard_overrides` declare `destructiveHint: true` (they overwrite or discard override data);
+  other built-in write tools declare `destructiveHint: false`.
 * A successful result whose body is a complete JSON object is returned twice: as the `text` block and as
   `structuredContent`. A truncated result has only the text block with the truncation marker. A plugin tool that
   declares an `outputSchema` is held to it (see 4.5).
