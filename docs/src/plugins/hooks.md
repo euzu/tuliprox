@@ -52,6 +52,7 @@ relative to `backend/plugins/src/`, `backend/processing/src/` or `backend/app/sr
 | `metrics.collect` | `metrics-hooks` | `collect_metrics()` -> list of metrics | none | Polled for the dashboard, at most every 10 seconds (`metrics.rs`) |
 | `notifications.send` | `notification-hooks` | `send_notification(msg)` -> `Ok` or a `DeliveryError` | capability `notifications` | When messaging delivers to the plugin's channel (`notify.rs`) |
 | `input.fetch` | `input-provider` | `fetch_playlist(req)` -> channels, `fetch_epg(req)` -> channels with programmes | `provides.input_type: true` | When an input with `type: plugin` is fetched (`input_provider.rs`) |
+| `media.fetch` | `media-provider-v1-1` | `fetch_catalog(req)` -> catalog page, `resolve_stream(req)`, `resolve_image(req)` | `provides.input_type: true` | When an input with `type: plugin` and media provider is fetched (`media_provider.rs`) |
 | `output.render` | `output-generator` | `begin_output`, `render_batch`, `finish_output` -> bytes | `provides.output_format` | When a target output with `type: plugin` is written (`output_provider.rs`) |
 | `rpc.call` | `rpc` | `call(method, payload)` -> JSON string | a non-empty `ui.rpc_exports` | `POST /api/v1/plugins/{id}/rpc/{method}` and MCP tools (`plugins_rpc_api.rs`). Not a pipeline hook |
 | `tasks.run` | `tasks` | `run(ctx)` -> summary string | a non-empty `tasks:` list | The scheduler and the manual run route (`tasks.rs`) |

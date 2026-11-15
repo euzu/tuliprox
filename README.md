@@ -1,4 +1,4 @@
-# **tuliprox** — Self-Hosted Media Gateway & Playlist Processor
+# **tuliprox** — Self-Hosted IPTV Proxy, Media Gateway & Playlist Processor with Web UI
 
 ![tuliprox logo](https://github.com/user-attachments/assets/8ef9ea79-62ff-4298-978f-22326c5c3d02)
 `tuliprox` is a high-performance, self-hosted media gateway for bringing IPTV providers, media servers, playlists, EPG data,  
@@ -8,7 +8,11 @@ Instead of configuring every player against every upstream source, Tuliprox sits
 media sources, normalizes and enriches their metadata, filters and reorganizes the catalog, manages provider connections,  
 and publishes the result in the formats your clients already understand.
 
-**One service. Multiple sources. Multiple users. Multiple output formats. Full control.**
+**One service. Multiple sources. Multiple users. Multiple output formats. Full control — from a complete Web UI.**
+
+Everything is configured in the browser: a setup wizard for the first start, editors for sources, targets, users,
+mappings, failover groups, schedules, notifications, recordings and plugins, plus live dashboards, logs and stream
+views. YAML files stay available for people who prefer them, but you never have to touch one.
 
 > **Legal Notice**
 >
@@ -22,15 +26,23 @@ and publishes the result in the formats your clients already understand.
 
 Tuliprox is built for more than playlist conversion. It is designed to become the central media gateway for a self-hosted setup:
 
-- **Unify fragmented sources** — combine Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, local media, staged catalogs,  
-  and EPG data in one place.
+- **Configure everything in the browser** — a guided setup wizard and a full Web UI cover every feature, from sources and
+  users to failover groups, plugins, recordings and monitoring. No YAML required.
+- **Unify fragmented sources** — combine Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, Silo, local media,
+  staged catalogs, plugin inputs such as YouTube, and EPG data in one place.
 - **Publish once, consume everywhere** — expose the same processed catalog as M3U, Xtream Codes API, HDHomeRun, or STRM without  
   maintaining separate setups.
 - **Protect provider connections** — share streams, enforce connection limits, prioritize users, recover from upstream problems,  
   and avoid wasting provider slots on unnecessary background work.
+- **Never lose a channel** — failover groups merge the same channel from several providers or accounts and switch to
+  another source while the viewer keeps watching (MPEG-TS and HLS).
 - **Shape the catalog your way** — filter, rename, map, sort, merge, deduplicate, curate, and enrich content before it reaches users.
 - **Operate multiple users safely** — assign targets, plans, output clusters, network restrictions, priorities, limits, and  
   server profiles per user.
+- **Extend it safely** — sandboxed WebAssembly plugins add inputs, media servers, outputs, filters, EPG matchers,
+  notification channels, Web UI panels and AI tools, installable from a built-in marketplace.
+- **Let AI assistants help** — an optional MCP server gives Claude, Cursor and other assistants read access to status,
+  streams, playlists and EPG diagnostics, under your permissions.
 - **Run it like infrastructure** — health and readiness probes, durable notifications, stream history, QoS snapshots, quality  
   guards, hot reloads, audit events, and optional runtime watchdog support are built in.
 - **Keep the stack small** — Rust, a single application, embedded storage, and no mandatory external database.
@@ -40,18 +52,76 @@ Tuliprox is built for more than playlist conversion. It is designed to become th
 
 | Area           | What Tuliprox gives you                                                                                      |
 |----------------|--------------------------------------------------------------------------------------------------------------|
-| **Inputs**     | Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, Silo, local libraries, staged sources              |
+| **Web UI**     | Setup wizard, editors for every setting, dashboard, playlist explorer, live logs, stream and QoS views       |
+| **Inputs**     | Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, Silo, local libraries, staged sources, plugins     |
 | **Outputs**    | M3U/M3U8, Xtream Codes API, HDHomeRun, STRM                                                                  |
 | **Processing** | Filtering, mapping DSL, sorting, templates, EPG matching, metadata enrichment, curation                      |
-| **Streaming**  | Reverse proxy, redirects, shared MPEG-TS/HLS, HLS cache/prefetch, catchup proxying, failover                 |
+| **Streaming**  | Reverse proxy, redirects, shared MPEG-TS/HLS, HLS cache/prefetch, catchup proxying, live failover groups     |
 | **Users**      | Multi-user gateway, plans, connection limits, priorities, output clusters, category access, network policies |
-| **Operations** | Web UI, REST API, scheduler, health/readiness probes, notifications, QoS, stream history, watchdog           |
+| **Plugins**    | Sandboxed WebAssembly plugins, marketplace, SDK, custom inputs, media servers, outputs, UI panels, MCP tools |
+| **AI**         | Optional MCP server for AI assistants, read-only by default, with the REST API's permissions                 |
+| **Operations** | REST API, scheduler, health/readiness probes, notifications, QoS, stream history, DVR, watchdog              |
 | **Storage**    | Embedded B+Tree engine, WAL protection, mmap scans, compression, compaction — no external DB required        |
 | **Deployment** | Docker, Docker Compose templates, Raspberry Pi, NAS, VPS, x86 and ARM                                        |
 
 ## 🏆 Key Features
 
-### 1. Fast, Lightweight, and Built for 24/7 Operation
+### 1. Web UI — Operate Tuliprox Without Living in YAML
+
+Tuliprox ships a complete, responsive Web UI. Every feature described on this page can be set up, changed and
+monitored in the browser; the YAML files are written for you.
+
+#### Setup and configuration
+
+- **Setup wizard** on the first start: main settings, sources, users, plugins and MCP in a few guided steps
+- **Source Editor** — a visual block editor for M3U, Xtream, Stalker, Plex, Emby, Jellyfin, Silo, local-library,
+  staged and plugin inputs and their targets, with drag & drop, block selection, batch editing and bouquet
+  whitelist/blacklist editing
+- One **media server** block: pick Plex, Emby, Jellyfin or Silo and only the fields for that server appear
+- **Failover Groups editor** to review automatic groups, correct them and build your own
+- Editors for every configuration area: main settings, reverse proxy and streaming, connection admission, schedules,
+  messaging and notification templates, recordings, metadata and probing, HDHomeRun devices, logging, the Web UI
+  itself, MCP and panel API
+- **User Management** with plans, connection limits, priorities, category access, output clusters and network
+  policies, plus **RBAC Administration** for users, groups and permission grants
+- **Plugin Manager** with a marketplace, install review of the requested capabilities, updates, settings forms,
+  per-plugin logs and plugin-provided pages and panels
+
+#### Operations and monitoring
+
+- **Dashboard** with backend status, active streams, system metrics, provider capacity and live sparklines
+- **Health banner** with green/amber/red capacity and backend state
+- **Maintenance card** that turns red while inputs are in maintenance, with a dialog to put inputs into or take them
+  out of maintenance with a remark
+- **Input-focused Update view** with per-input actions, affected-target selection, status, last update time and
+  capability-aware Update/Refresh/Force Update/Rescan actions
+- **Update Details** explain where data came from, which quality guards were applied, processing order, target
+  results and technical versus quality failures; the status survives a browser reload
+- **Playlist Explorer** with tree/gallery views, EPG timeline, text/regex and field-scoped search
+- **Manual item overrides**: correct single channels, movies or series in the Playlist Explorer — for the whole input
+  or for one target — without writing mapper rules, with validation, conflict checks and orphan cleanup
+- **Playlist Stats** with per-target content counts, input-to-output ratios, largest groups, catch-up channels, EPG
+  source health and unmapped live channel CSV export
+- **Stream View** with bandwidth, transferred bytes, player information, comments and EPG details
+- **Stream History & QoS** views for reliability analysis
+- **Download & Recording Manager** with retries, queue controls, fairness and RBAC-protected actions
+- **Live Logs** as a standalone view
+
+#### UX and accessibility
+
+- Multiple themes, including a color-vision-deficiency-friendly option
+- Runtime-discovered UI languages with RTL support
+- Resizable panes and personal, persisted table layouts
+- Bookmarkable views via URL hash and working browser back/forward navigation
+- Responsive design for desktop and mobile
+- Guided empty states, recoverable per-view error boundaries and confirmation before destructive actions
+- Keyboard-friendly dialogs and menus, screen-reader improvements, descriptive image alt text and reduced-motion
+  support
+
+**Benefit:** advanced functionality stays available to power users without forcing routine administration onto the
+command line or into configuration files.
+
+### 2. Fast, Lightweight, and Built for 24/7 Operation
 
 Tuliprox is written in Rust and designed to keep the runtime footprint small even when the catalog and number of connected clients grow.
 
@@ -68,7 +138,7 @@ Tuliprox is written in Rust and designed to keep the runtime footprint small eve
 **Benefit:** Tuliprox can stay in the background as infrastructure instead of becoming another heavyweight service stack  
 you constantly have to maintain.
 
-### 2. Bring All Your Media Sources Together
+### 3. Bring All Your Media Sources Together
 
 Use different upstream technologies without forcing every downstream player to understand them.
 
@@ -78,6 +148,8 @@ Use different upstream technologies without forcing every downstream player to u
   `create_link` playback resolution, resumable refreshes, and per-alias configuration
 - **Plex, Emby, Jellyfin & Silo** — import selected movie and TV libraries, each as its own category, and resolve protected playback  
   and artwork through Tuliprox
+- **Plugin inputs** — YouTube channels, playlists and live streams through the official `youtube-input` plugin, and any
+  other media server or source through your own WebAssembly plugin
 - **Local Media Library** — scan movies and series from disk and enrich them with NFO or TMDB metadata
 - **Staged Sources** — overlay a prepared Live, VOD, or Series catalog while keeping the original provider responsible for  
   actual stream delivery
@@ -87,7 +159,41 @@ memory before processing starts.
 
 **Benefit:** change providers, combine sources, or migrate clients without rebuilding your whole media setup around one vendor-specific API.
 
-### 3. One Catalog, Four Output Formats
+### 4. WebAssembly Plugins — Extend Tuliprox Without Forking It
+
+Plugins add features to Tuliprox without touching its code. They run sandboxed in WebAssembly inside the single
+Tuliprox binary — no Python, Node.js or other runtime to install.
+
+- **Marketplace** in the Web UI: browse by category, review the requested capabilities, install, update and configure
+- **Input plugins** bring new sources, for example the official `youtube-input` plugin for YouTube channels, playlists
+  and live streams
+- **Media server plugins** connect any further media server: the plugin delivers the library, Tuliprox handles
+  storage, series, outputs, playback with seeking and artwork exactly like for Plex, Emby, Jellyfin and Silo
+- **Output plugins** render additional playlist formats
+- **Pipeline hooks** for filtering, renaming, mapping, sorting, deduplication, channel numbering, metadata, EPG
+  loading, matching and enrichment, stream headers and managed channels
+- **Notification channels** such as Matrix, Discord, ntfy or Gotify as plugins (source examples in `plugins/examples/`)
+- **Custom UI**: settings forms, source-editor tiles, dashboard cards, explorer actions and pages inside the Web UI
+- **MCP tools**: plugins can offer their own tools to AI assistants
+- **Scheduled tasks**, HTTP routes, a key-value store, an image cache and controlled network access
+- **Safe by design**: capabilities need explicit approval; every call has memory, CPU and time limits; a plugin that
+  hangs or crashes fails only its own work, never Tuliprox
+- **Rust SDK** with typed hooks, settings with secrets, a mock host for unit tests and step-by-step guides
+
+**Benefit:** special requirements become a plugin instead of a fork, and a broken plugin cannot take your gateway
+down.
+
+### 5. AI Assistants (MCP)
+
+- Optional **MCP server** for Claude Desktop, Cursor and other MCP clients
+- Inspect status, streams, stream history, QoS, configuration, stored playlists (paged and filtered), media-server
+  libraries and per-target EPG diagnostics
+- Read-only by default; write tools such as starting a playlist update must be enabled explicitly, and every call is
+  checked against the same authentication and permissions as the REST API
+- Structured results and tool annotations, so assistants know which calls only read
+- Configurable in the Web UI and in the setup wizard
+
+### 6. One Catalog, Four Output Formats
 
 | Format               | Best for                                                                               |
 |----------------------|----------------------------------------------------------------------------------------|
@@ -100,7 +206,7 @@ Generate several output types from the same processed source at the same time.
 
 **Benefit:** the player no longer dictates how your upstream sources must be organized.
 
-### 4. Powerful Processing Pipeline — Make the Catalog Yours
+### 7. Powerful Processing Pipeline — Make the Catalog Yours
 
 Tuliprox can transform provider data into the structure you actually want to use.
 
@@ -131,7 +237,7 @@ Tuliprox can transform provider data into the structure you actually want to use
 
 **Benefit:** providers supply the raw catalog; Tuliprox decides what your users actually see and how it is organized.
 
-### 5. Protect Provider Slots and Improve Stream Delivery
+### 8. Protect Provider Slots and Improve Stream Delivery
 
 Tuliprox is not just a metadata processor — it actively manages stream delivery.
 
@@ -139,8 +245,9 @@ Tuliprox is not just a metadata processor — it actively manages stream deliver
 - **Redirect Mode** — avoid proxy overhead where direct delivery is preferred
 - **Shared MPEG-TS Streams** — several viewers can reuse one upstream provider stream
 - **Shared HLS Sessions** — reuse one server-side HLS session while retaining individual user leases and accounting
-- **Failover Groups** — one channel per live program across inputs, with source selection and runtime failover; correct
-  automatic groups and build your own in the Web UI editor or in `failover.yml` / `failover.d/` files with hot reload
+- **Failover Groups** — one channel per live program across inputs, with source selection and runtime failover for
+  MPEG-TS and HLS; correct automatic groups and build your own in the Web UI editor or in `failover.yml` /
+  `failover.d/` files with hot reload
 - **HLS Segment Cache & Prefetch** — fetch manifests, initialization maps, and segments once and serve them locally
 - **HLS Recovery** — optional manifest recovery, bounded segment repair, stale-origin recovery, and diagnostics for difficult upstream streams
 - **Universal Catchup** — expose provider archive/catchup through regular M3U-compatible `.ts` URLs
@@ -164,14 +271,14 @@ Tuliprox is not just a metadata processor — it actively manages stream deliver
 **Benefit:** limited provider capacity can be shared intentionally instead of being consumed unpredictably by clients,  
 reconnects, probes, and background jobs.
 
-### 6. Provider Resilience, Failover, and Safer Refreshes
+### 9. Provider Resilience, Failover, and Safer Refreshes
 
 Upstream providers are not always reliable. Tuliprox is designed to preserve usable service when they fail partially or temporarily.
 
 - Automatic provider URL failover on timeouts and server errors
 - **Failover groups with stream failover** collapse the same live channel from several providers or accounts into one
-  channel; playback starts on the best reachable source and, for MPEG-TS, switches to another source while the client
-  keeps watching. A Web UI editor and YAML failover files (`failover.yml` or `failover.d/`, hot reloaded) let you
+  channel; playback starts on the best reachable source and, for MPEG-TS and live HLS, switches to another source while
+  the client keeps watching. A Web UI editor and YAML failover files (`failover.yml` or `failover.d/`, hot reloaded) let you
   correct automatic groups and create your own
 - Choose whether a provider resumes from the last working URL or restarts from the first URL on future requests
 - `provider://` references resolve to the currently active provider URL
@@ -193,7 +300,7 @@ Upstream providers are not always reliable. Tuliprox is designed to preserve usa
 
 **Benefit:** a broken refresh or failing alias does not have to destroy an otherwise usable catalog.
 
-### 7. Metadata, EPG, and Stream Intelligence
+### 10. Metadata, EPG, and Stream Intelligence
 
 Tuliprox can improve incomplete provider data and make large catalogs easier to consume.
 
@@ -225,53 +332,7 @@ Tuliprox can improve incomplete provider data and make large catalogs easier to 
 
 **Benefit:** clients receive a cleaner, richer catalog without each player having to solve metadata and EPG inconsistencies on its own.
 
-### 8. Web UI — Operate Tuliprox Without Living in YAML
-
-Tuliprox can be configured and monitored directly from the browser.
-
-- **Dashboard** with backend status, active streams, system metrics, and provider capacity
-- **Maintenance card** on the dashboard that turns red while inputs are in maintenance, with a dialog to put inputs
-  into or take them out of maintenance with a remark
-- **Source Editor** for M3U, Xtream, Stalker, Plex, Emby, Jellyfin, Silo, local-library, and target configuration
-- Drag & drop, block selection, batch editing, and target bouquet whitelist/blacklist editing
-- **Input-focused Update view** with per-input actions, affected-target selection, status, last update time, and  
-  capability-aware Update/Refresh/Force Update/Rescan actions
-- **Update Details** explain where data came from, which quality guards were applied, processing order, target results,  
-  and technical versus quality failures
-- Reload-safe update/cluster status so a browser refresh does not erase the operational picture
-- **Playlist Stats** with per-target content counts, input-to-output ratios, largest groups, catch-up channels,
-  EPG source health, and unmapped live channel CSV export
-- **Playlist Explorer** with tree/gallery views, EPG timeline, text/regex search, and field-scoped search
-- **Manual item overrides**: correct single channels, movies or series in the Playlist Explorer — for the whole input or
-  for one target — without writing mapper rules, with validation, conflict checks and orphan cleanup
-- **Download & Recording Manager** with retries, queue controls, fairness, and RBAC-protected actions
-- **User Management** including plans, connection limits, priorities, category access, output clusters, and network policies
-- **RBAC Administration** for users, groups, and permission grants
-- **Stream View** with bandwidth, transferred bytes, player information, comments, and EPG details
-- **Stream History & QoS** views for reliability analysis
-- **Messaging Configuration** with channel routing, templates, and test/preview support
-- Configurable landing page and stream-field visibility
-- Multiple themes including a color-vision-deficiency-friendly option
-- Runtime-discovered UI languages with RTL support
-- Bookmarkable views via URL hash and working browser back/forward navigation
-- Responsive design for desktop and mobile
-
-#### UX and accessibility
-
-- Health banner with green/amber/red capacity and backend state
-- Live metric sparklines for CPU, memory, network, active users, and connections
-- Persisted sidebar and table preferences
-- Debounced filter editing for large expressions
-- Guided empty states instead of unexplained blank views
-- Recoverable per-view error boundaries
-- Keyboard-friendly dialogs and menus
-- Screen-reader improvements and descriptive image alt text
-- Reduced-motion support for animations and micro-interactions
-- Confirmation before destructive download/recording operations
-
-**Benefit:** advanced functionality stays available to power users without forcing routine administration onto the command line.
-
-### 9. Multi-User Gateway, Plans, and Access Control
+### 11. Multi-User Gateway, Plans, and Access Control
 
 Expose one Tuliprox instance to multiple users without giving everyone identical access.
 
@@ -297,7 +358,7 @@ Expose one Tuliprox instance to multiple users without giving everyone identical
 
 **Benefit:** one backend can serve different devices, households, environments, or access tiers without duplicating the provider and processing configuration.
 
-### 10. Security Built Into the Control Plane
+### 12. Security Built Into the Control Plane
 
 - Argon2 password hashing
 - JWT authentication with password-version tracking
@@ -315,7 +376,7 @@ Expose one Tuliprox instance to multiple users without giving everyone identical
 
 **Benefit:** Tuliprox can be exposed as a real multi-user gateway without treating authentication and access policies as an afterthought.
 
-### 11. Event-Based Notifications and Monitoring
+### 13. Event-Based Notifications and Monitoring
 
 Tuliprox uses a shared event backbone so operational events can feed the Web UI, notifications, diagnostics, and future integrations consistently.
 
@@ -353,7 +414,7 @@ Notification capabilities include:
 
 **Benefit:** failures that would otherwise live only in a log file can reach the operator through the channel that is actually monitored.
 
-### 12. Stream History and QoS Visibility
+### 14. Stream History and QoS Visibility
 
 Optional stream telemetry can turn individual playback failures into longer-term reliability information.
 
@@ -370,7 +431,7 @@ Optional stream telemetry can turn individual playback failures into longer-term
 
 **Benefit:** troubleshooting moves from “this channel sometimes fails” to data that can show where and how often it fails.
 
-### 13. Digital Video Recorder (DVR)
+### 15. Digital Video Recorder (DVR)
 
 Turn existing Tuliprox sources into a managed recording library without adding another DVR server and database stack.
 
@@ -392,7 +453,7 @@ Turn existing Tuliprox sources into a managed recording library without adding a
 
 **Benefit:** recording uses the same sources, permissions, provider limits, monitoring, and management UI you already configured for playback.
 
-### 14. Embedded Storage — No External Database Required
+### 16. Embedded Storage — No External Database Required
 
 Tuliprox includes its own storage engine for playlist and runtime data.
 
@@ -410,7 +471,7 @@ Tuliprox includes its own storage engine for playlist and runtime data.
 
 **Benefit:** you get durable local state without deploying and maintaining PostgreSQL, MySQL, MongoDB, or Redis just to run Tuliprox.
 
-### 15. Scheduling and Automation
+### 17. Scheduling and Automation
 
 - Cron-based scheduling with optional target selection
 - Scheduled local-library scans
@@ -421,16 +482,14 @@ Tuliprox includes its own storage engine for playlist and runtime data.
 - Panel API integration for provider account provisioning/renewal workflows
 - Dependency-aware parallel input processing
 - Management REST API for configuration, processing, transfers, recordings, status, stream history, QoS, and system information
-- Optional MCP server (read-only by default) so AI assistants such as Claude Desktop or Cursor can inspect status,
-  streams, stream history, QoS, configuration, stored playlists (paged, filtered) and per-target EPG diagnostics under
-  the REST API's own authentication and permissions; configurable in the Web UI
+- Optional MCP server for AI assistants (see [AI Assistants](#5-ai-assistants-mcp))
 - JSON and CBOR responses on supported endpoints
 - CLI one-shot processing for scripts and CI/CD
 
 **Benefit:** common maintenance tasks can run unattended, while the same operations remain available through the UI, API,  
 or CLI when manual control is needed.
 
-### 16. Complete Xtream-Compatible Delivery
+### 18. Complete Xtream-Compatible Delivery
 
 - Player API for Live, VOD, and Series
 - Categories and icons
@@ -444,7 +503,7 @@ or CLI when manual control is needed.
 - Custom server messages
 - Multiple advertised server profiles with different protocols, hosts, ports, and paths
 
-### 17. Local Media Library
+### 19. Local Media Library
 
 - Recursive directory scanning
 - Automatic Movie/Series classification
@@ -458,7 +517,7 @@ or CLI when manual control is needed.
 
 **Benefit:** local files and provider content can live in one catalog instead of separate client libraries and workflows.
 
-### 18. Operations and Deployment
+### 20. Operations and Deployment
 
 - Alpine and Scratch Docker images
 - Docker Compose templates for Traefik, CrowdSec, Gluetun/SOCKS5, iptv-org/epg, and Tuliprox
@@ -497,6 +556,7 @@ Tuliprox ships with demo placeholder configuration only — nothing in this repo
 - Normalize inconsistent names, groups, logos, and EPG data
 - Keep only the content you actually want
 - Use the same cleaned catalog in different players
+- Set everything up in the Web UI instead of editing configuration files
 - Share provider streams and make better use of limited connection slots
 
 ### Self-Hosted and Homelab Users
@@ -520,7 +580,8 @@ Tuliprox ships with demo placeholder configuration only — nothing in this repo
 
 - Mapper DSL for complex transformations
 - Reusable templates and staged mapping
-- Management REST API
+- Management REST API and MCP server
+- WebAssembly plugin SDK with typed hooks and a mock host for tests
 - Event-based automation and signed webhooks
 - CLI mode for scripting and CI/CD
 - Database viewers and diagnostics
@@ -534,9 +595,7 @@ Tuliprox ships with demo placeholder configuration only — nothing in this repo
 - [iptv-org-epg](docker/container-templates/iptv-org/) template
 - [tuliprox](docker/container-templates/tuliprox/) (including Traefik) template
 
-```text
-./docker/container-templates
-```
+All templates live in [`docker/container-templates`](docker/container-templates/).
 
 ## ⚡ Quick Start
 
@@ -559,7 +618,8 @@ services:
     restart: unless-stopped
 ```
 
-Then open the Web UI in your browser and continue the setup there.
+Then open `http://<your-host>:8901` in your browser. The setup wizard guides you through the main settings, your
+first sources, users and optional plugins; everything else can be configured in the Web UI afterwards.
 
 ## 🤝 Community
 
@@ -599,21 +659,34 @@ Main entry points:
 - [Operations & Debugging](docs/src/operations-debugging.md)
 - [MCP Server](docs/src/operator/mcp.md)
 - [Troubleshooting & Resilience](docs/src/troubleshooting.md)
+- [WebAssembly Plugins](docs/src/plugins/overview.md)
+  - [Plugin Quickstart](docs/src/plugins/quickstart.md)
+  - [Plugin Marketplace](docs/src/plugins/marketplace.md)
+  - [Connecting a Media Server as a Plugin](docs/src/plugins/media-server-plugins.md)
 
-### Documentation Strategy
+## ❓ FAQ
 
-The recommended format is:
+**Does Tuliprox have a Web UI?**
+Yes. Tuliprox includes a full Web UI with a setup wizard. Sources, targets, users, mappings, failover groups,
+schedules, notifications, recordings, plugins and all other settings can be managed in the browser.
 
-- source in Markdown
-- generated as static HTML
-- shipped together with the frontend/web root
+**Do I need a database server?**
+No. Tuliprox stores everything in its own embedded storage engine; it runs as a single binary or container.
 
-For this repository, `mdBook` is a natural fit:
+**Which IPTV players and media servers does it work with?**
+Any player that understands M3U/M3U8 or the Xtream Codes API (for example TiviMate, iMPlayer or VLC), HDHomeRun
+clients such as Plex, Jellyfin and Emby, and STRM-based libraries such as Kodi. Plex, Emby, Jellyfin and Silo can also
+be used as sources.
 
-- Markdown stays easy to review and edit in Git
-- static HTML output is simple to host
-- it fits the Rust ecosystem well
-- navigation and search are available out of the box
+**What happens when a provider fails during playback?**
+Provider URLs fail over automatically, and failover groups switch a running live stream to another provider or
+account (MPEG-TS and HLS) while the viewer keeps watching.
+
+**Can I extend it?**
+Yes, with sandboxed WebAssembly plugins from the built-in marketplace or written yourself with the Rust SDK.
+
+**How much hardware does it need?**
+Very little: it runs on a Raspberry Pi or NAS and can operate with as little as 256 MB RAM, depending on the workload.
 
 ## 📄 License
 

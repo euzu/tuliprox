@@ -745,7 +745,7 @@ async fn read_input_page(
     } else if input.input_type.is_m3u() {
         let records = iter_raw_m3u_input_playlist(app_config, input, Some(cluster)).await;
         collect_stored_page(records, |_: &M3uPlaylistItem| true, &filter, &query.fields, query.window).await
-    } else if input.input_type.is_media_server() {
+    } else if input.is_media_server_with_plugins(&app_state.plugins) {
         // The stored media-server catalog is one file for every cluster: movies
         // carry `Video`, series roots `SeriesInfo` and episodes `Series`. Episode
         // rows stay hidden like in the target listing, so a series query returns
@@ -885,8 +885,8 @@ const QUERYABLE_CLUSTERS: &[&str] = &["live", "video", "series"];
 /// A media-server catalog holds movies and series only; there are no live channels.
 const MEDIA_SERVER_QUERYABLE_CLUSTERS: &[&str] = &["video", "series"];
 
-fn summarize_input(input: &ConfigInput) -> InputSummary<'_> {
-    let clusters = if input.input_type.is_media_server() {
+fn summarize_input<'a>(input: &'a ConfigInput, plugins: &impl shared::model::PluginHost) -> InputSummary<'a> {
+    let clusters = if input.is_media_server_with_plugins(plugins) {
         MEDIA_SERVER_QUERYABLE_CLUSTERS
     } else if input.input_type.is_xtream() || input.input_type.is_m3u() {
         QUERYABLE_CLUSTERS
@@ -921,7 +921,7 @@ pub(super) async fn list_playlist_sources(State(app_state): State<Arc<AppState>>
             .flat_map(|source| &source.targets)
             .map(|target| summarize_target(&config, target))
             .collect(),
-        inputs: sources.inputs.iter().map(|input| summarize_input(input)).collect(),
+        inputs: sources.inputs.iter().map(|input| summarize_input(input, &app_state.plugins)).collect(),
     };
     axum::Json(response).into_response()
 }

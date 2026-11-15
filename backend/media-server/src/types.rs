@@ -275,6 +275,7 @@ pub enum MediaServerStreamRef {
     Jellyfin { input_name: Arc<str>, server_id: Arc<str>, item_id: Arc<str>, media_source_id: Option<Arc<str>> },
     Plex { input_name: Arc<str>, server_id: Arc<str>, rating_key: Arc<str>, part_key: Arc<str> },
     Silo { input_name: Arc<str>, server_id: Arc<str>, item_id: Arc<str>, media_source_id: Option<Arc<str>> },
+    Plugin { input_name: Arc<str>, plugin_id: Arc<str>, item_id: Arc<str>, stream_key: Option<Arc<str>> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,6 +306,12 @@ pub enum MediaServerImageRef {
         item_id: Arc<str>,
         image_kind: Arc<str>,
         tag: Option<Arc<str>>,
+    },
+    Plugin {
+        input_name: Arc<str>,
+        plugin_id: Arc<str>,
+        item_id: Arc<str>,
+        image_key: Arc<str>,
     },
 }
 

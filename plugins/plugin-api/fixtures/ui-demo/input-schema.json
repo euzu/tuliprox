@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "api_token": {
+      "type": "string",
+      "title": "API Token",
+      "writeOnly": true
+    },
+    "library": {
+      "type": "string",
+      "title": "Library",
+      "x-options-rpc": "options"
+    }
+  }
+}

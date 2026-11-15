@@ -1584,7 +1584,7 @@ pub async fn xtream_get_stream_info_response(
     // Resolved through the member name, so an item fetched by an alias finds its parent's option.
     let member_input = app_state.app_config.get_input_by_member_name(&pli.input_name);
     let configured_container_extension = member_input.as_deref().and_then(ConfigInput::default_container_extension);
-    let is_media_server = input.as_ref().is_some_and(|i| i.input_type.is_media_server());
+    let is_media_server = input.as_ref().is_some_and(|i| i.is_media_server_with_plugins(&app_state.plugins));
     // handle local items, media server, and items with embedded details
     // (e.g. M3U-synthesized SeriesInfo carrying seasons/episodes).
     if pli.item_type.is_local() || is_media_server || pli.has_details() {

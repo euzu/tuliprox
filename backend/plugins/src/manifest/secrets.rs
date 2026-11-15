@@ -21,7 +21,7 @@ const MAX_DEPTH: usize = 32;
 ///
 /// # Errors
 /// `TuliproxError::Plugin` naming every secret that has a `default`.
-pub(crate) fn secret_property_paths(schema: &Value) -> Result<Vec<String>, TuliproxError> {
+pub fn secret_property_paths(schema: &Value) -> Result<Vec<String>, TuliproxError> {
     let mut walk = Walk { root: schema, secrets: Vec::new(), defaulted: Vec::new(), refs: Vec::new() };
     walk.visit(schema, "", 0);
     if walk.defaulted.is_empty() {

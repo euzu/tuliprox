@@ -327,6 +327,12 @@ mod tests {
             username: Some("u"),
             password: None,
             options: &options,
+            refresh: false,
+            last_success_at: None,
+            event_sink: None,
+            run_id: None,
+            execution_order: None,
+            input_id: None,
         };
         let wit = wit_request(&request);
         assert_eq!(wit.input_name, "in");

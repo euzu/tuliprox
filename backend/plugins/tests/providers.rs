@@ -8,7 +8,19 @@ use shared::model::{HookCtx, PlaylistItemType, PluginHost, PluginInputRequest, P
 use std::path::Path;
 
 fn request(options: &[(String, String)]) -> PluginInputRequest<'_> {
-    PluginInputRequest { input_name: "feed", url: "http://host/feed", username: Some("u"), password: None, options }
+    PluginInputRequest {
+        input_name: "feed",
+        url: "http://host/feed",
+        username: Some("u"),
+        password: None,
+        options,
+        refresh: false,
+        last_success_at: None,
+        event_sink: None,
+        run_id: None,
+        execution_order: None,
+        input_id: None,
+    }
 }
 
 async fn render(

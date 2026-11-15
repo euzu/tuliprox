@@ -117,17 +117,30 @@ impl PluginHttp {
         Ok(Self { outbound: outbound.clone(), plugin: Arc::clone(plugin), granted })
     }
 
-    /// `GET url` through the same client, executor key and capability check as
+    /// `GET url` with optional headers through the same client, executor key and capability check as
     /// guest requests. Returns the body (at most `cap` bytes, further capped by
     /// [`MAX_RESPONSE_BYTES`]) and the `Content-Type` header. Redirects are not
     /// followed and a non-2xx status is an `Err`. The message never carries the
     /// URL, which may hold credentials.
-    pub(crate) async fn fetch(&self, url: &str, cap: usize) -> Result<(Bytes, Option<String>), String> {
+    pub(crate) async fn fetch_with_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        cap: usize,
+    ) -> Result<(Bytes, Option<String>), String> {
         if !self.granted {
             return Err(Error::HttpRequestDenied.to_string());
         }
         let PluginHttp { outbound: Outbound { client, executor }, plugin, .. } = self;
-        let request = client.get(url).build().map_err(|err| map_error(err).to_string())?;
+        let mut builder = client.get(url);
+        for (name, value) in headers {
+            if let (Ok(header_name), Ok(header_value)) =
+                (http::header::HeaderName::from_bytes(name.as_bytes()), http::header::HeaderValue::from_str(value))
+            {
+                builder = builder.header(header_name, header_value);
+            }
+        }
+        let request = builder.build().map_err(|err| map_error(err).to_string())?;
         let cap = cap.min(MAX_RESPONSE_BYTES);
         let fetched = executor
             .execute(plugin, classify, || perform(client, request, Timeouts::default(), cap))
@@ -139,6 +152,11 @@ impl PluginHttp {
         let content_type =
             fetched.headers.get(http::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).map(str::to_string);
         Ok((fetched.body, content_type))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn fetch(&self, url: &str, cap: usize) -> Result<(Bytes, Option<String>), String> {
+        self.fetch_with_headers(url, &[], cap).await
     }
 }
 

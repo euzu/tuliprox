@@ -30,8 +30,8 @@ use input::skipped_clusters;
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub use input::{
     get_input_local_library_playlist_file_path, get_input_m3u_playlist_file_path,
-    get_input_media_server_playlist_file_path, load_input_playlist, load_input_stalker_playlist,
-    persist_input_playlist, persist_input_playlist_with_options,
+    get_input_media_server_playlist_file_path, load_input_playlist, load_input_playlist_as,
+    load_input_stalker_playlist, persist_input_playlist, persist_input_playlist_with_options,
 };
 #[cfg(test)]
 use persist::persist_playlist_with_mode;

@@ -261,26 +261,38 @@ fn initialize_result(params: Option<&Value>) -> Value {
 fn tools_list(view: &ToolView, read_only: bool) -> Vec<Value> {
     view.visible(read_only)
         .map(|tool| {
-            json!({
+            let mut entry = json!({
                 "name": tool.name(),
                 "description": tool.description(),
                 "inputSchema": tool.schema(),
                 "annotations": tool_annotations(&tool),
-            })
+            });
+            if let Some(schema) = tool.output_schema() {
+                entry["outputSchema"] = schema;
+            }
+            entry
         })
         .collect()
 }
 
 /// MCP tool annotations. The spec defaults a non-read-only tool to destructive
 /// and every tool to open-world, so both are stated where they are known: a
-/// built-in tool only acts on tuliprox itself and none of them deletes data.
-/// A plugin's write tool keeps the spec defaults.
+/// built-in tool only acts on tuliprox itself and none of them deletes data, so
+/// it is not open-world. A plugin may call an external service, so it stays
+/// open-world; whether its write tools are destructive comes from the export's
+/// `destructive` flag, since only the plugin knows.
 fn tool_annotations(tool: &McpToolRef<'_>) -> Value {
-    let read_only = tool.kind() == McpToolKind::Read;
     match tool {
-        McpToolRef::Builtin(_) if read_only => json!({ "readOnlyHint": true, "openWorldHint": false }),
+        McpToolRef::Builtin(builtin) if builtin.kind == McpToolKind::Read => {
+            json!({ "readOnlyHint": true, "openWorldHint": false })
+        }
         McpToolRef::Builtin(_) => json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }),
-        McpToolRef::Plugin(_) => json!({ "readOnlyHint": read_only }),
+        McpToolRef::Plugin(plugin) if plugin.kind == McpToolKind::Read => {
+            json!({ "readOnlyHint": true, "openWorldHint": true })
+        }
+        McpToolRef::Plugin(plugin) => {
+            json!({ "readOnlyHint": false, "destructiveHint": plugin.destructive, "openWorldHint": true })
+        }
     }
 }
 
@@ -305,7 +317,12 @@ async fn call_tool_in(
     }
     let arguments = match params.get("arguments") {
         None | Some(Value::Null) => None,
-        Some(Value::Object(arguments)) => Some(arguments),
+        Some(Value::Object(arguments)) => {
+            if matches!(tool, McpToolRef::Plugin(_)) && arguments.contains_key("input_draft") {
+                return Ok(tool_result(true, "`input_draft` is not supported for MCP tools"));
+            }
+            Some(arguments)
+        }
         Some(_) => return Ok(tool_result(true, "arguments must be an object")),
     };
     let tool_request = match tool {
@@ -367,13 +384,20 @@ async fn call_tool_in(
         String::new()
     };
     let mut result = if status.is_success() {
-        let mut result = tool_result(false, &text);
-        // A complete JSON object answer is also given as `structuredContent`; a
-        // truncated answer carries a marker and no longer parses.
-        if let Ok(object @ Value::Object(_)) = serde_json::from_str::<Value>(&text) {
-            result["structuredContent"] = object;
+        match output_schema_result(&tool, &text) {
+            Ok(structured) => {
+                let mut result = tool_result(false, &text);
+                // A complete JSON object answer is also given as `structuredContent`;
+                // a truncated answer carries a marker and no longer parses.
+                if let Some(structured) = structured {
+                    result["structuredContent"] = structured;
+                }
+                result
+            }
+            // The plugin's answer does not fit the output schema it declared:
+            // the result is discarded, only the short reason reaches the model.
+            Err(message) => tool_result(true, &message),
         }
-        result
     } else {
         let mut message = if text.is_empty() { format!("HTTP {status}") } else { format!("HTTP {status}: {text}") };
         if let Some(seconds) = retry_after {
@@ -385,6 +409,59 @@ async fn call_tool_in(
         result["_meta"] = json!({ "tuliprox/plugin": plugin_tool.plugin_id });
     }
     Ok(result)
+}
+
+/// The `structuredContent` [`call_tool_in`] may attach, or the short reason a
+/// successful answer cannot be handed out.
+///
+/// A plugin tool that declares an `output_schema` is held to it: the answer must
+/// be a JSON object (the spec's structured content), complete (not truncated),
+/// and match the schema. Anything else is a tool error and the answer is
+/// discarded. A tool without an `output_schema` keeps the additive behavior: a
+/// complete JSON object is also structured content, everything else is text.
+fn output_schema_result(tool: &McpToolRef<'_>, text: &str) -> Result<Option<Value>, String> {
+    let output_schema = tool.output_schema();
+    let declared = output_schema.is_some();
+    if truncated_marker(text) {
+        return if declared {
+            Err(format!("The tool '{}' declares an outputSchema: its truncated answer was discarded", tool.name()))
+        } else {
+            Ok(None)
+        };
+    }
+    let parsed = serde_json::from_str::<Value>(text);
+    if !declared {
+        return Ok(parsed.ok().filter(Value::is_object));
+    }
+    let value = parsed.map_err(|_| {
+        format!(
+            "The tool '{}' declares an outputSchema but its answer is not JSON; the answer was discarded",
+            tool.name()
+        )
+    })?;
+    if !value.is_object() {
+        return Err(format!(
+            "The tool '{}' declares an outputSchema but its answer is not a JSON object; the answer was discarded",
+            tool.name()
+        ));
+    }
+    let violations = tool.output_violations(&value);
+    if violations.is_empty() {
+        return Ok(Some(value));
+    }
+    let mut paths: Vec<&str> = violations.iter().map(String::as_str).take(5).collect();
+    paths.sort_unstable();
+    let more = if violations.len() > paths.len() { ", …" } else { "" };
+    Err(format!(
+        "The tool '{}' answered outside its outputSchema ({}{more}); the answer was discarded",
+        tool.name(),
+        paths.join(", ")
+    ))
+}
+
+/// Whether `text` ends with the truncation marker [`body_to_text`] appends.
+fn truncated_marker(text: &str) -> bool {
+    text.rsplit_once("\n[truncated: response exceeded ").is_some_and(|(_, tail)| tail.ends_with(" bytes]"))
 }
 
 /// The rpc route's result limit (plan §7: plugin tool results are capped at it).
@@ -1877,7 +1954,25 @@ mod tests {
             kind,
             redact_secrets: true,
             plugin_id: "demo".to_string(),
+            destructive: false,
+            output_schema: None,
+            input_scoped: false,
         }
+    }
+
+    /// `plugin_tool` with an `output_schema`: `{"items": [{…}]}`.
+    fn schema_tool(name: &str) -> OwnedMcpTool {
+        let mut tool = plugin_tool(name, McpToolKind::Read);
+        tool.output_schema = Some(json!({
+            "type": "object",
+            "required": ["items"],
+            "additionalProperties": false,
+            "properties": {
+                "items": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" } } } },
+                "next_cursor": { "type": ["string", "null"] }
+            }
+        }));
+        tool
     }
 
     fn plugin_view(tools: Vec<OwnedMcpTool>) -> ToolView { ToolView::new(true, || tools) }
@@ -1964,10 +2059,13 @@ mod tests {
         let ping = list.iter().find(|tool| tool["name"] == "plugin_demo_ping").expect("listed");
         assert_eq!(ping["description"], "[plugin demo@1.0.0] Ping");
         assert_eq!(ping["inputSchema"]["properties"]["league"]["type"], "string");
-        assert_eq!(ping["annotations"]["readOnlyHint"], true);
+        assert_eq!(ping["annotations"], json!({ "readOnlyHint": true, "openWorldHint": true }));
         let reset = list.iter().find(|tool| tool["name"] == "plugin_demo_reset").expect("listed");
-        assert_eq!(reset["annotations"]["readOnlyHint"], false);
-        assert!(reset["annotations"].get("destructiveHint").is_none(), "plugin writes keep the spec default");
+        assert_eq!(
+            reset["annotations"],
+            json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true }),
+            "a plugin write is not destructive unless its export says so"
+        );
         let status = list.iter().find(|tool| tool["name"] == "get_status").expect("listed");
         assert_eq!(status["annotations"], json!({ "readOnlyHint": true, "openWorldHint": false }));
         let update = list.iter().find(|tool| tool["name"] == "update_playlists").expect("listed");
@@ -2058,6 +2156,104 @@ mod tests {
         assert_eq!(reply["_meta"], json!({ "tuliprox/plugin": "demo" }));
     }
 
+    #[test]
+    fn plugin_tool_annotations_follow_the_kind_and_the_destructive_flag() {
+        let mut destructive = plugin_tool("plugin_demo_drop", McpToolKind::Write);
+        destructive.destructive = true;
+        let view = plugin_view(vec![
+            plugin_tool("plugin_demo_ping", McpToolKind::Read),
+            plugin_tool("plugin_demo_reset", McpToolKind::Write),
+            destructive,
+        ]);
+        let list = tools_list(&view, false);
+        let find = |name: &str| list.iter().find(|tool| tool["name"] == name).expect("listed").clone();
+
+        // A plugin may call an external service: it keeps the spec's open world.
+        assert_eq!(find("plugin_demo_ping")["annotations"], json!({ "readOnlyHint": true, "openWorldHint": true }));
+        assert_eq!(
+            find("plugin_demo_reset")["annotations"],
+            json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })
+        );
+        assert_eq!(
+            find("plugin_demo_drop")["annotations"],
+            json!({ "readOnlyHint": false, "destructiveHint": true, "openWorldHint": true })
+        );
+        // The built-in annotations are unchanged.
+        assert_eq!(find("get_status")["annotations"], json!({ "readOnlyHint": true, "openWorldHint": false }));
+        assert_eq!(
+            find("update_playlists")["annotations"],
+            json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false })
+        );
+    }
+
+    #[test]
+    fn an_output_schema_is_listed_as_output_schema_and_only_for_plugins() {
+        let list = tools_list(&plugin_view(vec![schema_tool("plugin_demo_search")]), false);
+        let search = list.iter().find(|tool| tool["name"] == "plugin_demo_search").expect("listed");
+        assert_eq!(search["outputSchema"]["required"], json!(["items"]));
+        assert_eq!(search["inputSchema"]["properties"]["league"]["type"], "string", "the input schema stays");
+        for builtin in list.iter().filter(|tool| tool["name"] != "plugin_demo_search") {
+            assert!(builtin.get("outputSchema").is_none(), "{builtin}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_result_that_matches_the_output_schema_is_structured_content() {
+        let body = r#"{"items":[{"id":"a"}],"next_cursor":null}"#;
+        let state = plugin_state(rpc_router(move || async move { body }), true, 262_144);
+        let view = plugin_view(vec![schema_tool("plugin_demo_search")]);
+        let reply = call_plugin(&state, &view, "plugin_demo_search", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], false, "{reply}");
+        assert_eq!(reply["structuredContent"], json!({ "items": [{ "id": "a" }], "next_cursor": null }));
+        assert_eq!(reply["_meta"], json!({ "tuliprox/plugin": "demo" }));
+        assert!(result_text(&reply).contains(r#""items""#));
+    }
+
+    #[tokio::test]
+    async fn a_result_outside_the_output_schema_is_an_error_and_discarded() {
+        let body = r#"{"items":"not a list","leak":"SECRET-VALUE"}"#;
+        let state = plugin_state(rpc_router(move || async move { body }), true, 262_144);
+        let view = plugin_view(vec![schema_tool("plugin_demo_search")]);
+        let reply = call_plugin(&state, &view, "plugin_demo_search", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], true, "{reply}");
+        assert!(reply.get("structuredContent").is_none(), "{reply}");
+        let text = result_text(&reply);
+        assert!(text.contains("outputSchema") && text.contains("items"), "{text}");
+        assert!(!text.contains("SECRET-VALUE"), "the discarded answer does not reach the model: {text}");
+    }
+
+    #[tokio::test]
+    async fn a_non_object_or_non_json_result_with_an_output_schema_is_an_error() {
+        for body in ["[1,2]", r#""text""#, "42", "not json"] {
+            let state = plugin_state(rpc_router(move || async move { body }), true, 262_144);
+            let view = plugin_view(vec![schema_tool("plugin_demo_search")]);
+            let reply = call_plugin(&state, &view, "plugin_demo_search", json!({})).await.unwrap();
+            assert_eq!(reply["isError"], true, "{body}: {reply}");
+            assert!(reply.get("structuredContent").is_none(), "{body}");
+            assert!(result_text(&reply).contains("discarded"), "{body}: {}", result_text(&reply));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_truncated_result_with_an_output_schema_is_an_error() {
+        let body = format!(r#"{{"items":["{}"]}}"#, "a".repeat(200));
+        let state = plugin_state(rpc_router(move || async move { body }), true, 32);
+        let view = plugin_view(vec![schema_tool("plugin_demo_search")]);
+        let reply = call_plugin(&state, &view, "plugin_demo_search", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], true, "{reply}");
+        assert!(reply.get("structuredContent").is_none());
+        assert!(result_text(&reply).contains("truncated"), "{}", result_text(&reply));
+    }
+
+    #[tokio::test]
+    async fn without_an_output_schema_a_non_object_result_stays_text() {
+        let state = plugin_state(rpc_router(|| async { "[1,2]" }), true, 262_144);
+        let view = plugin_view(vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]);
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], false, "{reply}");
+        assert!(reply.get("structuredContent").is_none(), "only a JSON object becomes structured content");
+    }
+
     #[cfg(feature = "plugins")]
     #[test]
     fn a_plugin_tool_is_mapped_to_a_forced_redaction_post_of_the_rpc_route() {
@@ -2072,7 +2268,12 @@ mod tests {
                 plugin_id: "demo".to_string(),
                 method: "ping-it".to_string(),
                 kind,
+                destructive: true,
+                output_schema: Some(json!({ "type": "object" })),
+                input_scoped: true,
             });
+            assert!(tool.destructive && tool.input_scoped);
+            assert_eq!(tool.output_schema, Some(json!({ "type": "object" })));
             assert!(tool.redact_secrets);
             assert_eq!(tool.method, McpToolMethod::Post);
             assert_eq!(tool.path, "/plugins/demo/rpc/ping-it");
@@ -2184,6 +2385,203 @@ mod tests {
         let reply = call_plugin(&state, &view, "plugin_demo_denied", json!({})).await.unwrap();
         assert_eq!(result_text(&reply), "HTTP 403 Forbidden");
     }
+    // ---- input_scoped plugin tools ---------------------------------------
+
+    /// The `ui-demo` fixture: exports `echo`, a read that returns the payload it
+    /// was given. `None` when the fixtures are not built.
+    #[cfg(feature = "plugins")]
+    fn plugin_fixtures() -> Option<std::path::PathBuf> {
+        let dir = std::env::var_os("TULIPROX_PLUGIN_FIXTURES").map_or_else(
+            || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/plugin-fixtures/plugins"),
+            std::path::PathBuf::from,
+        );
+        dir.join("ui-demo").join("plugin.wasm").is_file().then_some(dir)
+    }
+
+    /// A loaded, MCP-approved `ui-demo` whose `echo` export is `input_scoped`,
+    /// the app state it runs under, and the MCP state on the real `/api/v1`
+    /// router, so a tool call goes through the rpc route into the guest.
+    #[cfg(feature = "plugins")]
+    struct ScopedFixture {
+        state: McpState,
+        view: ToolView,
+        _plugins: tempfile::TempDir,
+        _data: tempfile::TempDir,
+    }
+
+    #[cfg(feature = "plugins")]
+    async fn scoped_fixture(inputs: Vec<tuliprox_core::model::ConfigInput>) -> Option<ScopedFixture> {
+        use std::sync::Arc;
+        use tuliprox_core::model::{PluginEntry, PluginsConfig};
+        use tuliprox_plugins::{PluginServices, PluginSystem};
+
+        let fixtures = plugin_fixtures()?;
+        let wasm = std::fs::read(fixtures.join("ui-demo").join("plugin.wasm")).expect("fixture wasm");
+        let plugins = tempfile::tempdir().expect("plugins dir");
+        let data = tempfile::tempdir().expect("data dir");
+        let plugin_dir = plugins.path().join("ui-demo");
+        std::fs::create_dir_all(plugin_dir.join("rpc")).expect("plugin dir");
+        std::fs::write(plugin_dir.join("plugin.wasm"), &wasm).expect("wasm");
+        std::fs::write(
+            plugin_dir.join("manifest.yml"),
+            "id: ui-demo\nname: UI demo\nversion: 0.3.0\napi_version: 1\nhooks: [rpc.call]\nui:\n  rpc_exports:\n    - { name: echo, kind: read, mcp: true, input_scoped: true, description: \"Echo\", input_schema: rpc/in.json, output_schema: rpc/out.json }\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            plugin_dir.join("rpc/in.json"),
+            r#"{"type":"object","properties":{"query":{"type":"string"}},"additionalProperties":false}"#,
+        )
+        .expect("input schema");
+        std::fs::write(plugin_dir.join("rpc/out.json"), r#"{"type":"object"}"#).expect("output schema");
+
+        let config = PluginsConfig {
+            enabled: true,
+            directory: plugins.path().to_string_lossy().to_string(),
+            plugins: vec![PluginEntry {
+                id: "ui-demo".to_string(),
+                enabled: true,
+                priority: 0,
+                settings: serde_json::Map::new(),
+                settings_version: 1,
+                update_policy: shared::model::PluginUpdatePolicy::Auto,
+            }],
+            ..PluginsConfig::default()
+        };
+        let services = PluginServices::new(reqwest::Client::new(), data.path().join("plugin-data"));
+        let system = PluginSystem::load(&config, services).expect("load").expect("enabled");
+        // Trust on first use pinned the exact wasm without `mcp`; the admin's
+        // `mcp: true` is what makes the export a tool, so add it and re-scan.
+        let pins_path = data.path().join("plugin-data").join("approvals.json");
+        let mut pins: Value =
+            serde_json::from_slice(&std::fs::read(&pins_path).expect("pin written on load")).expect("approvals.json");
+        pins["ui-demo"]["mcp"] = json!(true);
+        std::fs::write(&pins_path, pins.to_string()).expect("approvals.json");
+        system.reload(&config);
+
+        let dto = shared::model::McpConfigDto {
+            enabled: true,
+            read_only: false,
+            plugin_tools: true,
+            max_response_bytes: 262_144,
+            ..Default::default()
+        };
+        let config = Config { mcp: Some(McpConfig::from(dto.clone())), ..Config::default() };
+        let app_state = crate::api::model::create_test_app_state_with_plugins(config, Some(system));
+        app_state.app_config.sources.store(Arc::new(crate::model::SourcesConfig {
+            inputs: inputs.into_iter().map(Arc::new).collect(),
+            ..crate::model::SourcesConfig::default()
+        }));
+        let v1 = v1_api_register(false, &app_state, "").with_state(Arc::clone(&app_state));
+        let state = McpState::new(v1, &McpConfig::from(dto), false, "", Arc::clone(&app_state));
+        let view = state.tool_view().await;
+        Some(ScopedFixture { state, view, _plugins: plugins, _data: data })
+    }
+
+    #[cfg(feature = "plugins")]
+    fn plugin_input(name: &str, plugin: &str) -> tuliprox_core::model::ConfigInput {
+        use shared::utils::Internable;
+        tuliprox_core::model::ConfigInput {
+            name: name.intern(),
+            input_type: shared::model::InputType::Plugin,
+            plugin: Some(plugin.intern()),
+            url: format!("http://{name}.local/"),
+            username: Some("alice".to_string()),
+            password: Some("hunter2".to_string()),
+            plugin_options: vec![
+                ("region".to_string(), "eu".to_string()),
+                ("api_token".to_string(), "t-0k3n".to_string()),
+            ],
+            ..tuliprox_core::model::ConfigInput::default()
+        }
+    }
+
+    #[cfg(feature = "plugins")]
+    #[tokio::test]
+    async fn a_scoped_tool_takes_the_input_enum_and_the_guest_reads_args_and_context() {
+        let Some(fixture) =
+            scoped_fixture(vec![plugin_input("living-room", "ui-demo"), plugin_input("bedroom", "other-plugin")]).await
+        else {
+            return;
+        };
+        let list = tools_list(&fixture.view, false);
+        let tool = list.iter().find(|tool| tool["name"] == "plugin_ui_demo_echo").expect("the scoped tool is listed");
+        assert_eq!(tool["inputSchema"]["properties"]["input"]["type"], "string");
+        assert_eq!(tool["inputSchema"]["properties"]["input"]["enum"], json!(["living-room"]));
+        assert_eq!(tool["inputSchema"]["required"], json!(["input"]));
+        assert_eq!(tool["annotations"], json!({ "readOnlyHint": true, "openWorldHint": true }));
+        assert_eq!(tool["outputSchema"], json!({ "type": "object" }));
+
+        let params = json!({ "name": "plugin_ui_demo_echo", "arguments": { "input": "living-room", "query": "news" } });
+        let reply = call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params)).await.expect("reply");
+        assert_eq!(reply["isError"], false, "{reply}");
+        let parsed: Value = serde_json::from_str(result_text(&reply)).expect("the guest's answer");
+        assert_eq!(parsed["echo"]["args"], json!({ "query": "news" }));
+        assert_eq!(parsed["echo"]["input"]["name"], "living-room");
+        assert_eq!(parsed["echo"]["input"]["url"], "http://living-room.local/");
+        assert_eq!(
+            parsed["echo"]["input"]["options"],
+            json!({ "region": "eu", "api_token": shared::model::REDACTED_SECRET })
+        );
+        // The guest echoed the credentials; none of their values leaves the host.
+        for leaked in ["hunter2", "t-0k3n", "alice"] {
+            assert!(!result_text(&reply).contains(leaked), "{leaked} leaked: {}", result_text(&reply));
+        }
+        assert_eq!(reply["structuredContent"], parsed, "the answer is a JSON object and becomes structured content");
+    }
+
+    #[cfg(feature = "plugins")]
+    #[tokio::test]
+    async fn a_scoped_tool_without_a_matching_input_is_not_listed_and_a_foreign_name_is_refused() {
+        let Some(fixture) = scoped_fixture(vec![plugin_input("bedroom", "other-plugin")]).await else { return };
+        assert!(fixture.view.find("plugin_ui_demo_echo").is_none(), "no input of this plugin: no tool");
+        assert!(!tools_list(&fixture.view, false).iter().any(|tool| tool["name"] == "plugin_ui_demo_echo"));
+
+        // `m3u-input` is configured, but it is not a `type: plugin` input.
+        let mut m3u = plugin_input("m3u-input", "ui-demo");
+        m3u.input_type = shared::model::InputType::M3u;
+        m3u.plugin = None;
+        let Some(fixture) =
+            scoped_fixture(vec![plugin_input("living-room", "ui-demo"), plugin_input("bedroom", "other-plugin"), m3u])
+                .await
+        else {
+            return;
+        };
+        // An input bound to another plugin is refused, and so is every name that
+        // does not resolve to a plugin input.
+        for (name, needle) in [
+            ("bedroom", "belongs to plugin `other-plugin`"),
+            ("nope", "no configured plugin input is named `nope`"),
+            ("m3u-input", "no configured plugin input is named `m3u-input`"),
+        ] {
+            let params = json!({ "name": "plugin_ui_demo_echo", "arguments": { "input": name } });
+            let reply =
+                call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params)).await.expect("reply");
+            assert_eq!(reply["isError"], true, "{name}: {reply}");
+            let text = result_text(&reply);
+            assert!(text.contains("400"), "{name}: {text}");
+            assert!(text.contains(needle), "{name}: {text}");
+        }
+    }
+
+    #[cfg(feature = "plugins")]
+    #[tokio::test]
+    async fn a_scoped_tool_via_mcp_refuses_input_draft() {
+        let Some(fixture) = scoped_fixture(vec![plugin_input("living-room", "ui-demo")]).await else { return };
+        let params = json!({
+            "name": "plugin_ui_demo_echo",
+            "arguments": {
+                "input_draft": {
+                    "name": "living-room",
+                    "url": "http://living-room.local/"
+                }
+            }
+        });
+        let reply = call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params)).await.expect("reply");
+        assert_eq!(reply["isError"], true);
+        let text = result_text(&reply);
+        assert!(text.contains("input_draft"), "{text}");
+    }
+
     #[test]
     fn media_server_tools_are_listed_with_schemas_and_annotations() {
         let view = ToolView::default();

@@ -15,18 +15,32 @@ the SDK offers is built on those imports. The component has no file system or so
 | `get-config` | `get-config() -> string` | The plugin's settings as JSON, with `${env:VAR}` references resolved |
 | `now-unix` | `now-unix() -> s64` | Unix seconds from the host clock. See [Determinism](#determinism-contract) |
 | `cache-image` | `cache-image(url) -> result<string, string>` | Needs capabilities `image_cache` and `network`. Returns a URL served by this server |
+| `cache-image-with-headers` | `cache-image-with-headers(url, headers) -> result<string, string>` | In `host-v1-1`. Needs `image_cache` and `network`. Returns a URL served by this server |
 | `run-process` | `run-process(program, args, env, stdin, timeout-secs) -> result<process-output, string>` | Needs capability `process`. Starts a local program and waits. See [Running programs](./security.md#running-programs) |
 
 The `kv-error` cases are `quota-exceeded`, `key-too-large`, `value-too-large`, and `unavailable(string)`.
 
 Without a capability the call is refused at run time, not at load time: a KV call without `storage` returns
-`unavailable("the plugin has no storage capability, so it has no KV store")`, and `cache-image` without both
-capabilities returns an `err` string. `get-config` is not gated. It returns the plugin's own settings with secrets
-resolved, and only to that plugin's own instances (`backend/plugins/src/host_fns.rs`).
+`unavailable("the plugin has no storage capability, so it has no KV store")`, and `cache-image` or
+`cache-image-with-headers` without both capabilities returns an `err` string. `get-config` is not gated. It returns the
+plugin's own settings with secrets resolved, and only to that plugin's own instances (`backend/plugins/src/host_fns.rs`).
 
-`cache-image` also returns `err`, and the plugin keeps the upstream URL, when the server's resource cache is disabled,
-when the image is over 2 MiB, when the plugin's 64 MiB image quota is spent, or when the type is `image/svg+xml`
-(`backend/plugins/src/image_cache.rs`). In CLI mode there is no resource cache, so it always returns `err`.
+`cache-image` and `cache-image-with-headers` also return `err`, and the plugin keeps the upstream URL, when the server's
+resource cache is disabled, when the image is over 2 MiB, when the plugin's 64 MiB image quota is spent, or when the
+type is `image/svg+xml` (`backend/plugins/src/image_cache.rs`). In CLI mode there is no resource cache, so it always
+returns `err`.
+
+`cache-image-with-headers` (defined in `interface host-v1-1` and imported by `media-input-plugin` and `host-v1-1-plugin`)
+allows plugins to pass custom request headers when fetching upstream artwork (e.g. for authenticated CDNs or media
+servers). It enforces strict safety rules:
+
+- Headers matching the hop-by-hop and connection denylist (`Host`, `Connection`, `Transfer-Encoding`, `Keep-Alive`,
+  `TE`, `Trailer`, `Upgrade`, `Proxy-*`) are dropped.
+- Limits are enforced: at most 64 headers, at most 256 bytes per header name, at most 4,096 bytes per header value, and
+  at most 16 KiB total header bytes. Exceeding any limit returns an `err`.
+- Sensitive privacy rule: header values are never logged or exposed in debug traces.
+- Backward compatibility: `host-v1-1` is an additive interface; 1.0.0 components that do not import it continue to load
+  and link cleanly.
 
 `run-process` returns `err` without the `process` capability, for a malformed request (an empty program, more than 256
 arguments, over 1 MiB of input, a NUL byte, an invalid environment name), when the program cannot be started, and when it
@@ -38,7 +52,7 @@ The SDK wraps these functions. The names below are those of `plugins/plugin-sdk/
 - `log` with `trace`, `debug`, `info`, `warn` and `error` macros, which take any `AsRef<str>`.
 - `kv` with `get`, `set`, `delete`, `get_str`, `set_str`, `get_json`, `set_json`, `set_ttl`, `get_fresh`, `set_json_ttl`
   and `get_json_fresh`.
-- `images::cache(url)`, `clock::now_unix()` and `config::raw()`.
+- `images::cache(url)` and `images::cache_with_headers(url, headers)`, `clock::now_unix()` and `config::raw()`.
 - `http` with `Request` builders (`get`, `post`, `put`, `delete`, `header`, `bearer`, `body`, `json`, `timeout`,
   `send`), a `Client` with defaults, `Response` with `status`, `header`, `text`, `json` and `error_for_status`, and
   free functions `get` and `get_json`. It is built on `wstd` 0.6.8 and runs with `block_on` inside synchronous exports.
@@ -100,6 +114,8 @@ requests. The network capability is described in [Security Model](./security.md)
 
 - Hook calls have a deadline set by `plugins.max_exec` (default `5s`), clamped by the manifest's `resources.max_exec_ms`.
 - Scheduled task runs have a deadline set by `plugins.max_task_exec` (default `10m`), clamped by the task's `max_exec_ms`.
+- Media provider `resolve-stream` and `resolve-image` calls have their own deadline: 5 s by default, set by the manifest's
+  `resources.resolve_ms` and clamped to 1 ms ... 30 s.
 - The engine checks its epoch every 10 ms. The wall-clock limit has one second of slack beyond the CPU deadline
   (`backend/plugins/src/runtime.rs`).
 - `stream.inject-headers` runs under a 50 ms clamp for the whole step, see [Hook Reference](./hooks.md).
@@ -205,7 +221,8 @@ a config reload. `enabled` defaults to `true`. Removing a source leaves the plug
 ## Mock host for unit tests
 
 The SDK's `mock` module replaces the host on non-wasm32 targets. Its functions are `reset`, `set_config`, `set_now`,
-`advance`, `set_kv_unavailable`, `kv_snapshot`, `logs`, `set_cached_image`, `cached_images`, `http_respond`,
+`advance`, `set_kv_unavailable`, `kv_snapshot`, `logs`, `set_cached_image`, `cached_images`, `cached_headers`,
+`cached_images_with_headers`, `http_respond`,
 `http_respond_with`, `http_fail` and `http_requests`. The template's unit test uses `mock::reset` and `mock::set_config`, then calls
 `plugin::Settings::reload()` because a unit test has no `init`. Run it with `cargo test` in the rendered plugin
 directory. No tuliprox server is needed.

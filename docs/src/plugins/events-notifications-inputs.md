@@ -187,6 +187,59 @@ once the plugin is enabled and the playlist is refreshed.
 - `plugin_config` holds those per-input values. The host hands them over as `input-request.options`; an input without
   one passes none.
 
+### Media catalog providers (`media-provider-v1-1`)
+
+For a step-by-step guide with a complete SDK example, see
+[Connecting a Media Server as a Plugin](media-server-plugins.md).
+
+A plugin can also serve as a structured media catalog provider, delivering movies, series, seasons, and episodes.
+It uses the `media.fetch` manifest hook (requiring `provides.input_type: true`) and exports
+`tuliprox:plugin/media-provider-v1-1@1.0.0`. A plugin may export `input-provider` (for classic M3U channels) or
+`media-provider-v1-1` (for structured media catalogs), but never both; the host rejects plugins exporting both
+at load time.
+
+- **`fetch_catalog(req)` contract & paging**: Fetches the catalog page by page until `next-cursor` is `None`.
+  The guest receives a `media-request` record containing:
+  - `refresh`: a boolean set to `true` when the input update runs under the `REFRESH` policy (bypassing caches and
+    forcing full upstream fetching), or `false` under `NORMAL` incremental updates.
+  - `last-success-at`: optional Unix timestamp (seconds) of the input's last successful complete catalog fetch, sourced
+    from the persisted input status, or `none` on the first run. Guests can use this timestamp to perform differential
+    syncs.
+  - `options` and `secrets`: input configuration key-value pairs and resolved secrets.
+  - `cursor`: pagination cursor passed back to subsequent pages (`none` for the first page).
+
+  Each page returns a `media-catalog` containing libraries, movies, series, seasons, and episodes. The host enforces
+  strict bounds: a per-page execution deadline (same as `input.fetch`), a maximum of 10,000 pages, loop cursor
+  detection, an overall item cap of 1,000,000 items, and string/list length caps (e.g. titles <= 512 bytes,
+  summaries <= 16,384 bytes, provider hints <= 50, cast and crew <= 100).
+- **Progress reporting**: While paging through the catalog, the host emits a `PlaylistUpdateProgressEvent` after each
+  page through the event sink. The UI displays the running total of ingested catalog items (movies, series, and
+  episodes) alongside the current input name and run order.
+- **Host-set IDs & Complete-before-publish**: The plugin assigns plugin-scoped item IDs, library IDs, and series/season
+  references. The host sets `input_name` and `server_id` (`plugin_id`), maps items to the shared media-server snapshot,
+  and publishes the catalog only after the last page completes successfully. Duplicate IDs and dangling references
+  are safely dropped and logged without crashing or panicking the host.
+- **Stream and image resolution**: playlist items of a media provider plugin carry internal `media-server://plugin/...`
+  references. When a client plays an item or loads its artwork, the host calls `resolve_stream` (with the client's
+  `Range` header in `range`) or `resolve_image` and proxies the returned target like a Jellyfin or Emby stream: the
+  `Range` header is forwarded, `206` and `416` pass through, and only safe response headers (`Content-Type`,
+  `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag`, `Last-Modified`) reach the client. The target's headers
+  go upstream only; the client never sees them.
+
+#### Resolution limits
+
+- **Deadline**: 5 s per call by default. A plugin can set `resources.resolve_ms` in its manifest; the host clamps it to
+  1 ms ... 30 s. A plugin that hangs or traps fails only that request (`502`); the host and other streams keep running.
+- **Target checks**: the URL must be `http` or `https` with a host, and the plugin needs the `network` capability. At
+  most 32 headers, 256 bytes per name, 4 KiB per value, 16 KiB in total. Headers on the plugin header denylist
+  (`Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Upgrade`, `Proxy-*`)
+  are rejected. Any violation fails that request.
+- **Cache**: a target with `ttl-secs` greater than 0 is cached per input, plugin, item and stream or image key, for at
+  most one hour and up to 4,096 entries. Failed resolutions and targets without `ttl-secs` are never cached.
+  Concurrent requests for the same key share one guest call. Set a TTL only when the target URL does not depend on
+  the requested range.
+- **Binding**: an item whose input no longer names the plugin, or whose plugin is disabled or removed, answers `404`.
+
 ## Output providers
 
 A plugin can render a target output file. It needs `provides.output_format` and the hook `output.render`. Like the
@@ -310,6 +363,84 @@ characters removed, and is limited to 512 characters.
 
 A `write` method is hidden whenever MCP is read-only, and otherwise needs `SystemWrite`. The result is checked for
 resolved secrets like any rpc result.
+
+### Annotations
+
+A tool's `annotations` tell the client what the call does:
+
+- A `kind: read` export is `{"readOnlyHint": true, "openWorldHint": true}`.
+- A `kind: write` export is `{"readOnlyHint": false, "destructiveHint": <the export's destructive>, "openWorldHint": true}`.
+  `destructive` is `false` unless the export says otherwise.
+
+`openWorldHint: true` is the MCP default and is kept for plugin tools: a plugin may contact an external service. Built-in
+tuliprox tools declare `openWorldHint: false`.
+Set `destructive: true` on a `write` export that deletes or overwrites data the operator cannot get back, so clients that
+ask for confirmation ask about those calls. It is only allowed with `kind: write`; on a `read` export the manifest is
+rejected.
+
+### Output schema
+
+An export may declare `output_schema`, a package-relative JSON Schema file like `input_schema` and checked with the same
+validator (so it uses the same subset). `tools/list` shows it as `outputSchema`. The host validates the plugin's answer
+against it on every successful call:
+
+```yaml
+  rpc_exports:
+    - name: search-items
+      kind: read
+      mcp: true
+      input_schema: rpc/search.items.in.json
+      output_schema: rpc/search.items.out.json
+```
+
+- The answer must be a JSON object (MCP's `structuredContent` is an object). A non-object answer with an `output_schema`
+  is a tool error and the answer is discarded.
+- A truncated answer (the 256 KiB cap) is a tool error too; the plugin has to page its result instead.
+- The tool's result then carries the answer as the `text` block and, when it matches, as `structuredContent`.
+- A violation is a tool error (`isError: true`) with the short list of offending paths and no plugin content at all.
+
+Without `output_schema`, behavior is unchanged: an answer that is a complete JSON object is also given as
+`structuredContent`, anything else is only the text block.
+
+### Input-scoped exports
+
+An export that works per configured input sets `input_scoped: true`. Examples are "list the libraries of this media
+server" or "check this connection". The host then adds a required `input` property to the tool's schema, an enum of the
+configured inputs with `type: plugin` and `plugin: <this plugin id>`. The tool is not listed at all when the plugin has no
+such input.
+
+The guest sees a different payload than for a plain export:
+
+```json
+{"args": {"query": "news"}, "input": {"name": "living-room", "url": "https://…",
+          "username": "alice", "password": "…", "options": {"region": "eu"}}}
+```
+
+- `args` is everything the caller sent apart from `input`, checked against `input_schema` as before (the schema describes
+  the arguments, not the selector).
+- `input.options` is the input's plugin options as an object.
+- The caller may only name an input of this plugin. An unknown name, an input bound to another plugin, or an input that
+  is not `type: plugin` is a tool error (`400` on the rpc route) and the guest is not called.
+- The host scrubs the resolved secrets from the answer and from the log lines of the call: the password, the username,
+  and every option value whose key looks secret (`password`, `passwd`, `secret`, `token`, `api_key`, `apikey`,
+  `api-key`, `authorization`, `cookie`, `username`, `user`). A plugin that echoes its input context never leaks it.
+
+An export without the flag receives its payload exactly as before; the flag changes nothing for old plugins.
+
+The same payload shape is available on `POST /api/v1/plugins/{id}/rpc/{method}` (the route used by a plugin's own UI), so
+a plugin can offer one method both to its frames and to MCP clients.
+
+### Pagination
+
+A tool that returns a list should page it rather than return everything. The convention, which the host does not enforce
+beyond the schema:
+
+- the arguments take an optional `limit` (integer, page size) and an optional `cursor` (string, opaque);
+- the answer is `{"items": [...], "next_cursor": "…"}`, with `next_cursor` a JSON `null` on the last page.
+
+The SDK has `tuliprox_plugin_sdk::page::Page<T>` for the answer and `Page::slice(items, cursor, limit)` to cut a `Vec`
+into the page a cursor names. Keep the page bounded by the 256 KiB result cap, and treat a cursor you did not produce as
+a bad request rather than trusting it.
 
 A plugin's output reaches the AI assistant as data. A compromised plugin can return text aimed at the assistant. The
 admin approves MCP exposure knowing that. Use an MCP client that asks for confirmation before it calls write tools.

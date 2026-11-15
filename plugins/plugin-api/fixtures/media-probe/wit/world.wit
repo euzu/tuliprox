@@ -1,0 +1,5 @@
+package tuliprox:media-probe@0.0.0;
+
+world media-probe {
+  include tuliprox:plugin/media-input-plugin@1.0.0;
+}

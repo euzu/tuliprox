@@ -657,6 +657,18 @@
     align-items: center;
     color: inherit;
   }
+
+  &__options-rpc-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  &__options-loading {
+    padding: var(--margin-small) 0;
+    color: var(--theme-brand-text-muted);
+    font-size: var(--font-size-sm);
+  }
 }
 
 // A plugin's input/output form: section texts, actions and the refused-apply notice.

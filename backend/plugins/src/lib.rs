@@ -15,6 +15,7 @@ mod api;
 mod boot_update;
 mod convert;
 mod convert_epg;
+pub mod convert_media;
 mod dispatch;
 mod epg_hooks;
 mod events;
@@ -32,6 +33,8 @@ mod managed_channels;
 mod manifest;
 mod marketplace;
 mod mcp_tools;
+pub mod media_provider;
+pub mod media_resolve;
 mod metrics;
 mod migration;
 mod notify;
@@ -40,7 +43,7 @@ mod process;
 mod registry;
 mod rpc;
 mod runtime;
-mod settings;
+pub mod settings;
 mod state;
 mod strategy;
 mod system;
@@ -51,16 +54,21 @@ pub use activation::{
     crash_knob, inject_test_crash, recover_activations, ActivationKind, ActivationStage, RecoveredActivation,
     RecoveryOutcome, ENV_PLUGIN_TEST_CRASH_AT,
 };
+pub use api::{is_env_reference, mask_settings};
 pub use boot_update::{boot_report_path, read_boot_report, record_recovered, run_boot_update};
 pub use http_routes::{HostAuthorization, HttpRouteRequest, HttpRouteResponse};
 pub use install::{ActivatedUpdate, InstallGuard, InstallRejection, MarketplaceExpect};
+pub use manifest::secrets::secret_property_paths;
 pub use marketplace::{
     browse, fetch_package, has_catalog, probe_source_name, remove_cache, resolve_release, source_info, source_warnings,
     sync_source, Blocker, Eligibility, FetchPolicy, MarketplaceError, ReleaseLookup, ResolvedRelease, UpdateCandidate,
     CATALOG_MAX_BYTES, PACKAGE_MAX_BYTES,
 };
-pub use mcp_tools::{PluginMcpTool, PluginMcpToolKind};
+pub use mcp_tools::{validate_output, PluginMcpTool, PluginMcpToolKind};
 pub use migration::MigratedSettings;
+pub use registry::check_conflicting_exports;
+pub use rpc::RpcInput;
+pub use settings::{literal_secret_warning, merge_secrets, redact, secret_values};
 pub use state::{HostClock, PluginServices, SealResourceUrl};
 pub use system::PluginSystem;
 pub use tasks::{TaskOutcome, TaskTrigger};

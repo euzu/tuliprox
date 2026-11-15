@@ -556,6 +556,12 @@ pub fn media_server_stream_ref_to_internal_url(stream_ref: &MediaServerStreamRef
             encode_url_path_segment(rating_key),
             encode_url_path_segment(part_key)
         ),
+        MediaServerStreamRef::Plugin { plugin_id, item_id, stream_key, .. } => format!(
+            "media-server://plugin/{}/{}{}",
+            encode_url_path_segment(plugin_id),
+            encode_url_path_segment(item_id),
+            stream_key.as_ref().map(|key| format!("?stream_key={}", encode_url_path_segment(key))).unwrap_or_default()
+        ),
     }
 }
 
@@ -591,6 +597,13 @@ pub fn media_server_image_ref_to_internal_url(image_ref: &MediaServerImageRef) -
             encode_url_path_segment(server_id),
             encode_url_path_segment(rating_key),
             encode_url_path_segment(image_path)
+        ),
+        MediaServerImageRef::Plugin { input_name, plugin_id, item_id, image_key } => format!(
+            "media-server://image/plugin/{}/{}/{}?image_key={}",
+            encode_url_path_segment(input_name),
+            encode_url_path_segment(plugin_id),
+            encode_url_path_segment(item_id),
+            encode_url_path_segment(image_key)
         ),
     }
 }

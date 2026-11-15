@@ -141,9 +141,12 @@ Notes:
   seconds (a hanging server answers `504`). `refresh_media_server_input` only queues work.
 * Tools declare `readOnlyHint` in their annotations, so clients can ask for confirmation before calling write tools.
   Built-in tools also declare `openWorldHint: false` (they act on tuliprox only), and the built-in write tools
-  declare `destructiveHint: false` (none of them deletes data). Plugin write tools keep the MCP defaults.
+  declare `destructiveHint: false` (none of them deletes data).
 * A successful result whose body is a complete JSON object is returned twice: as the `text` block and as
-  `structuredContent`. A truncated result has only the text block with the truncation marker.
+  `structuredContent`. A truncated result has only the text block with the truncation marker. A plugin tool that
+  declares an `outputSchema` is held to it (see 4.5).
+* Lists use `offset`/`limit` with `total_matched`, `returned` and `has_more`. Plugin tools follow the
+  `limit`/`cursor`/`next_cursor` convention instead (see 4.5).
 * Only the `tools` capability is implemented. Prompts and resources are not offered.
 
 ### 4.1 Reading stored playlists
@@ -283,7 +286,32 @@ Three tools address one core media-server input by name (from `list_playlist_sou
 
 No token, password or URL is returned by any of them.
 
-### 4.4 What is never returned
+### 4.4 Plugin tools
+
+A plugin's `ui.rpc_exports` with `mcp: true` appear as `plugin_<id>_<method>` when the admin approved MCP exposure for
+the loaded wasm and `mcp.plugin_tools` is on (see
+[Events, Notifications and Providers](../plugins/events-notifications-inputs.md#mcp-tools)).
+
+* **Annotations.** A `read` export is `readOnlyHint: true`; a `write` export is `readOnlyHint: false` with
+  `destructiveHint` from the manifest's `destructive` flag (default `false`). Plugin tools always declare
+  `openWorldHint: true`: a plugin may contact an external service.
+* **Output schema.** An export may declare an `output_schema` file. It is shown as `outputSchema`. A successful call
+  validates the plugin's JSON answer against it. A matching object answer becomes `structuredContent` (plus the text
+  block). An answer that is not a JSON object, that was truncated, or that violates the schema is a tool error
+  (`isError: true`) with a short reason, and the answer is discarded. Without `output_schema` the behavior is the
+  generic one: a complete JSON object is also structured content.
+* **Input-scoped tools.** An export with `input_scoped: true` takes a required `input` argument, an enum of the server's
+  inputs of that plugin. The named input must exist, be `type: plugin`, and belong to this plugin; otherwise the call is
+  a tool error and the plugin is not called. The plugin then receives
+  `{"args": <the other arguments>, "input": {name, url, username, password, options}}`. The host scrubs the input's
+  password, username and secret-looking option values from the answer and from the logs, so a plugin that echoes them
+  leaks nothing. The same payload is used by `POST /api/v1/plugins/{id}/rpc/{method}`.
+* **Pagination.** A list-returning plugin tool takes optional `limit` and `cursor` and answers
+  `{items, next_cursor}`, where `next_cursor` is `null` on the last page. The host does not enforce this beyond the
+  tool's schema; it is a convention plus the SDK's `Page<T>` helper.
+* **Limits.** A plugin answer is capped at 256 KiB and 10 calls per second per plugin (burst 20), like every rpc call.
+
+### 4.5 What is never returned
 
 * The provider `url` of a record is not selectable and never returned; Xtream provider URLs carry credentials in their
   path, which the generic redaction cannot detect.

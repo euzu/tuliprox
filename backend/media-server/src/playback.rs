@@ -111,6 +111,12 @@ pub fn parse_media_server_stream_ref(
                     .detail("plex media-server URL is missing part_key")
             })?,
         }),
+        "plugin" => Ok(MediaServerStreamRef::Plugin {
+            input_name: input_name.clone(),
+            plugin_id: Arc::<str>::from(parts[1].as_str()),
+            item_id: Arc::<str>::from(parts[2].as_str()),
+            stream_key: query_value(query, "stream_key").map(Arc::<str>::from),
+        }),
         _ => Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
             .detail("unsupported media server URL scheme")),
     }
@@ -166,6 +172,15 @@ pub fn parse_media_server_image_ref(resource_url: &str) -> Result<MediaServerIma
             image_path: query_value(query, "image_path").map(Arc::<str>::from).ok_or_else(|| {
                 MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
                     .detail("plex media-server image URL is missing image_path")
+            })?,
+        }),
+        "plugin" => Ok(MediaServerImageRef::Plugin {
+            input_name: Arc::<str>::from(parts[1].as_str()),
+            plugin_id: Arc::<str>::from(parts[2].as_str()),
+            item_id: Arc::<str>::from(parts[3].as_str()),
+            image_key: query_value(query, "image_key").map(Arc::<str>::from).ok_or_else(|| {
+                MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                    .detail("plugin media-server image URL is missing image_key")
             })?,
         }),
         _ => Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
@@ -358,6 +373,34 @@ mod tests {
             }
         );
 
+        let plugin_stream = parse_media_server_stream_ref(
+            &input_name,
+            "media-server://plugin/plugin%2Fone/item%3Fone?stream_key=stream%2Fkey%3Fone",
+        )
+        .expect("plugin media_server ref parses");
+        assert_eq!(
+            plugin_stream,
+            MediaServerStreamRef::Plugin {
+                input_name: input_name.clone(),
+                plugin_id: "plugin/one".into(),
+                item_id: "item?one".into(),
+                stream_key: Some("stream/key?one".into()),
+            }
+        );
+
+        let plugin_stream_no_key =
+            parse_media_server_stream_ref(&input_name, "media-server://plugin/plugin%2Fone/item%3Fone")
+                .expect("plugin media_server ref without stream_key parses");
+        assert_eq!(
+            plugin_stream_no_key,
+            MediaServerStreamRef::Plugin {
+                input_name: input_name.clone(),
+                plugin_id: "plugin/one".into(),
+                item_id: "item?one".into(),
+                stream_key: None,
+            }
+        );
+
         let unavailable = parse_media_server_stream_ref(&input_name, "media-server://unavailable/server/library/item")
             .expect_err("unavailable sentinel should map to a stable playback error");
         assert_eq!(unavailable.kind, MediaServerErrorKind::NoDirectPlayableMediaServerSource);
@@ -418,6 +461,18 @@ mod tests {
             parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&plex))
                 .expect("plex image ref parses"),
             plex
+        );
+
+        let plugin = MediaServerImageRef::Plugin {
+            input_name: "plugin/input".into(),
+            plugin_id: "my-plugin/one+".into(),
+            item_id: "item?five".into(),
+            image_key: "image/key+?".into(),
+        };
+        assert_eq!(
+            parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&plugin))
+                .expect("plugin image ref parses"),
+            plugin
         );
     }
 

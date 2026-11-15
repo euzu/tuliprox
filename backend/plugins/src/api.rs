@@ -549,7 +549,7 @@ pub(crate) fn parse_secret_path(path: &str) -> Vec<Step<'_>> {
 
 /// Whether the whole string is one `${env:VAR}` reference, so showing it
 /// reveals a variable name and no secret.
-pub(crate) fn is_env_reference(text: &str) -> bool {
+pub fn is_env_reference(text: &str) -> bool {
     CONSTANTS.re_env_var.find(text).is_some_and(|found| found.start() == 0 && found.end() == text.len())
 }
 
@@ -586,7 +586,7 @@ fn mask_at(value: &mut Value, steps: &[Step<'_>]) -> bool {
 /// stays absent. An empty string stays empty and is not `set`. A string that
 /// mixes a reference with literal text is masked, because the literal part may
 /// be the secret.
-pub(crate) fn mask_settings(settings: &Value, paths: &[String]) -> (Value, Vec<PluginSecretDto>) {
+pub fn mask_settings(settings: &Value, paths: &[String]) -> (Value, Vec<PluginSecretDto>) {
     let mut masked = settings.clone();
     let secrets = paths
         .iter()

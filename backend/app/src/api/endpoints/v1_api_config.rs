@@ -382,6 +382,65 @@ fn restore_written_plugin_lists(incoming: &mut ConfigDto, written: &ConfigDto) {
     plugins.plugins.clone_from(&written.plugins);
 }
 
+#[cfg(feature = "plugins")]
+/// Puts the stored value back for every input-form secret the client sent masked.
+/// `secret_paths` names the secret paths of a plugin's input form.
+fn merge_sources_plugin_config(
+    incoming: &mut shared::model::SourcesConfigDto,
+    stored: &shared::model::SourcesConfigDto,
+    secret_paths: impl Fn(&str) -> Vec<String>,
+) {
+    for input in &mut incoming.inputs {
+        let Some(plugin_id) = input.plugin.as_deref() else {
+            continue;
+        };
+        let secret_paths = secret_paths(plugin_id);
+        if secret_paths.is_empty() {
+            continue;
+        }
+        let stored_input = stored.inputs.iter().find(|i| i.name == input.name && i.plugin == input.plugin);
+        let stored_val = match stored_input {
+            Some(si) => serde_json::Value::Object(si.plugin_config.clone()),
+            None => serde_json::Value::Object(serde_json::Map::new()),
+        };
+        let mut input_val = serde_json::Value::Object(input.plugin_config.clone());
+        let literals = tuliprox_plugins::merge_secrets(&mut input_val, &stored_val, &secret_paths);
+        for literal in literals {
+            log::warn!("{}: {}", input.name, tuliprox_plugins::literal_secret_warning(&literal));
+        }
+        if let serde_json::Value::Object(m) = input_val {
+            input.plugin_config = m;
+        }
+    }
+}
+
+#[cfg(feature = "plugins")]
+/// The input-form secrets of every plugin input masked, from the values as
+/// written in `source.yml` (an `${env:VAR}` reference stays visible).
+fn mask_sources_plugin_config(
+    sources: &mut shared::model::SourcesConfigDto,
+    written: &shared::model::SourcesConfigDto,
+    secret_paths: impl Fn(&str) -> Vec<String>,
+) {
+    for input in &mut sources.inputs {
+        let Some(plugin_id) = input.plugin.as_deref() else {
+            continue;
+        };
+        if let Some(stored_input) = written.inputs.iter().find(|i| i.name == input.name && i.plugin == input.plugin) {
+            input.plugin_config.clone_from(&stored_input.plugin_config);
+        }
+        let secret_paths = secret_paths(plugin_id);
+        if secret_paths.is_empty() {
+            continue;
+        }
+        let val = serde_json::Value::Object(input.plugin_config.clone());
+        let (masked_val, _) = tuliprox_plugins::mask_settings(&val, &secret_paths);
+        if let serde_json::Value::Object(m) = masked_val {
+            input.plugin_config = m;
+        }
+    }
+}
+
 async fn save_config_main(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     headers: HeaderMap,
@@ -499,10 +558,21 @@ async fn save_config_main(
     }
 }
 
+#[cfg(feature = "plugins")]
+async fn merge_plugin_sources_secrets(sources: &mut SourcesConfigDto, sources_file_path: &str, app_state: &AppState) {
+    if let Some(plugins) = app_state.plugins.as_ref() {
+        if let Ok(stored) =
+            crate::config_loader::read_sources_file_from_path(Path::new(sources_file_path), false, false, None).await
+        {
+            merge_sources_plugin_config(sources, &stored, |id| plugins.input_form_secret_paths(id));
+        }
+    }
+}
+
 async fn save_config_sources(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::extract::Json(sources): axum::extract::Json<SourcesConfigDto>,
+    axum::extract::Json(mut sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
     let sources_file_path = app_state.app_config.paths.load().sources_file_path.clone();
     let _source_lock = app_state.app_config.file_locks.write_lock(Path::new(&sources_file_path)).await;
@@ -528,6 +598,9 @@ async fn save_config_sources(
             return internal_server_error!();
         }
     };
+
+    #[cfg(feature = "plugins")]
+    merge_plugin_sources_secrets(&mut sources, &sources_file_path, &app_state).await;
 
     let templates_to_persist =
         match crate::config_loader::validate_source_config_for_persist(&app_state.app_config, &sources).await {
@@ -813,6 +886,17 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
     match read_result {
         Ok(mut app_config) => {
             restore_written_plugin_lists(&mut app_config.config, &written);
+            #[cfg(feature = "plugins")]
+            if let Some(plugins) = app_state.plugins.as_ref() {
+                if let Ok(written_sources) =
+                    crate::config_loader::read_sources_file_from_path(Path::new(&sources_file_path), false, false, None)
+                        .await
+                {
+                    mask_sources_plugin_config(&mut app_config.sources, &written_sources, |id| {
+                        plugins.input_form_secret_paths(id)
+                    });
+                }
+            }
             if let Err(err) = prepare_sources_batch(&mut app_config.sources, false).await {
                 error!("Failed to prepare sources batch: {err}");
                 internal_server_error!()
@@ -1196,6 +1280,60 @@ async fn test_messaging(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "plugins")]
+    mod plugin_input_secrets {
+        use super::super::{mask_sources_plugin_config, merge_sources_plugin_config};
+        use shared::model::{ConfigInputDto, SourcesConfigDto, REDACTED_SECRET};
+
+        fn sources(entries: &[(&str, &str, &str)]) -> SourcesConfigDto {
+            SourcesConfigDto {
+                inputs: entries
+                    .iter()
+                    .map(|(name, plugin, token)| ConfigInputDto {
+                        name: (*name).into(),
+                        plugin: Some((*plugin).into()),
+                        plugin_config: serde_json::json!({ "api_token": token, "library": "movies" })
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default(),
+                        ..ConfigInputDto::default()
+                    })
+                    .collect(),
+                ..SourcesConfigDto::default()
+            }
+        }
+
+        fn paths(plugin: &str) -> Vec<String> {
+            if plugin == "media" {
+                vec!["api_token".to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+
+        #[test]
+        fn a_read_masks_the_secret_and_a_save_of_the_mask_keeps_the_stored_value() {
+            let written = sources(&[("living-room", "media", "t-0k3n"), ("env", "media", "${env:TOKEN}")]);
+            let mut read = sources(&[("living-room", "media", "resolved"), ("env", "media", "resolved")]);
+            mask_sources_plugin_config(&mut read, &written, paths);
+            assert_eq!(read.inputs[0].plugin_config["api_token"], REDACTED_SECRET);
+            assert_eq!(read.inputs[0].plugin_config["library"], "movies");
+            assert_eq!(read.inputs[1].plugin_config["api_token"], "${env:TOKEN}", "a reference stays visible");
+
+            merge_sources_plugin_config(&mut read, &written, paths);
+            assert_eq!(read.inputs[0].plugin_config["api_token"], "t-0k3n");
+            assert_eq!(read.inputs[1].plugin_config["api_token"], "${env:TOKEN}");
+        }
+
+        #[test]
+        fn a_mask_never_takes_the_secret_of_another_plugins_input() {
+            let stored = sources(&[("living-room", "other", "t-0k3n")]);
+            let mut incoming = sources(&[("living-room", "media", REDACTED_SECRET)]);
+            merge_sources_plugin_config(&mut incoming, &stored, paths);
+            assert_ne!(incoming.inputs[0].plugin_config.get("api_token").and_then(|v| v.as_str()), Some("t-0k3n"));
+        }
+    }
+
     use super::{
         build_xtream_login_input_source, filter_api_proxy_by_permissions, filter_app_config_by_permissions,
         require_matching_revision,

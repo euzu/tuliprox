@@ -424,6 +424,14 @@ pub(super) struct OwnedMcpTool {
     /// Always `true`: a plugin's answer reaches an AI model.
     pub redact_secrets: bool,
     pub plugin_id: String,
+    /// The export's `destructive: true`: `destructiveHint` of a write tool.
+    pub destructive: bool,
+    /// The export's `output_schema`: `outputSchema` in `tools/list`, checked
+    /// against the result of a successful call.
+    pub output_schema: Option<serde_json::Value>,
+    /// The export's `input_scoped`: the tool takes an `input` name, and the
+    /// host passes the resolved input to the guest beside the arguments.
+    pub input_scoped: bool,
 }
 
 #[cfg(feature = "plugins")]
@@ -446,8 +454,25 @@ impl From<&tuliprox_plugins::PluginMcpTool> for OwnedMcpTool {
             },
             redact_secrets: true,
             plugin_id: tool.plugin_id.clone(),
+            destructive: tool.destructive,
+            output_schema: tool.output_schema.clone(),
+            input_scoped: tool.input_scoped,
         }
     }
+}
+
+impl OwnedMcpTool {
+    /// The violated paths of `result` against the export's `output_schema`. The
+    /// plugin host validated the schema when it derived the tool, so the same
+    /// validator can check a result here.
+    #[cfg(feature = "plugins")]
+    pub(super) fn output_violations(&self, result: &serde_json::Value) -> Vec<String> {
+        self.output_schema.as_ref().map_or_else(Vec::new, |schema| tuliprox_plugins::validate_output(schema, result))
+    }
+
+    /// Without a plugin host no plugin tool exists, so no result is ever checked.
+    #[cfg(not(feature = "plugins"))]
+    pub(super) fn output_violations(&self, _result: &serde_json::Value) -> Vec<String> { Vec::new() }
 }
 
 /// One tool of a [`ToolView`].
@@ -499,6 +524,24 @@ impl McpToolRef<'_> {
             Self::Plugin(tool) => tool.redact_secrets,
         }
     }
+
+    /// The export's `output_schema`, which `tools/list` shows as `outputSchema`.
+    /// Built-in tools declare none.
+    pub(super) fn output_schema(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Builtin(_) => None,
+            Self::Plugin(tool) => tool.output_schema.clone(),
+        }
+    }
+
+    /// The violated paths of a result against [`McpToolRef::output_schema`];
+    /// empty when there is no schema or the result matches it.
+    pub(super) fn output_violations(&self, result: &serde_json::Value) -> Vec<String> {
+        match self {
+            Self::Builtin(_) => Vec::new(),
+            Self::Plugin(tool) => tool.output_violations(result),
+        }
+    }
 }
 
 impl ToolView {
@@ -534,16 +577,108 @@ impl ToolView {
 /// The plugin tools the plugin host offers right now (its side of the switches:
 /// the plugin is enabled, the export says `mcp: true`, the admin approved it);
 /// none without a plugin host.
+///
+/// An `input_scoped` tool additionally needs at least one configured input of
+/// this plugin: its name goes into the tool's required `input` enum. Without
+/// one there is nothing the tool could be called with, so it is not listed.
 #[cfg(feature = "plugins")]
 pub(super) fn plugin_tools(app_state: &crate::api::model::AppState) -> Vec<OwnedMcpTool> {
     static BUILTIN_NAMES: std::sync::LazyLock<Vec<&'static str>> =
         std::sync::LazyLock::new(|| MCP_TOOLS.iter().map(|tool| tool.name).collect());
-    app_state
-        .plugins
-        .as_ref()
-        .map(|plugins| plugins.mcp_tools(&BUILTIN_NAMES).iter().map(OwnedMcpTool::from).collect())
-        .unwrap_or_default()
+    let Some(plugins) = app_state.plugins.as_ref() else {
+        return Vec::new();
+    };
+    let tools: Vec<OwnedMcpTool> = plugins.mcp_tools(&BUILTIN_NAMES).iter().map(OwnedMcpTool::from).collect();
+    if !tools.iter().any(|tool| tool.input_scoped) {
+        return tools;
+    }
+    let sources = app_state.app_config.sources.load();
+    let mut kept = Vec::with_capacity(tools.len());
+    for mut tool in tools {
+        if tool.input_scoped {
+            let names: Vec<String> = sources
+                .inputs
+                .iter()
+                .filter(|input| {
+                    input.input_type.is_plugin() && input.plugin.as_deref() == Some(tool.plugin_id.as_str())
+                })
+                .map(|input| input.name.to_string())
+                .collect();
+            if names.is_empty() {
+                log::warn!(
+                    "plugin tool `{}` is not offered: the export is `input_scoped` but no `type: plugin` input of plugin `{}` is configured",
+                    tool.name,
+                    tool.plugin_id
+                );
+                continue;
+            }
+            if !add_input_selector(&mut tool.input_schema, &names) {
+                log::warn!("plugin tool `{}` is not offered: its input schema has no `properties` object", tool.name);
+                continue;
+            }
+        }
+        kept.push(tool);
+    }
+    kept
+}
+
+/// Add the required `input` selector to an `input_scoped` tool's schema.
+/// `false` when the schema is not an object with a `properties` object: the
+/// tool is then not offered instead of being offered unusably.
+fn add_input_selector(schema: &mut serde_json::Value, names: &[String]) -> bool {
+    let Some(object) = schema.as_object_mut() else {
+        return false;
+    };
+    let Some(properties) = object.get_mut("properties").and_then(serde_json::Value::as_object_mut) else {
+        return false;
+    };
+    properties.insert(
+        "input".to_string(),
+        serde_json::json!({
+            "type": "string",
+            "enum": names,
+            "description": "Name of the configured input this call uses (from list_playlist_sources).",
+        }),
+    );
+    match object.get_mut("required") {
+        Some(serde_json::Value::Array(required)) => {
+            if !required.iter().any(|name| name == "input") {
+                required.push(serde_json::Value::String("input".to_string()));
+            }
+        }
+        Some(_) => return false,
+        None => {
+            object.insert("required".to_string(), serde_json::json!(["input"]));
+        }
+    }
+    true
 }
 
 #[cfg(not(feature = "plugins"))]
 pub(super) fn plugin_tools(_app_state: &crate::api::model::AppState) -> Vec<OwnedMcpTool> { Vec::new() }
+
+#[cfg(test)]
+mod tests {
+    use super::add_input_selector;
+    use serde_json::json;
+
+    #[test]
+    fn the_input_selector_becomes_a_required_enum_property() {
+        let names = vec!["living-room".to_string(), "bedroom".to_string()];
+        let mut schema = json!({ "type": "object", "properties": { "query": { "type": "string" } } });
+        assert!(add_input_selector(&mut schema, &names));
+        assert_eq!(schema["properties"]["input"]["type"], "string");
+        assert_eq!(schema["properties"]["input"]["enum"], json!(names));
+        assert_eq!(schema["required"], json!(["input"]));
+        // An existing `required` list gains `input` once.
+        let mut schema = json!({
+            "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"]
+        });
+        assert!(add_input_selector(&mut schema, &names));
+        assert!(add_input_selector(&mut schema, &names));
+        assert_eq!(schema["required"], json!(["query", "input"]));
+        // A schema with no `properties` object cannot describe the selector.
+        assert!(!add_input_selector(&mut json!({ "type": "object" }), &names));
+        assert!(!add_input_selector(&mut json!({ "type": "object", "required": "input" }), &names));
+    }
+}

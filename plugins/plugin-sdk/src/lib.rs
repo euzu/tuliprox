@@ -71,6 +71,7 @@ pub mod bindings {
                 include tuliprox:plugin/settings-migration-plugin@1.0.0;
                 include tuliprox:plugin/http-plugin@1.0.0;
                 include tuliprox:plugin/managed-channel-plugin@1.0.0;
+                include tuliprox:plugin/media-input-plugin@1.0.0;
             }
         ",
         world: "tuliprox:sdk/union",
@@ -89,10 +90,12 @@ pub mod http;
 pub mod images;
 pub mod kv;
 pub mod log;
+pub mod media;
 pub mod metrics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mock;
 pub mod notify;
+pub mod page;
 pub mod process;
 pub mod rpc;
 pub mod settings;
@@ -101,9 +104,9 @@ pub mod tasks;
 
 pub use hooks::{
     ChnoHooks, DedupeHooks, EpgConflictHooks, EpgEnrichHooks, EpgLoadHooks, EpgMatchHooks, EpgTransformHooks,
-    EventHooks, FilterHooks, GroupMergeHooks, HttpRoutes, InputProvider, Lifecycle, ManagedChannelHooks, MetadataHooks,
-    MetricsHooks, NotificationHooks, OutputGenerator, PlaylistHooks, Rpc, SettingsMigration, SortHooks, SortKeyHooks,
-    SourceHooks, StreamHooks, Tasks,
+    EventHooks, FilterHooks, GroupMergeHooks, HttpRoutes, InputProvider, Lifecycle, ManagedChannelHooks, MediaProvider,
+    MetadataHooks, MetricsHooks, NotificationHooks, OutputGenerator, PlaylistHooks, Rpc, SettingsMigration, SortHooks,
+    SortKeyHooks, SourceHooks, StreamHooks, Tasks,
 };
 pub use settings::{Migrations, PluginSettings, Secret};
 /// The contract version the SDK is generated against.
@@ -116,10 +119,11 @@ pub mod wit {
         exports::tuliprox::plugin::{
             chno_hooks, dedupe_hooks, epg_conflict_hooks, epg_enrich_hooks, epg_load_hooks, epg_match_hooks,
             epg_transform_hooks, event_hooks, filter_hooks, group_merge_hooks, http_routes, input_provider, lifecycle,
-            managed_channel_hooks, metadata_hooks, metrics_hooks, notification_hooks, output_generator, playlist_hooks,
-            rpc, settings_migration, sort_hooks, sort_key_hooks, source_hooks, stream_hooks, tasks,
+            managed_channel_hooks, media_provider_v1_1, metadata_hooks, metrics_hooks, notification_hooks,
+            output_generator, playlist_hooks, rpc, settings_migration, sort_hooks, sort_key_hooks, source_hooks,
+            stream_hooks, tasks,
         },
-        tuliprox::plugin::{epg_types, host, status, types},
+        tuliprox::plugin::{epg_types, host, media_types_v1_1, status, types},
     };
 }
 
@@ -130,7 +134,9 @@ pub mod prelude {
         events::{EventExt, TypedEvent},
         hooks::*,
         http::{self, Client as HttpClient},
-        images, info, kv, log, metrics, notify, process, rpc,
+        images, info, kv, log,
+        media::*,
+        metrics, notify, process, rpc,
         settings::{Migrations, PluginSettings, Secret},
         tasks, trace, warn,
         wit::{

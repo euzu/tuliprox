@@ -9,7 +9,7 @@
 //!   every `title_key` resolves in `en`, the fallback locale.
 //! * Extensions: every `ui.config_extensions[].section` is a built-in config section.
 
-use super::{ConfigExtension, ConfigTab, ConfigTabSource, Manifest};
+use super::{ConfigExtension, ConfigTab, ConfigTabSource, Manifest, RpcKind};
 use crate::{
     manifest::secrets::secret_property_paths,
     settings::{schema_version, unsupported_constructs},
@@ -172,6 +172,131 @@ fn check_schema(schema: &Value, label: &str, problems: &mut Vec<String>) {
     }
 }
 
+fn check_options_rpc_annotations(schema: &Value, manifest: &Manifest, label: &str, problems: &mut Vec<String>) {
+    fn walk(node: &Value, path: &str, manifest: &Manifest, label: &str, problems: &mut Vec<String>, depth: usize) {
+        if depth > 32 {
+            return;
+        }
+        let Some(obj) = node.as_object() else {
+            return;
+        };
+        if let Some(opt_rpc) = obj.get("x-options-rpc") {
+            let shown = if path.is_empty() { "(root)" } else { path };
+            let is_string_prop = obj.get("type").and_then(Value::as_str) == Some("string");
+            if !is_string_prop {
+                problems.push(format!("{label}: `x-options-rpc` is only allowed on string properties (`{shown}`)"));
+            }
+            match opt_rpc.as_str() {
+                Some(name) if !name.is_empty() => {
+                    match manifest.ui.rpc_exports.iter().find(|export| export.name == name) {
+                        None => {
+                            problems.push(format!("{label}: `x-options-rpc` names unknown rpc export `{name}`"));
+                        }
+                        Some(export) => {
+                            if export.kind != RpcKind::Read {
+                                problems
+                                    .push(format!("{label}: `x-options-rpc` export `{name}` must have `kind: read`"));
+                            }
+                            if !export.input_scoped {
+                                problems.push(format!(
+                                    "{label}: `x-options-rpc` export `{name}` must have `input_scoped: true`"
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    problems.push(format!("{label}: `x-options-rpc` must be a non-empty string naming an rpc export"));
+                }
+            }
+        }
+        if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+            for (key, child) in props {
+                let child_path = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+                walk(child, &child_path, manifest, label, problems, depth + 1);
+            }
+        }
+        if let Some(items) = obj.get("items") {
+            walk(items, &format!("{path}[]"), manifest, label, problems, depth + 1);
+        }
+    }
+
+    walk(schema, "", manifest, label, problems, 0);
+}
+
+fn check_no_options_rpc(schema: &Value, label: &str, problems: &mut Vec<String>) {
+    fn walk(node: &Value, label: &str, problems: &mut Vec<String>, depth: usize) {
+        if depth > 32 {
+            return;
+        }
+        let Some(obj) = node.as_object() else {
+            return;
+        };
+        if obj.contains_key("x-options-rpc") {
+            problems.push(format!("{label}: `x-options-rpc` is only supported in input forms"));
+        }
+        if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+            for child in props.values() {
+                walk(child, label, problems, depth + 1);
+            }
+        }
+        if let Some(items) = obj.get("items") {
+            walk(items, label, problems, depth + 1);
+        }
+    }
+    walk(schema, label, problems, 0);
+}
+
+/// The secret property paths declared across all `ui.input_form` sections of `manifest`.
+pub(crate) fn input_form_secret_paths(dir: &Path, manifest: &Manifest) -> Vec<String> {
+    let mut paths = Vec::new();
+    for section in &manifest.ui.input_form {
+        if let Ok(schema) = read_json(dir, &section.schema, "input form schema") {
+            if let Ok(secrets) = secret_property_paths(&schema) {
+                for secret in secrets {
+                    if !paths.contains(&secret) {
+                        paths.push(secret);
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// The rpc exports named in `x-options-rpc` annotations of `ui.input_form` sections.
+pub(crate) fn input_form_options_rpc_exports(dir: &Path, manifest: &Manifest) -> Vec<String> {
+    let mut exports = Vec::new();
+    for section in &manifest.ui.input_form {
+        if let Ok(schema) = read_json(dir, &section.schema, "input form schema") {
+            collect_options_rpc_names(&schema, &mut exports, 0);
+        }
+    }
+    exports
+}
+
+fn collect_options_rpc_names(node: &Value, out: &mut Vec<String>, depth: usize) {
+    if depth > 32 {
+        return;
+    }
+    let Some(obj) = node.as_object() else {
+        return;
+    };
+    if let Some(Value::String(name)) = obj.get("x-options-rpc") {
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+        for child in props.values() {
+            collect_options_rpc_names(child, out, depth + 1);
+        }
+    }
+    if let Some(items) = obj.get("items") {
+        collect_options_rpc_names(items, out, depth + 1);
+    }
+}
+
 /// A locale file: a flat map of string to string.
 fn read_locale(dir: &Path, locale: &str) -> Result<Map<String, Value>, String> {
     let relative = format!("ui/locales/{locale}.json");
@@ -214,12 +339,27 @@ pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<Strin
         check_schema(&extension.schema, &format!("ui.config_extensions `{}` schema", extension.section), &mut problems);
     }
 
-    // Input/output form schemas. They describe values stored in `source.yml`, so a secret
-    // property is refused: a per-input secret belongs in the plugin's settings, where the
-    // host masks it.
-    for (id, relative) in form_schema_paths(manifest) {
-        let label = format!("form schema `{relative}` (`{id}`)");
-        match read_json(dir, relative, &label) {
+    // Input form schemas: secrets are allowed (but must not carry a `default`),
+    // and `x-options-rpc` annotations are validated against `ui.rpc_exports`.
+    for section in &manifest.ui.input_form {
+        let label = format!("input form schema `{}` (`{}`)", section.schema, section.id);
+        match read_json(dir, &section.schema, &label) {
+            Ok(schema) => {
+                check_schema(&schema, &label, &mut problems);
+                if let Err(problem) = secret_property_paths(&schema) {
+                    problems.push(format!("{label}: {problem}"));
+                }
+                check_options_rpc_annotations(&schema, manifest, &label, &mut problems);
+            }
+            Err(problem) => problems.push(problem),
+        }
+    }
+
+    // Output form schemas: secrets are refused; a per-target secret belongs in the
+    // plugin's settings. `x-options-rpc` is refused in output forms.
+    for section in &manifest.ui.output_form {
+        let label = format!("output form schema `{}` (`{}`)", section.schema, section.id);
+        match read_json(dir, &section.schema, &label) {
             Ok(schema) => {
                 check_schema(&schema, &label, &mut problems);
                 match secret_property_paths(&schema) {
@@ -230,6 +370,7 @@ pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<Strin
                     )),
                     Err(problem) => problems.push(format!("{label}: {problem}")),
                 }
+                check_no_options_rpc(&schema, &label, &mut problems);
             }
             Err(problem) => problems.push(problem),
         }
@@ -391,8 +532,8 @@ mod tests {
     }
 
     #[test]
-    fn a_form_schema_must_exist_be_supported_and_hold_no_secret() {
-        let extra = "ui:\n  input_form:\n    - id: main\n      schema: forms/input.json\n";
+    fn an_input_form_schema_allows_secrets_without_default_and_validates_x_options_rpc() {
+        let extra = "hooks: [rpc.call]\nui:\n  input_form:\n    - id: main\n      schema: forms/input.json\n  rpc_exports:\n    - name: opts\n      kind: read\n      input_scoped: true\n";
 
         let missing = package(&[]);
         let problems = check_package(missing.path(), &manifest(extra)).unwrap_err();
@@ -408,12 +549,78 @@ mod tests {
         let problems = check_package(nested.path(), &manifest(extra)).unwrap_err();
         assert!(problems.iter().any(|problem| problem.contains("oneOf")), "{problems:?}");
 
-        let secret = package(&[(
+        // Secrets are ALLOWED in input forms when they carry no default.
+        let secret_ok = package(&[(
             "forms/input.json",
             r#"{"type":"object","properties":{"token":{"type":"string","writeOnly":true}}}"#,
         )]);
-        let problems = check_package(secret.path(), &manifest(extra)).unwrap_err();
+        assert!(check_package(secret_ok.path(), &manifest(extra)).is_ok());
+
+        // Secret with default is refused in input forms.
+        let secret_with_default = package(&[(
+            "forms/input.json",
+            r#"{"type":"object","properties":{"token":{"type":"string","writeOnly":true,"default":"bad"}}}"#,
+        )]);
+        let problems = check_package(secret_with_default.path(), &manifest(extra)).unwrap_err();
+        assert!(problems.iter().any(|problem| problem.contains("must not have a `default`")), "{problems:?}");
+
+        // Secrets are REFUSED in output forms.
+        let out_extra = "ui:\n  output_form:\n    - id: main\n      schema: forms/out.json\n";
+        let out_secret = package(&[(
+            "forms/out.json",
+            r#"{"type":"object","properties":{"token":{"type":"string","writeOnly":true}}}"#,
+        )]);
+        let problems = check_package(out_secret.path(), &manifest(out_extra)).unwrap_err();
         assert!(problems.iter().any(|problem| problem.contains("must not be a secret")), "{problems:?}");
+
+        // Valid x-options-rpc on string property.
+        let opt_ok = package(&[(
+            "forms/input.json",
+            r#"{"type":"object","properties":{"pick":{"type":"string","x-options-rpc":"opts"}}}"#,
+        )]);
+        assert!(check_package(opt_ok.path(), &manifest(extra)).is_ok());
+
+        // x-options-rpc on non-string property is refused.
+        let opt_int = package(&[(
+            "forms/input.json",
+            r#"{"type":"object","properties":{"pick":{"type":"integer","x-options-rpc":"opts"}}}"#,
+        )]);
+        let problems = check_package(opt_int.path(), &manifest(extra)).unwrap_err();
+        assert!(problems.iter().any(|p| p.contains("only allowed on string properties")), "{problems:?}");
+
+        // x-options-rpc naming unknown export is refused.
+        let opt_unknown = package(&[(
+            "forms/input.json",
+            r#"{"type":"object","properties":{"pick":{"type":"string","x-options-rpc":"nope"}}}"#,
+        )]);
+        let problems = check_package(opt_unknown.path(), &manifest(extra)).unwrap_err();
+        assert!(problems.iter().any(|p| p.contains("unknown rpc export `nope`")), "{problems:?}");
+
+        // x-options-rpc naming non-read export is refused.
+        let write_extra = "hooks: [rpc.call]\nui:\n  input_form:\n    - id: main\n      schema: forms/input.json\n  rpc_exports:\n    - name: write-opts\n      kind: write\n      input_scoped: true\n";
+        let opt_write = package(&[(
+            "forms/input.json",
+            r#"{"type":"object","properties":{"pick":{"type":"string","x-options-rpc":"write-opts"}}}"#,
+        )]);
+        let problems = check_package(opt_write.path(), &manifest(write_extra)).unwrap_err();
+        assert!(problems.iter().any(|p| p.contains("must have `kind: read`")), "{problems:?}");
+
+        // x-options-rpc naming non-input_scoped export is refused.
+        let non_scoped_extra = "hooks: [rpc.call]\nui:\n  input_form:\n    - id: main\n      schema: forms/input.json\n  rpc_exports:\n    - name: plain-opts\n      kind: read\n      input_scoped: false\n";
+        let opt_non_scoped = package(&[(
+            "forms/input.json",
+            r#"{"type":"object","properties":{"pick":{"type":"string","x-options-rpc":"plain-opts"}}}"#,
+        )]);
+        let problems = check_package(opt_non_scoped.path(), &manifest(non_scoped_extra)).unwrap_err();
+        assert!(problems.iter().any(|p| p.contains("must have `input_scoped: true`")), "{problems:?}");
+
+        // x-options-rpc in output form is refused.
+        let out_opts = package(&[(
+            "forms/out.json",
+            r#"{"type":"object","properties":{"pick":{"type":"string","x-options-rpc":"opts"}}}"#,
+        )]);
+        let problems = check_package(out_opts.path(), &manifest(out_extra)).unwrap_err();
+        assert!(problems.iter().any(|p| p.contains("only supported in input forms")), "{problems:?}");
     }
 
     #[test]

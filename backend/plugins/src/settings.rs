@@ -126,7 +126,7 @@ fn merge_at(value: &mut Value, stored: Option<&Value>, steps: &[Step<'_>], liter
 ///
 /// Returns the secret paths that now carry a literal the caller just sent, one
 /// entry per path.
-pub(crate) fn merge_secrets(incoming: &mut Value, stored: &Value, paths: &[String]) -> Vec<String> {
+pub fn merge_secrets(incoming: &mut Value, stored: &Value, paths: &[String]) -> Vec<String> {
     let mut literals = Vec::new();
     for path in paths {
         let mut literal = false;
@@ -139,7 +139,7 @@ pub(crate) fn merge_secrets(incoming: &mut Value, stored: &Value, paths: &[Strin
 }
 
 /// The warning of a secret saved as a literal.
-pub(crate) fn literal_secret_warning(path: &str) -> String {
+pub fn literal_secret_warning(path: &str) -> String {
     format!("secret `{path}` is stored as a literal; prefer ${{env:VAR}}")
 }
 
@@ -166,7 +166,7 @@ fn collect_secrets(value: &Value, steps: &[Step<'_>], out: &mut Vec<String>) {
 
 /// The string values found at the secret `paths` of `settings`. Call it on the
 /// **resolved** settings to get what has to be redacted from log lines.
-pub(crate) fn secret_values(settings: &Value, paths: &[String]) -> Vec<String> {
+pub fn secret_values(settings: &Value, paths: &[String]) -> Vec<String> {
     let mut secrets = Vec::new();
     for path in paths {
         collect_secrets(settings, &parse_secret_path(path), &mut secrets);
@@ -175,7 +175,7 @@ pub(crate) fn secret_values(settings: &Value, paths: &[String]) -> Vec<String> {
 }
 
 /// `text` with every secret in `secrets` replaced by [`REDACTED_SECRET`].
-pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
+pub fn redact(text: &str, secrets: &[String]) -> String {
     secrets
         .iter()
         .filter(|secret| !secret.is_empty())

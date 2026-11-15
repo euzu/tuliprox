@@ -38,6 +38,7 @@ pub(crate) fn type_interfaces(interface: &str) -> &'static [&'static str] {
         | "epg-match-hooks"
         | "epg-conflict-hooks"
         | "input-provider" => &["epg-types"],
+        "media-provider-v1-1" => &["media-types-v1-1"],
         "metrics-hooks" | "notification-hooks" => &["status"],
         _ => &[],
     }
@@ -80,6 +81,7 @@ hook_table! {
     "MetricsHooks", "metrics-hooks", ["metrics.collect"];
     "NotificationHooks", "notification-hooks", ["notifications.send"];
     "InputProvider", "input-provider", ["input.fetch"];
+    "MediaProvider", "media-provider-v1-1", ["media.fetch"];
     "OutputGenerator", "output-generator", ["output.render"];
     "Rpc", "rpc", ["rpc.call"];
     "Tasks", "tasks", ["tasks.run"];

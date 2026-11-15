@@ -219,6 +219,48 @@
 
 ## 🌟 New Features
 
+- **Plugins can provide a media library (`media-provider-v1-1`).** A new additive ABI interface lets a `type: plugin`
+  input deliver movies, series, seasons and episodes with metadata (hook `media.fetch`, world `media-input-plugin`).
+  The host maps them with the same mapper and storage as the Plex, Emby, Jellyfin and Silo inputs, so plugin series
+  get the full series tree. The catalog is fetched page by page (`next-cursor`) and published only when complete.
+  The host bounds each page with a deadline, caps items, strings and lists, and drops repeated cursors, duplicate
+  ids and dangling references. A plugin may export either `input-provider` or `media-provider-v1-1`, not both. ABI
+  1.0.0 interfaces are unchanged.
+  - **Playback and artwork:** plugin items play through the host proxy like Jellyfin items. The host calls
+    `resolve-stream` (with the client's `Range`) or `resolve-image` and proxies the returned target; `206`/`416` pass
+    through, and the plugin's upstream headers never reach the client. Each call has its own deadline
+    (`resources.resolve_ms`, default 5 s, max 30 s). Targets must be `http`/`https`, headers are capped and
+    denylisted, and results with `ttl-secs` are cached for at most one hour. A failing plugin fails only that request.
+  - **Update context:** `fetch-catalog` now receives the real `refresh` flag of the update and the time of the last
+    successful update (`last-success-at`, `none` on the first run), and the host reports progress per page.
+  - **Images with headers:** the new additive `host-v1-1` interface offers `cache-image-with-headers` for image
+    servers that need authentication. Plugins without the import keep loading unchanged.
+  - **Stored catalogs everywhere:** the playlist explorer, the REST/MCP playlist readers and the Xtream info routes
+    treat a plugin media input like a built-in media-server input.
+
+  See [Connecting a Media Server as a Plugin](docs/src/plugins/media-server-plugins.md).
+
+- **Plugin input forms: secrets and dynamic options.** Fields marked `writeOnly: true` in a plugin's input form are
+  shown as `********` by the Web UI and the config API, and saving the masked value keeps the stored secret.
+  `${env:VAR}` references stay visible, and a literal secret logs a warning. A string field with
+  `x-options-rpc: <export>` becomes a select filled by the plugin (a `kind: read`, `input_scoped` export; at most
+  1000 options), with a refresh button and a text fallback. While an unsaved input is edited, the form sends its
+  values as `input_draft`; this needs the permission to edit sources, and stored secrets are only filled in while
+  the draft's URL matches the stored one. See [Settings, Secrets & Config Extensions](docs/src/plugins/settings.md).
+
+- **Plugin MCP tools: annotations, output schemas and input context.** `ui.rpc_exports[]` accepts `destructive`
+  (write exports only), `output_schema` and `input_scoped`.
+  - **Annotations:** plugin tools get `destructiveHint` from the manifest.
+  - **Output schema:** it is listed as `outputSchema`, and a result that matches it is returned as
+    `structuredContent`. A result that does not match is a tool error.
+  - **Input context:** an `input_scoped` tool takes a required `input` (the plugin's configured inputs). The guest
+    then receives `{"args", "input"}`, where `input` holds name, url, credentials and options. The input's secrets
+    are scrubbed from the result and from the guest's log lines of that call. The UI rpc route accepts `input` the
+    same way.
+  - **Paging:** the SDK adds `page::Page<T>` for the `limit`/`cursor`/`next_cursor` convention.
+
+  See [MCP](docs/src/operator/mcp.md).
+
 - **Media-server REST routes and MCP tools.** `GET /api/v1/media-server/{input}/libraries` lists the libraries a
   Plex, Emby, Jellyfin or Silo input can see, with a `selected` flag, even when the configured selection is stale.
   `GET /api/v1/media-server/{input}/status` checks the connection, and `POST /api/v1/media-server/{input}/refresh`

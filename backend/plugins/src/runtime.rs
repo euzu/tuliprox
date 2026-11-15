@@ -67,7 +67,7 @@ use tokio::{
     time::Instant,
 };
 use tuliprox_core::model::PluginsConfig;
-use tuliprox_plugin_api::bindings::tuliprox::plugin::host;
+use tuliprox_plugin_api::bindings::tuliprox::plugin::{host, host_v1_1};
 use wasmtime::{
     component::{Component, HasSelf, Instance, InstancePre, Linker},
     Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store, Trap, UpdateDeadline,
@@ -108,11 +108,15 @@ impl RuntimeConfig {
     }
 }
 
+pub(crate) const DEFAULT_RESOLVE_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const MAX_RESOLVE_DEADLINE: Duration = Duration::from_secs(30);
+
 /// One plugin's manifest `resources:`, clamped to the [`RuntimeConfig`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PluginLimits {
     pub(crate) memory_bytes: usize,
     pub(crate) exec: Duration,
+    pub(crate) resolve_exec: Duration,
     pub(crate) max_instances: u16,
 }
 
@@ -122,12 +126,23 @@ impl PluginLimits {
             .max_memory_mb
             .map_or(config.instance_memory, |mb| (u64::from(mb) * 1024 * 1024).min(config.instance_memory));
         let exec = resources.max_exec_ms.map_or(config.exec, |ms| Duration::from_millis(ms).min(config.exec));
+        let resolve_exec = resources.resolve_ms.map_or(DEFAULT_RESOLVE_DEADLINE, |ms| {
+            Duration::from_millis(ms).clamp(Duration::from_millis(1), MAX_RESOLVE_DEADLINE)
+        });
         let max_instances = resources.max_instances.map_or(config.instances, |n| n.min(config.instances));
-        Self { memory_bytes: usize::try_from(memory).unwrap_or(usize::MAX), exec, max_instances: max_instances.max(1) }
+        Self {
+            memory_bytes: usize::try_from(memory).unwrap_or(usize::MAX),
+            exec,
+            resolve_exec,
+            max_instances: max_instances.max(1),
+        }
     }
 
     /// The wall-clock cap of one call.
     pub(crate) fn wall_clock(&self) -> Duration { self.exec + WALL_CLOCK_SLACK }
+
+    /// The deadline of a resolve-stream / resolve-image call.
+    pub(crate) fn resolve_exec(&self) -> Duration { self.resolve_exec }
 
     /// The deadline of an input/output provider call: a full download or
     /// render, so the hook deadline times [`PROVIDER_EXEC_MULTIPLIER`], never
@@ -728,6 +743,7 @@ fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
     host::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)?;
+    host_v1_1::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)?;
     Ok(linker)
 }
 
@@ -770,22 +786,30 @@ mod tests {
     #[test]
     fn clamp_takes_the_smaller_of_manifest_and_config() {
         let config = config();
-        let asked =
-            Resources { max_memory_mb: Some(16), max_exec_ms: Some(100), max_instances: Some(2), ..Default::default() };
+        let asked = Resources {
+            max_memory_mb: Some(16),
+            max_exec_ms: Some(100),
+            resolve_ms: Some(10_000),
+            max_instances: Some(2),
+            ..Default::default()
+        };
         let limits = PluginLimits::clamp(&asked, &config);
         assert_eq!(limits.memory_bytes, 16 * 1024 * 1024);
         assert_eq!(limits.exec, Duration::from_millis(100));
+        assert_eq!(limits.resolve_exec, Duration::from_secs(10));
         assert_eq!(limits.max_instances, 2);
 
         let greedy = Resources {
             max_memory_mb: Some(4096),
             max_exec_ms: Some(60_000),
+            resolve_ms: Some(60_000),
             max_instances: Some(64),
             ..Default::default()
         };
         let limits = PluginLimits::clamp(&greedy, &config);
         assert_eq!(limits.memory_bytes, 64 * 1024 * 1024);
         assert_eq!(limits.exec, Duration::from_millis(500));
+        assert_eq!(limits.resolve_exec, Duration::from_secs(30));
         assert_eq!(limits.max_instances, 4);
     }
 
@@ -954,7 +978,12 @@ mod tests {
         let _ticker = EpochTicker::start(&engine).expect("ticker");
         let module = Module::new(&engine, SPIN).expect("module");
         let mut store = Store::new(&engine, ());
-        let limits = PluginLimits { memory_bytes: 1 << 20, exec: Duration::from_millis(200), max_instances: 1 };
+        let limits = PluginLimits {
+            memory_bytes: 1 << 20,
+            exec: Duration::from_millis(200),
+            resolve_exec: DEFAULT_RESOLVE_DEADLINE,
+            max_instances: 1,
+        };
         let cpu = CpuBudget::install(&mut store, limits);
         let instance = wasmtime::Instance::new_async(&mut store, &module, &[]).await.expect("instance");
         let spin = instance.get_typed_func::<(), ()>(&mut store, "spin").expect("spin");
@@ -994,7 +1023,12 @@ mod tests {
     const EMPTY_COMPONENT: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
 
     fn small_limits() -> PluginLimits {
-        PluginLimits { memory_bytes: MIB_BYTES, exec: Duration::from_millis(100), max_instances: 1 }
+        PluginLimits {
+            memory_bytes: MIB_BYTES,
+            exec: Duration::from_millis(100),
+            resolve_exec: DEFAULT_RESOLVE_DEADLINE,
+            max_instances: 1,
+        }
     }
 
     #[test]
@@ -1031,8 +1065,12 @@ mod tests {
     #[test]
     fn prepare_rejects_a_plugin_larger_than_the_budget() {
         let runtime = Runtime::new(RuntimeConfig { total_memory: 32 * MIB, ..config() }).expect("runtime");
-        let limits =
-            PluginLimits { memory_bytes: 64 * 1024 * 1024, exec: Duration::from_millis(100), max_instances: 1 };
+        let limits = PluginLimits {
+            memory_bytes: 64 * 1024 * 1024,
+            exec: Duration::from_millis(100),
+            resolve_exec: DEFAULT_RESOLVE_DEADLINE,
+            max_instances: 1,
+        };
         let err = runtime.check_memory(limits).expect_err("64 MiB > 32 MiB");
         assert!(err.to_string().contains("max_total_memory"), "{err}");
         let fits = PluginLimits { memory_bytes: 32 * 1024 * 1024, ..limits };

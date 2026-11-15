@@ -45,6 +45,7 @@
   - [Settings, Secrets & Config Extensions](./plugins/settings.md)
   - [Custom UI](./plugins/custom-ui.md)
   - [Events, Notifications, Inputs, Outputs & MCP](./plugins/events-notifications-inputs.md)
+  - [Connecting a Media Server](./plugins/media-server-plugins.md)
   - [Packaging & Publishing](./plugins/packaging.md)
   - [YouTube Input](./plugins/youtube-input.md)
   - [Plugin Marketplace](./plugins/marketplace.md)

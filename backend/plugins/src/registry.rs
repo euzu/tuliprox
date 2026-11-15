@@ -57,9 +57,9 @@ use tuliprox_core::{
 use tuliprox_plugin_api::{
     bindings::exports::tuliprox::plugin::{
         chno_hooks, dedupe_hooks, epg_enrich_hooks, epg_load_hooks, epg_match_hooks, epg_transform_hooks, event_hooks,
-        filter_hooks, group_merge_hooks, http_routes, input_provider, lifecycle, managed_channel_hooks, metadata_hooks,
-        metrics_hooks, notification_hooks, output_generator, playlist_hooks, rpc, settings_migration, sort_hooks,
-        sort_key_hooks, source_hooks, stream_hooks, tasks,
+        filter_hooks, group_merge_hooks, http_routes, input_provider, lifecycle, managed_channel_hooks,
+        media_provider_v1_1, metadata_hooks, metrics_hooks, notification_hooks, output_generator, playlist_hooks, rpc,
+        settings_migration, sort_hooks, sort_key_hooks, source_hooks, stream_hooks, tasks,
     },
     ABI_VERSION, EXPORT_INTERFACES,
 };
@@ -181,6 +181,7 @@ pub(crate) struct LoadedPlugin {
     pub(crate) metrics_hooks: Option<metrics_hooks::GuestIndices>,
     pub(crate) notification_hooks: Option<notification_hooks::GuestIndices>,
     pub(crate) input_provider: Option<input_provider::GuestIndices>,
+    pub(crate) media_provider: Option<media_provider_v1_1::GuestIndices>,
     pub(crate) output_generator: Option<output_generator::GuestIndices>,
     pub(crate) stream_hooks: Option<stream_hooks::GuestIndices>,
     pub(crate) tasks: Option<tasks::GuestIndices>,
@@ -245,6 +246,8 @@ pub(crate) struct PluginRecord {
     /// Fully qualified export interfaces the component implements.
     pub(crate) exports: Vec<String>,
     pub(crate) loaded: Option<LoadedPlugin>,
+    /// RPC exports named in `x-options-rpc` annotations of `ui.input_form`.
+    pub(crate) options_rpc_exports: Vec<String>,
     /// The `version` of the package's settings schema (1 without one).
     pub(crate) settings_version: u32,
     /// Set when the stored settings were written for another schema version
@@ -270,6 +273,7 @@ impl PluginRecord {
             wasm_sha256: None,
             exports: Vec::new(),
             loaded: None,
+            options_rpc_exports: Vec::new(),
             settings_version: DEFAULT_PLUGIN_SETTINGS_VERSION,
             settings_block: None,
             state: PluginState::Discovered,
@@ -290,6 +294,8 @@ impl PluginRecord {
             self.state
         }
     }
+
+    pub(crate) fn is_options_rpc(&self, method: &str) -> bool { self.options_rpc_exports.iter().any(|m| m == method) }
 
     /// Why the plugin is `Invalid`, `PendingApproval` or `Failed`.
     pub(crate) fn failure(&self) -> Option<String> {
@@ -611,6 +617,17 @@ pub(crate) fn check_hooks(hooks: &[HookId], exports: &[String]) -> Result<(), St
     }
 }
 
+/// An input provider plugin may implement the traditional M3U playlist provider (`input-provider`)
+/// or the structured media catalog provider (`media-provider-v1-1`), but never both.
+pub fn check_conflicting_exports(exports: &[String]) -> Result<(), String> {
+    if exports.contains(&interface_name("input-provider")) && exports.contains(&interface_name("media-provider-v1-1")) {
+        return Err(
+            "component exports both `input-provider` and `media-provider-v1-1`; at most one input provider interface is allowed".into(),
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Settings and secrets
 // ---------------------------------------------------------------------------
@@ -765,6 +782,7 @@ fn load(
         log::warn!("plugin `{}` exports `{name}`, which this host does not know; ignored", record.id);
     }
     record.exports = exports;
+    check_conflicting_exports(&record.exports).map_err(Rejection::invalid)?;
     check_hooks(&manifest.hooks, &record.exports).map_err(Rejection::invalid)?;
     if manifest.hooks.is_empty() {
         log::warn!("plugin `{}` lists no hooks and will never be called", record.id);
@@ -802,6 +820,7 @@ fn load(
     let metrics_hooks = bind!(metrics_hooks, "metrics-hooks");
     let notification_hooks = bind!(notification_hooks, "notification-hooks");
     let input_provider = bind!(input_provider, "input-provider");
+    let media_provider = bind!(media_provider_v1_1, "media-provider-v1-1");
     let output_generator = bind!(output_generator, "output-generator");
     let stream_hooks = bind!(stream_hooks, "stream-hooks");
     let tasks = bind!(tasks, "tasks");
@@ -843,6 +862,7 @@ fn load(
         metrics_hooks,
         notification_hooks,
         input_provider,
+        media_provider,
         output_generator,
         stream_hooks,
         tasks,
@@ -876,6 +896,7 @@ fn evaluate(
     // Validate the schemas, the locale files and the extension sections.
     let secret_paths =
         check_package(&record.dir, &manifest).map_err(|problems| Rejection::invalid(problems.join("; ")))?;
+    record.options_rpc_exports = crate::manifest::package::input_form_options_rpc_exports(&record.dir, &manifest);
     let settings_schema = read_settings_schema(&record.dir, &manifest);
     record.settings_version = settings_schema
         .as_ref()
@@ -1835,6 +1856,19 @@ mod tests {
         // all problems at once
         let all = check_hooks(&[HookId::PlaylistLoaded], &exports(&["sort-hooks"])).unwrap_err();
         assert_eq!(all.matches("; ").count(), 2, "{all}");
+    }
+
+    #[test]
+    fn conflicting_input_and_media_provider_exports_are_rejected() {
+        let input_exp = interface_name("input-provider");
+        let media_exp = interface_name("media-provider-v1-1");
+        assert!(check_conflicting_exports(std::slice::from_ref(&input_exp)).is_ok());
+        assert!(check_conflicting_exports(std::slice::from_ref(&media_exp)).is_ok());
+        let err = check_conflicting_exports(&[input_exp, media_exp]).unwrap_err();
+        assert_eq!(
+            err,
+            "component exports both `input-provider` and `media-provider-v1-1`; at most one input provider interface is allowed"
+        );
     }
 
     // --- secrets -----------------------------------------------------------

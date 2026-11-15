@@ -27,7 +27,7 @@ use shared::{
     utils::sanitize_sensitive_info,
 };
 use std::sync::Arc;
-use tuliprox_core::model::{AppConfig, ConfigInput};
+use tuliprox_core::model::{plugin_persistence_override, AppConfig, ConfigInput};
 use tuliprox_iptv::{
     error::ProviderErrorKind,
     provider::{
@@ -37,7 +37,7 @@ use tuliprox_iptv::{
     xtream,
 };
 use tuliprox_repository::{
-    load_input_playlist, persist_input_playlist_with_options, InputPlaylistPersistOptions, MemoryPlaylistSource,
+    load_input_playlist_as, persist_input_playlist_with_options, InputPlaylistPersistOptions, MemoryPlaylistSource,
     PlaylistSource,
 };
 
@@ -174,7 +174,9 @@ async fn playlist_download_from_input<E: EventSink, P: PluginHost>(
         InputType::Plex | InputType::Emby | InputType::Jellyfin | InputType::Silo => {
             MediaServerProvider.fetch(&request).await
         }
-        InputType::Plugin => plugin_playlist_fetch(plugins, input).await,
+        InputType::Plugin => {
+            plugin_playlist_fetch(plugins, input, events, execution, refresh_policy, &pending_status.status).await
+        }
         InputType::Staged => {
             UnsupportedProvider::new(
                 "staged",
@@ -235,17 +237,26 @@ async fn playlist_download_from_input<E: EventSink, P: PluginHost>(
 /// way a parsed M3U is. The plugin gets the input's `url` and credentials as configured (all optional
 /// for a plugin input). A plugin `Err`, trap or timeout fails the input like an unreachable provider;
 /// the downstream path (persist, cache status, `on-playlist-loaded`) is the M3U one.
-async fn plugin_playlist_fetch<P: PluginHost>(plugins: &P, input: &ConfigInput) -> PlaylistFetch {
+async fn plugin_playlist_fetch<E: EventSink, P: PluginHost>(
+    plugins: &P,
+    input: &ConfigInput,
+    events: &E,
+    execution: PlaylistUpdateExecutionRef<'_>,
+    refresh_policy: InputRefreshPolicy,
+    status: &input_cache::InputStatus,
+) -> PlaylistFetch {
     let Some(plugin) = input.plugin.as_deref() else {
         return PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
             "plugin input '{}' does not name a plugin",
             input.name
         )));
     };
+    let is_media = plugins.provides(PluginHook::MediaFetch, plugin);
+    let is_input = plugins.provides(PluginHook::FetchInput, plugin);
     // A plugin that was uninstalled or disabled leaves the input inactive: say so once, in the words of
     // the operator's own fix, instead of failing on the provider's generic answer. The input keeps its
     // last playlist (an empty result is never persisted) and every other input and target runs.
-    if !plugins.provides(PluginHook::FetchInput, plugin) {
+    if !is_media && !is_input {
         warn!(
             "plugin input '{}' is inactive: plugin '{plugin}' is not installed or not enabled. Install it under \
              Plugins, or remove the input.",
@@ -256,6 +267,21 @@ async fn plugin_playlist_fetch<P: PluginHost>(plugins: &P, input: &ConfigInput) 
             input.name
         )));
     }
+    let refresh = refresh_policy.bypasses_cache();
+    let last_success_at = status
+        .last_input_update
+        .as_ref()
+        .filter(|res| res.state == shared::model::PlaylistUpdateState::Success)
+        .map(|res| res.timestamp)
+        .or_else(|| {
+            status.clusters.get("default").and_then(|c| {
+                if c.status == input_cache::ClusterState::Ok && c.timestamp > 0 {
+                    Some(c.timestamp)
+                } else {
+                    None
+                }
+            })
+        });
     let ctx = HookCtx::new("").with_input(&input.name);
     let request = PluginInputRequest {
         input_name: &input.name,
@@ -263,15 +289,41 @@ async fn plugin_playlist_fetch<P: PluginHost>(plugins: &P, input: &ConfigInput) 
         username: input.username.as_deref(),
         password: input.password.as_deref(),
         options: &input.plugin_options,
+        refresh,
+        last_success_at,
+        event_sink: Some(events),
+        run_id: Some(execution.run_id),
+        execution_order: Some(execution.execution_order),
+        input_id: Some(input.id),
     };
-    match plugins.fetch_playlist(plugin, &ctx, &request).await {
-        Ok(items) => PlaylistFetch::groups(group_mapped_items(items)),
-        Err(err) => PlaylistFetch::failed(TuliproxError::Download(format!(
-            "plugin input '{}': {}",
-            input.name,
-            sanitize_sensitive_info(&err)
-        ))),
+    if is_media {
+        match plugins.fetch_media_catalog(plugin, &ctx, &request).await {
+            Ok(groups) => PlaylistFetch::groups(groups),
+            Err(err) => PlaylistFetch::failed(TuliproxError::Download(format!(
+                "plugin input '{}': {}",
+                input.name,
+                sanitize_sensitive_info(&err)
+            ))),
+        }
+    } else {
+        match plugins.fetch_playlist(plugin, &ctx, &request).await {
+            Ok(items) => PlaylistFetch::groups(group_mapped_items(items)),
+            Err(err) => PlaylistFetch::failed(TuliproxError::Download(format!(
+                "plugin input '{}': {}",
+                input.name,
+                sanitize_sensitive_info(&err)
+            ))),
+        }
     }
+}
+
+async fn load_stored_input_playlist<P: PluginHost>(
+    app_config: &Arc<AppConfig>,
+    plugins: &P,
+    input: &ConfigInput,
+) -> Result<PlaylistSource, TuliproxError> {
+    let persistence = input.persistence_with_plugins(plugins);
+    load_input_playlist_as(app_config, input, None, persistence).await
 }
 
 /// This read-modify-write operation requires holding the per-input lock from
@@ -298,7 +350,8 @@ pub(crate) async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M
     ctx: &PlaylistProcessingContext<E, M, P>,
     input: &Arc<ConfigInput>,
 ) -> (PlaylistSource, Option<TuliproxError>) {
-    match load_input_playlist(&ctx.config, input, None).await {
+    let load_res = load_stored_input_playlist(&ctx.config, &ctx.plugins, input).await;
+    match load_res {
         Ok(pl_source) => (pl_source, None),
         Err(err) => (MemoryPlaylistSource::default().into_source(), Some(err)),
     }
@@ -467,7 +520,8 @@ async fn download_input_with_policy<E: EventSink + Clone + 'static, M: MetadataU
         || playlist_download_result.persisted
         || reuse_persisted_after_quality_rejection
     {
-        match load_input_playlist(&ctx.config, input, None).await {
+        let load_res = load_stored_input_playlist(&ctx.config, &ctx.plugins, input).await;
+        match load_res {
             Ok(pl_source) => (pl_source, None),
             Err(e) => (MemoryPlaylistSource::default().into_source(), Some(e)),
         }
@@ -477,7 +531,10 @@ async fn download_input_with_policy<E: EventSink + Clone + 'static, M: MetadataU
             &ctx.config,
             input,
             std::mem::take(&mut playlist_download_result.downloaded_playlist),
-            InputPlaylistPersistOptions { accepted_empty_clusters },
+            InputPlaylistPersistOptions {
+                accepted_empty_clusters,
+                persistence: plugin_persistence_override(&ctx.plugins, input),
+            },
         )
         .await;
         (MemoryPlaylistSource::new(pl).into_source(), err)
@@ -509,7 +566,10 @@ async fn download_input_with_policy<E: EventSink + Clone + 'static, M: MetadataU
                 &ctx.config,
                 input,
                 merged_groups,
-                InputPlaylistPersistOptions { accepted_empty_clusters },
+                InputPlaylistPersistOptions {
+                    accepted_empty_clusters,
+                    persistence: plugin_persistence_override(&ctx.plugins, input),
+                },
             )
             .await;
             playlist = MemoryPlaylistSource::new(merged_playlist).into_source();
@@ -916,7 +976,19 @@ mod tests {
     /// says what to do. It never reaches the fetch, so it cannot disturb the other inputs.
     #[tokio::test]
     async fn a_plugin_input_without_its_plugin_reports_itself_inactive() {
-        let fetch = plugin_playlist_fetch(&NoPlugins, &plugin_input(Some("youtube-input"))).await;
+        let execution = PlaylistUpdateExecutionRef {
+            run_id: &shared::model::PlaylistUpdateRunId::from("test"),
+            execution_order: 1.into(),
+        };
+        let fetch = plugin_playlist_fetch(
+            &NoPlugins,
+            &plugin_input(Some("youtube-input")),
+            &shared::model::NoopSink,
+            execution,
+            InputRefreshPolicy::NORMAL,
+            &input_cache::InputStatus::default(),
+        )
+        .await;
 
         assert!(fetch.groups.is_empty());
         let message = fetch.errors.first().map(ToString::to_string).unwrap_or_default();
@@ -927,7 +999,19 @@ mod tests {
 
     #[tokio::test]
     async fn a_plugin_input_must_name_a_plugin() {
-        let fetch = plugin_playlist_fetch(&NoPlugins, &plugin_input(None)).await;
+        let execution = PlaylistUpdateExecutionRef {
+            run_id: &shared::model::PlaylistUpdateRunId::from("test"),
+            execution_order: 1.into(),
+        };
+        let fetch = plugin_playlist_fetch(
+            &NoPlugins,
+            &plugin_input(None),
+            &shared::model::NoopSink,
+            execution,
+            InputRefreshPolicy::NORMAL,
+            &input_cache::InputStatus::default(),
+        )
+        .await;
         let message = fetch.errors.first().map(ToString::to_string).unwrap_or_default();
         assert!(message.contains("does not name a plugin"), "{message}");
     }

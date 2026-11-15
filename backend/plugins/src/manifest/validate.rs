@@ -580,6 +580,13 @@ fn check_rpc_exports(raw: Vec<RawRpcExport>, errors: &mut Errors) -> Vec<RpcExpo
             None if export.mcp => errors.push(format!("{label}: `input_schema` is required when `mcp: true`")),
             None => {}
         }
+        let output_schema = non_blank(export.output_schema);
+        if let Some(path) = output_schema.as_deref() {
+            check_path(&format!("{label}: output_schema"), path, errors);
+        }
+        if export.destructive && kind == Some(RpcKind::Read) {
+            errors.push(format!("{label}: `destructive: true` is only allowed on a `kind: write` export"));
+        }
         if let Some(kind) = kind {
             exports.push(RpcExport {
                 name,
@@ -587,6 +594,9 @@ fn check_rpc_exports(raw: Vec<RawRpcExport>, errors: &mut Errors) -> Vec<RpcExpo
                 mcp: export.mcp,
                 description: non_blank(export.description),
                 input_schema,
+                destructive: export.destructive,
+                output_schema,
+                input_scoped: export.input_scoped,
             });
         }
     }
@@ -599,6 +609,9 @@ fn check_resources(raw: &super::raw::RawResources, errors: &mut Errors) -> Resou
     }
     if raw.max_exec_ms == Some(0) {
         errors.push("resources.max_exec_ms must not be zero");
+    }
+    if raw.resolve_ms == Some(0) {
+        errors.push("resources.resolve_ms must not be zero");
     }
     if raw.max_instances == Some(0) {
         errors.push("resources.max_instances must not be zero");
@@ -614,6 +627,7 @@ fn check_resources(raw: &super::raw::RawResources, errors: &mut Errors) -> Resou
     Resources {
         max_memory_mb: raw.max_memory_mb,
         max_exec_ms: raw.max_exec_ms,
+        resolve_ms: raw.resolve_ms,
         max_instances: raw.max_instances,
         fail_mode,
     }
@@ -647,19 +661,23 @@ fn check_hook_requirements(manifest: &Manifest, errors: &mut Errors) {
 /// The other direction: what the manifest declares only makes sense with the
 /// hook that serves it, and an id is listed iff the component exports it.
 fn check_declarations_have_hooks(manifest: &Manifest, errors: &mut Errors) {
-    let mut orphan = |declared: bool, what: &str, hook: HookId| {
-        if declared && !manifest.has_hook(hook) {
-            errors.push(format!("{what} is declared but hook `{}` is not listed", hook.as_str()));
+    // Each declaration is served by any one of its hooks.
+    let mut orphan = |declared: bool, what: &str, hooks: &[HookId]| {
+        if declared && !hooks.iter().any(|hook| manifest.has_hook(*hook)) {
+            let names = hooks.iter().map(|hook| format!("`{}`", hook.as_str())).collect::<Vec<_>>().join(" or ");
+            errors.push(format!("{what} is declared but hook {names} is not listed"));
         }
     };
-    orphan(!manifest.event_names.is_empty(), "`events:`", HookId::EventsOnEvent);
-    orphan(!manifest.tasks.is_empty(), "`tasks:`", HookId::TasksRun);
-    orphan(!manifest.routes.is_empty(), "`routes:`", HookId::HttpHandle);
-    orphan(!manifest.ui.rpc_exports.is_empty(), "`ui.rpc_exports`", HookId::RpcCall);
-    orphan(manifest.provides.input_type, "`provides.input_type`", HookId::InputFetch);
-    orphan(manifest.provides.output_format.is_some(), "`provides.output_format`", HookId::OutputRender);
-    orphan(manifest.ui.input_tile.is_some(), "`ui.input_tile`", HookId::InputFetch);
-    orphan(manifest.ui.output_tile.is_some(), "`ui.output_tile`", HookId::OutputRender);
+    // A `type: plugin` input is served by a playlist provider or a media catalog provider.
+    let input_hooks = [HookId::InputFetch, HookId::MediaFetch];
+    orphan(!manifest.event_names.is_empty(), "`events:`", &[HookId::EventsOnEvent]);
+    orphan(!manifest.tasks.is_empty(), "`tasks:`", &[HookId::TasksRun]);
+    orphan(!manifest.routes.is_empty(), "`routes:`", &[HookId::HttpHandle]);
+    orphan(!manifest.ui.rpc_exports.is_empty(), "`ui.rpc_exports`", &[HookId::RpcCall]);
+    orphan(manifest.provides.input_type, "`provides.input_type`", &input_hooks);
+    orphan(manifest.provides.output_format.is_some(), "`provides.output_format`", &[HookId::OutputRender]);
+    orphan(manifest.ui.input_tile.is_some(), "`ui.input_tile`", &input_hooks);
+    orphan(manifest.ui.output_tile.is_some(), "`ui.output_tile`", &[HookId::OutputRender]);
 }
 
 /// `title_key`s resolve in `ui/locales`, so they need at least one locale.

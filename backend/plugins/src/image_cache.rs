@@ -107,16 +107,39 @@ pub(crate) struct PluginImages {
     granted: bool,
 }
 
+pub const MAX_IMAGE_HEADER_COUNT: usize = 64;
+pub const MAX_IMAGE_HEADER_TOTAL_BYTES: usize = 16 * 1024;
+pub const MAX_IMAGE_HEADER_NAME_BYTES: usize = 256;
+pub const MAX_IMAGE_HEADER_VALUE_BYTES: usize = 4096;
+
 impl PluginImages {
     /// `granted` = the `image_cache` and `network` capabilities.
     pub(crate) fn new(cache: &ImageCache, plugin: &Arc<str>, granted: bool) -> Self {
         Self { inner: Arc::clone(&cache.inner), plugin: Arc::clone(plugin), granted }
     }
 
-    /// The local URL for `url`, or `Err` (the plugin keeps the upstream URL)
-    /// when not granted, the cache is disabled, the quota is spent or the
-    /// download fails.
-    pub(crate) async fn cache_image(&self, http: &PluginHttp, url: &str) -> Result<String, String> {
+    /// The local URL for `url` with extra request headers, or `Err` when not
+    /// granted, the cache is disabled, the quota is spent or the download fails.
+    pub(crate) async fn cache_image_with_headers(
+        &self,
+        http: &PluginHttp,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<String, String> {
+        if headers.len() > MAX_IMAGE_HEADER_COUNT {
+            return Err("oversized header set: too many headers".to_string());
+        }
+        let mut total_bytes: usize = 0;
+        for (name, value) in headers {
+            if name.len() > MAX_IMAGE_HEADER_NAME_BYTES || value.len() > MAX_IMAGE_HEADER_VALUE_BYTES {
+                return Err("oversized header set: header size exceeds limit".to_string());
+            }
+            total_bytes = total_bytes.saturating_add(name.len()).saturating_add(value.len());
+            if total_bytes > MAX_IMAGE_HEADER_TOTAL_BYTES {
+                return Err("oversized header set: total header size exceeds limit".to_string());
+            }
+        }
+
         if !self.granted {
             return Err("cache-image needs the image_cache and network capabilities".to_string());
         }
@@ -133,10 +156,26 @@ impl PluginImages {
             return Ok(sealed);
         }
 
-        let (bytes, content_type) = http.fetch(url, MAX_IMAGE_BYTES).await?;
+        let mut valid_headers = Vec::with_capacity(headers.len());
+        for (name, value) in headers {
+            if crate::header_inject::is_denied(name) {
+                log::debug!("[plugin:{}] dropped image cache header `{}`: on denylist", self.plugin, name);
+                continue;
+            }
+            valid_headers.push((name.clone(), value.clone()));
+        }
+
+        let (bytes, content_type) = http.fetch_with_headers(url, &valid_headers, MAX_IMAGE_BYTES).await?;
         let mime = image_mime(content_type.as_deref())?;
         self.admit(&cache, url, &mime, bytes, IMAGE_QUOTA_BYTES).await?;
         Ok(sealed)
+    }
+
+    /// The local URL for `url`, or `Err` (the plugin keeps the upstream URL)
+    /// when not granted, the cache is disabled, the quota is spent or the
+    /// download fails.
+    pub(crate) async fn cache_image(&self, http: &PluginHttp, url: &str) -> Result<String, String> {
+        self.cache_image_with_headers(http, url, &[]).await
     }
 
     pub(crate) fn usage(&self) -> ImageUsage {
@@ -370,5 +409,147 @@ mod tests {
         }
         accounting2.reserve(&p, "http://a.png", 50, 1000).unwrap();
         assert_eq!(accounting2.used("p"), 50);
+    }
+
+    #[tokio::test]
+    async fn cache_image_with_headers_sends_headers_to_origin() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+            let _ = stream.write_all(body).await;
+            let _ = stream.shutdown().await;
+            head
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (cache, _) = enabled(dir.path(), 1024 * 1024);
+        let id = plugin("p");
+        let images = PluginImages::new(&cache, &id, true);
+        let url = format!("http://127.0.0.1:{}/test.png", addr.port());
+
+        let headers = vec![
+            ("X-Custom-Auth".to_string(), "token-abc-123".to_string()),
+            ("X-Client-Id".to_string(), "client-456".to_string()),
+        ];
+        let result = images.cache_image_with_headers(&http(&id, true), &url, &headers).await;
+        assert!(result.is_ok(), "cache_image_with_headers failed: {result:?}");
+
+        let head = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("server timed out")
+            .expect("server task panicked");
+
+        let lower = head.to_ascii_lowercase();
+        assert!(lower.contains("x-custom-auth: token-abc-123"), "head: {head}");
+        assert!(lower.contains("x-client-id: client-456"), "head: {head}");
+    }
+
+    #[tokio::test]
+    async fn cache_image_with_headers_drops_denylisted_headers() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+            let _ = stream.write_all(body).await;
+            let _ = stream.shutdown().await;
+            head
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (cache, _) = enabled(dir.path(), 1024 * 1024);
+        let id = plugin("p");
+        let images = PluginImages::new(&cache, &id, true);
+        let url = format!("http://127.0.0.1:{}/test2.png", addr.port());
+
+        let headers = vec![
+            ("Host".to_string(), "spoofed.invalid".to_string()),
+            ("Connection".to_string(), "upgrade".to_string()),
+            ("Proxy-Authorization".to_string(), "secret".to_string()),
+            ("X-Allowed".to_string(), "yes".to_string()),
+        ];
+        let result = images.cache_image_with_headers(&http(&id, true), &url, &headers).await;
+        assert!(result.is_ok(), "cache_image_with_headers failed: {result:?}");
+
+        let head = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("server timed out")
+            .expect("server task panicked");
+
+        let lower = head.to_ascii_lowercase();
+        assert!(lower.contains("x-allowed: yes"), "head: {head}");
+        assert!(!lower.contains("spoofed.invalid"), "denied host header leaked: {head}");
+        assert!(!lower.contains("proxy-authorization"), "proxy header leaked: {head}");
+    }
+
+    #[tokio::test]
+    async fn cache_image_with_headers_without_capabilities_is_refused() {
+        let id = plugin("p");
+        let images = PluginImages::new(&disabled(), &id, false);
+        let err = images
+            .cache_image_with_headers(
+                &http(&id, true),
+                "http://127.0.0.1:1/a.png",
+                &[("X-Test".to_string(), "1".to_string())],
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("capabilities"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn cache_image_with_headers_oversized_header_set_is_an_error() {
+        let id = plugin("p");
+        let images = PluginImages::new(&disabled(), &id, true);
+
+        // More than MAX_IMAGE_HEADER_COUNT headers
+        let too_many: Vec<_> = (0..65).map(|i| (format!("X-Header-{i}"), "val".to_string())).collect();
+        let err =
+            images.cache_image_with_headers(&http(&id, true), "http://127.0.0.1:1/a.png", &too_many).await.unwrap_err();
+        assert!(err.contains("oversized header set"), "{err}");
+
+        // Single header name exceeds limit
+        let long_name = vec![("a".repeat(257), "val".to_string())];
+        let err = images
+            .cache_image_with_headers(&http(&id, true), "http://127.0.0.1:1/a.png", &long_name)
+            .await
+            .unwrap_err();
+        assert!(err.contains("oversized header set"), "{err}");
+
+        // Single header value exceeds limit
+        let long_val = vec![("X-Test".to_string(), "v".repeat(4097))];
+        let err =
+            images.cache_image_with_headers(&http(&id, true), "http://127.0.0.1:1/a.png", &long_val).await.unwrap_err();
+        assert!(err.contains("oversized header set"), "{err}");
     }
 }

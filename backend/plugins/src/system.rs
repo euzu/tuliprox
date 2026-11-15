@@ -6,6 +6,7 @@ use crate::{
     header_inject::HeaderCache,
     input_provider,
     mcp_tools::McpToolCache,
+    media_provider,
     metrics::MetricsCache,
     output_provider,
     registry::Registry,
@@ -17,9 +18,9 @@ use crate::{
 use shared::{
     error::TuliproxError,
     model::{
-        EpgProgramme, HookCtx, PlaylistItem, PluginAbort, PluginChannelProgrammes, PluginChnoMap, PluginDuplicateGroup,
-        PluginEpgChannel, PluginGroupMerge, PluginHook, PluginHost, PluginInputRequest, PluginKeepers,
-        PluginMatchRequest, PluginOutputRequest, PluginRunReport, PluginScopes, PluginSortKeys,
+        EpgProgramme, HookCtx, PlaylistGroup, PlaylistItem, PluginAbort, PluginChannelProgrammes, PluginChnoMap,
+        PluginDuplicateGroup, PluginEpgChannel, PluginGroupMerge, PluginHook, PluginHost, PluginInputRequest,
+        PluginKeepers, PluginMatchRequest, PluginOutputRequest, PluginRunReport, PluginScopes, PluginSortKeys,
     },
 };
 use std::sync::Arc;
@@ -35,6 +36,7 @@ struct Inner {
     events: EventQueue,
     metrics: MetricsCache,
     headers: HeaderCache,
+    resolve_cache: crate::media_resolve::ResolveCache,
     tasks: TaskRunner,
     managed: crate::managed_channels::ManagedSnapshots,
     /// The MCP tools derived from the registry snapshot.
@@ -86,6 +88,7 @@ impl PluginSystem {
                 events: EventQueue::new(config),
                 metrics: MetricsCache::new(config),
                 headers: HeaderCache::new(config),
+                resolve_cache: crate::media_resolve::ResolveCache::new(),
                 tasks: TaskRunner::new(config),
                 mcp_tools: McpToolCache::default(),
                 runtime,
@@ -127,6 +130,52 @@ impl PluginSystem {
     pub(crate) fn tasks(&self) -> &TaskRunner { &self.inner.tasks }
 
     pub(crate) fn mcp_tool_cache(&self) -> &McpToolCache { &self.inner.mcp_tools }
+
+    pub async fn fetch_media_catalog_snapshot(
+        &self,
+        plugin: &str,
+        ctx: &HookCtx<'_>,
+        request: &PluginInputRequest<'_>,
+    ) -> Result<tuliprox_media_server::MediaServerCatalogSnapshot, String> {
+        media_provider::fetch_media_catalog_snapshot(&self.dispatcher(), plugin, ctx, request).await
+    }
+
+    pub async fn resolve_stream(
+        &self,
+        plugin: &str,
+        ctx: &HookCtx<'_>,
+        request: &shared::model::PluginStreamRequest<'_>,
+    ) -> Result<shared::model::PluginStreamTarget, String> {
+        crate::media_resolve::resolve_stream(&self.dispatcher(), &self.inner.resolve_cache, plugin, ctx, request).await
+    }
+
+    pub async fn resolve_image(
+        &self,
+        plugin: &str,
+        ctx: &HookCtx<'_>,
+        request: &shared::model::PluginImageRequest<'_>,
+    ) -> Result<shared::model::PluginStreamTarget, String> {
+        crate::media_resolve::resolve_image(&self.dispatcher(), &self.inner.resolve_cache, plugin, ctx, request).await
+    }
+
+    pub fn input_form_secret_paths(&self, plugin_id: &str) -> Vec<String> {
+        let snapshot = self.registry().snapshot();
+        let Some(record) = snapshot.get(plugin_id) else {
+            return Vec::new();
+        };
+        let Some(manifest) = record.manifest.as_deref() else {
+            return Vec::new();
+        };
+        crate::manifest::package::input_form_secret_paths(&record.dir, manifest)
+    }
+
+    pub fn is_options_rpc(&self, plugin_id: &str, method: &str) -> bool {
+        let snapshot = self.registry().snapshot();
+        let Some(record) = snapshot.get(plugin_id) else {
+            return false;
+        };
+        record.is_options_rpc(method)
+    }
 }
 
 impl PluginSystem {
@@ -298,6 +347,33 @@ impl PluginHost for PluginSystem {
         request: &PluginInputRequest<'_>,
     ) -> Result<Vec<PlaylistItem>, String> {
         input_provider::fetch_playlist(&self.dispatcher(), plugin, ctx, request).await
+    }
+
+    async fn fetch_media_catalog(
+        &self,
+        plugin: &str,
+        ctx: &HookCtx<'_>,
+        request: &PluginInputRequest<'_>,
+    ) -> Result<Vec<PlaylistGroup>, String> {
+        media_provider::fetch_media_catalog(&self.dispatcher(), plugin, ctx, request).await
+    }
+
+    async fn resolve_stream(
+        &self,
+        plugin: &str,
+        ctx: &HookCtx<'_>,
+        request: &shared::model::PluginStreamRequest<'_>,
+    ) -> Result<shared::model::PluginStreamTarget, String> {
+        self.resolve_stream(plugin, ctx, request).await
+    }
+
+    async fn resolve_image(
+        &self,
+        plugin: &str,
+        ctx: &HookCtx<'_>,
+        request: &shared::model::PluginImageRequest<'_>,
+    ) -> Result<shared::model::PluginStreamTarget, String> {
+        self.resolve_image(plugin, ctx, request).await
     }
 
     async fn fetch_epg(

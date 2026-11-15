@@ -1166,13 +1166,30 @@ async fn media_server_input_is_queried_from_its_stored_catalog() {
 
 #[test]
 fn summarize_input_reports_media_server_clusters() {
+    #[derive(Clone)]
+    struct MediaHost;
+    impl shared::model::PluginHost for MediaHost {
+        fn provides(&self, hook: shared::model::PluginHook, plugin: &str) -> bool {
+            hook == shared::model::PluginHook::MediaFetch && plugin == "media-plugin"
+        }
+    }
+
+    let no_plugins = shared::model::NoPlugins;
     let media_server =
         ConfigInput { name: "ms_input".into(), input_type: InputType::Jellyfin, ..ConfigInput::default() };
-    assert_eq!(summarize_input(&media_server).clusters, ["video", "series"]);
+    assert_eq!(summarize_input(&media_server, &no_plugins).clusters, ["video", "series"]);
 
     let m3u = ConfigInput { name: "m3u".into(), input_type: InputType::M3u, ..ConfigInput::default() };
-    assert_eq!(summarize_input(&m3u).clusters, ["live", "video", "series"]);
+    assert_eq!(summarize_input(&m3u, &no_plugins).clusters, ["live", "video", "series"]);
 
     let plugin = ConfigInput { name: "plugin".into(), input_type: InputType::Plugin, ..ConfigInput::default() };
-    assert_eq!(summarize_input(&plugin).clusters.len(), 0);
+    assert_eq!(summarize_input(&plugin, &no_plugins).clusters.len(), 0);
+
+    let media_plugin = ConfigInput {
+        name: "media_plugin".into(),
+        input_type: InputType::Plugin,
+        plugin: Some("media-plugin".into()),
+        ..ConfigInput::default()
+    };
+    assert_eq!(summarize_input(&media_plugin, &MediaHost).clusters, ["video", "series"]);
 }
