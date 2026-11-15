@@ -37,8 +37,9 @@ use super::{
         HlsRecoveryBoundarySlackMs, HlsRecoveryPressurePolicy,
     },
     reevaluation::{
-        availability_refresh_trigger_decision, register_hls_availability_reevaluation_with_mode,
-        HlsAvailabilityAttemptSchedule, HlsAvailabilityRefreshTriggerDecision,
+        availability_refresh_trigger_decision, evaluate_post_refresh_terminal_attempt,
+        register_hls_availability_reevaluation_with_mode, HlsAvailabilityAttemptSchedule,
+        HlsAvailabilityReevaluationCycle, HlsAvailabilityRefreshTriggerDecision, HlsTerminalReevaluationDecision,
     },
     terminal_cutover::HlsTerminalCommitContext,
     terminal_pending_owner::{

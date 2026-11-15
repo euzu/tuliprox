@@ -326,7 +326,7 @@ async fn provider_stream_request(
                 if log_enabled!(log::Level::Debug) {
                     // Unfortunately, the HEAD request does not work, so we need this workaround.
                     // We need some header information from the provider, we extract the necessary headers and forward them to the client
-                    let message = format!("Provider response info: {:?}", response.info);
+                    let message = format_provider_response_info(&response.info);
                     debug!("{}", sanitize_sensitive_info(&message));
                 }
                 return Ok(Some(response));
@@ -564,6 +564,18 @@ pub(super) async fn get_provider_stream(
         provider_error_class: "service_unavailable",
         serve_channel_unavailable: true,
     })
+}
+
+pub(super) fn format_provider_response_info(info: &tuliprox_session::ProviderStreamInfo) -> String {
+    match info {
+        Some((headers, status, url, custom_video_type)) => {
+            let url_str = url.as_ref().map_or("None", reqwest::Url::as_str);
+            format!(
+                "Provider response info: (headers: {headers:?}, status: {status}, url: {url_str}, custom_video_type: {custom_video_type:?})"
+            )
+        }
+        None => "Provider response info: None".to_string(),
+    }
 }
 
 impl Drop for ProviderOpenGuard {

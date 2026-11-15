@@ -608,9 +608,10 @@ use std::{
 };
 use tuliprox_hls::api::{
     build_hls_origin_session_owner, hls_manifest_acceptance_directive_for_session, trigger_origin_refresh_sync,
-    HlsBoundAccountAcquireErrorKind, HlsManifestAcceptanceDirective, HlsManifestAcceptanceEvaluationOutcome,
-    HlsMemberHealthPolicy, HlsMemberUnhealthyReason, HlsOriginAccountRuntime, HlsOriginAccountSnapshot,
-    HlsOriginAccountWork, HlsOriginSource, HlsPreparedOriginAccount, HlsSession, LiveHlsOriginEntry,
+    HlsBoundAccountAcquireErrorKind, HlsFreshManifestRequiredReason, HlsManifestAcceptanceDirective,
+    HlsManifestAcceptanceEvaluationOutcome, HlsManifestCommitRequirement, HlsMemberHealthPolicy,
+    HlsMemberUnhealthyReason, HlsOriginAccountRuntime, HlsOriginAccountSnapshot, HlsOriginAccountWork, HlsOriginSource,
+    HlsPreparedOriginAccount, HlsSession, LiveHlsOriginEntry,
 };
 use tuliprox_repository::target_stream_item::{classify_virtual_id, ResolvedStreamTarget};
 
@@ -697,6 +698,8 @@ impl HlsOriginAccountRuntime for AppHlsOriginAccountRuntime {
     fn raw_request_url(&self) -> Option<String> { Some(self.member.load().raw_request_url.clone()) }
 
     fn entry_url(&self) -> Option<String> { Some(self.member.load().entry_url.clone()) }
+
+    fn member_handoff_pending(&self) -> bool { self.handoff_in_flight.load(Ordering::Acquire) }
 
     fn member_health_policy(&self, session: &HlsSession) -> Option<HlsMemberHealthPolicy> {
         let failover = self.group_failover_config(session)?;
@@ -928,6 +931,67 @@ fn publish_hls_origin_member_handoff(
     true
 }
 
+/// Runs one origin manifest refresh for a prepared group member account through the regular
+/// refresh/acceptance pipeline. Shared by the member handoff and the same-member retry.
+async fn trigger_hls_group_origin_refresh(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    prepared: HlsPreparedOriginAccount,
+    preacquired_handle: Option<tuliprox_session::ManagedProviderHandle>,
+    manifest_commit_requirement: HlsManifestCommitRequirement,
+    fingerprint: &Fingerprint,
+    now_ms: u64,
+) {
+    let proxy_session_id = session.read().await.proxy_session_id.clone();
+    let acceptance_directive =
+        match hls_manifest_acceptance_directive_for_session(&app_state.hls_ctx(), session, &proxy_session_id).await {
+            HlsManifestAcceptanceEvaluationOutcome::Evaluated(directive) => directive,
+            HlsManifestAcceptanceEvaluationOutcome::SessionSuperseded => return,
+            HlsManifestAcceptanceEvaluationOutcome::StateContention { .. } => HlsManifestAcceptanceDirective::none(),
+        };
+    let (policy, reservation_ttl_secs, playback_kind, account_runtime, headers) = {
+        let session = session.read().await;
+        (
+            session.effective_origin_acquire_policy_or_default(),
+            session.account_overlap_timing().reservation_ttl_secs(),
+            session.origin_playback_kind(),
+            session.origin_account_runtime.clone(),
+            session.origin_request_headers.clone(),
+        )
+    };
+    let mut origin_io = HlsOriginIoContext {
+        ctx: app_state.hls_ctx(),
+        client_addr: fingerprint.addr,
+        allow_grace: HlsOriginWorkClass::ManifestInteractive.allows_grace(),
+        priority: policy.priority,
+        connection_kind: policy.connection_kind,
+        reservation_ttl_secs,
+        preacquired_provider_handle: None,
+        started_generation: None,
+        prepared_account: None,
+        playback_kind,
+        account_runtime,
+    };
+    if let Some(handle) = preacquired_handle {
+        origin_io = origin_io.with_managed_provider_handle(handle);
+    }
+    let request = hls_origin_refresh_request(
+        app_state,
+        session,
+        prepared,
+        HlsOriginRefreshOptions {
+            headers,
+            origin_io,
+            manifest_commit_requirement,
+            acceptance_directive,
+            access_lease_id: None,
+            rewrite_secret: app_state.get_encrypt_secret().to_vec(),
+            now_ms,
+        },
+    );
+    trigger_origin_refresh_sync(request).await;
+}
+
 /// Fetches and commits the new member's manifest through the regular refresh/acceptance pipeline,
 /// mirroring the account-rebind follow-up. This makes the host switch, epoch, discontinuity, key
 /// namespace and init-map transitions happen inside the handoff rather than on the next poll.
@@ -948,37 +1012,6 @@ async fn trigger_hls_group_member_handoff_refresh(
     else {
         return;
     };
-    let proxy_session_id = session.read().await.proxy_session_id.clone();
-    let acceptance_directive =
-        match hls_manifest_acceptance_directive_for_session(&app_state.hls_ctx(), session, &proxy_session_id).await {
-            HlsManifestAcceptanceEvaluationOutcome::Evaluated(directive) => directive,
-            HlsManifestAcceptanceEvaluationOutcome::SessionSuperseded => return,
-            HlsManifestAcceptanceEvaluationOutcome::StateContention { .. } => HlsManifestAcceptanceDirective::none(),
-        };
-    let (policy, reservation_ttl_secs, playback_kind, account_runtime, headers) = {
-        let session = session.read().await;
-        (
-            session.effective_origin_acquire_policy_or_default(),
-            session.account_overlap_timing().reservation_ttl_secs(),
-            session.origin_playback_kind(),
-            session.origin_account_runtime.clone(),
-            session.origin_request_headers.clone(),
-        )
-    };
-    let origin_io = HlsOriginIoContext {
-        ctx: app_state.hls_ctx(),
-        client_addr: fingerprint.addr,
-        allow_grace: HlsOriginWorkClass::ManifestInteractive.allows_grace(),
-        priority: policy.priority,
-        connection_kind: policy.connection_kind,
-        reservation_ttl_secs,
-        preacquired_provider_handle: None,
-        started_generation: None,
-        prepared_account: None,
-        playback_kind,
-        account_runtime,
-    }
-    .with_managed_provider_handle(preacquired_handle);
     let manifest_commit_requirement = tuliprox_hls::api::hls_manifest_commit_requirement(
         session,
         tuliprox_hls::api::HlsSessionStoreOutcome::Reused,
@@ -987,21 +1020,84 @@ async fn trigger_hls_group_member_handoff_refresh(
         now_ms,
     )
     .await;
-    let request = hls_origin_refresh_request(
+    trigger_hls_group_origin_refresh(
         app_state,
         session,
         HlsPreparedOriginAccount { entry, snapshot },
-        HlsOriginRefreshOptions {
-            headers,
-            origin_io,
-            manifest_commit_requirement,
-            acceptance_directive,
-            access_lease_id: None,
-            rewrite_secret: app_state.get_encrypt_secret().to_vec(),
-            now_ms,
-        },
+        Some(preacquired_handle),
+        manifest_commit_requirement,
+        fingerprint,
+        now_ms,
+    )
+    .await;
+}
+
+/// Refreshes the manifest for the currently bound group member during a same-member retry.
+async fn trigger_current_hls_group_member_refresh(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    member: &ArcSwap<AppHlsMemberBinding>,
+    fingerprint: &Fingerprint,
+    now_ms: u64,
+) {
+    let current_member = member.load();
+    let Some(input) = app_state
+        .app_config
+        .get_input_by_id(current_member.input_id)
+        .filter(|input| input.name == current_member.input_name)
+    else {
+        return;
+    };
+    let (proxy_id, policy) = {
+        let session = session.read().await;
+        (session.proxy_session_id.clone(), session.effective_origin_acquire_policy_or_default())
+    };
+    let Ok(prepared) = prepare_hls_origin_runtime(
+        app_state,
+        session,
+        &input,
+        &current_member.raw_request_url,
+        &current_member.entry_url,
+        &proxy_id,
+        fingerprint,
+        policy.connection_kind,
+        policy.priority,
+        HlsOriginWorkKind::Manifest,
+        HlsOriginWorkClass::ManifestInteractive,
+        now_ms,
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(entry) = LiveHlsOriginEntry::parse_with_provider_configs(
+        &prepared.fetch_url,
+        prepared.url_failover_provider,
+        prepared.runtime_provider_config,
+    ) else {
+        return;
+    };
+    session.write().await.origin_refresh.next_fetch_allowed_at_ms = 0;
+    let manifest_commit_requirement = HlsManifestCommitRequirement::FreshCommitRequired {
+        reason: HlsFreshManifestRequiredReason::PreviousHardManifestFailure,
+    };
+    trigger_hls_group_origin_refresh(
+        app_state,
+        session,
+        HlsPreparedOriginAccount { entry, snapshot: prepared.snapshot },
+        prepared.preacquired_origin_account_handle,
+        manifest_commit_requirement,
+        fingerprint,
+        now_ms,
+    )
+    .await;
+}
+
+fn log_handoff_outcome(proxy_session_id: &ProxySessionId, outcome: &str) {
+    debug!(
+        "HLS group member handoff outcome: proxy_session={} outcome={outcome}",
+        safe_proxy_session_id(proxy_session_id)
     );
-    trigger_origin_refresh_sync(request).await;
 }
 
 /// Hands a live failover-group session over to the next healthy member. R3 triggers call this via
@@ -1051,21 +1147,61 @@ async fn handoff_hls_group_member(
         record_member_failure(&app_state.member_health, &group.members[index], None, reason.failure_class());
     }
 
+    debug!(
+        "HLS group member handoff trigger: proxy_session={} reason={reason:?} failure_class={:?}",
+        safe_proxy_session_id(&proxy_session_id),
+        reason.failure_class()
+    );
+
     let playback = group_playback_settings(app_state, &target);
     let member_count = group.members.len();
-    let decision = {
+    let mut decision = {
         let mut guard = handoff_budget.lock().await;
         let budget = guard.get_or_insert_with(|| FailoverBudget::new(&playback.failover));
         budget.on_trigger(current_index.unwrap_or(0), member_count, Instant::now())
     };
 
-    let exclude = match decision {
-        BudgetDecision::GiveUp => {
-            begin_hls_group_member_handoff(app_state, session, old_binding.as_ref(), now_ms).await;
-            return;
+    let exclude = loop {
+        debug!(
+            "HLS group member handoff budget decision: proxy_session={} decision={decision:?}",
+            safe_proxy_session_id(&proxy_session_id)
+        );
+        match decision {
+            BudgetDecision::GiveUp => {
+                log_handoff_outcome(&proxy_session_id, "give-up");
+                begin_hls_group_member_handoff(app_state, session, old_binding.as_ref(), current_time_millis()).await;
+                return;
+            }
+            BudgetDecision::RetrySame => {
+                if session.read().await.origin_source != failed_origin {
+                    return;
+                }
+                let commits_before = session.read().await.origin_manifest_commits();
+                trigger_current_hls_group_member_refresh(
+                    app_state,
+                    session,
+                    member,
+                    fingerprint,
+                    current_time_millis(),
+                )
+                .await;
+                if session.read().await.origin_source != failed_origin {
+                    return;
+                }
+                let commits_after = session.read().await.origin_manifest_commits();
+                if commits_after > commits_before {
+                    log_handoff_outcome(&proxy_session_id, "retried-same-ok");
+                    return;
+                }
+                log_handoff_outcome(&proxy_session_id, "retried-same-failed");
+                decision = {
+                    let mut guard = handoff_budget.lock().await;
+                    let budget = guard.get_or_insert_with(|| FailoverBudget::new(&playback.failover));
+                    budget.on_trigger(current_index.unwrap_or(0), member_count, Instant::now())
+                };
+            }
+            BudgetDecision::Next { exclude } => break exclude,
         }
-        BudgetDecision::RetrySame => return,
-        BudgetDecision::Next { exclude } => exclude,
     };
 
     // Serialize the member handoff with concurrent account prepares. Once the old binding is
@@ -1126,6 +1262,7 @@ async fn handoff_hls_group_member(
     let Ok((resolved, probed)) = selected else {
         // No member left: the old binding is already detached and fenced, so the session's
         // existing terminal/unavailable handling takes over.
+        log_handoff_outcome(&proxy_session_id, "no-member");
         return;
     };
 
@@ -1133,11 +1270,13 @@ async fn handoff_hls_group_member(
         resolved.acquired.handle.handle().and_then(|handle| handle.allocation.get_provider_config())
     else {
         drop(resolved.acquired.handle);
+        log_handoff_outcome(&proxy_session_id, "no-member");
         return;
     };
     let Some(new_account) = resolved.acquired.handle.handle().and_then(|handle| handle.allocation.get_provider_name())
     else {
         drop(resolved.acquired.handle);
+        log_handoff_outcome(&proxy_session_id, "no-member");
         return;
     };
     let member_url = if let Some(probed) = probed.as_ref() {
@@ -1155,6 +1294,7 @@ async fn handoff_hls_group_member(
     };
     let Some(member_url) = member_url else {
         drop(resolved.acquired.handle);
+        log_handoff_outcome(&proxy_session_id, "no-member");
         return;
     };
 
@@ -1181,6 +1321,20 @@ async fn handoff_hls_group_member(
     new_binding.provider_binding_tag = resolved.acquired.handle.handle().and_then(|handle| handle.binding_tag);
 
     let new_index = resolved.acquired.index;
+    debug!(
+        "HLS group member handoff member switch: proxy_session={} old_index={:?} new_index={} old_account={} new_account={}",
+        safe_proxy_session_id(&proxy_session_id),
+        current_index,
+        new_index,
+        sanitize_sensitive_info(
+            current_binding
+                .as_ref()
+                .or(old_binding.as_ref())
+                .map_or("-", |binding| binding.account_name.as_ref())
+        ),
+        sanitize_sensitive_info(new_account.as_ref())
+    );
+
     let published = publish_hls_origin_account_with_status(app_state, session, |current| {
         if !publish_hls_origin_member_handoff(
             current,
@@ -1196,6 +1350,7 @@ async fn handoff_hls_group_member(
     .await;
     let Ok(snapshot) = published else {
         drop(resolved.acquired.handle);
+        log_handoff_outcome(&proxy_session_id, "no-member");
         return;
     };
 
@@ -1226,6 +1381,8 @@ async fn handoff_hls_group_member(
             budget.on_switched(new_index, current_index.unwrap_or(new_index), Instant::now());
         }
     }
+
+    log_handoff_outcome(&proxy_session_id, "switched");
 }
 
 #[cfg(test)]

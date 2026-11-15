@@ -1565,6 +1565,35 @@
 
 ## 🐛 Fixes
 
+- **Exhausted manifest refresh triggers member failover instead of terminal state.** When an active HLS group member's
+  manifest refresh fails persistently (such as repeated HTTP 503 errors or an origin manifest that freezes and stops
+  advancing segments), the failure reports to member health immediately once the retry budget is exhausted, initiating
+  a member handoff rather than committing a terminal outage.
+
+- **Terminal availability commit deferred while a member handoff runs.** Post-refresh availability reevaluation no
+  longer commits a terminal state while an active member handoff is in flight; the reevaluation re-checks after the
+  handoff finishes, preserving bounded outage handling if all members are exhausted.
+
+- **A failing HLS group session tries the next member before it ends.** When the shared cache is about to end an
+  active group playback and no member switch was triggered (for example a timeline conflict after segment `503`
+  errors), Tuliprox first requests one switch to the next member. The playback ends only when that switch fails too.
+
+- **A member switch is no longer blocked by a failed segment of the previous member.** A segment of the old member that
+  failed and was never sent to a player blocked the new member's playlist when the new member's window did not
+  contain it. The player then saw no new media, and Tuliprox switched back to the failing member.
+
+- **`same_source_retries` performs a real same-member reopen before moving to the next member.** During runtime
+  failover of a member that played stably, `RetrySame` now performs a real same-member refresh under the in-flight
+  guard; if that refresh fails, the handoff proceeds directly to the next member within the same handoff.
+
+- **Legacy stale child playlist URLs after a member switch are served from the new member.** In legacy (non-cached)
+  HLS group playback, players that continue polling child variant URLs sealed with the previous member are served the
+  newly selected member's media playlist (matched by bandwidth or first variant) rather than being rejected with 404.
+
+- **Provider response debug log formats URLs as strings for sanitizing.** Upstream response debug logging now formats
+  `reqwest::Url` via `Url::as_str()` before passing it through `sanitize_sensitive_info`, ensuring sensitive tokens in
+  path segments are correctly redacted.
+
 - **Shared HLS cache fetches a new segment at once.** The retry jitter of segment and map fetches also applied to the
   first attempt, so about half of all segment fetches waited up to 100 ms before their first request. Jitter now only
   spreads real retries.

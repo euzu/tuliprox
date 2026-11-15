@@ -29,7 +29,7 @@ use url::Url;
 /// provider cookie store admits them for the variant URL (same origin, path, domain and secure rules).
 /// A configured input cookie is merged with them (master wins per name) and removed from
 /// `variant_source`, because configured input headers take precedence over request headers.
-fn variant_probe_headers<'a>(
+pub(super) fn variant_probe_headers<'a>(
     headers: &'a HeaderMap,
     master_url: &Url,
     master_response_headers: &HeaderMap,

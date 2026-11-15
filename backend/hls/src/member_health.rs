@@ -109,16 +109,23 @@ impl HlsMemberHealth {
         self.hard_manifest_failures = 0;
     }
 
-    /// Records one failed refresh. Reports on repeated hard failures, or on repeated failures that
-    /// lasted `no_data_timeout_ms` without a successful refresh in between. A single failure never
-    /// reports.
-    pub(crate) fn manifest_failed(&mut self, hard: bool, now_ms: u64, no_data_timeout_ms: u64) -> bool {
+    /// Records one failed refresh. Reports on repeated hard failures, on an exhausted refresh, or on
+    /// repeated failures that lasted `no_data_timeout_ms` without a successful refresh in between.
+    /// A single non-exhausted failure never reports.
+    pub(crate) fn manifest_failed(
+        &mut self,
+        hard: bool,
+        exhausted: bool,
+        now_ms: u64,
+        no_data_timeout_ms: u64,
+    ) -> bool {
         let first = *self.first_manifest_failure_ms.get_or_insert(now_ms);
         self.manifest_failures = self.manifest_failures.saturating_add(1);
         if hard {
             self.hard_manifest_failures = self.hard_manifest_failures.saturating_add(1);
         }
-        self.hard_manifest_failures >= HARD_MANIFEST_FAILURES_BEFORE_REPORT
+        exhausted
+            || self.hard_manifest_failures >= HARD_MANIFEST_FAILURES_BEFORE_REPORT
             || (no_data_timeout_ms > 0
                 && self.manifest_failures >= 2
                 && now_ms.saturating_sub(first) >= no_data_timeout_ms)
@@ -197,15 +204,17 @@ impl HlsSession {
     }
 
     /// A manifest refresh failed. `hard` is the failure class from the refresh classifier; the caller
-    /// passes `None` for failures that say nothing about the member's origin.
+    /// passes `None` for failures that say nothing about the member's origin. `exhausted` is true
+    /// when the refresh budget is exhausted and produced a terminal-capable reevaluation action.
     pub(crate) fn member_unhealthy_after_manifest_failure(
         &mut self,
         hard: Option<bool>,
+        exhausted: bool,
         now_ms: u64,
     ) -> Option<HlsMemberUnhealthyNotice> {
         let hard = hard?;
         let (runtime, policy) = self.member_health_policy()?;
-        if self.member_health.manifest_failed(hard, now_ms, policy.no_data_timeout_ms) {
+        if self.member_health.manifest_failed(hard, exhausted, now_ms, policy.no_data_timeout_ms) {
             return Some(HlsMemberUnhealthyNotice { runtime, reason: HlsMemberUnhealthyReason::ManifestFailure });
         }
         self.member_stall_notice(runtime, policy, now_ms)
@@ -279,7 +288,7 @@ pub(crate) mod test_support {
         future::Future,
         pin::Pin,
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Mutex,
         },
     };
@@ -289,6 +298,7 @@ pub(crate) mod test_support {
         policy: Option<HlsMemberHealthPolicy>,
         reasons: Mutex<Vec<HlsMemberUnhealthyReason>>,
         progress: AtomicUsize,
+        handoff_pending: AtomicBool,
     }
 
     impl fmt::Debug for RecordingMemberRuntime {
@@ -297,7 +307,16 @@ pub(crate) mod test_support {
 
     impl RecordingMemberRuntime {
         pub(crate) fn new(policy: Option<HlsMemberHealthPolicy>) -> Arc<Self> {
-            Arc::new(Self { policy, reasons: Mutex::new(Vec::new()), progress: AtomicUsize::new(0) })
+            Arc::new(Self {
+                policy,
+                reasons: Mutex::new(Vec::new()),
+                progress: AtomicUsize::new(0),
+                handoff_pending: AtomicBool::new(false),
+            })
+        }
+
+        pub(crate) fn set_member_handoff_pending(&self, pending: bool) {
+            self.handoff_pending.store(pending, Ordering::Release);
         }
 
         pub(crate) fn default_policy() -> HlsMemberHealthPolicy {
@@ -331,6 +350,8 @@ pub(crate) mod test_support {
                 reasons.push(reason);
             }
         }
+
+        fn member_handoff_pending(&self) -> bool { self.handoff_pending.load(Ordering::Acquire) }
 
         fn member_health_policy(&self, _session: &HlsSession) -> Option<HlsMemberHealthPolicy> { self.policy }
 
@@ -446,29 +467,32 @@ mod tests {
     #[test]
     fn one_retryable_failure_never_reports_but_two_hard_ones_do() {
         let mut health = HlsMemberHealth::default();
-        assert!(!health.manifest_failed(false, 1_000, 8_000));
-        assert!(!health.manifest_failed(true, 1_500, 8_000));
-        assert!(health.manifest_failed(true, 2_000, 8_000));
+        assert!(!health.manifest_failed(false, false, 1_000, 8_000));
+        assert!(!health.manifest_failed(true, false, 1_500, 8_000));
+        assert!(health.manifest_failed(true, false, 2_000, 8_000));
         health.manifest_succeeded();
-        assert!(!health.manifest_failed(true, 3_000, 8_000), "a successful refresh restarts the count");
+        assert!(!health.manifest_failed(true, false, 3_000, 8_000), "a successful refresh restarts the count");
     }
 
     #[test]
     fn retryable_failures_report_after_the_no_data_timeout() {
         let mut health = HlsMemberHealth::default();
-        assert!(!health.manifest_failed(false, 1_000, 8_000));
-        assert!(!health.manifest_failed(false, 5_000, 8_000));
-        assert!(health.manifest_failed(false, 9_000, 8_000));
+        assert!(!health.manifest_failed(false, false, 1_000, 8_000));
+        assert!(!health.manifest_failed(false, false, 5_000, 8_000));
+        assert!(health.manifest_failed(false, false, 9_000, 8_000));
         let mut disabled = HlsMemberHealth::default();
-        assert!(!disabled.manifest_failed(false, 1_000, 0));
-        assert!(!disabled.manifest_failed(false, 90_000, 0));
+        assert!(!disabled.manifest_failed(false, false, 1_000, 0));
+        assert!(!disabled.manifest_failed(false, false, 90_000, 0));
     }
 
     #[test]
     fn two_quick_retryable_failures_do_not_switch() {
         let mut health = HlsMemberHealth::default();
-        assert!(!health.manifest_failed(false, 1_000, 8_000));
-        assert!(!health.manifest_failed(false, 1_500, 8_000), "two quick soft failures stay below the no-data timeout");
+        assert!(!health.manifest_failed(false, false, 1_000, 8_000));
+        assert!(
+            !health.manifest_failed(false, false, 1_500, 8_000),
+            "two quick soft failures stay below the no-data timeout"
+        );
     }
 
     #[test]
@@ -528,11 +552,11 @@ mod tests {
     #[test]
     fn handoff_restarts_every_clock() {
         let mut health = HlsMemberHealth::default();
-        assert!(!health.manifest_failed(true, 1_000, 8_000));
+        assert!(!health.manifest_failed(true, false, 1_000, 8_000));
         health.reset_for_handoff(50_000);
         assert!(!health.stalled(52_000, 10_000, 4_000, 8_000), "progress of the old member does not count");
         assert!(health.stalled(58_000, 10_000, 4_000, 8_000));
-        assert!(!health.manifest_failed(true, 58_500, 8_000));
+        assert!(!health.manifest_failed(true, false, 58_500, 8_000));
     }
 
     #[test]
@@ -541,7 +565,7 @@ mod tests {
         let mut session = session(&runtime);
         session.origin_control.record_media_progress(1_000, 4_000);
         for now in [10_000, 20_000, 30_000] {
-            send(session.member_unhealthy_after_manifest_failure(Some(true), now));
+            send(session.member_unhealthy_after_manifest_failure(Some(true), false, now));
             send(session.member_unhealthy_after_manifest_success(now));
             send(session.member_unhealthy_after_segment_ready(now, 4_000, 90_000));
         }
@@ -555,14 +579,34 @@ mod tests {
     fn manifest_failures_notify_with_the_classified_reason() {
         let runtime = RecordingMemberRuntime::new(Some(RecordingMemberRuntime::default_policy()));
         let mut session = session(&runtime);
-        send(session.member_unhealthy_after_manifest_failure(Some(false), 1_000));
+        send(session.member_unhealthy_after_manifest_failure(Some(false), false, 1_000));
         runtime.assert_quiet("one retryable failure must not switch");
-        send(session.member_unhealthy_after_manifest_failure(None, 1_100));
+        send(session.member_unhealthy_after_manifest_failure(None, false, 1_100));
         runtime.assert_quiet("failures unrelated to the origin are ignored");
-        send(session.member_unhealthy_after_manifest_failure(Some(true), 1_200));
+        send(session.member_unhealthy_after_manifest_failure(Some(true), false, 1_200));
         runtime.assert_quiet("");
-        send(session.member_unhealthy_after_manifest_failure(Some(true), 1_300));
+        send(session.member_unhealthy_after_manifest_failure(Some(true), false, 1_300));
         assert_eq!(runtime.reasons(), vec![HlsMemberUnhealthyReason::ManifestFailure]);
+    }
+
+    #[test]
+    fn exhausted_manifest_failure_reports_immediately() {
+        let mut health = HlsMemberHealth::default();
+        assert!(health.manifest_failed(false, true, 1_000, 8_000), "exhausted retryable failure reports immediately");
+        let mut health2 = HlsMemberHealth::default();
+        assert!(health2.manifest_failed(true, true, 1_000, 8_000), "exhausted hard failure reports immediately");
+
+        let runtime = RecordingMemberRuntime::new(Some(RecordingMemberRuntime::default_policy()));
+        let mut sess = session(&runtime);
+        send(sess.member_unhealthy_after_manifest_failure(Some(false), false, 1_000));
+        runtime.assert_quiet("non-exhausted retryable failure does not switch");
+        send(sess.member_unhealthy_after_manifest_failure(Some(false), true, 1_100));
+        assert_eq!(runtime.reasons(), vec![HlsMemberUnhealthyReason::ManifestFailure]);
+
+        let no_policy_runtime = RecordingMemberRuntime::new(None);
+        let mut no_policy_session = session(&no_policy_runtime);
+        send(no_policy_session.member_unhealthy_after_manifest_failure(Some(false), true, 1_200));
+        no_policy_runtime.assert_quiet("no policy disables reporting even on exhausted failures");
     }
 
     #[test]

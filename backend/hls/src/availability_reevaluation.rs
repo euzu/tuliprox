@@ -468,6 +468,20 @@ impl HlsAvailabilityReevaluationOwnership {
     pub fn discard_superseded(&self, owner_key: &HlsAvailabilityReevaluationOwnerKey) {
         self.coordinator.discard_superseded(owner_key, self.owner_token);
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        coordinator: Arc<HlsAvailabilityReevaluationCoordinator>,
+        proxy_session_id: ProxySessionId,
+    ) -> Self {
+        Self {
+            coordinator,
+            proxy_session_id,
+            owner_token: 1,
+            cancellation: tokio_util::sync::CancellationToken::new(),
+            wake: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

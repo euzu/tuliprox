@@ -52,28 +52,39 @@ async fn status_origin(status: Arc<AtomicU16>) -> super::TestOriginServer {
 }
 
 #[tokio::test]
-async fn repeated_hard_manifest_failures_notify_the_member_unhealthy() {
+async fn exhausted_manifest_failure_notifies_the_member_unhealthy() {
     let fixture = fixture(true).await;
     let origin = status_origin(Arc::new(AtomicU16::new(404))).await;
 
-    refresh_once(&fixture, &origin.base_url).await;
-    fixture.runtime.assert_quiet("one failure must not switch");
     refresh_once(&fixture, &origin.base_url).await;
     assert_eq!(fixture.runtime.reasons(), vec![HlsMemberUnhealthyReason::ManifestFailure]);
 }
 
 #[tokio::test]
-async fn one_retryable_manifest_failure_does_not_notify_and_success_restarts_the_count() {
+async fn persistent_retryable_manifest_failure_notifies_the_member_unhealthy() {
     let fixture = fixture(true).await;
     let status = Arc::new(AtomicU16::new(503));
     let origin = status_origin(Arc::clone(&status)).await;
 
     refresh_once(&fixture, &origin.base_url).await;
-    status.store(200, Ordering::Release);
+    assert_eq!(fixture.runtime.reasons(), vec![HlsMemberUnhealthyReason::ManifestFailure]);
+}
+
+#[tokio::test]
+async fn transient_manifest_failure_does_not_notify() {
+    let fixture = fixture(true).await;
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let origin = spawn_test_origin(Arc::new(move |_path| {
+        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            (503, Vec::new(), String::new())
+        } else {
+            (200, Vec::new(), manifest_body())
+        }
+    }))
+    .await;
+
     refresh_once(&fixture, &origin.base_url).await;
-    status.store(404, Ordering::Release);
-    refresh_once(&fixture, &origin.base_url).await;
-    fixture.runtime.assert_quiet("a success between failures restarts the hard-failure count");
+    fixture.runtime.assert_quiet("transient 503 that recovers inside retries does not switch");
 }
 
 #[tokio::test]
@@ -107,9 +118,11 @@ async fn stalled_publication_is_reported_on_a_successful_refresh() {
 #[tokio::test]
 async fn handoff_resets_the_failure_count_of_the_previous_member() {
     let fixture = fixture(true).await;
-    let origin = status_origin(Arc::new(AtomicU16::new(404))).await;
+    let status = Arc::new(AtomicU16::new(404));
+    let origin = status_origin(Arc::clone(&status)).await;
 
     refresh_once(&fixture, &origin.base_url).await;
+    assert_eq!(fixture.runtime.reasons(), vec![HlsMemberUnhealthyReason::ManifestFailure]);
     {
         let mut session = fixture.session.write().await;
         let binding = crate::HlsOriginAccountBinding::new(
@@ -121,6 +134,11 @@ async fn handoff_resets_the_failure_count_of_the_previous_member() {
         let source = session.origin_source.clone();
         session.handoff_origin_member(source, binding);
     }
+    status.store(200, Ordering::Release);
     refresh_once(&fixture, &origin.base_url).await;
-    fixture.runtime.assert_quiet("the new member starts without the old member's failures");
+    assert_eq!(
+        fixture.runtime.reasons(),
+        vec![HlsMemberUnhealthyReason::ManifestFailure],
+        "the new member starts fresh and does not emit a second notice"
+    );
 }

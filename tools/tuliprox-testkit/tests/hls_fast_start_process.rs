@@ -79,6 +79,7 @@ async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool)
             input_type: FixtureInputType::M3u,
             stalker: &FixtureStalker::default(),
             failover_inputs: &[],
+            failover_runtime: None,
         },
     )
     .await?;
