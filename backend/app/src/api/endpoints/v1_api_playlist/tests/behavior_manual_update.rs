@@ -97,6 +97,7 @@ fn manual_update_capabilities_reject_unsupported_actions_and_keep_all_required_i
         (InputType::Plex, 2),
         (InputType::Library, 1),
         (InputType::Jellyfin, 2),
+        (InputType::Silo, 2),
         (InputType::Emby, 2),
         (InputType::M3uBatch, 3),
         (InputType::XtreamBatch, 3),

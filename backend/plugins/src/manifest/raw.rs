@@ -162,12 +162,18 @@ pub(super) struct RawRpcExport {
     pub mcp: bool,
     pub description: Option<String>,
     pub input_schema: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub destructive: bool,
+    pub output_schema: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub input_scoped: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct RawResources {
     pub max_memory_mb: Option<u32>,
     pub max_exec_ms: Option<u64>,
+    pub resolve_ms: Option<u64>,
     pub max_instances: Option<u16>,
     pub fail_mode: Option<String>,
 }

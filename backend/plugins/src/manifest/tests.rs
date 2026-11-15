@@ -186,6 +186,9 @@ fn the_full_example_parses_into_typed_fields() {
             mcp: true,
             description: Some("Upcoming fixtures for the tracked leagues".to_string()),
             input_schema: Some("rpc/get-fixtures.schema.json".to_string()),
+            destructive: false,
+            output_schema: None,
+            input_scoped: false,
         }]
     );
 
@@ -194,6 +197,7 @@ fn the_full_example_parses_into_typed_fields() {
         Resources {
             max_memory_mb: Some(64),
             max_exec_ms: Some(5_000),
+            resolve_ms: None,
             max_instances: Some(4),
             fail_mode: FailMode::Continue
         }
@@ -379,7 +383,7 @@ fn declarations_need_the_hook_that_serves_them() {
     assert_problem(&with("events: [playlist.update]\n"), "`events:` is declared but hook `events.on-event`");
     assert_problem(&with("tasks: [{ id: refresh-fixtures }]\n"), "`tasks:` is declared but hook `tasks.run`");
     assert_problem(&with("ui:\n  rpc_exports: [{ name: ping, kind: read }]\n"), "hook `rpc.call` is not listed");
-    assert_problem(&with("provides: { input_type: true }\n"), "hook `input.fetch` is not listed");
+    assert_problem(&with("provides: { input_type: true }\n"), "hook `input.fetch` or `media.fetch` is not listed");
     assert_problem(&with("provides: { output_format: my-format }\n"), "hook `output.render` is not listed");
 }
 
@@ -459,6 +463,57 @@ fn mcp_exports_need_an_input_schema() {
         "{hook}    - {{ name: ping, kind: read, mcp: true, input_schema: rpc/ping.json }}\n"
     )))
     .is_ok());
+}
+
+#[test]
+fn rpc_export_destructive_output_schema_and_input_scoped_default_off() {
+    let hook = "hooks: [rpc.call]\nui:\n  rpc_exports:\n";
+    let manifest = parse(&with(&format!("{hook}    - {{ name: ping, kind: read }}\n"))).unwrap();
+    let export = &manifest.ui.rpc_exports[0];
+    assert!(!export.destructive);
+    assert_eq!(export.output_schema, None);
+    assert!(!export.input_scoped);
+
+    let manifest = parse(&with(&format!(
+        "{hook}    - {{ name: reset, kind: write, destructive: true, output_schema: rpc/reset.out.json, input_scoped: true }}\n"
+    )))
+    .unwrap();
+    let export = &manifest.ui.rpc_exports[0];
+    assert!(export.destructive);
+    assert_eq!(export.output_schema.as_deref(), Some("rpc/reset.out.json"));
+    assert!(export.input_scoped);
+
+    // An explicit `false` is the same as leaving the key out.
+    let manifest =
+        parse(&with(&format!("{hook}    - {{ name: ping, kind: read, destructive: false, input_scoped: false }}\n")))
+            .unwrap();
+    assert!(!manifest.ui.rpc_exports[0].destructive);
+    assert!(!manifest.ui.rpc_exports[0].input_scoped);
+}
+
+#[test]
+fn destructive_is_only_allowed_on_a_write_export() {
+    let hook = "hooks: [rpc.call]\nui:\n  rpc_exports:\n";
+    assert_problem(
+        &with(&format!("{hook}    - {{ name: ping, kind: read, destructive: true }}\n")),
+        "`destructive: true` is only allowed on a `kind: write` export",
+    );
+    // A read export that says `destructive: false` is fine.
+    assert!(parse(&with(&format!("{hook}    - {{ name: ping, kind: read, destructive: false }}\n"))).is_ok());
+}
+
+#[test]
+fn output_schema_must_be_a_path_inside_the_package() {
+    let hook = "hooks: [rpc.call]\nui:\n  rpc_exports:\n";
+    for path in ["../escape.json", "/etc/schema.json", "rpc\\out.json"] {
+        assert_problem(
+            &with(&format!("{hook}    - {{ name: ping, kind: read, output_schema: {path} }}\n")),
+            "must be a relative path inside the package",
+        );
+    }
+    // An empty value reads as absent.
+    let manifest = parse(&with(&format!("{hook}    - {{ name: ping, kind: read, output_schema: }}\n"))).unwrap();
+    assert_eq!(manifest.ui.rpc_exports[0].output_schema, None);
 }
 
 #[test]
@@ -696,6 +751,7 @@ fn provides_output_format_is_a_kebab_id() {
 fn resources_are_non_zero_and_fail_mode_is_known() {
     assert_problem(&with("resources: { max_memory_mb: 0 }\n"), "max_memory_mb must not be zero");
     assert_problem(&with("resources: { max_exec_ms: 0 }\n"), "max_exec_ms must not be zero");
+    assert_problem(&with("resources: { resolve_ms: 0 }\n"), "resolve_ms must not be zero");
     assert_problem(&with("resources: { max_instances: 0 }\n"), "max_instances must not be zero");
     assert_problem(
         &with("resources: { fail_mode: explode }\n"),
@@ -706,6 +762,7 @@ fn resources_are_non_zero_and_fail_mode_is_known() {
         FailMode::AbortTarget
     );
     assert_eq!(parse(&with("resources: { fail_mode: continue }\n")).unwrap().resources.fail_mode, FailMode::Continue);
+    assert_eq!(parse(&with("resources: { resolve_ms: 12000 }\n")).unwrap().resources.resolve_ms, Some(12_000));
 }
 
 #[test]

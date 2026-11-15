@@ -1,6 +1,6 @@
 use super::layout::PLUGIN_TILE_WIDTH;
 use crate::{
-    app::components::{Block, BlockId, BlockInstance, PluginSlot, PortStatus},
+    app::components::{Block, BlockId, BlockInstance, BlockType, PluginSlot, PortStatus},
     html_if,
     i18n::use_translation,
 };
@@ -152,8 +152,14 @@ pub fn BlockView(props: &BlockProps) -> Html {
         });
     }
 
-    let type_label =
-        props.plugin_label.clone().unwrap_or_else(|| translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}")));
+    let type_label = props.plugin_label.clone().unwrap_or_else(|| {
+        if block_type == BlockType::InputMediaServer {
+            if let BlockInstance::Input(dto) = &block.instance {
+                return translate.t(super::input_form::media_server_flavor_label_key(dto.input_type));
+            }
+        }
+        translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}"))
+    });
     let (title, show_type, is_batch) = {
         let (dto_title, show_type, is_batch) = match &block.instance {
             BlockInstance::Input(dto) => dto.aliases.as_ref().map_or((dto.name.to_string(), true, false), |a| {

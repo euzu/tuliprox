@@ -37,7 +37,10 @@ use shared::{
 };
 use std::rc::Rc;
 use web_sys::{HtmlInputElement, InputEvent, MouseEvent};
-use yew::{classes, component, html, use_context, use_state, Callback, Html, Properties, TargetCast};
+use yew::{
+    classes, component, html, use_context, use_effect_with, use_mut_ref, use_state, Callback, Html, Properties,
+    TargetCast,
+};
 
 // ---------------------------------------------------------------------------
 // Schema analysis (pure)
@@ -157,6 +160,8 @@ pub struct FieldModel {
     /// The field takes a row of its own in a multi-column layout.
     pub full_row: bool,
     pub kind: FieldKind,
+    /// Named RPC export to load select options from (`x-options-rpc`).
+    pub options_rpc: Option<String>,
 }
 
 impl FieldModel {
@@ -462,6 +467,7 @@ fn build_field(
     let full_row = node.get("row").and_then(Value::as_bool) == Some(true)
         || matches!(kind, FieldKind::Group { .. })
         || matches!(widget, Widget::Textarea | Widget::Code);
+    let options_rpc = non_blank_str(node, "x-options-rpc").map(str::to_owned);
     Ok(FieldModel {
         key: key.to_owned(),
         keys,
@@ -476,6 +482,7 @@ fn build_field(
         widget,
         full_row,
         kind,
+        options_rpc,
     })
 }
 
@@ -802,6 +809,41 @@ fn placeholder_for(field: &FieldModel) -> Option<String> {
     })
 }
 
+/// An option parsed from an options RPC answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedRpcOption {
+    pub value: String,
+    pub label: String,
+}
+
+/// Parses the guest's response for `x-options-rpc`: `[{"value": "...", "label": "..."}]` or `{"options": [...]}`.
+pub fn parse_options_result(result: &Value) -> Result<Vec<ParsedRpcOption>, String> {
+    let array = match result {
+        Value::Array(items) => items,
+        Value::Object(map) => match map.get("options").and_then(Value::as_array) {
+            Some(items) => items,
+            None => return Err("expected an array of options or an object with an 'options' array".to_string()),
+        },
+        _ => return Err("expected an array of options".to_string()),
+    };
+    let mut out = Vec::with_capacity(array.len());
+    for item in array {
+        let Some(obj) = item.as_object() else {
+            return Err("option entry must be an object".to_string());
+        };
+        let value = match obj.get("value").and_then(Value::as_str) {
+            Some(v) => v.to_string(),
+            None => return Err("option entry missing 'value' string".to_string()),
+        };
+        let label = match obj.get("label").and_then(Value::as_str) {
+            Some(l) => l.to_string(),
+            None => value.clone(),
+        };
+        out.push(ParsedRpcOption { value, label });
+    }
+    Ok(out)
+}
+
 fn field_dom_id(path: &str) -> String {
     let normalized: String = path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     format!("plugin_setting_{normalized}")
@@ -825,6 +867,12 @@ pub struct SchemaFormProps {
     pub errors: Vec<PluginFieldErrorDto>,
     /// The whole edited object after every change.
     pub on_change: Callback<Value>,
+    /// The plugin id when rendering an input form.
+    #[prop_or_default]
+    pub plugin_id: Option<String>,
+    /// The unsaved input values for x-options-rpc.
+    #[prop_or_default]
+    pub input_draft: Option<Value>,
 }
 
 /// Everything a field needs to render and to report a change.
@@ -832,6 +880,8 @@ struct FormContext<'a> {
     value: &'a Value,
     secrets: &'a [PluginSecretDto],
     errors: &'a [PluginFieldErrorDto],
+    plugin_id: Option<&'a str>,
+    input_draft: Option<&'a Value>,
     on_change: &'a Callback<Value>,
 }
 
@@ -963,6 +1013,12 @@ fn SecretField(props: &SecretFieldProps) -> Html {
     let shown = props.value.as_ref().map(scalar_text).filter(|text| !text.is_empty());
     let state_label = if props.is_set { "LABEL.PLUGIN_SECRET_SET" } else { "LABEL.PLUGIN_SECRET_NOT_SET" };
 
+    let placeholder = if props.is_set {
+        shared::model::REDACTED_SECRET.to_string()
+    } else {
+        translate.t("LABEL.PLUGIN_SECRET_NEW_VALUE")
+    };
+
     html! {
         <div class="tp__schema-form__field tp__schema-form__secret">
             { field_label(&props.field, &field_id) }
@@ -977,7 +1033,7 @@ fn SecretField(props: &SecretFieldProps) -> Html {
                 field_id={Some(field_id)}
                 hidden={true}
                 value={typed}
-                placeholder={Some(translate.t("LABEL.PLUGIN_SECRET_NEW_VALUE"))}
+                placeholder={Some(placeholder)}
                 on_change={Some(on_input)}
                 error={joined_error(&props.errors)}
             />
@@ -1047,6 +1103,183 @@ fn DurationField(props: &DurationFieldProps) -> Html {
                 <Select name={format!("{field_id}_unit")} options={options} on_select={on_unit} />
             </div>
             { render_errors(&props.errors) }
+        </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OptionsRpcFieldProps {
+    field: Rc<FieldModel>,
+    value: Option<Value>,
+    errors: Vec<String>,
+    rpc_name: String,
+    #[prop_or_default]
+    plugin_id: Option<String>,
+    #[prop_or_default]
+    input_draft: Option<Value>,
+    on_change: Callback<Option<Value>>,
+}
+
+#[component]
+fn OptionsRpcField(props: &OptionsRpcFieldProps) -> Html {
+    let translate = use_translation();
+    let ui_ctx = crate::app::components::use_plugin_ui();
+    let service =
+        ui_ctx.as_ref().map(|c| c.service.clone()).unwrap_or_else(|| Rc::new(crate::services::PluginUiService::new()));
+    let field_id = field_dom_id(&props.field.path);
+
+    let options = use_state(|| None::<Rc<Vec<ParsedRpcOption>>>);
+    let loading = use_state(|| false);
+    let fetch_error = use_state(|| None::<String>);
+    let fallback_text = use_state(|| false);
+    let request_gen = use_mut_ref(|| 0u64);
+
+    let current_val = props.value.as_ref().and_then(Value::as_str).unwrap_or_default().to_string();
+
+    let fetch_options = {
+        let options = options.clone();
+        let loading = loading.clone();
+        let fetch_error = fetch_error.clone();
+        let fallback_text = fallback_text.clone();
+        let plugin_id = props.plugin_id.clone();
+        let rpc_name = props.rpc_name.clone();
+        let input_draft = props.input_draft.clone();
+        let service = service.clone();
+        let request_gen = request_gen.clone();
+
+        Callback::from(move |()| {
+            let Some(plugin_id) = plugin_id.clone() else {
+                return;
+            };
+            *request_gen.borrow_mut() += 1;
+            let my_gen = *request_gen.borrow();
+            let request_gen = request_gen.clone();
+
+            let options = options.clone();
+            let loading = loading.clone();
+            let fetch_error = fetch_error.clone();
+            let fallback_text = fallback_text.clone();
+            let rpc_name = rpc_name.clone();
+            let service = service.clone();
+
+            let mut payload_map = serde_json::Map::new();
+            if let Some(draft) = input_draft.clone() {
+                payload_map.insert("input_draft".to_string(), draft);
+            }
+            let payload = Value::Object(payload_map);
+
+            loading.set(true);
+            fetch_error.set(None);
+
+            wasm_bindgen_futures::spawn_local(async move {
+                let outcome = service.rpc(&plugin_id, &rpc_name, &payload).await;
+                if *request_gen.borrow() != my_gen {
+                    return;
+                }
+                match outcome {
+                    Ok(result) => match parse_options_result(&result) {
+                        Ok(opts) => {
+                            options.set(Some(Rc::new(opts)));
+                            fallback_text.set(false);
+                        }
+                        Err(err) => {
+                            fetch_error.set(Some(err));
+                            fallback_text.set(true);
+                        }
+                    },
+                    Err(failure) => {
+                        fetch_error.set(Some(failure.error));
+                        fallback_text.set(true);
+                    }
+                }
+                loading.set(false);
+            });
+        })
+    };
+
+    // Load options on first mount or when plugin_id / rpc_name changes
+    {
+        let fetch_options = fetch_options.clone();
+        let options = options.clone();
+        let fallback_text = fallback_text.clone();
+        let fetch_error = fetch_error.clone();
+        let deps = (props.plugin_id.clone(), props.rpc_name.clone());
+        use_effect_with(deps, move |(plugin_id, _)| {
+            options.set(None);
+            fallback_text.set(false);
+            fetch_error.set(None);
+            if plugin_id.is_some() {
+                fetch_options.emit(());
+            }
+        });
+    }
+
+    let on_refresh = {
+        let fetch_options = fetch_options.clone();
+        let loading = loading.clone();
+        Callback::from(move |(_name, _e): (String, MouseEvent)| {
+            if !*loading {
+                fetch_options.emit(());
+            }
+        })
+    };
+
+    let on_select = {
+        let on_change = props.on_change.clone();
+        Callback::from(move |(_, selection): (String, DropDownSelection)| {
+            if let DropDownSelection::Single(id) = selection {
+                on_change.emit(Some(Value::String(id)));
+            }
+        })
+    };
+
+    let on_text_input = {
+        let on_change = props.on_change.clone();
+        Callback::from(move |text: String| {
+            on_change.emit(if text.is_empty() { None } else { Some(Value::String(text)) });
+        })
+    };
+
+    let mut all_errors = props.errors.clone();
+    if let Some(err) = (*fetch_error).as_ref() {
+        all_errors.push(format!("{}: {}", translate.t("MESSAGES.PLUGIN_OPTIONS_ERROR"), err));
+    }
+
+    let dropdown_options = (*options).as_ref().map(|opts| {
+        let items: Vec<DropDownOption> = opts
+            .iter()
+            .map(|opt| {
+                let selected = opt.value == current_val;
+                DropDownOption::new(&opt.value, html! { { &opt.label } }, selected)
+            })
+            .collect();
+        Rc::new(items)
+    });
+
+    html! {
+        <div class="tp__schema-form__field tp__schema-form__options-rpc">
+            <div class="tp__schema-form__options-rpc-header">
+                { field_label(&props.field, &field_id) }
+                <IconButton name={format!("{field_id}_refresh")} icon="Refresh"
+                    hint={translate.t("LABEL.REFRESH_OPTIONS")}
+                    onclick={on_refresh} />
+            </div>
+            if *loading {
+                <div class="tp__schema-form__options-loading">
+                    <span>{ translate.t("MESSAGES.PLUGIN_OPTIONS_LOADING") }</span>
+                </div>
+            } else if *fallback_text || dropdown_options.is_none() {
+                <Input name={props.field.path.clone()} field_id={Some(field_id.clone())}
+                    value={current_val}
+                    placeholder={props.field.placeholder.clone()}
+                    on_change={Some(on_text_input)}
+                    error={joined_error(&all_errors)} />
+            } else if let Some(opts) = dropdown_options {
+                <Select name={field_id} options={opts} on_select={on_select}
+                    required={props.field.required}
+                    error={joined_error(&all_errors)} />
+            }
+            { render_errors(&all_errors) }
         </div>
     }
 }
@@ -1329,6 +1562,16 @@ fn render_fields(ctx: &FormContext<'_>, fields: &[FieldModel], columns: u8) -> H
 
 fn render_field(ctx: &FormContext<'_>, field: &FieldModel) -> Html {
     let errors = errors_for(ctx.errors, &field.path);
+    if let Some(rpc_name) = &field.options_rpc {
+        let value = value_at(ctx.value, &field.keys).cloned();
+        return html! {
+            <OptionsRpcField key={field.path.clone()} field={Rc::new(field.clone())}
+                value={value} errors={errors} rpc_name={rpc_name.clone()}
+                plugin_id={ctx.plugin_id.map(str::to_owned)}
+                input_draft={ctx.input_draft.cloned()}
+                on_change={ctx.setter(field)} />
+        };
+    }
     if field.widget == Widget::Duration {
         return html! {
             <DurationField key={field.path.clone()} field={Rc::new(field.clone())}
@@ -1398,6 +1641,8 @@ pub fn SchemaForm(props: &SchemaFormProps) -> Html {
                 value: &props.value,
                 secrets: &props.secrets,
                 errors: &props.errors,
+                plugin_id: props.plugin_id.as_deref(),
+                input_draft: props.input_draft.as_ref(),
                 on_change: &props.on_change,
             };
             let loose = unmatched_errors(&model, &props.errors);
@@ -1827,5 +2072,66 @@ mod tests {
         assert_eq!(unsupported(&schema), "enum of non-scalar values");
         let empty = json!({"type": "object", "properties": {"m": {"enum": []}}});
         assert_eq!(unsupported(&empty), "enum of non-scalar values");
+    }
+
+    #[test]
+    fn x_options_rpc_annotation_is_extracted_into_field_model() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "library": {
+                    "type": "string",
+                    "title": "Library",
+                    "x-options-rpc": "get_libraries"
+                },
+                "plain": {
+                    "type": "string"
+                }
+            }
+        });
+        let model = analyze_schema(&schema).expect("supported");
+        assert_eq!(field(&model, "library").options_rpc.as_deref(), Some("get_libraries"));
+        assert_eq!(field(&model, "plain").options_rpc, None);
+    }
+
+    #[test]
+    fn parse_options_result_handles_array_and_object_envelopes() {
+        // Direct array
+        let arr = json!([
+            {"value": "1", "label": "One"},
+            {"value": "2", "label": "Two"}
+        ]);
+        let parsed = parse_options_result(&arr).expect("parse array");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].value, "1");
+        assert_eq!(parsed[0].label, "One");
+
+        // Object with options key
+        let obj = json!({
+            "options": [
+                {"value": "a", "label": "Alpha"}
+            ]
+        });
+        let parsed = parse_options_result(&obj).expect("parse object");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].value, "a");
+        assert_eq!(parsed[0].label, "Alpha");
+
+        // Missing label defaults to value
+        let no_label = json!([{"value": "only_val"}]);
+        let parsed = parse_options_result(&no_label).expect("parse no label");
+        assert_eq!(parsed[0].label, "only_val");
+
+        // Invalid shapes
+        assert!(parse_options_result(&json!("string")).is_err());
+        assert!(parse_options_result(&json!({"options": "not_arr"})).is_err());
+        assert!(parse_options_result(&json!([{"no_value": 1}])).is_err());
+    }
+
+    #[test]
+    fn secret_after_input_restores_original_when_empty() {
+        let orig = Some(json!("hunter2"));
+        assert_eq!(secret_after_input("", orig.as_ref()), orig);
+        assert_eq!(secret_after_input("new_pass", orig.as_ref()), Some(json!("new_pass")));
     }
 }

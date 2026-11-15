@@ -306,6 +306,8 @@ pub struct PluginSectionCardProps {
     pub plugin_id: String,
     #[prop_or(PluginFormKind::Input)]
     pub form: PluginFormKind,
+    #[prop_or_default]
+    pub input_draft: Option<Value>,
 }
 
 /// One section's fields. A host-panel section renders bare, so it sits inside the
@@ -314,13 +316,15 @@ pub struct PluginSectionCardProps {
 pub fn PluginSectionCard(props: &PluginSectionCardProps) -> Html {
     let on_change = props.on_change.clone();
     let errors = section_errors(&props.section, &props.errors);
+    let plugin_id = (!props.plugin_id.is_empty()).then(|| props.plugin_id.clone());
     let fields = html! {
         <>
             if let Some(description) = props.section.description.clone() {
                 <p class="tp__plugin-form__section-description">{ description }</p>
             }
             <fieldset class="tp__plugin-ext__fields" disabled={!props.allow_write}>
-                <SchemaForm schema={props.section.schema.clone()} value={props.value.clone()} {errors} {on_change} />
+                <SchemaForm schema={props.section.schema.clone()} value={props.value.clone()} {errors} {on_change}
+                    {plugin_id} input_draft={props.input_draft.clone()} />
             </fieldset>
             if !props.section.actions.is_empty() {
                 <PluginFormActions plugin_id={props.plugin_id.clone()} form={props.form}

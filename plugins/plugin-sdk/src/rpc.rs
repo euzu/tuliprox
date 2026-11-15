@@ -13,8 +13,44 @@
 //! }
 //! ```
 
-use serde::{de::DeserializeOwned, Serialize};
-use std::fmt::Display;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{collections::BTreeMap, fmt::Display};
+
+/// An option entry returned by an options RPC export (`x-options-rpc`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RpcOption {
+    pub value: String,
+    pub label: String,
+}
+
+impl RpcOption {
+    #[must_use]
+    pub fn new(value: impl Into<String>, label: impl Into<String>) -> Self {
+        Self { value: value.into(), label: label.into() }
+    }
+}
+
+/// The input context handed to an `input_scoped` RPC export.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RpcInputContext {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub options: BTreeMap<String, serde_json::Value>,
+}
+
+/// The envelope received by an `input_scoped` RPC export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedRequest<A = serde_json::Value> {
+    pub args: A,
+    pub input: RpcInputContext,
+}
 
 type Handler = Box<dyn Fn(&str) -> Result<String, String>>;
 
@@ -49,6 +85,22 @@ impl Router {
             }),
         ));
         self
+    }
+
+    /// Registers `handler` for an `input_scoped` RPC export: the incoming payload
+    /// `{ "args": ..., "input": ... }` is parsed into [`ScopedRequest<A>`].
+    #[must_use]
+    pub fn route_scoped<A, O, E>(
+        self,
+        method: &'static str,
+        handler: impl Fn(ScopedRequest<A>) -> Result<O, E> + 'static,
+    ) -> Self
+    where
+        A: DeserializeOwned,
+        O: Serialize,
+        E: Display,
+    {
+        self.route(method, handler)
     }
 
     /// Calls the handler registered for `method`; an unknown method is an
@@ -94,5 +146,17 @@ mod tests {
         assert!(bad.starts_with("invalid `lookup` payload:"));
         let unknown = router().dispatch("zap", "").unwrap_err();
         assert!(unknown.contains("`zap`") && unknown.contains("lookup, ping, fail"));
+    }
+
+    #[test]
+    fn scoped_routes_receive_args_and_input_context() {
+        let r = Router::new().route_scoped("get-options", |req: ScopedRequest<serde_json::Value>| {
+            let filter = req.args["filter"].as_str().unwrap_or_default();
+            let opt = RpcOption::new("main", format!("{}:{filter}", req.input.name));
+            Ok::<_, String>(vec![opt])
+        });
+        let payload = r#"{"args":{"filter":"active"},"input":{"name":"my-server","url":"http://srv"}}"#;
+        let res = r.dispatch("get-options", payload).unwrap();
+        assert_eq!(res, r#"[{"value":"main","label":"my-server:active"}]"#);
     }
 }

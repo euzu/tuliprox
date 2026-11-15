@@ -111,6 +111,7 @@ pub fn emby_item_to_episode<F: EmbyFamilyFlavor>(
         library_id: Arc::clone(ctx.library_id),
         stream_ref: stream_ref::<F>(ctx, &base.item_id, source),
         item_id: base.item_id,
+        season_id: non_blank_arc(item.season_id.as_deref()),
         series_id: non_blank_arc(item.series_id.as_deref()),
         series_title: non_blank_arc(item.series_name.as_deref()),
         title: base.title,

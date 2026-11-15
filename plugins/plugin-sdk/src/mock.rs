@@ -46,6 +46,7 @@ struct Host {
     now: i64,
     images: BTreeMap<String, Result<String, String>>,
     cached: Vec<String>,
+    cached_headers: Vec<(String, Vec<(String, String)>)>,
     http_queue: BTreeMap<(String, String), VecDeque<Result<Response, HttpError>>>,
     http_log: Vec<Request>,
     process_queue: BTreeMap<String, VecDeque<Result<ProcessOutput, String>>>,
@@ -72,6 +73,7 @@ impl Host {
             now: 0,
             images: BTreeMap::new(),
             cached: Vec::new(),
+            cached_headers: Vec::new(),
             http_queue: BTreeMap::new(),
             http_log: Vec::new(),
             process_queue: BTreeMap::new(),
@@ -120,6 +122,10 @@ pub fn set_cached_image(url: &str, result: Result<&str, &str>) {
 /// The URLs passed to `host::cache-image`, in call order.
 #[must_use]
 pub fn cached_images() -> Vec<String> { with(|host| host.cached.clone()) }
+
+/// The URLs and headers passed to `host-v1-1::cache-image-with-headers`, in call order.
+#[must_use]
+pub fn cached_images_with_headers() -> Vec<(String, Vec<(String, String)>)> { with(|host| host.cached_headers.clone()) }
 
 /// Queues the next response for `method url` (first in, first out).
 pub fn http_respond(method: Method, url: &str, status: u16, body: impl Into<Vec<u8>>) {
@@ -203,6 +209,14 @@ pub(crate) fn now_unix() -> i64 { with(|host| host.now) }
 pub(crate) fn cache_image(url: &str) -> Result<String, String> {
     with(|host| {
         host.cached.push(url.to_string());
+        host.images.get(url).cloned().unwrap_or_else(|| Ok(format!("/mock-cache/{url}")))
+    })
+}
+
+pub(crate) fn cache_image_with_headers(url: &str, headers: &[(String, String)]) -> Result<String, String> {
+    with(|host| {
+        host.cached.push(url.to_string());
+        host.cached_headers.push((url.to_string(), headers.to_vec()));
         host.images.get(url).cloned().unwrap_or_else(|| Ok(format!("/mock-cache/{url}")))
     })
 }

@@ -153,6 +153,17 @@ pub trait InputProvider {
     fn fetch_epg(req: &InputRequest) -> Res<Vec<(EpgChannel, Vec<EpgProgramme>)>>;
 }
 
+/// `media-provider-v1-1`: manifest `media.fetch` (`provides.input_type: true`).
+pub trait MediaProvider {
+    fn fetch_catalog(req: &crate::media::MediaRequest) -> Res<crate::media::MediaCatalogPage>;
+    fn resolve_stream(_req: &crate::media::StreamRequest) -> Res<crate::media::StreamTarget> {
+        Err("resolve_stream is not supported yet".into())
+    }
+    fn resolve_image(_req: &crate::media::ImageRequest) -> Res<crate::media::StreamTarget> {
+        Err("resolve_image is not supported yet".into())
+    }
+}
+
 /// `output-generator`: manifest `output.render` (`provides.output_format`).
 /// One instance per output file, so the three calls may share state.
 pub trait OutputGenerator {
@@ -334,4 +345,27 @@ pub trait ManagedChannelHooks {
 
 impl<T: ManagedChannelHooks> exports::managed_channel_hooks::Guest for Adapter<T> {
     fn reconcile(req: ManagedChannelRequest) -> Res<Vec<ManagedChannel>> { T::reconcile(&req) }
+}
+
+impl<T: MediaProvider> exports::media_provider_v1_1::Guest for Adapter<T> {
+    fn fetch_catalog(
+        req: exports::media_provider_v1_1::MediaRequest,
+    ) -> Res<exports::media_provider_v1_1::MediaCatalogPage> {
+        let sdk_req = crate::media::MediaRequest::from(req);
+        T::fetch_catalog(&sdk_req).map(Into::into)
+    }
+
+    fn resolve_stream(
+        req: exports::media_provider_v1_1::StreamRequest,
+    ) -> Res<exports::media_provider_v1_1::StreamTarget> {
+        let sdk_req = crate::media::StreamRequest::from(req);
+        T::resolve_stream(&sdk_req).map(Into::into)
+    }
+
+    fn resolve_image(
+        req: exports::media_provider_v1_1::ImageRequest,
+    ) -> Res<exports::media_provider_v1_1::StreamTarget> {
+        let sdk_req = crate::media::ImageRequest::from(req);
+        T::resolve_image(&sdk_req).map(Into::into)
+    }
 }

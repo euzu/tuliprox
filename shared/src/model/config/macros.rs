@@ -95,7 +95,7 @@ macro_rules! check_input_credentials {
                     }
                 }
             }
-            InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex => {
+            InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex | InputType::Silo => {
                 // Media-server credentials live in the dedicated media_server block; detailed
                 // validation happens in ConfigInputDto/ConfigInput prepare methods.
             }
@@ -163,7 +163,7 @@ macro_rules! check_input_connections {
                     }
                 }
             }
-            InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex => {}
+            InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex | InputType::Silo => {}
             InputType::Staged | InputType::Plugin => {}
         }
     };

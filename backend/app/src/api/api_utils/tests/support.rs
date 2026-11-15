@@ -498,7 +498,7 @@ pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_config_wit
     }
 }
 
-pub(in crate::api::api_utils::tests) fn create_test_app_state() -> Arc<AppState> {
+pub(crate) fn create_test_app_state() -> Arc<AppState> {
     create_test_app_state_for_config(Arc::new(create_test_app_config()))
 }
 

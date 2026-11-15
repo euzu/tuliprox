@@ -323,8 +323,25 @@ ui:
 - `main` and `options` extend the host's own panels. The host always shows the fields every input or output has:
   for an input the plugin, name, enabled, sequential group, max connections, priority, cache duration, url and playback
   provider; for an output the plugin, file name and filter. Any other id adds a panel after them.
-- A form field must not be a secret (`writeOnly`/`format: password` is refused): the values are stored in `source.yml`,
-  which the host does not mask. Keep credentials in the plugin's settings.
+- Secrets in input forms: `writeOnly: true` (or `format: password`) is supported on string properties in
+  `ui.input_form`. Secret properties must not carry a `default`. The values are stored in `source.yml` under the
+  input's `plugin_config`. On read routes, the API masks stored literal secrets with `********` (`REDACTED_SECRET`).
+  On save, a masked sentinel value is merged with the stored value from `source.yml`; entering a new literal string
+  produces a literal secret warning in the log. Values referencing `${env:VAR}` are kept as references in the API and
+  are resolved when handed to the plugin (during fetch, resolve, or RPC input context). The host scrubs these
+  credentials, secret-looking options, and `writeOnly` form secrets from guest RPC results and MCP tool answers. It
+  also redacts them from guest log lines during RPC calls, catalog updates (`fetch-catalog`), and media resolution
+  (`resolve-stream`, `resolve-image`). Output forms (`ui.output_form`) keep refusing secrets: a target secret belongs
+  in the plugin's settings.
+- Dynamic options via `x-options-rpc`: A string property in `ui.input_form` can specify `"x-options-rpc": "<export>"`.
+  The named export must exist in `ui.rpc_exports`, have `kind: read`, and specify `input_scoped: true`. The export
+  returns a list of option objects `[{"value": string, "label": string}]` (or `{"options": [...]}`). The host caps
+  the list at 1000 items and caps string lengths at 1024 characters. In the web UI, the field renders as a select dropdown
+  with on-demand loading and a refresh button; if the RPC call fails or returns an invalid shape, the field falls back
+  to a plain text input so typed values remain usable. The current unsaved form fields are passed as `input_draft`.
+  A call with `input_draft` needs the permission to edit sources (`403` otherwise). Masked secrets in a draft are
+  filled in from the stored input of the same name and plugin only while the draft's `url` equals the stored `url`;
+  otherwise they are empty, so a changed URL never receives a saved secret.
 
 The values are stored per input or output, in `plugin_config`:
 

@@ -55,6 +55,35 @@ fn spin() -> ! {
     }
 }
 
+fn options(payload: &Value) -> Result<Value, String> {
+    let args = payload.get("args").unwrap_or(payload);
+    let mode = args.get("mode").and_then(Value::as_str).unwrap_or("normal");
+    match mode {
+        "oversized" => {
+            let items: Vec<Value> = (0..1001)
+                .map(|i| json!({ "value": format!("v{i}"), "label": format!("Option {i}") }))
+                .collect();
+            Ok(json!(items))
+        }
+        "wrong_shape" => Ok(json!({ "not": "options" })),
+        "echo_secret" => {
+            let secret = payload
+                .get("input")
+                .and_then(|i| {
+                    i.get("password")
+                        .or_else(|| i.get("options").and_then(|o| o.get("api_token")))
+                })
+                .and_then(Value::as_str)
+                .unwrap_or("no-secret");
+            Ok(json!([{ "value": "echo", "label": secret }]))
+        }
+        _ => Ok(json!([
+            { "value": "movies", "label": "Movies" },
+            { "value": "series", "label": "TV Series" }
+        ])),
+    }
+}
+
 impl lifecycle::Guest for UiDemo {
     fn init(_settings: String) -> Result<(), String> {
         host::log(LogLevel::Debug, "ui-demo initialised");
@@ -70,6 +99,7 @@ impl rpc::Guest for UiDemo {
             "counter" => json!(read_counter()?),
             "bump" => json!(bump(&payload)?),
             "spin" => spin(),
+            "options" => options(&payload)?,
             other => return Err(format!("unknown method `{other}`")),
         };
         Ok(result.to_string())

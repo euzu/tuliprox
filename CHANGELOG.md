@@ -219,6 +219,82 @@
 
 ## 🌟 New Features
 
+- **Plugins can provide a media library (`media-provider-v1-1`).** A new additive ABI interface lets a `type: plugin`
+  input deliver movies, series, seasons and episodes with metadata (hook `media.fetch`, world `media-input-plugin`).
+  The host maps them with the same mapper and storage as the Plex, Emby, Jellyfin and Silo inputs, so plugin series
+  get the full series tree. The catalog is fetched page by page (`next-cursor`) and published only when complete.
+  The host bounds each page with a deadline, caps items, strings and lists, and drops repeated cursors, duplicate
+  ids and dangling references. A plugin may export either `input-provider` or `media-provider-v1-1`, not both. ABI
+  1.0.0 interfaces are unchanged.
+  - **Playback and artwork:** plugin items play through the host proxy like Jellyfin items. The host calls
+    `resolve-stream` (with the client's `Range`) or `resolve-image` and proxies the returned target; `206`/`416` pass
+    through, and the plugin's upstream headers never reach the client. Each call has its own deadline
+    (`resources.resolve_ms`, default 5 s, max 30 s). Targets must be `http`/`https`, headers are capped and
+    denylisted, and results with `ttl-secs` are cached for at most one hour. A failing plugin fails only that request.
+  - **Update context:** `fetch-catalog` now receives the real `refresh` flag of the update and the time of the last
+    successful update (`last-success-at`, `none` on the first run), and the host reports progress per page.
+  - **Images with headers:** the new additive `host-v1-1` interface offers `cache-image-with-headers` for image
+    servers that need authentication. Plugins without the import keep loading unchanged.
+  - **Stored catalogs everywhere:** the playlist explorer, the REST/MCP playlist readers and the Xtream info routes
+    treat a plugin media input like a built-in media-server input.
+  - **Resolution caching by Range:** stream resolution cache keys distinguish client byte ranges, preventing stale
+    responses across seeks.
+  - **Comprehensive secret scrubbing:** guest log lines during catalog fetching and stream or image resolution redact
+    input credentials, secret options, and form fields marked `writeOnly`.
+  - **Header-hashed image cache:** `cache-image-with-headers` distinguishes cached images by request headers using a
+    SHA-256 digest without exposing secrets in cache keys.
+  - **Fail-closed input form masking:** when a plugin's form schema is unavailable, every `plugin_config` value
+    except `${env:VAR}` references is shown masked. Saving a masked value without a stored value to restore is
+    refused with `400`.
+
+  See [Connecting a Media Server as a Plugin](docs/src/plugins/media-server-plugins.md).
+
+- **Plugin input forms: secrets and dynamic options.** Fields marked `writeOnly: true` in a plugin's input form are
+  shown as `********` by the Web UI and the config API, and saving the masked value keeps the stored secret.
+  `${env:VAR}` references stay visible, and a literal secret logs a warning. A string field with
+  `x-options-rpc: <export>` becomes a select filled by the plugin (a `kind: read`, `input_scoped` export; at most
+  1000 options), with a refresh button and a text fallback. While an unsaved input is edited, the form sends its
+  values as `input_draft`; this needs the permission to edit sources, and stored secrets are only filled in while
+  the draft's URL matches the stored one. See [Settings, Secrets & Config Extensions](docs/src/plugins/settings.md).
+
+- **Plugin MCP tools: annotations, output schemas and input context.** `ui.rpc_exports[]` accepts `destructive`
+  (write exports only), `output_schema` and `input_scoped`.
+  - **Annotations:** plugin tools get `destructiveHint` from the manifest.
+  - **Output schema:** it is listed as `outputSchema`, and a result that matches it is returned as
+    `structuredContent`. A result that does not match is a tool error.
+  - **Input context:** an `input_scoped` tool takes a required `input` (the plugin's configured inputs). The guest
+    then receives `{"args", "input"}`, where `input` holds name, url, credentials and options. The input's secrets
+    are scrubbed from the result and from the guest's log lines of that call. The UI rpc route accepts `input` the
+    same way.
+  - **Paging:** the SDK adds `page::Page<T>` for the `limit`/`cursor`/`next_cursor` convention.
+
+  See [MCP](docs/src/operator/mcp.md).
+
+- **Media-server REST routes and MCP tools.** `GET /api/v1/media-server/{input}/libraries` lists the libraries a
+  Plex, Emby, Jellyfin or Silo input can see, with a `selected` flag, even when the configured selection is stale.
+  `GET /api/v1/media-server/{input}/status` checks the connection, and `POST /api/v1/media-server/{input}/refresh`
+  queues a `normal` or `refresh` update of that input. All answers are redacted, and calls to the server are bounded
+  to 15 seconds (`504`). The MCP server offers them as `list_media_server_libraries`, `get_media_server_status` and
+  `refresh_media_server_input`, and `query_playlist_items` / `list_playlist_sources` now cover the stored catalog of
+  media-server inputs (`video`, `series`). See [MCP](docs/src/operator/mcp.md) and the
+  [REST API cookbook](docs/src/rest-api-cookbook.md).
+
+- **MCP tool results carry `structuredContent` and fuller annotations.** A successful tool result whose body is a
+  complete JSON object is also returned as `structuredContent`; truncated results stay text only. Built-in tools
+  declare `openWorldHint: false`, and the built-in write tools declare `destructiveHint: false`, so MCP clients no
+  longer treat `update_playlists` and `update_geoip` as destructive. See [MCP](docs/src/operator/mcp.md).
+
+- **Silo media server input (`type: silo`).** Import movie and TV libraries directly from the Silo media server
+  via its Jellyfin compatibility listener. Includes automatic user resolution via `GET /Users/Me` for API key
+  authentication, automatic series season synthesis from episode metadata when upstream season listings are omitted,
+  clear error feedback when pointed at Silo's web interface port instead of the compatibility port, and support
+  for direct playback redirects. See [Media server inputs](docs/src/configuration/source.md#27-media-server-inputs-plex-emby-jellyfin-silo).
+
+- **Unified media server block in the source editor.** The source editor now provides a single **Media server**
+  input block instead of separate blocks per server type. A flavor selector chooses between Jellyfin, Emby, Plex,
+  and Silo, showing only the parameters relevant to the selected server and clearing unused fields on switch while
+  keeping existing input configurations intact on save.
+
 - **Live HLS failover groups switch members while playing.** A running live HLS group stream now moves to the next
   member when the bound member fails: two hard manifest refresh failures, a segment or initialization map that still
   fails after its retries (`404`, `410`, `5xx`, transport), a stall, or (shared cache only) segments that arrive slower
@@ -1488,6 +1564,10 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Shared HLS cache fetches a new segment at once.** The retry jitter of segment and map fetches also applied to the
+  first attempt, so about half of all segment fetches waited up to 100 ms before their first request. Jitter now only
+  spreads real retries.
 
 - **Stalker members of failover groups play on the shared HLS cache.** A Stalker member has no stored stream URL, so
   every playlist refresh of its shared cache session answered `503`. The session now reuses its resolved link and

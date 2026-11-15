@@ -37,7 +37,7 @@ pub async fn persist_input_playlist_with_options(
     mut playlist: Vec<PlaylistGroup>,
     options: InputPlaylistPersistOptions,
 ) -> (Vec<PlaylistGroup>, Option<TuliproxError>) {
-    let persistence = input.get_download_input_type().persistence();
+    let persistence = options.persistence.unwrap_or_else(|| input.get_download_input_type().persistence());
     let accepts_empty = persistence == InputPersistence::Library
         || (!options.accepted_empty_clusters.is_empty()
             && matches!(persistence, InputPersistence::Xtream | InputPersistence::Stalker));
@@ -47,7 +47,7 @@ pub async fn persist_input_playlist_with_options(
             input.name
         ));
         warn!("{empty_error}");
-        return match load_input_playlist(app_config, input, None).await {
+        return match load_input_playlist_as(app_config, input, None, persistence).await {
             Ok(mut previous) => {
                 if previous.is_empty() {
                     (playlist, Some(empty_error))
@@ -139,13 +139,23 @@ pub async fn load_input_playlist(
     input: &ConfigInput,
     clusters: Option<&[XtreamCluster]>,
 ) -> Result<PlaylistSource, TuliproxError> {
+    load_input_playlist_as(app_config, input, clusters, input.get_download_input_type().persistence()).await
+}
+
+/// [`load_input_playlist`] for an input stored in `persistence` instead of its type's own layout.
+pub async fn load_input_playlist_as(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    clusters: Option<&[XtreamCluster]>,
+    persistence: InputPersistence,
+) -> Result<PlaylistSource, TuliproxError> {
     let cfg = app_config.config.load();
     let storage_path = get_input_storage_path(&input.name, &cfg.storage_dir)
         .await
         .map_err(|e| TuliproxError::Config(format!("Error getting input path: {e}")))?;
     let disk_based_processing = cfg.disk_based_processing;
 
-    match input.get_download_input_type().persistence() {
+    match persistence {
         InputPersistence::Xtream => {
             let clusters_to_load = clusters.unwrap_or(&XTREAM_CLUSTER);
             if disk_based_processing {

@@ -78,6 +78,7 @@ hook_ids! {
     MetricsCollect => "metrics.collect", "metrics-hooks", Requirement::None;
     NotificationsSend => "notifications.send", "notification-hooks", Requirement::Capability(Capability::Notifications);
     InputFetch => "input.fetch", "input-provider", Requirement::InputType;
+    MediaFetch => "media.fetch", "media-provider-v1-1", Requirement::InputType;
     OutputRender => "output.render", "output-generator", Requirement::OutputFormat;
     RpcCall => "rpc.call", "rpc", Requirement::RpcExports;
     TasksRun => "tasks.run", "tasks", Requirement::Tasks;
@@ -137,6 +138,7 @@ impl HookId {
             Self::MetricsCollect => Some(PluginHook::CollectMetrics),
             Self::NotificationsSend => Some(PluginHook::SendNotification),
             Self::InputFetch => Some(PluginHook::FetchInput),
+            Self::MediaFetch => Some(PluginHook::MediaFetch),
             Self::OutputRender => Some(PluginHook::RenderOutput),
             Self::StreamInjectHeaders => Some(PluginHook::InjectHeaders),
             Self::TasksRun => Some(PluginHook::RunTask),
@@ -153,9 +155,9 @@ mod tests {
 
     #[test]
     fn the_table_has_unique_ids_and_round_trips() {
-        assert_eq!(HookId::ALL.len(), 30);
+        assert_eq!(HookId::ALL.len(), 31);
         let spellings: HashSet<_> = HookId::ALL.iter().map(|hook| hook.as_str()).collect();
-        assert_eq!(spellings.len(), 30);
+        assert_eq!(spellings.len(), 31);
         for hook in HookId::ALL {
             assert_eq!(HookId::parse(hook.as_str()), Ok(*hook));
             let (group, name) = hook.as_str().split_once('.').expect("ids are dotted");
@@ -169,9 +171,10 @@ mod tests {
         assert_eq!(stages, 6);
         let others: HashSet<_> =
             HookId::ALL.iter().map(|hook| hook.wit_interface()).filter(|wit| *wit != "playlist-hooks").collect();
-        assert_eq!(others.len(), 24, "24 other ids, 24 distinct interfaces");
+        assert_eq!(others.len(), 25, "25 other ids, 25 distinct interfaces");
         assert_eq!(HookId::PlaylistLoaded.wit_interface(), "source-hooks");
         assert_eq!(HookId::InputFetch.wit_interface(), "input-provider");
+        assert_eq!(HookId::MediaFetch.wit_interface(), "media-provider-v1-1");
         assert_eq!(HookId::RpcCall.wit_interface(), "rpc");
     }
 
@@ -191,6 +194,7 @@ mod tests {
                 "events.on-event",
                 "notifications.send",
                 "input.fetch",
+                "media.fetch",
                 "output.render",
                 "rpc.call",
                 "tasks.run",
@@ -203,6 +207,7 @@ mod tests {
         assert_eq!(HookId::NotificationsSend.requirement(), Requirement::Capability(Capability::Notifications));
         assert_eq!(HookId::EventsOnEvent.requirement(), Requirement::Events);
         assert_eq!(HookId::TasksRun.requirement(), Requirement::Tasks);
+        assert_eq!(HookId::MediaFetch.requirement(), Requirement::InputType);
     }
 
     #[test]
@@ -226,14 +231,15 @@ mod tests {
     #[test]
     fn every_hook_but_resolve_conflict_rpc_and_migrate_maps_to_a_host_hook() {
         let pipeline: Vec<_> = HookId::ALL.iter().filter_map(|hook| hook.pipeline_hook()).collect();
-        assert_eq!(pipeline.len(), 26);
-        assert_eq!(pipeline.iter().copied().collect::<HashSet<_>>().len(), 26);
+        assert_eq!(pipeline.len(), 27);
+        assert_eq!(pipeline.iter().copied().collect::<HashSet<_>>().len(), 27);
         assert_eq!(HookId::PlaylistLoaded.pipeline_hook(), Some(PluginHook::PlaylistLoaded));
         assert_eq!(HookId::PlaylistAfterFilter.pipeline_hook(), Some(PluginHook::AfterFilter));
         assert_eq!(HookId::EpgResolveConflict.pipeline_hook(), None);
         assert_eq!(HookId::RpcCall.pipeline_hook(), None);
         assert_eq!(HookId::SettingsMigrate.pipeline_hook(), None);
         assert_eq!(HookId::StreamInjectHeaders.pipeline_hook(), Some(PluginHook::InjectHeaders));
+        assert_eq!(HookId::MediaFetch.pipeline_hook(), Some(PluginHook::MediaFetch));
         assert_eq!(HookId::TasksRun.pipeline_hook(), Some(PluginHook::RunTask));
     }
 }

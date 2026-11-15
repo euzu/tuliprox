@@ -2224,6 +2224,7 @@ mod tests {
             (InputType::Library, &["rescan"], true),
             (InputType::Plex, &[POLICY_NORMAL, POLICY_REFRESH], true),
             (InputType::Jellyfin, &[POLICY_NORMAL, POLICY_REFRESH], true),
+            (InputType::Silo, &[POLICY_NORMAL, POLICY_REFRESH], true),
             (InputType::Emby, &[POLICY_NORMAL, POLICY_REFRESH], true),
         ];
         for &(input_type, expected, starts_playlist_update) in cases {

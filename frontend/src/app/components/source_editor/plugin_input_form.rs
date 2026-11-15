@@ -144,7 +144,20 @@ pub fn PluginInputView(props: &PluginInputViewProps) -> Html {
         })
     };
 
+    let input_draft = {
+        let form = state.data();
+        let options: serde_json::Map<String, Value> = form.plugin_config.clone();
+        serde_json::json!({
+            "name": form.name,
+            "url": form.url,
+            "username": form.username,
+            "password": form.password,
+            "options": options,
+        })
+    };
+
     let cards_for = |panel: &str| -> Html {
+        let input_draft = input_draft.clone();
         super::plugin_form::sections_for_panel(&sections, panel)
             .into_iter()
             .map(|section| {
@@ -152,7 +165,8 @@ pub fn PluginInputView(props: &PluginInputViewProps) -> Html {
                     <PluginSectionCard key={section.id.clone()} section={section.clone()}
                         value={config_value.clone()} allow_write={props.allow_write}
                         on_change={on_config_change.clone()} errors={errors.clone()}
-                        plugin_id={plugin_id.clone()} form={PluginFormKind::Input} />
+                        plugin_id={plugin_id.clone()} form={PluginFormKind::Input}
+                        input_draft={Some(input_draft.clone())} />
                 }
             })
             .collect::<Html>()

@@ -175,6 +175,11 @@ This example is from `plugins/examples/sports-enricher/manifest.yml`.
 - A `write` method needs the `SystemWrite` permission on the calling request.
 - `input_schema` is required when `mcp: true`. Its file is validated with the same schema subset as settings, and the
   payload is checked against it before the plugin is called.
+- Three optional fields shape the MCP side: `destructive` (only with `kind: write`), `output_schema` (a package-relative
+  schema the result is checked against) and `input_scoped` (the method works per configured input and gets it as
+  `{"args": …, "input": …}`). See
+  [Events, Notifications and Providers](./events-notifications-inputs.md#mcp-tools) for annotations, output schemas,
+  input-scoped payloads and the pagination convention.
 - The description is shown in the install review, with control characters removed and at most 512 characters kept.
 - The request body is at most 64 KiB and the result at most 256 KiB. A result that contains a resolved secret is
   redacted.

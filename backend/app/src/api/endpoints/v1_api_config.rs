@@ -382,6 +382,144 @@ fn restore_written_plugin_lists(incoming: &mut ConfigDto, written: &ConfigDto) {
     plugins.plugins.clone_from(&written.plugins);
 }
 
+fn is_env_reference(text: &str) -> bool {
+    shared::utils::CONSTANTS.re_env_var.find(text).is_some_and(|found| found.start() == 0 && found.end() == text.len())
+}
+
+fn mask_unresolved_plugin_config(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => map.values_mut().for_each(mask_unresolved_plugin_config),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(mask_unresolved_plugin_config),
+        serde_json::Value::String(text) if is_env_reference(text) => {}
+        serde_json::Value::String(_) => {
+            *value = serde_json::Value::String(shared::model::REDACTED_SECRET.to_string());
+        }
+        _ => {}
+    }
+}
+
+fn restore_redacted_secrets(incoming: &mut serde_json::Value, stored: &serde_json::Value) {
+    match (incoming, stored) {
+        (serde_json::Value::Object(in_map), serde_json::Value::Object(st_map)) => {
+            for (k, v) in in_map.iter_mut() {
+                if let Some(st_val) = st_map.get(k) {
+                    restore_redacted_secrets(v, st_val);
+                }
+            }
+        }
+        (serde_json::Value::Array(in_arr), serde_json::Value::Array(st_arr)) => {
+            for (i, v) in in_arr.iter_mut().enumerate() {
+                if let Some(st_val) = st_arr.get(i) {
+                    restore_redacted_secrets(v, st_val);
+                }
+            }
+        }
+        (val @ serde_json::Value::String(_), st_val) if val.as_str() == Some(shared::model::REDACTED_SECRET) => {
+            *val = st_val.clone();
+        }
+        _ => {}
+    }
+}
+
+fn value_contains_redacted_secret(val: &serde_json::Value) -> bool {
+    match val {
+        serde_json::Value::String(s) if s == shared::model::REDACTED_SECRET => true,
+        serde_json::Value::Object(map) => map.values().any(value_contains_redacted_secret),
+        serde_json::Value::Array(arr) => arr.iter().any(value_contains_redacted_secret),
+        _ => false,
+    }
+}
+
+/// Puts the stored value back for every input-form secret the client sent masked.
+/// `secret_paths` names the secret paths of a plugin's input form when known.
+fn merge_sources_plugin_config(
+    incoming: &mut shared::model::SourcesConfigDto,
+    stored: &shared::model::SourcesConfigDto,
+    secret_paths: impl Fn(&str) -> Option<Vec<String>>,
+) -> Result<(), String> {
+    for input in &mut incoming.inputs {
+        if let Some(plugin_id) = input.plugin.as_deref() {
+            let stored_plugin_input = stored.inputs.iter().find(|i| i.name == input.name && i.plugin == input.plugin);
+            if stored_plugin_input.is_none() && input.plugin_config.values().any(value_contains_redacted_secret) {
+                return Err(redacted_secret_error(&input.name));
+            }
+            let stored_val = match stored_plugin_input {
+                Some(si) => serde_json::Value::Object(si.plugin_config.clone()),
+                None => serde_json::Value::Object(serde_json::Map::new()),
+            };
+            let mut input_val = serde_json::Value::Object(input.plugin_config.clone());
+            let metadata = secret_paths(plugin_id);
+            match metadata {
+                #[cfg(feature = "plugins")]
+                Some(paths) => {
+                    let literals = tuliprox_plugins::merge_secrets(&mut input_val, &stored_val, &paths);
+                    for literal in literals {
+                        log::warn!("{}: {}", input.name, tuliprox_plugins::literal_secret_warning(&literal));
+                    }
+                    // Values masked while the form metadata was unavailable.
+                    restore_redacted_secrets(&mut input_val, &stored_val);
+                }
+                #[cfg(not(feature = "plugins"))]
+                Some(_) => {}
+                None => {
+                    restore_redacted_secrets(&mut input_val, &stored_val);
+                }
+            }
+            if let serde_json::Value::Object(m) = input_val {
+                input.plugin_config = m;
+            }
+        }
+
+        if input.plugin_config.values().any(value_contains_redacted_secret) {
+            return Err(redacted_secret_error(&input.name));
+        }
+    }
+    Ok(())
+}
+
+fn redacted_secret_error(input: &str) -> String {
+    format!(
+        "Cannot save input '{input}': contains redacted secret with no stored value to restore from; please re-enter the secret"
+    )
+}
+
+/// The input-form secrets of every plugin input masked, from the values as
+/// written in `source.yml` (an `${env:VAR}` reference stays visible).
+fn mask_sources_plugin_config(
+    sources: &mut shared::model::SourcesConfigDto,
+    written: &shared::model::SourcesConfigDto,
+    secret_paths: impl Fn(&str) -> Option<Vec<String>>,
+) {
+    for input in &mut sources.inputs {
+        let Some(plugin_id) = input.plugin.as_deref() else {
+            continue;
+        };
+        if let Some(stored_input) = written.inputs.iter().find(|i| i.name == input.name && i.plugin == input.plugin) {
+            input.plugin_config.clone_from(&stored_input.plugin_config);
+        }
+        let metadata = secret_paths(plugin_id);
+        match metadata {
+            #[cfg(feature = "plugins")]
+            Some(paths) => {
+                if !paths.is_empty() {
+                    let val = serde_json::Value::Object(input.plugin_config.clone());
+                    let (masked_val, _) = tuliprox_plugins::mask_settings(&val, &paths);
+                    if let serde_json::Value::Object(m) = masked_val {
+                        input.plugin_config = m;
+                    }
+                }
+            }
+            #[cfg(not(feature = "plugins"))]
+            Some(_) => {}
+            None => {
+                for val in input.plugin_config.values_mut() {
+                    mask_unresolved_plugin_config(val);
+                }
+            }
+        }
+    }
+}
+
 async fn save_config_main(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     headers: HeaderMap,
@@ -499,10 +637,11 @@ async fn save_config_main(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn save_config_sources(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::extract::Json(sources): axum::extract::Json<SourcesConfigDto>,
+    axum::extract::Json(mut sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
     let sources_file_path = app_state.app_config.paths.load().sources_file_path.clone();
     let _source_lock = app_state.app_config.file_locks.write_lock(Path::new(&sources_file_path)).await;
@@ -528,6 +667,25 @@ async fn save_config_sources(
             return internal_server_error!();
         }
     };
+
+    let stored_sources: shared::model::SourcesConfigDto =
+        crate::config_loader::read_sources_file_from_path(Path::new(&sources_file_path), false, false, None)
+            .await
+            .unwrap_or_default();
+    if let Err(err) = merge_sources_plugin_config(&mut sources, &stored_sources, |id| {
+        #[cfg(feature = "plugins")]
+        {
+            app_state.plugins.as_ref().and_then(|p| p.input_form_secret_paths(id))
+        }
+        #[cfg(not(feature = "plugins"))]
+        {
+            let _ = id;
+            None
+        }
+    }) {
+        error!("Failed to merge sources secrets: {err}");
+        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err}))).into_response();
+    }
 
     let templates_to_persist =
         match crate::config_loader::validate_source_config_for_persist(&app_state.app_config, &sources).await {
@@ -813,6 +971,22 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
     match read_result {
         Ok(mut app_config) => {
             restore_written_plugin_lists(&mut app_config.config, &written);
+            if let Ok(written_sources) =
+                crate::config_loader::read_sources_file_from_path(Path::new(&sources_file_path), false, false, None)
+                    .await
+            {
+                mask_sources_plugin_config(&mut app_config.sources, &written_sources, |id| {
+                    #[cfg(feature = "plugins")]
+                    {
+                        app_state.plugins.as_ref().and_then(|p| p.input_form_secret_paths(id))
+                    }
+                    #[cfg(not(feature = "plugins"))]
+                    {
+                        let _ = id;
+                        None
+                    }
+                });
+            }
             if let Err(err) = prepare_sources_batch(&mut app_config.sources, false).await {
                 error!("Failed to prepare sources batch: {err}");
                 internal_server_error!()
@@ -1196,6 +1370,87 @@ async fn test_messaging(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "plugins")]
+    mod plugin_input_secrets {
+        use super::super::{mask_sources_plugin_config, merge_sources_plugin_config};
+        use shared::model::{ConfigInputDto, SourcesConfigDto, REDACTED_SECRET};
+
+        fn sources(entries: &[(&str, &str, &str)]) -> SourcesConfigDto {
+            SourcesConfigDto {
+                inputs: entries
+                    .iter()
+                    .map(|(name, plugin, token)| ConfigInputDto {
+                        name: (*name).into(),
+                        plugin: Some((*plugin).into()),
+                        plugin_config: serde_json::json!({ "api_token": token, "library": "movies" })
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default(),
+                        ..ConfigInputDto::default()
+                    })
+                    .collect(),
+                ..SourcesConfigDto::default()
+            }
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn paths(plugin: &str) -> Option<Vec<String>> {
+            if plugin == "media" {
+                Some(vec!["api_token".to_string()])
+            } else {
+                Some(Vec::new())
+            }
+        }
+
+        #[test]
+        fn a_read_masks_the_secret_and_a_save_of_the_mask_keeps_the_stored_value() {
+            let written = sources(&[("living-room", "media", "t-0k3n"), ("env", "media", "${env:TOKEN}")]);
+            let mut read = sources(&[("living-room", "media", "resolved"), ("env", "media", "resolved")]);
+            mask_sources_plugin_config(&mut read, &written, paths);
+            assert_eq!(read.inputs[0].plugin_config["api_token"], REDACTED_SECRET);
+            assert_eq!(read.inputs[0].plugin_config["library"], "movies");
+            assert_eq!(read.inputs[1].plugin_config["api_token"], "${env:TOKEN}", "a reference stays visible");
+
+            merge_sources_plugin_config(&mut read, &written, paths).expect("merge succeeds");
+            assert_eq!(read.inputs[0].plugin_config["api_token"], "t-0k3n");
+            assert_eq!(read.inputs[1].plugin_config["api_token"], "${env:TOKEN}");
+        }
+
+        #[test]
+        fn a_mask_never_takes_the_secret_of_another_plugins_input() {
+            let stored = sources(&[("living-room", "other", "t-0k3n")]);
+            let mut incoming = sources(&[("living-room", "media", REDACTED_SECRET)]);
+            assert!(merge_sources_plugin_config(&mut incoming, &stored, paths).is_err());
+            assert_ne!(incoming.inputs[0].plugin_config.get("api_token").and_then(|v| v.as_str()), Some("t-0k3n"));
+        }
+
+        #[test]
+        fn mask_sources_plugin_config_fails_closed_when_metadata_unavailable_and_merge_restores() {
+            let written = sources(&[("living-room", "media", "t-0k3n"), ("env", "media", "${env:TOKEN}")]);
+            let mut read = sources(&[("living-room", "media", "resolved"), ("env", "media", "resolved")]);
+            // Metadata unavailable (returns None)
+            mask_sources_plugin_config(&mut read, &written, |_| None);
+            assert_eq!(read.inputs[0].plugin_config["api_token"], REDACTED_SECRET);
+            assert_eq!(read.inputs[0].plugin_config["library"], REDACTED_SECRET);
+            assert_eq!(read.inputs[1].plugin_config["api_token"], "${env:TOKEN}", "env reference stays");
+
+            // Merge restores the redacted values from stored
+            merge_sources_plugin_config(&mut read, &written, |_| None).expect("stored input restores values");
+            assert_eq!(read.inputs[0].plugin_config["api_token"], "t-0k3n");
+            assert_eq!(read.inputs[0].plugin_config["library"], "movies");
+            assert_eq!(read.inputs[1].plugin_config["api_token"], "${env:TOKEN}");
+        }
+
+        #[test]
+        fn merge_sources_plugin_config_rejects_redacted_secret_when_no_stored_input_exists() {
+            let stored = SourcesConfigDto::default();
+            let mut incoming = sources(&[("new-input", "media", REDACTED_SECRET)]);
+            let err = merge_sources_plugin_config(&mut incoming, &stored, paths)
+                .expect_err("should reject save when no stored input exists to restore redacted secret");
+            assert!(err.contains("re-enter the secret"), "error should ask to re-enter secret: {err}");
+        }
+    }
+
     use super::{
         build_xtream_login_input_source, filter_api_proxy_by_permissions, filter_app_config_by_permissions,
         require_matching_revision,

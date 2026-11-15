@@ -2,7 +2,7 @@ use crate::{
     emby::{
         dto::{
             EmbyAuthenticateByNameRequest, EmbyAuthenticationResultDto, EmbyItemDto, EmbyItemsPageDto,
-            EmbyPublicSystemInfoDto, EmbyViewDto, EmbyVirtualFolderDto,
+            EmbyPublicSystemInfoDto, EmbyUserDto, EmbyViewDto, EmbyVirtualFolderDto,
         },
         flavor::{validate_token, EmbyClientIdentity, EmbyFamilyFlavor, UserScope},
         mapper::{
@@ -10,7 +10,7 @@ use crate::{
             EmbyMapContext,
         },
     },
-    library_selection::select_libraries,
+    library_selection::{available_libraries, select_libraries},
     non_blank_arc,
     operation::MediaServerOperation,
     redaction::redacted_secret,
@@ -241,7 +241,12 @@ impl<F: EmbyFamilyFlavor> EmbyFamilyCatalogClient<F> {
         let (token, origin, mut user_id, login_server_id) =
             if let Some(token) = self.config.token.as_ref().or(self.config.api_key.as_ref()) {
                 validate_token(token, F::PROVIDER)?;
-                (Arc::clone(token), TokenOrigin::Configured, None, None)
+                let user_id = if F::RESOLVES_USER_VIA_USERS_ME && self.config.user_id.is_none() {
+                    Some(self.fetch_current_user_id(token).await?)
+                } else {
+                    None
+                };
+                (Arc::clone(token), TokenOrigin::Configured, user_id, None)
             } else if let Some(username) = self.config.username.as_deref() {
                 let password = self.config.password.as_deref().unwrap_or_default();
                 let login = self.login(username, password).await?;
@@ -276,13 +281,39 @@ impl<F: EmbyFamilyFlavor> EmbyFamilyCatalogClient<F> {
         Ok(EmbyConnectionState { status, token, user_id, origin })
     }
 
+    async fn fetch_current_user_id(&self, token: &str) -> Result<Arc<str>, MediaServerError> {
+        let url = self.url(&["Users", "Me"], &[])?;
+        let headers = F::auth_headers(&self.identity, Some(token))?;
+        let response = self
+            .http
+            .request_for(Method::GET, url.as_str(), MediaServerOperation::Discovery)
+            .headers(headers)
+            .send_with_error_detail(format!("{} current user request failed", F::PROVIDER))
+            .await?;
+        let user: EmbyUserDto = self.read_json(response, MediaServerOperation::Discovery, "current user").await?;
+        non_blank_arc(user.id.as_deref()).ok_or_else(|| {
+            MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
+                .provider(F::PROVIDER)
+                .detail("current user request did not return a user id")
+        })
+    }
+
     async fn discover_public_info(&self) -> Result<EmbyPublicSystemInfoDto, MediaServerError> {
         let url = self.url(&["System", "Info", "Public"], &[])?;
         let response = self
             .identity_request(Method::GET, &url)?
             .send_with_error_detail(format!("{} discovery request failed", F::PROVIDER))
             .await?;
-        self.read_json(response, MediaServerOperation::Discovery, "discovery").await
+        self.read_json(response, MediaServerOperation::Discovery, "discovery").await.map_err(|err| {
+            match (F::DISCOVERY_HINT, err.detail_text()) {
+                (Some(hint), Some(detail)) => {
+                    let detail = format!("{detail}; {hint}");
+                    err.detail(detail)
+                }
+                (Some(hint), None) => err.detail(hint),
+                (None, _) => err,
+            }
+        })
     }
 
     async fn login(&self, username: &str, password: &str) -> Result<EmbyAuthenticationResultDto, MediaServerError> {
@@ -458,10 +489,38 @@ impl<F: EmbyFamilyFlavor> MediaServerCatalogClient for EmbyFamilyCatalogClient<F
             let views: EmbyItemsPageDto<EmbyViewDto> =
                 self.get_json(&self.url(endpoint.path.segments(), query)?).await?;
             select_libraries(F::PROVIDER, input_name, server_id, &self.config.libraries, &views.items)
-        } else {
+        } else if F::SUPPORTS_VIRTUAL_FOLDERS {
             let folders: Vec<EmbyVirtualFolderDto> =
                 self.get_json(&self.url(&["Library", "VirtualFolders"], &[])?).await?;
             select_libraries(F::PROVIDER, input_name, server_id, &self.config.libraries, &folders)
+        } else {
+            Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)
+                .provider(F::PROVIDER)
+                .detail(format!("{} requires an authenticated user to list libraries", F::PROVIDER)))
+        }
+    }
+
+    async fn list_available_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
+        let connection = self.connection().await?;
+        let server_id = &connection.status.server_id;
+        let input_name = &self.config.input_name;
+        if let Some(user_id) = connection.user_id.as_deref() {
+            let endpoint = F::user_views_path(user_id);
+            let query: &[(&str, &str)] = match endpoint.user_scope {
+                UserScope::Query => &[("UserId", user_id)],
+                UserScope::None | UserScope::InPath => &[],
+            };
+            let views: EmbyItemsPageDto<EmbyViewDto> =
+                self.get_json(&self.url(endpoint.path.segments(), query)?).await?;
+            Ok(available_libraries(input_name, server_id, &views.items))
+        } else if F::SUPPORTS_VIRTUAL_FOLDERS {
+            let folders: Vec<EmbyVirtualFolderDto> =
+                self.get_json(&self.url(&["Library", "VirtualFolders"], &[])?).await?;
+            Ok(available_libraries(input_name, server_id, &folders))
+        } else {
+            Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)
+                .provider(F::PROVIDER)
+                .detail(format!("{} requires an authenticated user to list libraries", F::PROVIDER)))
         }
     }
 
@@ -596,6 +655,10 @@ impl<F: EmbyFamilyFlavor> MediaServerCatalogClient for EmbyFamilyCatalogClient<F
             .boxed();
         Ok(MediaServerStreamResponse { status, headers, body })
     }
+
+    fn post_process_catalog(&self, snapshot: &mut crate::catalog::MediaServerCatalogSnapshot) {
+        F::post_process_catalog(snapshot);
+    }
 }
 
 /// Configured server URL reduced to an http(s) base that requests are appended to.
@@ -628,6 +691,7 @@ mod tests {
         emby::flavor::Emby,
         jellyfin::flavor::Jellyfin,
         refresh_media_server_catalog_complete_before_publish,
+        silo::flavor::Silo,
         test_fixtures::{
             EMBY_AUTH_RESULT_JSON, EMBY_EPISODES_PAGE_JSON, EMBY_ITEMS_PAGE_JSON, EMBY_PUBLIC_SYSTEM_INFO_JSON,
             EMBY_SEASONS_PAGE_JSON, EMBY_SERIES_PAGE_JSON, EMBY_VIRTUAL_FOLDERS_JSON, JELLYFIN_VIEWS_JSON,
@@ -666,6 +730,8 @@ mod tests {
         log: StdMutex<Vec<String>>,
         movie_total: Option<usize>,
         last_range: StdMutex<Option<String>>,
+        discovery_body: StdMutex<Option<String>>,
+        users_me_body: StdMutex<Option<String>>,
     }
 
     impl MockServer {
@@ -681,6 +747,8 @@ mod tests {
                 log: StdMutex::new(Vec::new()),
                 movie_total: None,
                 last_range: StdMutex::new(None),
+                discovery_body: StdMutex::new(None),
+                users_me_body: StdMutex::new(None),
             }
         }
 
@@ -694,13 +762,20 @@ mod tests {
             self
         }
 
+        fn with_discovery_body(self, body: impl Into<String>) -> Self {
+            *self.discovery_body.lock().expect("lock") = Some(body.into());
+            self
+        }
+
+        fn set_users_me_body(&self, body: Option<String>) { *self.users_me_body.lock().expect("lock") = body; }
+
         fn set_valid_token(&self, token: &str) { *self.valid_token.lock().expect("lock") = token.to_string(); }
 
         fn log(&self) -> Vec<String> { self.log.lock().expect("lock").clone() }
 
         fn logins(&self) -> usize { self.login_count.load(Ordering::SeqCst) }
 
-        fn is_jellyfin(&self) -> bool { self.provider == "jellyfin" }
+        fn is_jellyfin(&self) -> bool { self.provider == "jellyfin" || self.provider == "silo" }
 
         /// `(identity header present, token)` as the client sent them.
         fn credentials(&self, parts: &Parts) -> (bool, Option<String>) {
@@ -748,7 +823,11 @@ mod tests {
 
             match (parts.method.as_str(), segments.as_slice()) {
                 ("GET", ["System", "Info", "Public"]) if token.is_none() => {
-                    respond(StatusCode::OK, EMBY_PUBLIC_SYSTEM_INFO_JSON)
+                    if let Some(body) = self.discovery_body.lock().expect("lock").as_ref() {
+                        respond_with(StatusCode::OK, body, &[("content-type", "text/html")])
+                    } else {
+                        respond(StatusCode::OK, EMBY_PUBLIC_SYSTEM_INFO_JSON)
+                    }
                 }
                 ("POST", ["Users", "AuthenticateByName"]) if token.is_none() => {
                     let count = self.login_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -766,6 +845,13 @@ mod tests {
                     respond(StatusCode::UNAUTHORIZED, "{}")
                 }
                 ("GET", ["Library", "VirtualFolders"]) => respond(StatusCode::OK, EMBY_VIRTUAL_FOLDERS_JSON),
+                ("GET", ["Users", "Me"]) => {
+                    if let Some(body) = self.users_me_body.lock().expect("lock").as_ref() {
+                        respond(StatusCode::OK, body)
+                    } else {
+                        respond(StatusCode::OK, r#"{"Id":"mock-user-me","Name":"Admin"}"#)
+                    }
+                }
                 ("GET", ["UserViews"] | ["Users", _, "Views"]) => respond(StatusCode::OK, JELLYFIN_VIEWS_JSON),
                 ("GET", ["Items"] | ["Users", _, "Items"]) => respond(StatusCode::OK, &self.items_body(&query)),
                 ("GET", ["Videos", _, "stream"]) => {
@@ -1703,5 +1789,72 @@ mod tests {
         assert!(cache.contains_key(&key("prune-idle-session")));
         drop(cache);
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn api_key_without_user_silo_resolves_user_via_users_me_and_never_calls_virtual_folders() {
+        let server = Arc::new(MockServer::new("silo", "token-valid"));
+        let (url, _handle) = serve(&server).await;
+        let mut settings = token_settings("token-valid");
+        settings.api_key = Some("token-valid".to_string());
+        settings.token = None;
+        settings.user_id = None;
+        let client = client::<Silo>("silo-key", &url, &settings);
+
+        let libraries = client.list_libraries().await.expect("libraries listed");
+        assert_eq!(libraries.len(), 1);
+
+        let log = server.log();
+        assert!(log.iter().any(|entry| entry.contains("GET /System/Info/Public")), "logged discovery: {log:?}");
+        assert!(log.iter().any(|entry| entry.contains("GET /Users/Me")), "resolved user via /Users/Me: {log:?}");
+        assert!(
+            log.iter().any(|entry| entry.contains("GET /UserViews?UserId=mock-user-me")),
+            "fetched user views: {log:?}"
+        );
+        assert!(!log.iter().any(|entry| entry.contains("VirtualFolders")), "never called VirtualFolders: {log:?}");
+    }
+
+    #[tokio::test]
+    async fn silo_discovery_with_html_body_returns_clear_error() {
+        let server = Arc::new(
+            MockServer::new("silo", "token-valid")
+                .with_discovery_body("<!DOCTYPE html><html><body>Silo SPA</body></html>"),
+        );
+        let (url, _handle) = serve(&server).await;
+        let settings = token_settings("token-valid");
+        let client = client::<Silo>("silo-spa", &url, &settings);
+
+        let err = client.discover().await.expect_err("discovery failed on HTML body");
+        assert_eq!(err.kind, MediaServerErrorKind::MediaServerDiscoveryFailed);
+        let detail = err.detail_text().expect("has error detail");
+        assert!(
+            detail.contains(
+                "point the input at the Silo Jellyfin-compatibility port (default 8096) and enable the compatibility in Silo"
+            ),
+            "clear error message: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_current_user_id_returns_error_and_retries_without_caching() {
+        let server = Arc::new(MockServer::new("silo", "token-valid"));
+        server.set_users_me_body(Some(r#"{"Id":"","Name":"Admin"}"#.to_string()));
+        let (url, _handle) = serve(&server).await;
+        let mut settings = token_settings("token-valid");
+        settings.api_key = Some("token-valid".to_string());
+        settings.token = None;
+        settings.user_id = None;
+        let client = client::<Silo>("silo-key", &url, &settings);
+
+        // First attempt fails because user id is blank
+        let err = client.list_libraries().await.expect_err("should fail when user id is blank");
+        assert_eq!(err.kind, MediaServerErrorKind::MediaServerDiscoveryFailed);
+
+        // Server now returns a valid user id
+        server.set_users_me_body(Some(r#"{"Id":"mock-user-me","Name":"Admin"}"#.to_string()));
+
+        // Retry succeeds - state was not cached
+        let libraries = client.list_libraries().await.expect("retry should succeed");
+        assert_eq!(libraries.len(), 1);
     }
 }

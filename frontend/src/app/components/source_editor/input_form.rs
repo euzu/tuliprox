@@ -3,6 +3,7 @@ mod common;
 mod library;
 mod m3u;
 mod media_server;
+pub(super) use media_server::media_server_flavor_label_key;
 mod staged;
 mod stalker;
 mod xtream;
@@ -128,6 +129,10 @@ const LABEL_SERVER_ID: &str = "LABEL.SERVER_ID";
 const LABEL_SERVER_NAME: &str = "LABEL.SERVER_NAME";
 const LABEL_PREFER_HTTPS: &str = "LABEL.PREFER_HTTPS";
 const LABEL_ALLOW_RELAY: &str = "LABEL.ALLOW_RELAY";
+const LABEL_CATALOG_OPTIONS: &str = "LABEL.CATALOG_OPTIONS";
+const LABEL_PAGE_SIZE: &str = "LABEL.PAGE_SIZE";
+const LABEL_REQUEST_DELAY_MS: &str = "LABEL.REQUEST_DELAY_MS";
+const LABEL_INCLUDE_MEDIA_SOURCES: &str = "LABEL.INCLUDE_MEDIA_SOURCES";
 
 fn input_persist_hint_key(staged_input: bool) -> &'static str {
     if staged_input {
@@ -163,6 +168,7 @@ fn options_kind_for(input_type: InputType, staged_type: StagedInputType) -> Opti
         InputType::Library
         | InputType::Emby
         | InputType::Jellyfin
+        | InputType::Silo
         | InputType::Plex
         | InputType::Staged
         | InputType::Plugin => OptionsKind::Basic,
@@ -410,6 +416,7 @@ generate_form_reducer!(
     state: ConfigInputFormState { form: ConfigInputDto },
     action_name: ConfigInputFormAction,
     fields {
+        InputType => input_type: shared::model::InputType,
         Name => name: String,
         ManagedChannels => managed_channels: Vec<shared::model::PluginRef>,
         Url => url: String,
@@ -931,7 +938,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         shared::model::InputType::Staged => html! {
             <StagedInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
         },
-        shared::model::InputType::Emby | shared::model::InputType::Jellyfin | shared::model::InputType::Plex => html! {
+        shared::model::InputType::Emby
+        | shared::model::InputType::Jellyfin
+        | shared::model::InputType::Silo
+        | shared::model::InputType::Plex => html! {
             <MediaServerInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
         },
         shared::model::InputType::Library => html! {
@@ -1578,6 +1588,7 @@ mod tests {
             (InputType::Library, StagedInputType::M3u, false),
             (InputType::Emby, StagedInputType::M3u, false),
             (InputType::Jellyfin, StagedInputType::M3u, false),
+            (InputType::Silo, StagedInputType::M3u, false),
             (InputType::Plex, StagedInputType::M3u, false),
         ];
 

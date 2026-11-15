@@ -64,6 +64,12 @@ pub async fn healthy_call(system: &PluginSystem) -> Duration {
         username: None,
         password: None,
         options: &[],
+        refresh: false,
+        last_success_at: None,
+        event_sink: None,
+        run_id: None,
+        execution_order: None,
+        input_id: None,
     };
     let items = system.fetch_playlist(HEALTHY, &ctx, &request).await.expect("the healthy plugin answers");
     assert_eq!(items.len(), 5, "the healthy plugin returns its normal answer");

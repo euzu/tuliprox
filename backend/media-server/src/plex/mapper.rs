@@ -128,6 +128,7 @@ pub fn plex_video_to_episode(
         server_id: Arc::clone(server_id),
         library_id: Arc::clone(library_id),
         item_id: Arc::clone(&rating_key),
+        season_id: None,
         series_id: non_blank_arc(video.grandparent_rating_key.as_deref()),
         series_title: non_blank_arc(video.grandparent_title.as_deref()),
         title,

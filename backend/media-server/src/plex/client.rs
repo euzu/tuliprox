@@ -301,6 +301,16 @@ impl MediaServerCatalogClient for PlexCatalogClient {
         )
     }
 
+    async fn list_available_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
+        let connection = self.connection().await?;
+        let sections = self.fetch_sections(&connection).await?;
+        Ok(crate::library_selection::available_libraries(
+            &self.config.input_name,
+            &connection.status.server_id,
+            &sections.directories,
+        ))
+    }
+
     async fn list_movies(
         &self,
         library: &MediaServerLibraryRef,

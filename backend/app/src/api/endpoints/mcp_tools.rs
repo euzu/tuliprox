@@ -39,6 +39,8 @@ pub(super) struct McpTool {
     pub kind: McpToolKind,
     /// Scrub secrets from the JSON result before it leaves the server.
     pub redact_secrets: bool,
+    /// `destructiveHint` of a write tool.
+    pub destructive: bool,
 }
 
 impl McpTool {
@@ -79,6 +81,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/status",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "list_active_streams",
@@ -88,6 +91,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/streams",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_config",
@@ -97,6 +101,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/config",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "get_playlist_update_status",
@@ -106,6 +111,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/update/status",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "query_stream_history",
@@ -115,6 +121,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/stream-history",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_stream_history_summary",
@@ -124,6 +131,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/stream-history/summary",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_hls_origin_telemetry",
@@ -133,6 +141,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/hls/origin-telemetry",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "list_qos_snapshots",
@@ -142,6 +151,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/qos-snapshots",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_qos_snapshot",
@@ -151,6 +161,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/qos-snapshots/{stream_identity_key}",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_event_stats",
@@ -160,6 +171,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/events/stats",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "get_ip_info",
@@ -169,19 +181,21 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/ipinfo",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "list_playlist_sources",
-        description: "Start here for playlist questions. Lists the playlist sources whose stored data can be read: targets (by name, with their outputs xtream/m3u and per-output EPG availability) and inputs (by name, with input_type and the clusters they hold). Use the returned names as the `target` or `input` argument of query_playlist_items and as `target` of the EPG tools. Small response, no credentials, no URLs.",
+        description: "Start here for playlist questions. Lists the playlist sources whose stored data can be read: targets (by name, with their outputs xtream/m3u and per-output EPG availability) and inputs (by name, with input_type and the clusters they hold; media-server inputs report video and series). Use the returned names as the `target` or `input` argument of query_playlist_items, as `input` of the media-server tools and as `target` of the EPG tools. Reads stored data only. Small response, no credentials, no URLs.",
         input_schema: NO_ARGUMENTS,
         method: McpToolMethod::Get,
         path: "/playlist/sources",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "query_playlist_items",
-        description: "Read the stored playlist records of ONE target or ONE input (give exactly one of `target`/`input`, addressed by NAME; call list_playlist_sources first) for one `cluster`, with substring search, group filter, EPG-match filter, field projection and paging. Returns {source, cluster, total_matched, skipped_records, offset, limit, returned, has_more, items}. total_matched counts all records matching the filter (not just this page); continue with offset += returned while has_more is true. skipped_records is the number of stored records that could not be read: when it is greater than 0 they are missing from the listing and from total_matched, and a `note` says so. limit defaults to 50 and is clamped to 500 (the applied value is echoed and limit_clamped is true). Only stored data is read, no provider traffic is triggered; inputs without a stored database (e.g. stalker) answer an error. The provider `url` of a record is never returned. `fields: override_id` returns the id the override tools take for an item (equal to provider_id for most items; for M3U items without a numeric id a urlhash-v1:… value), and search_field override_id finds an item by exactly that id. `epg_status` works for targets only and answers an error for inputs or targets without an EPG database.",
+        description: "Read the stored playlist records of ONE target or ONE input (give exactly one of `target`/`input`, addressed by NAME; call list_playlist_sources first) for one `cluster`, with substring search, group filter, EPG-match filter, field projection and paging. Returns {source, cluster, total_matched, skipped_records, offset, limit, returned, has_more, items}. total_matched counts all records matching the filter (not just this page); continue with offset += returned while has_more is true. skipped_records is the number of stored records that could not be read: when it is greater than 0 they are missing from the listing and from total_matched, and a `note` says so. limit defaults to 50 and is clamped to 500 (the applied value is echoed and limit_clamped is true). Only stored data is read, no provider traffic is triggered; media-server inputs (plex, emby, jellyfin, silo) are read from their stored catalog (video = movies, series = series without episode rows); inputs without a stored database (e.g. stalker) answer an error. The provider `url` of a record is never returned. `fields: override_id` returns the id the override tools take for an item (equal to provider_id for most items; for M3U items without a numeric id a urlhash-v1:… value), and search_field override_id finds an item by exactly that id. `epg_status` works for targets only and answers an error for inputs or targets without an EPG database.",
         input_schema: concat!(
             r#"{"type":"object","properties":{"#,
             r#""target":{"type":"string","description":"Target name (from list_playlist_sources). Exactly one of `target` or `input` is required."},"#,
@@ -200,6 +214,37 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/items",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
+    },
+    McpTool {
+        name: "list_media_server_libraries",
+        description: "Libraries of ONE media-server input (plex, emby, jellyfin or silo; name from list_playlist_sources). Unlike the playlist tools this contacts the configured media server with two sequential calls, each with a 15 second bound (total up to ~30 seconds). Returns [{id, name, kind, selected}] where kind is movies, tvshows or unsupported and selected marks the libraries the input imports. An unknown input answers 404, an input that is not a media server 400, an unreachable or rejecting server 502.",
+        input_schema: r#"{"type":"object","properties":{"input":{"type":"string","description":"Media-server input name (from list_playlist_sources)."}},"required":["input"],"additionalProperties":false}"#,
+        method: McpToolMethod::Get,
+        path: "/media-server/{input}/libraries",
+        kind: McpToolKind::Read,
+        redact_secrets: false,
+        destructive: false,
+    },
+    McpTool {
+        name: "get_media_server_status",
+        description: "Connection check for ONE media-server input (plex, emby, jellyfin or silo; name from list_playlist_sources). Unlike the playlist tools this contacts the configured media server once, with a 15 second bound, and answers {kind, server_id, name, version, reachable: true}. A failure answers an error with the redacted media-server kind and detail; no token, password or URL is returned.",
+        input_schema: r#"{"type":"object","properties":{"input":{"type":"string","description":"Media-server input name (from list_playlist_sources)."}},"required":["input"],"additionalProperties":false}"#,
+        method: McpToolMethod::Get,
+        path: "/media-server/{input}/status",
+        kind: McpToolKind::Read,
+        redact_secrets: false,
+        destructive: false,
+    },
+    McpTool {
+        name: "refresh_media_server_input",
+        description: "Queue a playlist update for ONE media-server input (plex, emby, jellyfin or silo; name from list_playlist_sources). action normal reuses a valid cached catalog when possible, refresh bypasses the cache and fetches from the server. Answers 202 with a run id; 409 while another playlist update is queued. Only queues the update: no server traffic happens during this call, and progress is read with get_playlist_update_status.",
+        input_schema: r#"{"type":"object","properties":{"input":{"type":"string","description":"Media-server input name (from list_playlist_sources)."},"action":{"type":"string","enum":["normal","refresh"],"description":"normal = reuse a valid cached catalog when possible; refresh = bypass the cache and fetch from the media server."}},"required":["input","action"],"additionalProperties":false}"#,
+        method: McpToolMethod::Post,
+        path: "/media-server/{input}/refresh",
+        kind: McpToolKind::Write,
+        redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "query_target_epg_channels",
@@ -218,6 +263,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/epg/channels",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "get_target_epg_channel",
@@ -236,6 +282,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/epg/channel",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "get_overrides",
@@ -250,6 +297,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "get_override_item",
@@ -266,6 +314,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides/item",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "list_override_orphans",
@@ -275,6 +324,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides/orphans",
         kind: McpToolKind::Read,
         redact_secrets: true,
+        destructive: false,
     },
     McpTool {
         name: "search_epg_ids",
@@ -291,6 +341,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/epg/search",
         kind: McpToolKind::Read,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "update_playlists",
@@ -300,6 +351,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/update",
         kind: McpToolKind::Write,
         redact_secrets: false,
+        destructive: false,
     },
     McpTool {
         name: "save_overrides",
@@ -342,6 +394,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides",
         kind: McpToolKind::Write,
         redact_secrets: false,
+        destructive: true,
     },
     McpTool {
         name: "discard_overrides",
@@ -362,6 +415,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/playlist/overrides/discard",
         kind: McpToolKind::Write,
         redact_secrets: false,
+        destructive: true,
     },
     McpTool {
         name: "update_geoip",
@@ -371,6 +425,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         path: "/geoip/update",
         kind: McpToolKind::Write,
         redact_secrets: false,
+        destructive: false,
     },
 ];
 
@@ -397,6 +452,15 @@ pub(super) struct OwnedMcpTool {
     /// Always `true`: a plugin's answer reaches an AI model.
     pub redact_secrets: bool,
     pub plugin_id: String,
+    /// The export's `destructive: true`: `destructiveHint` of a write tool.
+    pub destructive: bool,
+    /// The export's `output_schema`: `outputSchema` in `tools/list`, checked
+    /// against the result of a successful call.
+    pub output_schema: Option<serde_json::Value>,
+    /// The export's `input_scoped`: the tool takes an `input` name, and the
+    /// host passes the resolved input to the guest beside the arguments.
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+    pub input_scoped: bool,
 }
 
 #[cfg(feature = "plugins")]
@@ -419,8 +483,25 @@ impl From<&tuliprox_plugins::PluginMcpTool> for OwnedMcpTool {
             },
             redact_secrets: true,
             plugin_id: tool.plugin_id.clone(),
+            destructive: tool.destructive,
+            output_schema: tool.output_schema.clone(),
+            input_scoped: tool.input_scoped,
         }
     }
+}
+
+impl OwnedMcpTool {
+    /// The violated paths of `result` against the export's `output_schema`. The
+    /// plugin host validated the schema when it derived the tool, so the same
+    /// validator can check a result here.
+    #[cfg(feature = "plugins")]
+    pub(super) fn output_violations(&self, result: &serde_json::Value) -> Vec<String> {
+        self.output_schema.as_ref().map_or_else(Vec::new, |schema| tuliprox_plugins::validate_output(schema, result))
+    }
+
+    /// Without a plugin host no plugin tool exists, so no result is ever checked.
+    #[cfg(not(feature = "plugins"))]
+    pub(super) fn output_violations(&self, _result: &serde_json::Value) -> Vec<String> { Vec::new() }
 }
 
 /// One tool of a [`ToolView`].
@@ -472,6 +553,24 @@ impl McpToolRef<'_> {
             Self::Plugin(tool) => tool.redact_secrets,
         }
     }
+
+    /// The export's `output_schema`, which `tools/list` shows as `outputSchema`.
+    /// Built-in tools declare none.
+    pub(super) fn output_schema(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Builtin(_) => None,
+            Self::Plugin(tool) => tool.output_schema.clone(),
+        }
+    }
+
+    /// The violated paths of a result against [`McpToolRef::output_schema`];
+    /// empty when there is no schema or the result matches it.
+    pub(super) fn output_violations(&self, result: &serde_json::Value) -> Vec<String> {
+        match self {
+            Self::Builtin(_) => Vec::new(),
+            Self::Plugin(tool) => tool.output_violations(result),
+        }
+    }
 }
 
 impl ToolView {
@@ -507,16 +606,120 @@ impl ToolView {
 /// The plugin tools the plugin host offers right now (its side of the switches:
 /// the plugin is enabled, the export says `mcp: true`, the admin approved it);
 /// none without a plugin host.
+///
+/// An `input_scoped` tool additionally needs at least one configured input of
+/// this plugin: its name goes into the tool's required `input` enum. Without
+/// one there is nothing the tool could be called with, so it is not listed.
 #[cfg(feature = "plugins")]
 pub(super) fn plugin_tools(app_state: &crate::api::model::AppState) -> Vec<OwnedMcpTool> {
     static BUILTIN_NAMES: std::sync::LazyLock<Vec<&'static str>> =
         std::sync::LazyLock::new(|| MCP_TOOLS.iter().map(|tool| tool.name).collect());
-    app_state
-        .plugins
-        .as_ref()
-        .map(|plugins| plugins.mcp_tools(&BUILTIN_NAMES).iter().map(OwnedMcpTool::from).collect())
-        .unwrap_or_default()
+    let Some(plugins) = app_state.plugins.as_ref() else {
+        return Vec::new();
+    };
+    let tools: Vec<OwnedMcpTool> = plugins.mcp_tools(&BUILTIN_NAMES).iter().map(OwnedMcpTool::from).collect();
+    if !tools.iter().any(|tool| tool.input_scoped) {
+        return tools;
+    }
+    let sources = app_state.app_config.sources.load();
+    let mut kept = Vec::with_capacity(tools.len());
+    for mut tool in tools {
+        if tool.input_scoped {
+            let names: Vec<String> = sources
+                .inputs
+                .iter()
+                .filter(|input| {
+                    input.input_type.is_plugin() && input.plugin.as_deref() == Some(tool.plugin_id.as_str())
+                })
+                .map(|input| input.name.to_string())
+                .collect();
+            if names.is_empty() {
+                log::warn!(
+                    "plugin tool `{}` is not offered: the export is `input_scoped` but no `type: plugin` input of plugin `{}` is configured",
+                    tool.name,
+                    tool.plugin_id
+                );
+                continue;
+            }
+            if !add_input_selector(&mut tool.input_schema, &names) {
+                log::warn!("plugin tool `{}` is not offered: its input schema has no `properties` object", tool.name);
+                continue;
+            }
+        }
+        kept.push(tool);
+    }
+    kept
+}
+
+/// Add the required `input` selector to an `input_scoped` tool's schema.
+/// `false` when the schema is not an object or has a non-object `properties`.
+/// When `properties` is absent from an object schema, an empty object is inserted.
+fn add_input_selector(schema: &mut serde_json::Value, names: &[String]) -> bool {
+    let Some(object) = schema.as_object_mut() else {
+        return false;
+    };
+    if let Some(prop_val) = object.get("properties") {
+        if !prop_val.is_object() {
+            return false;
+        }
+    } else {
+        object.insert("properties".to_string(), serde_json::json!({}));
+    }
+    let Some(properties) = object.get_mut("properties").and_then(serde_json::Value::as_object_mut) else {
+        return false;
+    };
+    properties.insert(
+        "input".to_string(),
+        serde_json::json!({
+            "type": "string",
+            "enum": names,
+            "description": "Name of the configured input this call uses (from list_playlist_sources).",
+        }),
+    );
+    match object.get_mut("required") {
+        Some(serde_json::Value::Array(required)) => {
+            if !required.iter().any(|name| name == "input") {
+                required.push(serde_json::Value::String("input".to_string()));
+            }
+        }
+        Some(_) => return false,
+        None => {
+            object.insert("required".to_string(), serde_json::json!(["input"]));
+        }
+    }
+    true
 }
 
 #[cfg(not(feature = "plugins"))]
 pub(super) fn plugin_tools(_app_state: &crate::api::model::AppState) -> Vec<OwnedMcpTool> { Vec::new() }
+
+#[cfg(test)]
+mod tests {
+    use super::add_input_selector;
+    use serde_json::json;
+
+    #[test]
+    fn the_input_selector_becomes_a_required_enum_property() {
+        let names = vec!["living-room".to_string(), "bedroom".to_string()];
+        let mut schema = json!({ "type": "object", "properties": { "query": { "type": "string" } } });
+        assert!(add_input_selector(&mut schema, &names));
+        assert_eq!(schema["properties"]["input"]["type"], "string");
+        assert_eq!(schema["properties"]["input"]["enum"], json!(names));
+        assert_eq!(schema["required"], json!(["input"]));
+        // An existing `required` list gains `input` once.
+        let mut schema = json!({
+            "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"]
+        });
+        assert!(add_input_selector(&mut schema, &names));
+        assert!(add_input_selector(&mut schema, &names));
+        assert_eq!(schema["required"], json!(["query", "input"]));
+        // A schema with no `properties` object gains one.
+        let mut no_props = json!({ "type": "object" });
+        assert!(add_input_selector(&mut no_props, &names));
+        assert_eq!(no_props["properties"]["input"]["enum"], json!(names));
+        assert_eq!(no_props["required"], json!(["input"]));
+        // A schema with a present non-object `properties` is rejected.
+        assert!(!add_input_selector(&mut json!({ "type": "object", "properties": "not-an-object" }), &names));
+        assert!(!add_input_selector(&mut json!({ "type": "object", "required": "input" }), &names));
+    }
+}

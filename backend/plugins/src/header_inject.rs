@@ -49,7 +49,7 @@ const DENIED_HEADERS: [&str; 8] =
     ["host", "content-length", "transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade"];
 
 /// `true` for a name on the denylist.
-fn is_denied(name: &str) -> bool {
+pub(crate) fn is_denied(name: &str) -> bool {
     DENIED_HEADERS.iter().any(|denied| name.eq_ignore_ascii_case(denied))
         || name.as_bytes().get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"proxy-"))
 }

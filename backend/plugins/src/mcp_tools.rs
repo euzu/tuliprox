@@ -57,6 +57,31 @@ pub struct PluginMcpTool {
     /// The manifest's `rpc_exports[].name` (kebab case).
     pub method: String,
     pub kind: PluginMcpToolKind,
+    /// `rpc_exports[].destructive`: only ever true for a `kind: write` export,
+    /// where it becomes `destructiveHint` for the MCP client.
+    pub destructive: bool,
+    /// The export's `output_schema` file, when it declares one. The host checks
+    /// a successful result against it before handing it out as structured content.
+    pub output_schema: Option<Value>,
+    /// `rpc_exports[].input_scoped`: the tool takes an `input` name and the
+    /// host passes the resolved input to the guest beside the arguments.
+    pub input_scoped: bool,
+}
+
+/// The paths of `result` that violate `schema`, empty when it matches. The
+/// schema is checked with the same validator as `input_schema`, so it must be
+/// inside the same subset. A path is in the secret-path grammar; no message
+/// echoes a value.
+pub fn validate_output(schema: &Value, result: &Value) -> Vec<String> {
+    crate::settings::validate(schema, result).into_iter().map(|field| field.path).collect()
+}
+
+impl PluginMcpTool {
+    /// The violated paths of `result`, empty when the tool declares no
+    /// `output_schema` or the result matches it.
+    pub fn output_violations(&self, result: &Value) -> Vec<String> {
+        self.output_schema.as_ref().map_or_else(Vec::new, |schema| validate_output(schema, result))
+    }
 }
 
 /// What the tool derivation needs to know of one plugin.
@@ -91,28 +116,37 @@ fn tool_description(id: &str, manifest: &Manifest, export: &RpcExport) -> String
     description
 }
 
-/// The export's schema, read from the package. It must be an object schema made of
+/// One schema file of the package. It must be an object schema made of
 /// constructs the rpc route's validator can check; otherwise every call would fail.
-fn tool_schema(dir: &Path, export: &RpcExport) -> Result<Value, String> {
-    let relative = export.input_schema.as_deref().ok_or("the export declares no `input_schema`")?;
+fn object_schema(dir: &Path, relative: &str, what: &str) -> Result<Value, String> {
     let schema = read_package_json(dir, relative)
-        .ok_or_else(|| format!("the input schema `{relative}` is missing, unreadable or not JSON"))?;
+        .ok_or_else(|| format!("the {what} schema `{relative}` is missing, unreadable or not JSON"))?;
     if schema.get("type").and_then(Value::as_str) != Some("object") {
-        return Err(format!("the input schema `{relative}` is not an object schema"));
+        return Err(format!("the {what} schema `{relative}` is not an object schema"));
     }
     let unsupported = unsupported_constructs(&schema);
     if !unsupported.is_empty() {
         return Err(format!(
-            "the input schema `{relative}` uses constructs the host cannot check: {}",
+            "the {what} schema `{relative}` uses constructs the host cannot check: {}",
             unsupported.join(", ")
         ));
     }
     Ok(schema)
 }
 
+fn tool_schema(dir: &Path, export: &RpcExport) -> Result<Value, String> {
+    let relative = export.input_schema.as_deref().ok_or("the export declares no `input_schema`")?;
+    object_schema(dir, relative, "input")
+}
+
+fn tool_output_schema(dir: &Path, export: &RpcExport) -> Result<Option<Value>, String> {
+    export.output_schema.as_deref().map(|relative| object_schema(dir, relative, "output")).transpose()
+}
+
 fn build_tool(candidate: &Candidate<'_>, export: &RpcExport) -> Result<PluginMcpTool, String> {
     let name = tool_name(candidate.id, &export.name)?;
     let input_schema = tool_schema(candidate.dir, export)?;
+    let output_schema = tool_output_schema(candidate.dir, export)?;
     Ok(PluginMcpTool {
         name,
         description: tool_description(candidate.id, candidate.manifest, export),
@@ -123,6 +157,9 @@ fn build_tool(candidate: &Candidate<'_>, export: &RpcExport) -> Result<PluginMcp
             RpcKind::Read => PluginMcpToolKind::Read,
             RpcKind::Write => PluginMcpToolKind::Write,
         },
+        destructive: export.destructive,
+        output_schema,
+        input_scoped: export.input_scoped,
     })
 }
 
@@ -302,6 +339,9 @@ mod tests {
                 plugin_id: "demo".to_string(),
                 method: "ping".to_string(),
                 kind: PluginMcpToolKind::Read,
+                destructive: false,
+                output_schema: None,
+                input_scoped: false,
             }]
         );
     }
@@ -434,6 +474,53 @@ mod tests {
     }
 
     #[test]
+    fn a_write_export_carries_its_destructive_flag() {
+        let out = r#"{"type":"object","properties":{"ok":{"type":"boolean"}}}"#;
+        let exports = "    - { name: reset, kind: write, destructive: true, mcp: true, input_schema: rpc/ping.json, output_schema: rpc/out.json }\n";
+        let flagged = staged("demo", exports, Some(OBJECT_SCHEMA));
+        fs::write(flagged.dir.path().join("rpc/out.json"), out).unwrap();
+        let tools = one(&flagged, PluginState::Enabled, true);
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].destructive);
+        assert_eq!(tools[0].output_schema, Some(serde_json::from_str(out).unwrap()));
+
+        // Without the flag a write tool is not destructive.
+        let plain = "    - { name: reset, kind: write, mcp: true, input_schema: rpc/ping.json }\n";
+        let staged = staged("demo", plain, Some(OBJECT_SCHEMA));
+        assert!(!one(&staged, PluginState::Enabled, true)[0].destructive);
+    }
+
+    #[test]
+    fn an_export_without_a_usable_output_schema_is_not_a_tool() {
+        let exports =
+            "    - { name: ping, kind: read, mcp: true, input_schema: rpc/ping.json, output_schema: rpc/out.json }\n";
+        let cases = [
+            ("a file that does not exist", None),
+            ("a file that is not JSON", Some("not json")),
+            ("JSON that is not an object schema", Some(r#"{"type":"string"}"#)),
+            ("a construct the validator cannot check", Some(r#"{"type":"object","oneOf":[{"type":"object"}]}"#)),
+        ];
+        for (what, schema) in cases {
+            let staged = staged("demo", exports, Some(OBJECT_SCHEMA));
+            if let Some(schema) = schema {
+                fs::write(staged.dir.path().join("rpc/out.json"), schema).unwrap();
+            }
+            assert_eq!(one(&staged, PluginState::Enabled, true).len(), 0, "{what}");
+        }
+        // The same export is a tool once its output schema is usable.
+        let usable = staged("demo", exports, Some(OBJECT_SCHEMA));
+        fs::write(usable.dir.path().join("rpc/out.json"), OBJECT_SCHEMA).unwrap();
+        assert_eq!(one(&usable, PluginState::Enabled, true).len(), 1);
+    }
+
+    #[test]
+    fn output_violations_are_empty_without_a_schema() {
+        let staged = staged("demo", PING, Some(OBJECT_SCHEMA));
+        let tools = one(&staged, PluginState::Enabled, true);
+        assert_eq!(tools[0].output_violations(&Value::Null), Vec::<String>::new());
+    }
+
+    #[test]
     fn tasks_are_never_tools() {
         let text = "id: demo\nname: Demo\nversion: 1.0.0\napi_version: 1\nhooks: [tasks.run]\ntasks: [{ id: refresh-fixtures }]\n";
         let manifest = Manifest::parse(text, "demo").unwrap();
@@ -509,6 +596,9 @@ mod tests {
             plugin_id: "demo".to_string(),
             method: "ping".to_string(),
             kind: PluginMcpToolKind::Read,
+            destructive: false,
+            output_schema: None,
+            input_scoped: false,
         }]
     }
 

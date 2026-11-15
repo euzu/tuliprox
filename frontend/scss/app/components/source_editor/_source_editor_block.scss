@@ -213,6 +213,7 @@ $port-size: 10px;
     background-color: var(--brick-input-stalker-background-color);
   }
 
+  &-InputMediaServer,
   &-InputJellyfin {
     border-color: var(--brick-input-jellyfin-border-color);
     background-color: var(--brick-input-jellyfin-background-color);
@@ -348,6 +349,7 @@ $port-size: 10px;
   &-InputStalker {
     @include brick-handle-input-color(var(--brick-input-stalker-background-color), var(--brick-input-stalker-border-color));
   }
+  &-InputMediaServer,
   &-InputJellyfin {
     @include brick-handle-input-color(var(--brick-input-jellyfin-background-color), var(--brick-input-jellyfin-border-color));
   }

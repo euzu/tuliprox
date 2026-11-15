@@ -69,6 +69,7 @@ normal tuliprox-plugin-sdk -> tuliprox-plugin-api
 dev tuliprox-plugin-sdk-macros -> tuliprox-plugin-api
 # The plugin KV store (plan §18 Q10). `btree` has no workspace deps, so no cycle.
 normal tuliprox-plugins -> tuliprox-btree
+normal tuliprox-plugins -> tuliprox-media-server
 normal tuliprox -> tuliprox-metadata
 # Background metadata resolution. Sits above the pipeline: it implements
 # `MetadataUpdateSink`, which `processing` declares.

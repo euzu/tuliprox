@@ -43,7 +43,7 @@ impl InputUpdateCapabilities {
             | InputType::Plugin => Self::Manual {
                 policies: &[InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE],
             },
-            InputType::Plex | InputType::Jellyfin | InputType::Emby => {
+            InputType::Plex | InputType::Jellyfin | InputType::Emby | InputType::Silo => {
                 Self::Manual { policies: &[InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH] }
             }
             InputType::Library => Self::Rescan,
@@ -88,6 +88,7 @@ mod tests {
             (InputType::Library, 0),
             (InputType::Jellyfin, 2),
             (InputType::Emby, 2),
+            (InputType::Silo, 2),
             (InputType::M3uBatch, 3),
             (InputType::XtreamBatch, 3),
             (InputType::StalkerBatch, 3),

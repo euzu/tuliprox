@@ -50,6 +50,7 @@ impl ConfigInputDto {
             InputType::Emby => InputType::Emby,
             InputType::Jellyfin => InputType::Jellyfin,
             InputType::Plex => InputType::Plex,
+            InputType::Silo => InputType::Silo,
             InputType::Staged => InputType::Staged,
             InputType::Plugin => InputType::Plugin,
         };
@@ -106,7 +107,7 @@ impl ConfigInputDto {
         }
 
         match self.input_type {
-            InputType::Emby | InputType::Jellyfin => {
+            InputType::Emby | InputType::Jellyfin | InputType::Silo => {
                 if trimmed_url.is_empty() {
                     return Err(TuliproxError::ConfigInput(format!(
                         "url is mandatory for input type {} (input: {})",

@@ -473,4 +473,88 @@ mod tests {
         assign_item_identity(&mut unknown_hls_header, &mut source_ordinal, &mut target_id_mapping);
         assert_eq!(unknown_hls_header.item_type, PlaylistItemType::LiveHls);
     }
+
+    #[test]
+    fn plugin_media_server_items_pass_episode_gate_and_materialize() {
+        let series_uuid = "123e4567-e89b-12d3-a456-426614174999";
+        let series_info = PlaylistItem {
+            header: PlaylistItemHeader {
+                uuid: UUIDType::from_valid_uuid(series_uuid),
+                id: "media-server:my-plugin:series-123".intern(),
+                name: "Test Series".intern(),
+                title: "Test Series".intern(),
+                url: "media-server://plugin/my-plugin/series-123".intern(),
+                item_type: PlaylistItemType::SeriesInfo,
+                xtream_cluster: shared::model::XtreamCluster::Series,
+                additional_properties: Some(StreamProperties::Series(Box::new(
+                    shared::model::SeriesStreamProperties {
+                        name: "Test Series".intern(),
+                        details: Some(shared::model::SeriesStreamDetailProperties {
+                            year: Some(2024),
+                            seasons: None,
+                            episodes: None,
+                        }),
+                        ..shared::model::SeriesStreamProperties::default()
+                    },
+                ))),
+                ..PlaylistItemHeader::default()
+            },
+        };
+        let series_parent_code = series_info.header.uuid.to_string();
+
+        let episode_item = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "media-server:my-plugin:ep-1".intern(),
+                name: "Pilot".intern(),
+                title: "Pilot".intern(),
+                url: "media-server://plugin/my-plugin/ep-1?stream_key=stream1".intern(),
+                item_type: PlaylistItemType::Series,
+                parent_code: series_parent_code.intern(),
+                virtual_id: VirtualId::new(7001),
+                additional_properties: Some(StreamProperties::Episode(Box::new(
+                    shared::model::EpisodeStreamProperties {
+                        episode_id: 0,
+                        episode: 1,
+                        season: 1,
+                        added: Some("1700000000".intern()),
+                        release_date: Some("2024-02-03".intern()),
+                        series_release_date: Some("2024-01-01".intern()),
+                        plot: Some("Episode summary".intern()),
+                        tmdb: Some(67890),
+                        movie_image: "media-server://image/plugin/test/my-plugin/ep-1?image_key=thumb".intern(),
+                        container_extension: "mkv".intern(),
+                        video: Some(r#"{"codec_name":"h264"}"#.intern()),
+                        audio: Some(r#"{"codec_name":"aac"}"#.intern()),
+                    },
+                ))),
+                ..PlaylistItemHeader::default()
+            },
+        };
+
+        let mut media_server_series = HashMap::<Arc<str>, Vec<SeriesStreamDetailEpisodeProperties>>::new();
+        assign_media_server_series_info_episode(&mut media_server_series, &episode_item.header);
+        assert_eq!(media_server_series.len(), 1, "plugin episode passed the episode gate");
+
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "TV Shows".intern(),
+            xtream_cluster: shared::model::XtreamCluster::Series,
+            channels: vec![series_info, episode_item],
+        }];
+
+        materialize_media_server_series_info_episodes(&mut playlist, &media_server_series);
+
+        let series_channel = &playlist[0].channels[0];
+        assert_eq!(series_channel.header.item_type, PlaylistItemType::SeriesInfo);
+        let Some(StreamProperties::Series(series)) = &series_channel.header.additional_properties else {
+            panic!("Expected StreamProperties::Series");
+        };
+        let details = series.details.as_ref().expect("details");
+        let episodes = details.episodes.as_ref().expect("materialized episodes");
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].title.as_ref(), "Pilot");
+        assert_eq!(episodes[0].season, 1);
+        assert_eq!(episodes[0].episode_num, 1);
+        assert_eq!(episodes[0].id, 7001);
+    }
 }

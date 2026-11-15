@@ -14,9 +14,7 @@ pub enum BlockType {
     InputXtream,
     InputM3u,
     InputLibrary,
-    InputEmby,
-    InputJellyfin,
-    InputPlex,
+    InputMediaServer,
     InputStalker,
     InputStaged,
     /// A `type: plugin` input: the id of the providing plugin lives in
@@ -37,8 +35,10 @@ impl BlockType {
     pub const INPUT_XTREAM: &'static str = "InputXtream";
     pub const INPUT_M3U: &'static str = "InputM3u";
     pub const INPUT_LIBRARY: &'static str = "InputLibrary";
+    pub const INPUT_MEDIA_SERVER: &'static str = "InputMediaServer";
     pub const INPUT_EMBY: &'static str = "InputEmby";
     pub const INPUT_JELLYFIN: &'static str = "InputJellyfin";
+    pub const INPUT_SILO: &'static str = "InputSilo";
     pub const INPUT_PLEX: &'static str = "InputPlex";
     pub const INPUT_STALKER: &'static str = "InputStalker";
     pub const INPUT_STAGED: &'static str = "InputStaged";
@@ -56,9 +56,7 @@ impl BlockType {
             Self::InputXtream
                 | Self::InputM3u
                 | Self::InputLibrary
-                | Self::InputEmby
-                | Self::InputJellyfin
-                | Self::InputPlex
+                | Self::InputMediaServer
                 | Self::InputStalker
                 | Self::InputStaged
                 | Self::InputPlugin
@@ -93,9 +91,11 @@ impl From<&str> for BlockType {
             BlockType::INPUT_XTREAM => BlockType::InputXtream,
             BlockType::INPUT_M3U => BlockType::InputM3u,
             BlockType::INPUT_LIBRARY => BlockType::InputLibrary,
-            BlockType::INPUT_EMBY => BlockType::InputEmby,
-            BlockType::INPUT_JELLYFIN => BlockType::InputJellyfin,
-            BlockType::INPUT_PLEX => BlockType::InputPlex,
+            BlockType::INPUT_MEDIA_SERVER
+            | BlockType::INPUT_EMBY
+            | BlockType::INPUT_JELLYFIN
+            | BlockType::INPUT_SILO
+            | BlockType::INPUT_PLEX => BlockType::InputMediaServer,
             BlockType::INPUT_STALKER => BlockType::InputStalker,
             BlockType::INPUT_STAGED => BlockType::InputStaged,
             BlockType::INPUT_PLUGIN => BlockType::InputPlugin,
@@ -120,9 +120,7 @@ impl From<InputType> for BlockType {
             InputType::M3uBatch | InputType::M3u => BlockType::InputM3u,
             InputType::XtreamBatch | InputType::Xtream => BlockType::InputXtream,
             InputType::Library => BlockType::InputLibrary,
-            InputType::Emby => BlockType::InputEmby,
-            InputType::Jellyfin => BlockType::InputJellyfin,
-            InputType::Plex => BlockType::InputPlex,
+            InputType::Emby | InputType::Jellyfin | InputType::Silo | InputType::Plex => BlockType::InputMediaServer,
             InputType::Stalker | InputType::StalkerBatch => BlockType::InputStalker,
             InputType::Staged => BlockType::InputStaged,
             InputType::Plugin => BlockType::InputPlugin,
@@ -137,9 +135,7 @@ impl fmt::Display for BlockType {
             BlockType::InputXtream => Self::INPUT_XTREAM,
             BlockType::InputM3u => Self::INPUT_M3U,
             BlockType::InputLibrary => Self::INPUT_LIBRARY,
-            BlockType::InputEmby => Self::INPUT_EMBY,
-            BlockType::InputJellyfin => Self::INPUT_JELLYFIN,
-            BlockType::InputPlex => Self::INPUT_PLEX,
+            BlockType::InputMediaServer => Self::INPUT_MEDIA_SERVER,
             BlockType::InputStalker => Self::INPUT_STALKER,
             BlockType::InputStaged => Self::INPUT_STAGED,
             BlockType::InputPlugin => Self::INPUT_PLUGIN,
@@ -308,17 +304,25 @@ mod tests {
     }
 
     #[test]
-    fn media_server_input_types_keep_distinct_source_editor_blocks() {
-        assert_eq!(BlockType::from(InputType::Emby), BlockType::InputEmby);
-        assert_eq!(BlockType::from(InputType::Jellyfin), BlockType::InputJellyfin);
-        assert_eq!(BlockType::from(InputType::Plex), BlockType::InputPlex);
+    fn media_server_input_types_map_to_media_server_block() {
+        assert_eq!(BlockType::from(InputType::Emby), BlockType::InputMediaServer);
+        assert_eq!(BlockType::from(InputType::Jellyfin), BlockType::InputMediaServer);
+        assert_eq!(BlockType::from(InputType::Silo), BlockType::InputMediaServer);
+        assert_eq!(BlockType::from(InputType::Plex), BlockType::InputMediaServer);
     }
 
     #[test]
-    fn media_server_source_editor_blocks_are_inputs() {
-        assert!(BlockType::InputEmby.is_input());
-        assert!(BlockType::InputJellyfin.is_input());
-        assert!(BlockType::InputPlex.is_input());
+    fn media_server_source_editor_block_is_input() {
+        assert!(BlockType::InputMediaServer.is_input());
+    }
+
+    #[test]
+    fn legacy_block_type_strings_map_to_media_server() {
+        assert_eq!(BlockType::from("InputMediaServer"), BlockType::InputMediaServer);
+        assert_eq!(BlockType::from("InputEmby"), BlockType::InputMediaServer);
+        assert_eq!(BlockType::from("InputJellyfin"), BlockType::InputMediaServer);
+        assert_eq!(BlockType::from("InputSilo"), BlockType::InputMediaServer);
+        assert_eq!(BlockType::from("InputPlex"), BlockType::InputMediaServer);
     }
 
     #[test]

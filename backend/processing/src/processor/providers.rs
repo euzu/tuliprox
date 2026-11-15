@@ -2,7 +2,7 @@
 //!
 //! The M3U and Xtream providers ship with the client code in `tuliprox-iptv`. These three
 //! cannot: Stalker's resumable refresh, the local library scan and the media-server catalog
-//! import (Plex, Emby, Jellyfin) all reach into `tuliprox-repository` and this crate's own processors, and `tuliprox-iptv`
+//! import (Plex, Emby, Jellyfin, Silo) all reach into `tuliprox-repository` and this crate's own processors, and `tuliprox-iptv`
 //! sits below both. The trait is what lets them keep that dependency direction and still
 //! answer the dispatcher in one shape.
 use super::{
@@ -66,7 +66,7 @@ impl PlaylistProvider for LibraryProvider {
     }
 }
 
-/// Media server catalog import for Plex, Emby and Jellyfin inputs.
+/// Media server catalog import for Plex, Emby, Jellyfin and Silo inputs.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MediaServerProvider;
 
@@ -166,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn media_server_inputs_without_media_server_block_report_download_error() {
         let client = reqwest::Client::new();
-        for input_type in [InputType::Plex, InputType::Emby, InputType::Jellyfin] {
+        for input_type in [InputType::Plex, InputType::Emby, InputType::Jellyfin, InputType::Silo] {
             let input = ConfigInput { name: "ms".into(), input_type, media_server: None, ..ConfigInput::default() };
 
             let (groups, errors) = download_media_server_playlist(&client, &input).await;

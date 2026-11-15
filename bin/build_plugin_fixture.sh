@@ -60,6 +60,7 @@ build task-probe
 build ui-demo
 build http-probe
 build managed-probe
+build media-probe
 
 # Install one component once per manifest in <fixture>/manifests; each
 # manifest's id must be its file name.
@@ -95,6 +96,9 @@ install_plugin filter-probe \
 install_plugin provider-probe \
     "$out/build/$target/release/plugin_fixture_provider_probe.wasm" \
     "$fixtures/provider-probe/manifest.yml"
+install_plugin media-probe \
+    "$out/build/$target/release/plugin_fixture_media_probe.wasm" \
+    "$fixtures/media-probe/manifest.yml"
 install_plugin settings-migrate-probe \
     "$out/build/$target/release/plugin_fixture_settings_migrate_probe.wasm" \
     "$fixtures/settings-migrate-probe/manifest.yml"
@@ -106,7 +110,7 @@ cp "$fixtures/settings-migrate-probe/config-schema.json" "$out/plugins/settings-
 install_ui_demo() {
     local src="$fixtures/ui-demo" dest="$out/plugins/ui-demo" pack="$out/ui-demo.tlpx"
     install_plugin ui-demo "$out/build/$target/release/plugin_fixture_ui_demo.wasm" "$src/manifest.yml"
-    cp "$src/config-schema.json" "$src/tab-schema.json" "$dest/"
+    cp "$src/config-schema.json" "$src/tab-schema.json" "$src/input-schema.json" "$dest/"
     cp -R "$src/rpc" "$src/ui" "$dest/"
     rm -f "$pack"
     if command -v zip >/dev/null 2>&1; then

@@ -14,6 +14,7 @@ mod maintenance_api;
 pub(in crate::api) mod mcp_api;
 mod mcp_redact;
 mod mcp_tools;
+pub(in crate::api) mod media_server_api;
 mod plugins_api;
 mod plugins_http_api;
 mod plugins_install_api;

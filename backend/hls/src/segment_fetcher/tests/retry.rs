@@ -468,3 +468,13 @@ async fn segment_retry_starts_again_at_fetch_ref_after_redirect_failure() {
     assert_eq!(outcome, super::super::SegmentDemandFetchOutcome::Ready);
     assert_eq!(server.requests.lock().await.as_slice(), ["/1.ts", "/redirected.ts", "/1.ts"]);
 }
+
+#[test]
+fn retry_jitter_never_delays_an_attempt_without_a_configured_delay() {
+    let policy = SegmentFetchPolicy { retry_delays_ms: [0, 100, 250, 500, 750], ..SegmentFetchPolicy::default() };
+    assert!(policy.retry_jitter_max_ms > 0, "the default policy jitters retries");
+    for _ in 0..200 {
+        assert_eq!(policy.retry_delay_ms(0), 0, "the first attempt starts at once");
+        assert!(policy.retry_delay_ms(1) <= 100 + policy.retry_jitter_max_ms);
+    }
+}

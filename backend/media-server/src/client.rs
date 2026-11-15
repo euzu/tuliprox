@@ -1,8 +1,8 @@
 use crate::{
-    operation::MediaServerOperation, redaction::redact_media_server_text, MediaServerEpisode, MediaServerError,
-    MediaServerErrorKind, MediaServerImageRef, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie,
-    MediaServerPage, MediaServerPageRequest, MediaServerSeason, MediaServerSeries, MediaServerStatus,
-    MediaServerStreamRef, MediaServerStreamResponse,
+    catalog::MediaServerCatalogSnapshot, operation::MediaServerOperation, redaction::redact_media_server_text,
+    MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerImageRef, MediaServerLibrary,
+    MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason,
+    MediaServerSeries, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
 };
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -14,6 +14,10 @@ pub trait MediaServerCatalogClient: Send + Sync {
     async fn discover(&self) -> Result<MediaServerStatus, MediaServerError>;
 
     async fn list_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError>;
+
+    /// Every library the server exposes to the configured account, without the
+    /// input's library selection. `list_libraries` only returns the selected ones.
+    async fn list_available_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError>;
 
     async fn list_movies(
         &self,
@@ -46,6 +50,8 @@ pub trait MediaServerCatalogClient: Send + Sync {
     ) -> Result<MediaServerStreamResponse, MediaServerError>;
 
     async fn open_image(&self, image_ref: &MediaServerImageRef) -> Result<MediaServerStreamResponse, MediaServerError>;
+
+    fn post_process_catalog(&self, _snapshot: &mut MediaServerCatalogSnapshot) {}
 }
 
 #[derive(Clone)]

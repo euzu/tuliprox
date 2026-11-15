@@ -636,6 +636,7 @@ mod tests {
             InputType::Plex,
             InputType::Emby,
             InputType::Jellyfin,
+            InputType::Silo,
             InputType::Staged,
         ] {
             for enabled in [false, true] {

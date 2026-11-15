@@ -9,15 +9,13 @@ use crate::{
 };
 use yew::prelude::*;
 
-pub const BLOCK_TYPES_INPUT: [BlockType; 9] = [
+pub const BLOCK_TYPES_INPUT: [BlockType; 7] = [
     BlockType::InputXtream,
     BlockType::InputM3u,
     BlockType::InputLibrary,
     BlockType::InputStalker,
     BlockType::InputStaged,
-    BlockType::InputJellyfin,
-    BlockType::InputEmby,
-    BlockType::InputPlex,
+    BlockType::InputMediaServer,
     BlockType::InputPlugin,
 ];
 
@@ -31,9 +29,7 @@ mod tests {
         assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputM3u));
         assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputLibrary));
         assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputStaged));
-        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputEmby));
-        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputJellyfin));
-        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputPlex));
+        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputMediaServer));
         assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputPlugin));
     }
 

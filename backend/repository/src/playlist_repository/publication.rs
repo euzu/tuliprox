@@ -2,7 +2,7 @@ use super::replacement::{OrdinaryPublication, TargetReplacementDeadline};
 use crate::xtream_repository::target_publish::{xtream_write_playlist_with_mode, TargetEmptyReplacementMode};
 use shared::{
     error::TuliproxError,
-    model::{ClusterFlags, PlaylistGroup, XtreamCluster},
+    model::{ClusterFlags, InputPersistence, PlaylistGroup, XtreamCluster},
 };
 use std::sync::Arc;
 use tuliprox_core::model::{apply_filter_to_playlist, AppConfig, ConfigTarget, TargetOutput};
@@ -34,10 +34,13 @@ pub(super) enum TargetCacheReloadStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputPlaylistPersistOptions {
     pub accepted_empty_clusters: ClusterFlags,
+    /// Storage layout when it is not the input type's own, e.g. a `type: plugin`
+    /// input served by a media catalog provider stores a media-server catalog.
+    pub persistence: Option<InputPersistence>,
 }
 
 impl Default for InputPlaylistPersistOptions {
-    fn default() -> Self { Self { accepted_empty_clusters: ClusterFlags::empty() } }
+    fn default() -> Self { Self { accepted_empty_clusters: ClusterFlags::empty(), persistence: None } }
 }
 
 /// Empty Library contribution proven by successful input jobs, before target transforms.

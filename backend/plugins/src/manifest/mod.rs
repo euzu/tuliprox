@@ -259,6 +259,15 @@ pub(crate) struct RpcExport {
     pub description: Option<String>,
     /// Package-relative JSON Schema of the payload; present whenever `mcp` is.
     pub input_schema: Option<String>,
+    /// The export deletes data. Only allowed on a `kind: write` export; it only
+    /// changes the MCP annotation, never what the host permits.
+    pub destructive: bool,
+    /// Package-relative JSON Schema of the result, checked before it becomes
+    /// `structuredContent` of an MCP tool.
+    pub output_schema: Option<String>,
+    /// The MCP tool and the rpc route resolve a configured input and pass it to
+    /// the guest as `{"args": …, "input": {…}}`.
+    pub input_scoped: bool,
 }
 
 /// One `ui.input_form` / `ui.output_form` section: fields a plugin adds to a
@@ -340,6 +349,7 @@ pub(crate) enum FailMode {
 pub(crate) struct Resources {
     pub max_memory_mb: Option<u32>,
     pub max_exec_ms: Option<u64>,
+    pub resolve_ms: Option<u64>,
     pub max_instances: Option<u16>,
     pub fail_mode: FailMode,
 }

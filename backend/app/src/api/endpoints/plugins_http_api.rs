@@ -180,6 +180,7 @@ mod tests {
     use super::*;
     use crate::{api::model::create_test_app_state, model::Config};
     use axum::http::Request;
+    #[cfg(feature = "plugins")]
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 

@@ -1,0 +1,16 @@
+id: media-probe
+name: Media probe (W-A1 fixture)
+version: 0.1.0
+api_version: 1
+hooks:
+  - media.fetch
+provides:
+  input_type: true
+capabilities:
+  network: true
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  resolve_ms: 5000
+  max_instances: 4
+  fail_mode: continue

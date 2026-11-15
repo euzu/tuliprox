@@ -435,7 +435,8 @@ fn plugin_ref_problems<P: shared::model::PluginHost>(
             }
         }
         if let Some((hook, plugin)) = input.plugin_ref() {
-            if !plugins.provides(hook, plugin) {
+            let satisfied = plugins.provides(hook, plugin) || plugins.provides(PluginHook::MediaFetch, plugin);
+            if !satisfied {
                 problems.push(format!("input {}: no loaded plugin {plugin} provides {}", input.name, hook.as_str()));
             }
         }
@@ -740,5 +741,28 @@ mod tests {
         let sources = sources_with_output(Some("csv"));
         let err = validate_plugin_refs(&host, &sources).expect_err("should reject mismatched format");
         assert!(err.to_string().contains("plugin custom-out renders `tsv`, not `csv`"));
+    }
+
+    #[derive(Clone, Default)]
+    struct MediaFetchTestHost {
+        plugin_id: String,
+    }
+
+    impl PluginHost for MediaFetchTestHost {
+        fn provides(&self, hook: PluginHook, plugin: &str) -> bool {
+            hook == PluginHook::MediaFetch && plugin == self.plugin_id
+        }
+    }
+
+    #[test]
+    fn validate_plugin_refs_accepts_media_fetch_plugin_for_input() {
+        let host = MediaFetchTestHost { plugin_id: "media-provider".into() };
+        let sources =
+            SourcesConfig { inputs: vec![plugin_input("movies", "media-provider")], ..SourcesConfig::default() };
+        assert!(validate_plugin_refs(&host, &sources).is_ok());
+
+        let missing =
+            SourcesConfig { inputs: vec![plugin_input("movies", "unknown-plugin")], ..SourcesConfig::default() };
+        assert!(validate_plugin_refs(&host, &missing).is_err());
     }
 }

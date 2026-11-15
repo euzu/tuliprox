@@ -7,7 +7,10 @@
 //! The wasm host that implements the trait lives in `tuliprox-plugins`, which
 //! this crate never names.
 
-use super::{EpgProgramme, PlaylistItem, PlaylistItemType};
+use super::{
+    EpgProgramme, EventMessage, EventSink, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateProgressEvent,
+    PlaylistUpdateRunId, PlaylistUpdateRunOrder,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{future::Future, path::Path, pin::Pin, sync::Arc, time::Duration};
@@ -63,6 +66,8 @@ pub enum PluginHook {
     FetchInput,
     /// A `type: plugin` target output (`output-generator`).
     RenderOutput,
+    /// A `type: plugin` media server catalog input (`media-provider-v1-1`).
+    MediaFetch,
     /// Extra upstream headers at stream-session setup (`stream-hooks`).
     InjectHeaders,
     /// A scheduled or manual plugin task (`tasks`).
@@ -97,6 +102,7 @@ impl PluginHook {
             Self::SendNotification => "send-notification",
             Self::FetchInput => "fetch-input",
             Self::RenderOutput => "render-output",
+            Self::MediaFetch => "media-fetch",
             Self::InjectHeaders => "inject-upstream-headers",
             Self::RunTask => "run-task",
         }
@@ -143,14 +149,105 @@ pub struct PluginMatchRequest<'a> {
     pub candidates: Vec<PluginEpgChannel>,
 }
 
-/// What a `type: plugin` input hands its provider (`input-provider.input-request`).
-#[derive(Debug, Clone, Copy)]
+/// What a `type: plugin` input hands its provider (`input-provider.input-request` or `media-provider-v1-1.fetch-catalog`).
+#[derive(Clone, Copy)]
 pub struct PluginInputRequest<'a> {
     pub input_name: &'a str,
     pub url: &'a str,
     pub username: Option<&'a str>,
     pub password: Option<&'a str>,
     pub options: &'a [(String, String)],
+    pub refresh: bool,
+    pub last_success_at: Option<u64>,
+    pub event_sink: Option<&'a (dyn EventSink + Send + Sync + 'a)>,
+    pub run_id: Option<&'a PlaylistUpdateRunId>,
+    pub execution_order: Option<PlaylistUpdateRunOrder>,
+    pub input_id: Option<u16>,
+}
+
+impl std::fmt::Debug for PluginInputRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginInputRequest")
+            .field("input_name", &self.input_name)
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &self.password.map(|_| "***"))
+            .field("options", &self.options)
+            .field("refresh", &self.refresh)
+            .field("last_success_at", &self.last_success_at)
+            .field("has_event_sink", &self.event_sink.is_some())
+            .field("run_id", &self.run_id)
+            .field("execution_order", &self.execution_order)
+            .field("input_id", &self.input_id)
+            .finish()
+    }
+}
+
+impl<'a> PluginInputRequest<'a> {
+    #[must_use]
+    pub const fn new(input_name: &'a str, url: &'a str, options: &'a [(String, String)]) -> Self {
+        Self {
+            input_name,
+            url,
+            username: None,
+            password: None,
+            options,
+            refresh: false,
+            last_success_at: None,
+            event_sink: None,
+            run_id: None,
+            execution_order: None,
+            input_id: None,
+        }
+    }
+
+    pub fn emit_progress(&self, target: &str, message: &str) {
+        if let Some(events) = self.event_sink {
+            let event = if let (Some(run_id), Some(order), Some(input_id)) =
+                (self.run_id, self.execution_order, self.input_id)
+            {
+                PlaylistUpdateProgressEvent::for_run_input(run_id.clone(), order, input_id, target, message)
+            } else {
+                let mut event = PlaylistUpdateProgressEvent::global(target, message);
+                event.input_id = self.input_id;
+                event
+            };
+            events.emit(EventMessage::PlaylistUpdateProgress(event));
+        }
+    }
+}
+
+/// One `resolve-stream` request (`media-provider-v1-1.resolve-stream`).
+#[derive(Debug, Clone, Copy)]
+pub struct PluginStreamRequest<'a> {
+    pub input_name: &'a str,
+    pub url: &'a str,
+    pub username: Option<&'a str>,
+    pub password: Option<&'a str>,
+    pub options: &'a [(String, String)],
+    pub item_id: &'a str,
+    pub stream_key: Option<&'a str>,
+    pub range: Option<&'a str>,
+}
+
+/// One `resolve-image` request (`media-provider-v1-1.resolve-image`).
+#[derive(Debug, Clone, Copy)]
+pub struct PluginImageRequest<'a> {
+    pub input_name: &'a str,
+    pub url: &'a str,
+    pub username: Option<&'a str>,
+    pub password: Option<&'a str>,
+    pub options: &'a [(String, String)],
+    pub item_id: &'a str,
+    pub image_key: &'a str,
+}
+
+/// The resolved stream or image target returned by a media provider plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginStreamTarget {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub ttl_secs: Option<u32>,
 }
 
 /// One `type: plugin` target output (`output-generator.output-request`). The
@@ -600,6 +697,39 @@ pub trait PluginHost: Clone + Send + Sync + 'static {
         async { Err(NO_PLUGIN_HOST.to_string()) }
     }
 
+    /// `fetch-catalog` of the media-server provider plugin a `type: plugin`
+    /// input names. Returns the mapped playlist groups.
+    fn fetch_media_catalog(
+        &self,
+        _plugin: &str,
+        _ctx: &HookCtx<'_>,
+        _request: &PluginInputRequest<'_>,
+    ) -> impl Future<Output = Result<Vec<PlaylistGroup>, String>> + Send {
+        async { Err(NO_PLUGIN_HOST.to_string()) }
+    }
+
+    /// `resolve-stream` of the media-server provider plugin a `type: plugin`
+    /// input names. Returns the target URL and upstream headers.
+    fn resolve_stream(
+        &self,
+        _plugin: &str,
+        _ctx: &HookCtx<'_>,
+        _request: &PluginStreamRequest<'_>,
+    ) -> impl Future<Output = Result<PluginStreamTarget, String>> + Send {
+        async { Err(NO_PLUGIN_HOST.to_string()) }
+    }
+
+    /// `resolve-image` of the media-server provider plugin a `type: plugin`
+    /// input names. Returns the target URL and upstream headers.
+    fn resolve_image(
+        &self,
+        _plugin: &str,
+        _ctx: &HookCtx<'_>,
+        _request: &PluginImageRequest<'_>,
+    ) -> impl Future<Output = Result<PluginStreamTarget, String>> + Send {
+        async { Err(NO_PLUGIN_HOST.to_string()) }
+    }
+
     /// `fetch-epg` of the plugin a `type: plugin` input names; `Ok(vec![])`
     /// when the provider has no EPG.
     fn fetch_epg(
@@ -840,6 +970,42 @@ impl<P: PluginHost> PluginHost for Option<P> {
     ) -> Result<Vec<PlaylistItem>, String> {
         match self {
             Some(host) => host.fetch_playlist(plugin, ctx, request).await,
+            None => Err(NO_PLUGIN_HOST.to_string()),
+        }
+    }
+
+    async fn fetch_media_catalog(
+        &self,
+        plugin: &str,
+        ctx: &HookCtx<'_>,
+        request: &PluginInputRequest<'_>,
+    ) -> Result<Vec<PlaylistGroup>, String> {
+        match self {
+            Some(host) => host.fetch_media_catalog(plugin, ctx, request).await,
+            None => Err(NO_PLUGIN_HOST.to_string()),
+        }
+    }
+
+    async fn resolve_stream(
+        &self,
+        plugin: &str,
+        ctx: &HookCtx<'_>,
+        request: &PluginStreamRequest<'_>,
+    ) -> Result<PluginStreamTarget, String> {
+        match self {
+            Some(host) => host.resolve_stream(plugin, ctx, request).await,
+            None => Err(NO_PLUGIN_HOST.to_string()),
+        }
+    }
+
+    async fn resolve_image(
+        &self,
+        plugin: &str,
+        ctx: &HookCtx<'_>,
+        request: &PluginImageRequest<'_>,
+    ) -> Result<PluginStreamTarget, String> {
+        match self {
+            Some(host) => host.resolve_image(plugin, ctx, request).await,
             None => Err(NO_PLUGIN_HOST.to_string()),
         }
     }

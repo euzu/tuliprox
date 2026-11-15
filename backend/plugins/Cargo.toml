@@ -13,6 +13,7 @@ shared = { workspace = true }
 tuliprox-core = { workspace = true }
 tuliprox-plugin-api = { workspace = true, features = ["host"] }
 tuliprox-btree = { workspace = true }
+tuliprox-media-server = { workspace = true }
 # `cranelift` + `pulley`: native code where Cranelift can host it, the Pulley
 # interpreter on the rest (armv7).
 wasmtime = { workspace = true, features = ["component-model", "async", "cranelift", "pulley", "runtime", "std", "pooling-allocator"] }
@@ -21,6 +22,7 @@ wasmtime-wasi-http = { workspace = true, features = ["p2"] }
 arc-swap.workspace = true
 bytes.workspace = true
 http.workspace = true
+lru.workspace = true
 matchit = "0.9.2"
 http-body-util.workspace = true
 log.workspace = true

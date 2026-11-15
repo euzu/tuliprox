@@ -239,6 +239,12 @@ async fn fetch_call(system: PluginSystem, plugin: &'static str) -> Result<usize,
         username: None,
         password: None,
         options: &[],
+        refresh: false,
+        last_success_at: None,
+        event_sink: None,
+        run_id: None,
+        execution_order: None,
+        input_id: None,
     };
     system.fetch_playlist(plugin, &ctx, &request).await.map(|list| list.len())
 }

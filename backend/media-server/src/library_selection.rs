@@ -29,6 +29,33 @@ pub(crate) fn library_matches_selector<C: MediaServerLibraryCandidate>(
     }
 }
 
+/// Every visible library, in the order the server listed it.
+///
+/// Unlike [`select_libraries`] this applies no selector filter, so it also
+/// reports libraries the input does not import.
+pub(crate) fn available_libraries<C: MediaServerLibraryCandidate>(
+    input_name: &Arc<str>,
+    server_id: &Arc<str>,
+    candidates: &[C],
+) -> Vec<MediaServerLibrary> {
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            let library_id = non_blank_arc(candidate.library_key())?;
+            let name = non_blank_arc(candidate.library_title()).unwrap_or_else(|| Arc::clone(&library_id));
+            Some(MediaServerLibrary {
+                reference: MediaServerLibraryRef {
+                    input_name: Arc::clone(input_name),
+                    server_id: Arc::clone(server_id),
+                    library_id,
+                },
+                name,
+                kind: candidate.library_kind(),
+            })
+        })
+        .collect()
+}
+
 /// Resolves every selector to exactly one visible library, in selector order.
 pub(crate) fn select_libraries<C: MediaServerLibraryCandidate>(
     provider: &'static str,
@@ -154,6 +181,25 @@ mod tests {
             &details(None, Some("2"), None, Some(MediaServerLibraryKind::Unsupported))
         ));
         assert!(library_matches_selector(&mixed, &details(None, Some("2"), None, None)));
+    }
+
+    #[test]
+    fn available_libraries_lists_every_visible_candidate_in_server_order() {
+        let candidates = [
+            candidate("2", "Shows", MediaServerLibraryKind::TvShows),
+            candidate("1", "Movies", MediaServerLibraryKind::Movies),
+            TestCandidate { key: None, title: Some("No key"), kind: MediaServerLibraryKind::Unsupported },
+        ];
+
+        let libraries = available_libraries(&Arc::<str>::from("input"), &Arc::<str>::from("server"), &candidates);
+
+        assert_eq!(
+            libraries.iter().map(|library| library.reference.library_id.as_ref()).collect::<Vec<_>>(),
+            ["2", "1"]
+        );
+        assert_eq!(libraries[0].name.as_ref(), "Shows");
+        assert_eq!(libraries[1].kind, MediaServerLibraryKind::Movies);
+        assert_eq!(libraries[1].reference.input_name.as_ref(), "input");
     }
 
     #[test]

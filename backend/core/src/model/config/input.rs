@@ -10,9 +10,10 @@ use shared::{
     foundation::Filter,
     model::{
         ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, EpgConfigDto,
-        EpgSourceTypeDto, FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto,
-        MediaServerInputConfigDto, MediaServerLibrarySelector, PluginHook, ProviderAccountIdentity, StagedInputType,
-        StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
+        EpgSourceTypeDto, FlussonicHlsCatchup, InputFetchMethod, InputPersistence, InputType,
+        MediaServerCatalogConfigDto, MediaServerInputConfigDto, MediaServerLibrarySelector, PluginHook, PluginHost,
+        ProviderAccountIdentity, StagedInputType, StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference,
+        StalkerInputConfigDto, StalkerMagPreset,
     },
     utils::{
         get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string,
@@ -32,6 +33,7 @@ use tuliprox_media_server::{
     emby::{client::EmbyClientSettings, EmbyCatalogClient},
     jellyfin::JellyfinCatalogClient,
     plex::client::{PlexCatalogClient, PlexClientSettings},
+    silo::SiloCatalogClient,
     AnyMediaServerCatalogClient, MediaServerError, MediaServerErrorKind, MediaServerHttpClient,
 };
 use url::Url;
@@ -267,6 +269,15 @@ impl ConfigInput {
             InputType::Jellyfin => {
                 let settings = self.emby_client_settings(self.media_server_config("jellyfin")?);
                 Ok(AnyMediaServerCatalogClient::Jellyfin(JellyfinCatalogClient::new(
+                    self.name.clone(),
+                    self.url.as_str(),
+                    &settings,
+                    http,
+                )?))
+            }
+            InputType::Silo => {
+                let settings = self.emby_client_settings(self.media_server_config("silo")?);
+                Ok(AnyMediaServerCatalogClient::Silo(SiloCatalogClient::new(
                     self.name.clone(),
                     self.url.as_str(),
                     &settings,
@@ -630,7 +641,27 @@ pub struct ConfigInput {
     pub managed_channels: Vec<shared::model::PluginRef>,
 }
 
+/// Storage layout override of a `type: plugin` input served by a media catalog provider:
+/// it is stored like the core media-server inputs. `None` keeps the input type's own layout.
+pub fn plugin_persistence_override<P: PluginHost>(plugins: &P, input: &ConfigInput) -> Option<InputPersistence> {
+    (input.input_type == InputType::Plugin
+        && input.plugin.as_deref().is_some_and(|plugin| plugins.provides(PluginHook::MediaFetch, plugin)))
+    .then_some(InputPersistence::MediaServer)
+}
+
 impl ConfigInput {
+    /// Resolved persistence of the input, taking media-provider plugins into account.
+    #[must_use]
+    pub fn persistence_with_plugins<P: PluginHost>(&self, plugins: &P) -> InputPersistence {
+        plugin_persistence_override(plugins, self).unwrap_or_else(|| self.get_download_input_type().persistence())
+    }
+
+    /// `true` for a core media-server input or a plugin input backed by a media catalog provider.
+    #[must_use]
+    pub fn is_media_server_with_plugins<P: PluginHost>(&self, plugins: &P) -> bool {
+        self.input_type.is_media_server() || plugin_persistence_override(plugins, self).is_some()
+    }
+
     #[must_use]
     pub fn playlist_update_input_type(&self) -> InputType {
         match (self.input_type, self.inline_batch || self.t_batch_url.is_some()) {
@@ -801,7 +832,7 @@ impl ConfigInput {
         media_server: &MediaServerInputConfig,
     ) -> Result<(), TuliproxError> {
         match self.input_type {
-            InputType::Emby | InputType::Jellyfin => {
+            InputType::Emby | InputType::Jellyfin | InputType::Silo => {
                 if trimmed_url.is_empty() {
                     return Err(TuliproxError::ConfigInput(format!(
                         "url is mandatory for input type {} (input: {})",
@@ -1386,6 +1417,9 @@ mod tests {
         let jellyfin =
             media_server_input(InputType::Jellyfin, "http://jf.example.invalid:8096", with(None, Some("key")));
         assert!(matches!(jellyfin.media_server_catalog_client(http()), Ok(AnyMediaServerCatalogClient::Jellyfin(_))));
+
+        let silo = media_server_input(InputType::Silo, "http://silo.example.invalid:8096", with(None, Some("key")));
+        assert!(matches!(silo.media_server_catalog_client(http()), Ok(AnyMediaServerCatalogClient::Silo(_))));
     }
 
     #[test]
@@ -1403,9 +1437,12 @@ mod tests {
 
     #[test]
     fn media_server_catalog_client_requires_media_server_block() {
-        for (input_type, provider) in
-            [(InputType::Plex, "plex"), (InputType::Emby, "emby"), (InputType::Jellyfin, "jellyfin")]
-        {
+        for (input_type, provider) in [
+            (InputType::Plex, "plex"),
+            (InputType::Emby, "emby"),
+            (InputType::Jellyfin, "jellyfin"),
+            (InputType::Silo, "silo"),
+        ] {
             let input = media_server_input(input_type, "http://ms.example.invalid", None);
 
             let err = input

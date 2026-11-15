@@ -471,3 +471,199 @@ interface managed-channel-hooks {
   reconcile: func(req: request) -> result<list<managed-channel>, string>;
 }
 world managed-channel-plugin { include base; export managed-channel-hooks; }
+
+// Additive ABI 1.x interfaces for media catalog provider.
+// Mirroring the neutral media-server model in tuliprox-media-server.
+interface media-types-v1-1 {
+  record provider-id {
+    namespace: string,
+    value: string,
+  }
+
+  record video-technical-facts {
+    codec: option<string>,
+    width: option<u32>,
+    height: option<u32>,
+  }
+
+  record audio-technical-facts {
+    codec: option<string>,
+    channels: option<u32>,
+  }
+
+  record technical-facts {
+    container: option<string>,
+    duration-secs: option<u32>,
+    bitrate: option<u32>,
+    video: option<video-technical-facts>,
+    audio: option<audio-technical-facts>,
+  }
+
+  record descriptive-facts {
+    original-title: option<string>,
+    sort-title: option<string>,
+    summary: option<string>,
+    tagline: option<string>,
+    studio: option<string>,
+    network: option<string>,
+    content-rating: option<string>,
+    parental-age: option<u32>,
+    audience-rating: option<string>,
+    genres: list<string>,
+    countries: list<string>,
+    directors: list<string>,
+    writers: list<string>,
+    cast: list<string>,
+    crew: list<string>,
+  }
+
+  enum library-kind {
+    movies,
+    tv-shows,
+  }
+
+  record media-library {
+    id: string,
+    name: string,
+    kind: library-kind,
+  }
+
+  record media-movie {
+    library-id: string,
+    item-id: string,
+    title: string,
+    year: option<u32>,
+    release-date: option<string>,
+    source-version-hint: option<string>,
+    provider-ids: list<provider-id>,
+    descriptive: option<descriptive-facts>,
+    technical: option<technical-facts>,
+    stream-key: option<string>,
+    image-key: option<string>,
+  }
+
+  record media-series {
+    library-id: string,
+    item-id: string,
+    title: string,
+    year: option<u32>,
+    release-date: option<string>,
+    source-version-hint: option<string>,
+    provider-ids: list<provider-id>,
+    descriptive: option<descriptive-facts>,
+    child-count: option<u32>,
+    episode-count: option<u32>,
+    image-key: option<string>,
+  }
+
+  record media-season {
+    library-id: string,
+    item-id: string,
+    series-id: option<string>,
+    series-title: option<string>,
+    title: string,
+    season: option<u32>,
+    year: option<u32>,
+    release-date: option<string>,
+    source-version-hint: option<string>,
+    provider-ids: list<provider-id>,
+    descriptive: option<descriptive-facts>,
+    episode-count: option<u32>,
+    image-key: option<string>,
+  }
+
+  record media-episode {
+    library-id: string,
+    item-id: string,
+    season-id: option<string>,
+    series-id: option<string>,
+    series-title: option<string>,
+    title: string,
+    season: option<u32>,
+    episode: option<u32>,
+    release-date: option<string>,
+    source-version-hint: option<string>,
+    provider-ids: list<provider-id>,
+    descriptive: option<descriptive-facts>,
+    technical: option<technical-facts>,
+    stream-key: option<string>,
+    image-key: option<string>,
+  }
+
+  record media-catalog {
+    libraries: list<media-library>,
+    movies: list<media-movie>,
+    series: list<media-series>,
+    seasons: list<media-season>,
+    episodes: list<media-episode>,
+  }
+}
+
+interface media-provider-v1-1 {
+  use media-types-v1-1.{media-catalog};
+
+  record media-request {
+    input-name: string,
+    url: string,
+    username: option<string>,
+    password: option<string>,
+    options: list<tuple<string, string>>,
+    refresh: bool,
+    last-success-at: option<u64>,
+    cursor: option<string>,
+  }
+
+  record media-catalog-page {
+    catalog: media-catalog,
+    next-cursor: option<string>,
+  }
+
+  fetch-catalog: func(req: media-request) -> result<media-catalog-page, string>;
+
+  record stream-request {
+    input-name: string,
+    url: string,
+    username: option<string>,
+    password: option<string>,
+    options: list<tuple<string, string>>,
+    item-id: string,
+    stream-key: option<string>,
+    range: option<string>,
+  }
+
+  record stream-target {
+    url: string,
+    headers: list<tuple<string, string>>,
+    ttl-secs: option<u32>,
+  }
+
+  resolve-stream: func(req: stream-request) -> result<stream-target, string>;
+
+  record image-request {
+    input-name: string,
+    url: string,
+    username: option<string>,
+    password: option<string>,
+    options: list<tuple<string, string>>,
+    item-id: string,
+    image-key: string,
+  }
+
+  resolve-image: func(req: image-request) -> result<stream-target, string>;
+}
+
+world media-input-plugin {
+  include base;
+  import host-v1-1;
+  export media-provider-v1-1;
+}
+
+interface host-v1-1 {
+  cache-image-with-headers: func(url: string, headers: list<tuple<string, string>>) -> result<string, string>;
+}
+
+world host-v1-1-plugin {
+  include base;
+  import host-v1-1;
+}
+

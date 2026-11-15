@@ -13,6 +13,9 @@ hooks:
 ui:
   config_section:
     schema: config-schema.json
+  input_form:
+    - id: main
+      schema: input-schema.json
   config_extensions:
     - section: messaging
       schema:
@@ -79,6 +82,11 @@ ui:
       mcp: true
       description: Adds `by` (1 to 100) to the stored counter and returns it.
       input_schema: rpc/bump.schema.json
+    - name: options
+      kind: read
+      input_scoped: true
+      description: Returns select options for the library input.
+      input_schema: rpc/options.schema.json
 resources:
   max_memory_mb: 32
   max_exec_ms: 5000

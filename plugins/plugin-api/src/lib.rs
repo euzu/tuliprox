@@ -24,7 +24,7 @@ pub const WIT_SOURCE: &str = include_str!("../wit/tuliprox-plugin.wit");
 /// Every interface a plugin may export, as the fully qualified component export
 /// name the registry looks up. `lifecycle` is mandatory; each other entry is
 /// one manifest hook family.
-pub const EXPORT_INTERFACES: [&str; 26] = [
+pub const EXPORT_INTERFACES: [&str; 27] = [
     "tuliprox:plugin/lifecycle@1.0.0",
     "tuliprox:plugin/playlist-hooks@1.0.0",
     "tuliprox:plugin/source-hooks@1.0.0",
@@ -51,6 +51,7 @@ pub const EXPORT_INTERFACES: [&str; 26] = [
     "tuliprox:plugin/settings-migration@1.0.0",
     "tuliprox:plugin/http-routes@1.0.0",
     "tuliprox:plugin/managed-channel-hooks@1.0.0",
+    "tuliprox:plugin/media-provider-v1-1@1.0.0",
 ];
 
 /// Host bindings for the whole contract.
@@ -104,6 +105,7 @@ pub mod bindings {
                 include tuliprox:plugin/settings-migration-plugin@1.0.0;
                 include tuliprox:plugin/http-plugin@1.0.0;
                 include tuliprox:plugin/managed-channel-plugin@1.0.0;
+                include tuliprox:plugin/media-input-plugin@1.0.0;
             }
         ",
         world: "tuliprox:host/union",
@@ -180,6 +182,7 @@ mod tests {
             e::settings_migration::GuestIndices::new::<()>,
             e::http_routes::GuestIndices::new::<()>,
             e::managed_channel_hooks::GuestIndices::new::<()>,
+            e::media_provider_v1_1::GuestIndices::new::<()>,
         );
     }
 }

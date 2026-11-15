@@ -371,9 +371,9 @@ fn create_instance(spec: &BlockSpec) -> BlockInstance {
         BlockType::InputXtream => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Xtream))),
         BlockType::InputM3u => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::M3u))),
         BlockType::InputLibrary => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Library))),
-        BlockType::InputEmby => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Emby))),
-        BlockType::InputJellyfin => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Jellyfin))),
-        BlockType::InputPlex => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Plex))),
+        BlockType::InputMediaServer => {
+            BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Jellyfin)))
+        }
         BlockType::InputStalker => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Stalker))),
         BlockType::InputStaged => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Staged))),
         BlockType::InputPlugin => {
@@ -436,14 +436,10 @@ fn normalize_input_type_by_url(input: &mut ConfigInputDto, block_type: BlockType
         BlockType::InputLibrary => {
             input.input_type = InputType::Library;
         }
-        BlockType::InputEmby => {
-            input.input_type = InputType::Emby;
-        }
-        BlockType::InputJellyfin => {
-            input.input_type = InputType::Jellyfin;
-        }
-        BlockType::InputPlex => {
-            input.input_type = InputType::Plex;
+        BlockType::InputMediaServer => {
+            if !input.input_type.is_media_server() {
+                input.input_type = InputType::Jellyfin;
+            }
         }
         BlockType::InputStaged => {
             input.input_type = InputType::Staged;
@@ -2485,19 +2481,11 @@ mod tests {
     }
 
     #[test]
-    fn media_server_blocks_create_matching_input_types() {
-        let cases = [
-            (BlockType::InputEmby, InputType::Emby),
-            (BlockType::InputJellyfin, InputType::Jellyfin),
-            (BlockType::InputPlex, InputType::Plex),
-        ];
-
-        for (block_type, expected_input_type) in cases {
-            let BlockInstance::Input(input) = create_instance(&BlockSpec::of(block_type)) else {
-                panic!("media_server block should create an input instance");
-            };
-            assert_eq!(input.input_type, expected_input_type);
-        }
+    fn media_server_block_creates_jellyfin_input_type() {
+        let BlockInstance::Input(input) = create_instance(&BlockSpec::of(BlockType::InputMediaServer)) else {
+            panic!("media_server block should create an input instance");
+        };
+        assert_eq!(input.input_type, InputType::Jellyfin);
     }
 
     #[test]
@@ -2618,22 +2606,66 @@ mod tests {
 
     #[test]
     fn media_server_block_normalization_preserves_input_type() {
-        let cases = [
-            (BlockType::InputEmby, InputType::Emby),
-            (BlockType::InputJellyfin, InputType::Jellyfin),
-            (BlockType::InputPlex, InputType::Plex),
-        ];
+        let cases = [InputType::Emby, InputType::Jellyfin, InputType::Silo, InputType::Plex];
 
-        for (block_type, expected_input_type) in cases {
+        for expected_input_type in cases {
             let mut input = ConfigInputDto {
-                input_type: InputType::Xtream,
+                input_type: expected_input_type,
                 url: "batch://should-not-convert-media-server".to_string(),
                 ..ConfigInputDto::default()
             };
 
-            normalize_input_type_by_url(&mut input, block_type);
+            normalize_input_type_by_url(&mut input, BlockType::InputMediaServer);
 
             assert_eq!(input.input_type, expected_input_type);
+        }
+
+        // Non-media-server input defaults to Jellyfin
+        let mut non_ms = ConfigInputDto {
+            input_type: InputType::Xtream,
+            url: "http://example.com/stream".to_string(),
+            ..ConfigInputDto::default()
+        };
+        normalize_input_type_by_url(&mut non_ms, BlockType::InputMediaServer);
+        assert_eq!(non_ms.input_type, InputType::Jellyfin);
+    }
+
+    #[test]
+    fn media_server_inputs_round_trip_through_editor_preserving_type() {
+        for input_type in [InputType::Emby, InputType::Jellyfin, InputType::Silo, InputType::Plex] {
+            let input = ConfigInputDto {
+                name: format!("{input_type}-source").into(),
+                url: format!("http://localhost:8096/{input_type}"),
+                media_server: Some(shared::model::MediaServerInputConfigDto {
+                    token: Some("secret-token".to_string()),
+                    libraries: vec![shared::model::MediaServerLibrarySelector::Name("Movies".to_string())],
+                    ..shared::model::MediaServerInputConfigDto::default()
+                }),
+                ..ConfigInputDto::new_with_type(input_type)
+            };
+
+            // Loading from config: InputType -> BlockType
+            let block_type = BlockType::from(input.input_type);
+            assert_eq!(block_type, BlockType::InputMediaServer);
+
+            let mut state = EditorState::default();
+            state.blocks.push(create_block(1, block_type, BlockInstance::Input(Rc::new(input.clone()))));
+            state.blocks.push(create_block(
+                2,
+                BlockType::Target,
+                BlockInstance::Target(Rc::new(ConfigTargetDto {
+                    name: "test-target".to_string(),
+                    ..ConfigTargetDto::default()
+                })),
+            ));
+            state.connections.push(Connection { from: 1, to: 2 });
+
+            let saved = editor_state_to_sources_config(&SourcesConfigDto::default(), &state);
+            assert_eq!(saved.inputs.len(), 1);
+            assert_eq!(saved.inputs[0].input_type, input_type);
+            assert_eq!(saved.inputs[0].name, input.name);
+            assert_eq!(saved.inputs[0].url, input.url);
+            assert_eq!(saved.inputs[0].media_server, input.media_server);
         }
     }
 

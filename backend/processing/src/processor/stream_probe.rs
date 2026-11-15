@@ -218,6 +218,7 @@ async fn prepare_generic_stream_metadata<E: EventSink>(
         }
         InputType::Emby
         | InputType::Jellyfin
+        | InputType::Silo
         | InputType::Plex
         | InputType::Stalker
         | InputType::StalkerBatch
@@ -548,6 +549,7 @@ mod tests {
     fn media_server_probe_does_not_require_provider_connection() {
         assert!(!requires_provider_connection_for_generic_probe(InputType::Emby));
         assert!(!requires_provider_connection_for_generic_probe(InputType::Jellyfin));
+        assert!(!requires_provider_connection_for_generic_probe(InputType::Silo));
         assert!(!requires_provider_connection_for_generic_probe(InputType::Plex));
     }
 

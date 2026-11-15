@@ -87,7 +87,8 @@ impl SegmentFetchPolicy {
 
     pub fn retry_delay_ms(&self, attempt_index: usize) -> u64 {
         let base_delay_ms = self.retry_delays_ms[attempt_index];
-        if self.retry_jitter_max_ms == 0 {
+        // Jitter spreads retries apart; an attempt without a configured delay starts at once.
+        if base_delay_ms == 0 || self.retry_jitter_max_ms == 0 {
             return base_delay_ms;
         }
         let jitter_ms = fastrand::u64(0..=self.retry_jitter_max_ms);
