@@ -102,10 +102,9 @@ impl FaultSchedule {
     /// matching and must be removed with [`Self::clear`].
     pub fn take(&mut self, fault_id: &str) -> Option<OriginFault> { self.faults.remove(fault_id) }
 
-    pub fn clear(&mut self, fault_id: &str) -> Result<(), TestkitError> {
+    pub fn clear(&mut self, fault_id: &str) -> Result<OriginFault, TestkitError> {
         self.faults
             .remove(fault_id)
-            .map(|_| ())
             .ok_or_else(|| TestkitError::Configuration(format!("fault ID {fault_id} does not exist")))
     }
 

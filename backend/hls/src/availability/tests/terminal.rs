@@ -726,3 +726,100 @@ async fn post_refresh_terminal_commits_immediately_without_policy() {
         .expect("terminal lease remains stored");
     assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalTail(_)));
 }
+
+#[tokio::test]
+async fn post_refresh_terminal_live_allowed_with_policy_does_not_notify_terminal_pending() {
+    let fixture = post_refresh_terminal_fixture_with_progress("post-refresh-live-allowed-policy", true, false).await;
+    let runtime = crate::member_health::test_support::RecordingMemberRuntime::new(Some(
+        crate::member_health::test_support::RecordingMemberRuntime::default_policy(),
+    ));
+    fixture.session.write().await.origin_account_runtime = Some(runtime.clone());
+
+    let owner_key = fixture
+        .ctx
+        .hls_proxy
+        .availability_reevaluation_owner_key(&fixture.session, &fixture.proxy_session_id)
+        .await
+        .expect("owner key");
+    let ownership = crate::availability_reevaluation::HlsAvailabilityReevaluationOwnership::for_test(
+        fixture.ctx.hls_proxy.availability_reevaluations(),
+        fixture.proxy_session_id.clone(),
+    );
+    let mut cycle = HlsAvailabilityReevaluationCycle::new(fixture.now_ms);
+
+    let decision = evaluate_post_refresh_terminal_attempt(
+        &fixture.ctx,
+        &fixture.session,
+        &owner_key,
+        &ownership,
+        HlsAvailabilityReevaluationMode::PostRefresh(
+            crate::refresh::HlsPostRefreshAvailabilityReason::RetryableManifestFailure,
+        ),
+        &mut cycle,
+        fixture.now_ms,
+    )
+    .await;
+
+    assert_eq!(decision, HlsTerminalReevaluationDecision::Continue { terminal_evaluation_pending: true });
+    assert!(cycle.retain_post_refresh_owner);
+    assert_eq!(cycle.handoff_defer_until_ms, None);
+    assert_eq!(runtime.reasons(), Vec::<crate::origin_account_runtime::HlsMemberUnhealthyReason>::new());
+    assert!(cycle.awaiting_evidence);
+}
+
+#[tokio::test]
+async fn handoff_defer_retry_backoff_grows_across_restarts_and_resets_when_deferral_ends() {
+    let fixture = post_refresh_terminal_fixture("post-refresh-defer-backoff-growth", true).await;
+    let runtime = crate::member_health::test_support::RecordingMemberRuntime::new(Some(
+        crate::member_health::test_support::RecordingMemberRuntime::default_policy(),
+    ));
+    runtime.set_member_handoff_pending(true);
+    fixture.session.write().await.origin_account_runtime = Some(runtime);
+
+    let owner_key = fixture
+        .ctx
+        .hls_proxy
+        .availability_reevaluation_owner_key(&fixture.session, &fixture.proxy_session_id)
+        .await
+        .expect("owner key");
+    let ownership = crate::availability_reevaluation::HlsAvailabilityReevaluationOwnership::for_test(
+        fixture.ctx.hls_proxy.availability_reevaluations(),
+        fixture.proxy_session_id.clone(),
+    );
+
+    let defer_until_ms = fixture.now_ms + 10;
+    let mut cycle = HlsAvailabilityReevaluationCycle::new(fixture.now_ms);
+    cycle.handoff_defer_until_ms = Some(defer_until_ms);
+
+    let mut retry_delays = Vec::new();
+
+    for _ in 0..6 {
+        let decision = evaluate_post_refresh_terminal_attempt(
+            &fixture.ctx,
+            &fixture.session,
+            &owner_key,
+            &ownership,
+            HlsAvailabilityReevaluationMode::PostRefresh(
+                crate::refresh::HlsPostRefreshAvailabilityReason::RetryableManifestFailure,
+            ),
+            &mut cycle,
+            fixture.now_ms,
+        )
+        .await;
+
+        assert_eq!(decision, HlsTerminalReevaluationDecision::Continue { terminal_evaluation_pending: true });
+        let deadline = cycle.live_reserve_deadline.expect("defer deadline");
+        let retry_delay = deadline.next_reevaluation_at_ms.saturating_sub(fixture.now_ms);
+        retry_delays.push(retry_delay);
+
+        cycle.attempts_completed = cycle.attempts_completed.saturating_add(1);
+        cycle = cycle.restart(fixture.now_ms);
+    }
+
+    assert_eq!(retry_delays, vec![1, 1, 2, 4, 8, 10]);
+
+    cycle.handoff_defer_until_ms = None;
+    let restarted = cycle.restart(fixture.now_ms);
+    assert_eq!(restarted.attempts_completed, 0);
+    assert_eq!(restarted.handoff_defer_until_ms, None);
+}

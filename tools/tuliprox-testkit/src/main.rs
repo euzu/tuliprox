@@ -1148,10 +1148,17 @@ async fn clear_fault(Path((run_id, fault_id)): Path<(String, String)>, State(sta
     if run_id != state.run_id.0 {
         return StatusCode::NOT_FOUND;
     }
-    match state.faults.lock().await.clear(&fault_id) {
-        Ok(()) => StatusCode::NO_CONTENT,
-        Err(_) => StatusCode::NOT_FOUND,
+    let mut faults = state.faults.lock().await;
+    let Ok(fault) = faults.clear(&fault_id) else {
+        return StatusCode::NOT_FOUND;
+    };
+    // A later freeze of this account starts from the live sequence, not from the cleared freeze.
+    if let OriginFault::HlsManifestFreeze { account } = fault {
+        if !faults.is_manifest_frozen_for(&account) {
+            state.hls_frozen_sequences.lock().await.retain(|(frozen_account, _), _| *frozen_account != account);
+        }
     }
+    StatusCode::NO_CONTENT
 }
 
 fn fault_status_response(status: u16) -> Response {
@@ -4331,6 +4338,30 @@ mod tests {
             .status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn cleared_manifest_freeze_does_not_replay_its_sequence() {
+        let state = test_origin_state("freeze-run");
+        let freeze = || {
+            Some(Json(OriginFaultSpec {
+                kind: OriginFaultKind::HlsManifestFreeze,
+                account: "input-a".to_owned(),
+                status: None,
+                bytes_per_second: None,
+            }))
+        };
+        let path = || Path(("freeze-run".to_owned(), "a-freeze".to_owned()));
+        assert_eq!(set_fault(path(), State(state.clone()), freeze()).await, StatusCode::NO_CONTENT);
+        state.hls_frozen_sequences.lock().await.insert(("input-a".to_owned(), 17), 9);
+        state.hls_frozen_sequences.lock().await.insert(("input-b".to_owned(), 17), 4);
+
+        assert_eq!(clear_fault(path(), State(state.clone())).await, StatusCode::NO_CONTENT);
+        assert_eq!(set_fault(path(), State(state.clone()), freeze()).await, StatusCode::NO_CONTENT);
+
+        let frozen = state.hls_frozen_sequences.lock().await;
+        assert!(!frozen.contains_key(&("input-a".to_owned(), 17)));
+        assert_eq!(frozen.get(&("input-b".to_owned(), 17)), Some(&4));
     }
 
     #[tokio::test]

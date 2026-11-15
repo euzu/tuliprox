@@ -7,7 +7,7 @@
 
 use super::{
     hls_manifest_acceptance_directive_for_reevaluation, HlsManifestAcceptanceDirective, HlsTerminalFailedClosedReason,
-    HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS, HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS,
+    HlsTerminalResolution, HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS, HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS,
     HLS_AVAILABILITY_REEVALUATION_MAX_BACKOFF_MS, HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS,
 };
 use crate::{
@@ -19,9 +19,9 @@ use crate::{
     hls_ctx::HlsCtx,
     origin_account_runtime::HlsMemberUnhealthyReason,
     post_refresh_availability::{
-        evaluate_active_terminal_leases_for_reevaluation, evaluate_owner_failure_fallback, wait_for_owner_resolution,
-        HlsLiveReserveDeadline, HlsPostRefreshOwnerResolution, HlsPostRefreshOwnerWaitOutcome,
-        HlsPostRefreshTerminalEvaluation,
+        evaluate_active_terminal_leases_for_reevaluation, evaluate_owner_failure_fallback,
+        query_active_terminal_leases_for_reevaluation, wait_for_owner_resolution, HlsLiveReserveDeadline,
+        HlsPostRefreshOwnerResolution, HlsPostRefreshOwnerWaitOutcome, HlsPostRefreshTerminalEvaluation,
     },
     refresh::{
         maybe_trigger_origin_refresh_with_outcome, HlsOriginRefreshTriggerOutcome, HlsPostRefreshAvailabilityAction,
@@ -275,6 +275,15 @@ impl HlsAvailabilityReevaluationCycle {
         self.handoff_defer_until_ms.map_or(self.deadline_ms, |defer| defer.max(self.deadline_ms))
     }
 
+    pub(crate) fn restart(&self, now_ms: u64) -> Self {
+        let mut cycle = Self::new(now_ms);
+        cycle.handoff_defer_until_ms = self.handoff_defer_until_ms;
+        if self.handoff_defer_until_ms.is_some() {
+            cycle.attempts_completed = self.attempts_completed;
+        }
+        cycle
+    }
+
     fn retained_owner_resolution(&self, now_ms: u64) -> Option<HlsPostRefreshOwnerResolution> {
         if !self.retain_post_refresh_owner {
             return None;
@@ -419,10 +428,15 @@ pub(crate) async fn evaluate_post_refresh_terminal_attempt(
                 .await
                 .is_empty();
             if has_active_leases {
-                runtime.notify_member_unhealthy(session, HlsMemberUnhealthyReason::TerminalPending);
-                let defer_until_ms = now_ms.saturating_add(HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS);
-                cycle.handoff_defer_until_ms = Some(defer_until_ms);
-                return defer_post_refresh_terminal_for_handoff(owner_key, cycle, defer_until_ms, now_ms);
+                let resolution =
+                    query_active_terminal_leases_for_reevaluation(ctx, session, &owner_key.proxy_session_id, now_ms)
+                        .await;
+                if resolution != HlsTerminalResolution::LiveAllowed {
+                    runtime.notify_member_unhealthy(session, HlsMemberUnhealthyReason::TerminalPending);
+                    let defer_until_ms = now_ms.saturating_add(HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS);
+                    cycle.handoff_defer_until_ms = Some(defer_until_ms);
+                    return defer_post_refresh_terminal_for_handoff(owner_key, cycle, defer_until_ms, now_ms);
+                }
             }
         }
     }
@@ -630,10 +644,12 @@ async fn run_hls_availability_reevaluation(
     ownership: HlsAvailabilityReevaluationOwnership,
     mut refresh_request: Option<OriginRefreshRequest>,
 ) {
-    let mut handoff_defer_until_ms = None;
+    let mut prior_cycle: Option<HlsAvailabilityReevaluationCycle> = None;
     'cycles: loop {
-        let mut cycle = HlsAvailabilityReevaluationCycle::new(ctx.hls_proxy.now_ms());
-        cycle.handoff_defer_until_ms = handoff_defer_until_ms;
+        let mut cycle = prior_cycle.as_ref().map_or_else(
+            || HlsAvailabilityReevaluationCycle::new(ctx.hls_proxy.now_ms()),
+            |prior| prior.restart(ctx.hls_proxy.now_ms()),
+        );
         loop {
             match run_hls_availability_reevaluation_attempt(
                 &ctx,
@@ -647,15 +663,16 @@ async fn run_hls_availability_reevaluation(
             {
                 HlsAvailabilityCycleDecision::ContinueAttempts(_) => {}
                 HlsAvailabilityCycleDecision::RestartCycle => {
-                    handoff_defer_until_ms = cycle.handoff_defer_until_ms;
+                    prior_cycle = Some(cycle);
                     continue 'cycles;
                 }
                 HlsAvailabilityCycleDecision::FinishCycle => break,
                 HlsAvailabilityCycleDecision::Stop => return,
             }
         }
-        handoff_defer_until_ms = cycle.handoff_defer_until_ms;
-        if let Some(resolution) = cycle.retained_owner_resolution(ctx.hls_proxy.now_ms()) {
+        let retained = cycle.retained_owner_resolution(ctx.hls_proxy.now_ms());
+        prior_cycle = Some(cycle);
+        if let Some(resolution) = retained {
             match wait_for_owner_resolution(&ownership, resolution, ctx.hls_proxy.now_ms()).await {
                 HlsPostRefreshOwnerWaitOutcome::Cancelled => {
                     ownership.discard_superseded(&owner_key);
@@ -666,9 +683,7 @@ async fn run_hls_availability_reevaluation(
             continue;
         }
         match ownership.finish_cycle(&owner_key, HlsAvailabilityReevaluationFinishReason::CycleBudgetExhausted) {
-            HlsAvailabilityReevaluationFinishDecision::StartSuccessor => {
-                handoff_defer_until_ms = cycle.handoff_defer_until_ms;
-            }
+            HlsAvailabilityReevaluationFinishDecision::StartSuccessor => {}
             HlsAvailabilityReevaluationFinishDecision::Complete
             | HlsAvailabilityReevaluationFinishDecision::Superseded => return,
         }

@@ -491,10 +491,20 @@ pub(in crate::api) async fn handle_hls_stream_request(
         // (often CDN URLs) are fetched as sealed and only from their origin provider.
         // A Stalker URL is account-bound: refreshes resolve a fresh link, sealed variants stay with their account.
         // A group member session follows the same account-bound rules as any other Stalker session.
-        let stalker_url = effective_lookup_input
-            .input_type
-            .is_stalker()
-            .then(|| stalker_manifest_url(stage, selected_provider_config.name.as_ref()));
+        let is_live_legacy_group = is_live_hls && bound_member_info.is_some();
+        let child_decision = super::legacy::evaluate_child_manifest_source(
+            stage,
+            selected_provider_config.name.as_ref(),
+            is_live_legacy_group,
+        );
+        is_stale_child_legacy_group = child_decision == super::legacy::StaleChildDecision::ReResolveBoundMember;
+        let stalker_url = effective_lookup_input.input_type.is_stalker().then(|| {
+            if is_stale_child_legacy_group {
+                StalkerManifestUrl::Resolve
+            } else {
+                stalker_manifest_url(stage, selected_provider_config.name.as_ref())
+            }
+        });
         if stalker_url == Some(StalkerManifestUrl::Reject) {
             debug_if_enabled!(
                 "HLS Stalker manifest token without matching origin rejected for selected provider {}",
@@ -502,12 +512,6 @@ pub(in crate::api) async fn handle_hls_stream_request(
             );
             return StatusCode::NOT_FOUND.into_response();
         }
-        let is_live_legacy_group = is_live_hls && bound_member_info.is_some();
-        let child_decision = super::legacy::evaluate_child_manifest_source(
-            stage,
-            selected_provider_config.name.as_ref(),
-            is_live_legacy_group,
-        );
         let accept_requested_stream_url = stalker_url == Some(StalkerManifestUrl::Accept)
             || match child_decision {
                 super::legacy::StaleChildDecision::Accept => match stage {
@@ -528,7 +532,6 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     return StatusCode::NOT_FOUND.into_response();
                 }
             };
-        is_stale_child_legacy_group = child_decision == super::legacy::StaleChildDecision::ReResolveBoundMember;
         let pinned_stalker_stream = (stalker_url == Some(StalkerManifestUrl::Resolve))
             .then(|| {
                 let stream_ref = bound_member_info.as_ref().map_or(stream_ref.as_str(), |(_, _, member_ref, _)| {
@@ -2094,6 +2097,190 @@ mod playback_provider_tests {
             &user,
             &env.target,
             None,
+            None,
+            "http://127.0.0.1/solis/child.m3u8",
+            None,
+            non_group_source.stream_context,
+            &korath_input,
+            &HeaderMap::new(),
+            shared::model::UserConnectionPermission::Allowed,
+            None,
+            "/iptv/hls/viewer/secret/live/1.m3u8",
+            solis_child_stage,
+        )
+        .await
+        .into_response();
+        assert_eq!(non_group_response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(env.origin_hits("korath"), korath_hits_after_first);
+        assert_eq!(env.origin_hits("solis"), solis_hits_after_first);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn stale_child_request_for_switched_stalker_group_session_re_resolves() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use shared::utils::Internable;
+        use std::net::SocketAddr;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+            .hls()
+            .m3u("solis")
+            .stalker("korath")
+            .stalker_retry_origin("korath", "/live/korath.m3u8")
+            .build()
+            .await;
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("test user");
+        let solis_input = env.app_state.app_config.get_input_by_name(&"solis".intern()).expect("solis input");
+        let korath_input = env.app_state.app_config.get_input_by_name(&"korath".intern()).expect("korath input");
+        let korath_cfg = env.app_state.active_provider.find_provider_config(&"korath".intern()).expect("korath cfg");
+        crate::api::endpoints::hls_api::tests::failover_group::publish_stalker_live_item(&env, &korath_input).await;
+
+        let addr: SocketAddr = "127.0.0.1:12345".parse().expect("addr");
+        let fingerprint = Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let token = "test-stalker-switched-session-token";
+
+        env.app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: token,
+                virtual_id: env.group_vid,
+                provider: &solis_input.name,
+                stream_url: &format!("http://{}/live/101", env.origins.get("solis").expect("origin").addr),
+                addr: &addr,
+                connection_permission: shared::model::UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        env.app_state
+            .active_users
+            .bind_member(
+                &user.username,
+                token,
+                tuliprox_session::MemberBinding {
+                    group_vid: env.group_vid,
+                    member_vid: env.group_record.members[0].member_vid.get(),
+                    member_index: 0,
+                    input_name: Arc::clone(&solis_input.name),
+                    member_title: "Solis".intern(),
+                    provider: Arc::clone(&solis_input.name),
+                },
+            )
+            .await;
+
+        // Runtime failover switches the session to korath (Stalker member 1):
+        env.app_state
+            .active_users
+            .bind_member(
+                &user.username,
+                token,
+                tuliprox_session::MemberBinding {
+                    group_vid: env.group_vid,
+                    member_vid: env.group_record.members[1].member_vid.get(),
+                    member_index: 1,
+                    input_name: Arc::clone(&korath_input.name),
+                    member_title: "Korath".intern(),
+                    provider: Arc::clone(&korath_cfg.name),
+                },
+            )
+            .await;
+        env.app_state
+            .active_users
+            .update_session_provider_binding(
+                &user.username,
+                token,
+                Arc::clone(&korath_cfg.name),
+                Arc::from(format!("http://{}/live/101", env.origins.get("korath").expect("origin").addr)),
+            )
+            .await;
+
+        let session = env.app_state.active_users.get_and_update_user_session(&user.username, token).await;
+        assert!(session.is_some(), "session exists");
+
+        let stream_source = crate::api::endpoints::hls_api::resolve_hls_virtual_source_for_target(
+            &env.app_state,
+            &env.target,
+            env.group_vid,
+        )
+        .await
+        .expect("source");
+
+        // A stale child request from solis arrives for the switched session.
+        let solis_child_stage = HlsRequestStage::Variant {
+            source: crate::processing::parser::hls::HlsManifestSource::Child,
+            origin_provider: Some("solis"),
+        };
+        let solis_hits_before = env.origin_hits("solis");
+        let korath_hits_before = env.origin_hits("korath");
+
+        let response = handle_hls_stream_request(
+            &fingerprint,
+            &env.app_state,
+            &user,
+            &env.target,
+            session.as_ref(),
+            None,
+            "http://127.0.0.1/solis/child.m3u8",
+            None,
+            stream_source.stream_context,
+            &korath_input,
+            &HeaderMap::new(),
+            shared::model::UserConnectionPermission::Allowed,
+            None,
+            "/iptv/hls/viewer/secret/live/1.m3u8",
+            solis_child_stage,
+        )
+        .await
+        .into_response();
+
+        // Must NOT be 404; must succeed with 200 OK.
+        assert_eq!(response.status(), StatusCode::OK);
+        // Korath's origin must be hit by the re-resolved request.
+        assert!(env.origin_hits("korath") > korath_hits_before, "korath origin must be hit by the re-resolved request");
+        // Solis's origin must NOT be hit by this request.
+        assert_eq!(
+            env.origin_hits("solis"),
+            solis_hits_before,
+            "solis origin must not be hit by the stale child request"
+        );
+
+        let korath_hits_after_first = env.origin_hits("korath");
+        let solis_hits_after_first = env.origin_hits("solis");
+
+        // Non-group session (member_binding = None) with stale child keeps 404.
+        let non_group_token = "test-stalker-non-group-token";
+        env.app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: non_group_token,
+                virtual_id: env.plain_vid,
+                provider: &korath_cfg.name,
+                stream_url: "http://127.0.0.1/korath/live.m3u8",
+                addr: &addr,
+                connection_permission: shared::model::UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        let non_group_session =
+            env.app_state.active_users.get_and_update_user_session(&user.username, non_group_token).await;
+        assert!(non_group_session.is_some());
+
+        let non_group_source = crate::api::endpoints::hls_api::resolve_hls_virtual_source_for_target(
+            &env.app_state,
+            &env.target,
+            env.plain_vid,
+        )
+        .await
+        .expect("non group source");
+        let non_group_response = handle_hls_stream_request(
+            &fingerprint,
+            &env.app_state,
+            &user,
+            &env.target,
+            non_group_session.as_ref(),
             None,
             "http://127.0.0.1/solis/child.m3u8",
             None,

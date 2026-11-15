@@ -1577,6 +1577,8 @@
 - **A failing HLS group session tries the next member before it ends.** When the shared cache is about to end an
   active group playback and no member switch was triggered (for example a timeline conflict after segment `503`
   errors), Tuliprox first requests one switch to the next member. The playback ends only when that switch fails too.
+  A session that can still recover keeps its member, and the checks while a switch runs back off instead of
+  repeating at once.
 
 - **A member switch is no longer blocked by a failed segment of the previous member.** A segment of the old member that
   failed and was never sent to a player blocked the new member's playlist when the new member's window did not
@@ -1589,6 +1591,7 @@
 - **Legacy stale child playlist URLs after a member switch are served from the new member.** In legacy (non-cached)
   HLS group playback, players that continue polling child variant URLs sealed with the previous member are served the
   newly selected member's media playlist (matched by bandwidth or first variant) rather than being rejected with 404.
+  This also applies when the new member is a Stalker member: Tuliprox resolves a fresh link for it.
 
 - **Provider response debug log formats URLs as strings for sanitizing.** Upstream response debug logging now formats
   `reqwest::Url` via `Url::as_str()` before passing it through `sanitize_sensitive_info`, ensuring sensitive tokens in

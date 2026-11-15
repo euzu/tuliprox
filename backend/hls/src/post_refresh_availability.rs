@@ -1,8 +1,8 @@
 use super::{
     availability::{
         commit_terminal_tail_if_lease_reserve_requires_cutover_detailed, current_time_millis,
-        HlsDetailedTerminalResolution, HlsTerminalDecisionPurpose, HlsTerminalFailedClosedReason,
-        HlsTerminalResolution,
+        query_lease_terminal_cutover_resolution, HlsDetailedTerminalResolution, HlsTerminalDecisionPurpose,
+        HlsTerminalFailedClosedReason, HlsTerminalResolution,
     },
     availability_reevaluation::{HlsAvailabilityReevaluationOwnership, HlsAvailabilityReevaluationRegistration},
     hls_ctx::HlsCtx,
@@ -211,6 +211,36 @@ pub(super) async fn evaluate_active_terminal_leases_for_reevaluation(
     } else {
         HlsPostRefreshTerminalEvaluation::NoLiveLease
     }
+}
+
+pub(super) async fn query_active_terminal_leases_for_reevaluation(
+    ctx: &HlsCtx,
+    session: &HlsSessionHandle,
+    proxy_session_id: &ProxySessionId,
+    now_ms: u64,
+) -> HlsTerminalResolution {
+    ctx.hls_proxy.sync_recovery_binding_protection(&ctx.active_provider, session, now_ms).await;
+    let leases = ctx.hls_proxy.terminal_playback_snapshots_for_session(proxy_session_id, now_ms).await;
+    if leases.is_empty() {
+        return HlsTerminalResolution::LiveAllowed;
+    }
+    for lease in &leases {
+        let detailed = query_lease_terminal_cutover_resolution(
+            ctx,
+            session,
+            proxy_session_id,
+            lease,
+            now_ms,
+            HlsTerminalDecisionPurpose::OrdinaryCutover,
+        )
+        .await;
+        if detailed.resolution != HlsTerminalResolution::LiveAllowed
+            && detailed.resolution != HlsTerminalResolution::Reevaluate
+        {
+            return detailed.resolution;
+        }
+    }
+    HlsTerminalResolution::LiveAllowed
 }
 
 fn earliest_deadline(

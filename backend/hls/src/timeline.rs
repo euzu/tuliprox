@@ -444,6 +444,7 @@ struct TimelineDraft {
     target_duration: Option<u32>,
     independent_segments: bool,
     origin_window_proxy_seqs: Vec<u64>,
+    last_rendered_first_proxy_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -495,6 +496,10 @@ impl From<&HlsSession> for TimelineDraft {
             target_duration: session.target_duration,
             independent_segments: session.independent_segments,
             origin_window_proxy_seqs: session.live_origin_sequences().to_vec(),
+            last_rendered_first_proxy_seq: session
+                .last_rendered_manifest
+                .as_ref()
+                .map(|manifest| manifest.first_proxy_seq),
         }
     }
 }
@@ -870,11 +875,21 @@ impl TimelineDraft {
             // Unpublished, unready entries of the previous member that the new member's window does not
             // contain can never become renderable; left in place they block the publishable head.
             let before = self.segments.len();
+            let last_published_first_seq = self.last_rendered_first_proxy_seq;
+            let mut pruned_hidden_discontinuities = 0_u64;
             self.segments.retain(|proxy_seq, entry| {
-                matches!(entry.status, SegmentCacheStatus::Ready { .. })
+                let keep = matches!(entry.status, SegmentCacheStatus::Ready { .. })
                     || entry.last_rendered_at_ms.is_some()
-                    || result.segment_proxy_seqs.contains(proxy_seq)
+                    || result.segment_proxy_seqs.contains(proxy_seq);
+                if !keep
+                    && entry.discontinuity_before
+                    && last_published_first_seq.is_some_and(|first_seq| *proxy_seq < first_seq)
+                {
+                    pruned_hidden_discontinuities = pruned_hidden_discontinuities.saturating_add(1);
+                }
+                keep
             });
+            self.discontinuity_sequence = self.discontinuity_sequence.saturating_add(pruned_hidden_discontinuities);
             if self.segments.len() != before {
                 self.origin_to_proxy.retain(|_, proxy_seq| self.segments.contains_key(proxy_seq));
                 handoff_head = None;

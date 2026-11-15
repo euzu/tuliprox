@@ -1513,6 +1513,73 @@ mod tests {
     }
 
     #[test]
+    fn provisioning_member_handoff_prune_preserves_monotonic_discontinuity_sequence() {
+        let mut session = session();
+        let old_manifest = normal_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
+             #EXTINF:2,\n0.ts\n\
+             #EXT-X-DISCONTINUITY\n\
+             #EXTINF:2,\n1.ts\n\
+             #EXTINF:2,\n2.ts\n\
+             #EXTINF:2,\n3.ts\n\
+             #EXTINF:2,\n4.ts\n\
+             #EXTINF:2,\n5.ts\n\
+             #EXTINF:2,\n6.ts\n",
+        );
+        session.apply_origin_manifest(&old_manifest).expect("manifest maps");
+        session.publishable_origin_head_proxy_seq = Some(3);
+        session.publishable_origin_tail_proxy_seq = Some(6);
+        for seq in 3..=5 {
+            if let Some(entry) = session.segments.get_mut(&seq) {
+                entry.status = SegmentCacheStatus::Ready { content_length: 1024, ready_at_ms: 10 };
+                entry.last_rendered_at_ms = Some(10);
+            }
+        }
+        if let Some(entry) = session.segments.get_mut(&6) {
+            entry.status = SegmentCacheStatus::FailedRetryable { failed_at_ms: 20, retry_after_ms: 100 };
+            entry.last_rendered_at_ms = None;
+        }
+        let rendered_before = HlsManifestRenderer::render(&session, 10).expect("manifest should render before handoff");
+        assert_eq!(rendered_before.first_proxy_seq, 3);
+        assert_eq!(rendered_before.discontinuity_sequence, 1);
+        session.last_rendered_manifest = Some(rendered_before.clone());
+
+        let new_source = crate::origin::HlsOriginSource::new(
+            2,
+            std::sync::Arc::from("member-b"),
+            "member-b-stream",
+            crate::origin::HlsOriginSourceKind::DirectMediaPlaylist,
+        );
+        let binding = crate::origin::HlsOriginAccountBinding::rebound(
+            std::sync::Arc::from("member-b"),
+            std::sync::Arc::from("account-b"),
+            crate::origin::build_hls_origin_session_owner(&session.proxy_session_id),
+            1,
+            10,
+        );
+        session.handoff_origin_member(new_source, binding);
+
+        let new_manifest = normal_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:100\n\
+             #EXTINF:2,\n100.ts\n#EXTINF:2,\n101.ts\n#EXTINF:2,\n102.ts\n",
+        );
+        session.apply_origin_manifest(&new_manifest).expect("new member manifest maps");
+        for seq in 7..=9 {
+            if let Some(entry) = session.segments.get_mut(&seq) {
+                entry.status = SegmentCacheStatus::Ready { content_length: 1024, ready_at_ms: 30 };
+            }
+        }
+
+        let rendered_after = HlsManifestRenderer::render(&session, 30).expect("manifest should render after handoff");
+        assert!(
+            rendered_after.discontinuity_sequence >= rendered_before.discontinuity_sequence,
+            "discontinuity sequence must be non-decreasing: before={}, after={}",
+            rendered_before.discontinuity_sequence,
+            rendered_after.discontinuity_sequence
+        );
+    }
+
+    #[test]
     fn without_handoff_failed_retryable_head_blocks_render() {
         let mut session = session();
         let manifest = normal_manifest(

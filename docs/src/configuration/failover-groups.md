@@ -208,7 +208,8 @@ Live HLS group streams fail over at start and while playing:
   or slow-delivery detection). Tuliprox rewrites the new member's playlist so the media sequence continues. In master/child
   setups, stale child playlist URLs of the previous member that a player continues polling after a member switch are
   served from the newly selected member (matching variant bandwidth or falling back to the first variant), preventing
-  404 rejections.
+  404 rejections. For a Stalker member, Tuliprox resolves a fresh link first. Alternate audio renditions
+  (`#EXT-X-MEDIA`) of the previous member are not matched yet; such a URL receives the new member's variant playlist.
 - **Top-level master playlists.** A live member that answers with a single-variant master playlist is followed to its
   media playlist by the shared cache as well, like at start.
 - **Stalker links.** When a portal rejects a cached Stalker link during the probe, Tuliprox requests a fresh link

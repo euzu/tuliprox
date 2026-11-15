@@ -17,7 +17,7 @@ use shared::{
     utils::Internable,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tuliprox_hls::api::{HlsMemberUnhealthyReason, HlsSessionHandle, HlsSessionKey};
+use tuliprox_hls::api::{HlsMemberUnhealthyReason, HlsOriginAccountRuntime, HlsSessionHandle, HlsSessionKey};
 use tuliprox_repository::{
     stalker_generation_repository::{save_active_manifest, ClusterFiles, StalkerActiveManifest},
     stalker_repository::{ensure_stalker_storage_path, get_stalker_file_path, persist_stalker_items},
@@ -772,6 +772,16 @@ async fn wait_for_bound_member(session: &HlsSessionHandle, input: &str) {
     );
 }
 
+async fn wait_for_member_handoff_idle(runtime: &Arc<dyn HlsOriginAccountRuntime>) {
+    for _ in 0..100 {
+        if !runtime.member_handoff_pending() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!runtime.member_handoff_pending(), "pending flag must clear once handoff completes");
+}
+
 #[tokio::test]
 async fn member_handoff_moves_group_session_to_next_member() {
     let env = GroupPlaybackEnv::builder(&["solis", "korath"])
@@ -1105,14 +1115,7 @@ async fn member_handoff_pending_reflects_in_flight_flag() {
 
     drop(prepare_guard);
     wait_for_bound_member(&session, "korath").await;
-
-    for _ in 0..100 {
-        if !runtime.member_handoff_pending() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(!runtime.member_handoff_pending(), "pending flag must clear once handoff completes");
+    wait_for_member_handoff_idle(&runtime).await;
 }
 
 #[tokio::test]
@@ -1157,7 +1160,7 @@ async fn member_handoff_retry_same_failed_refresh_leads_to_next_switch() {
         Some("korath")
     );
     drop(session_guard);
-    assert!(!runtime.member_handoff_pending());
+    wait_for_member_handoff_idle(&runtime).await;
 }
 
 #[tokio::test]

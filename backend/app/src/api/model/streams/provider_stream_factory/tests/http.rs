@@ -249,6 +249,8 @@ async fn preserve_origin_never_magic_sniffs_headerless_body() {
 
 #[test]
 fn test_format_provider_response_info_contains_url_string_and_sanitizes() {
+    let _sanitize = crate::api::model::lock_sanitize_flag(true);
+
     let url = Url::parse("http://example.com/live/alice/secretpass/1.ts").unwrap();
     let info = Some((vec![("Content-Type".to_string(), "video/mp2t".to_string())], StatusCode::OK, Some(url), None));
     let message = format_provider_response_info(&info);

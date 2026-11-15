@@ -10,6 +10,9 @@ use url::Url;
 const SEGMENT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const MANIFEST_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const MANIFEST_RELOAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// Consecutive `503 Service Unavailable` manifest responses a player reloads through, as
+/// hls.js and ffmpeg do for a live media playlist.
+const MANIFEST_UNAVAILABLE_RETRIES: usize = 3;
 
 pub async fn read_segments(
     manifest_url: &str,
@@ -45,15 +48,31 @@ pub async fn read_playlist(
     // segment that was already decoded.
     let mut consumed: HashSet<String> = HashSet::new();
     let deadline = tokio::time::Instant::now() + MANIFEST_RELOAD_DEADLINE;
+    let mut unavailable_responses = 0;
     loop {
-        let (final_url, manifest) = tokio::time::timeout_at(deadline, async {
-            let response =
-                request_with_headers(client.get(manifest_url.clone()), headers).send().await?.error_for_status()?;
+        let response = tokio::time::timeout_at(deadline, async {
+            let response = request_with_headers(client.get(manifest_url.clone()), headers).send().await?;
+            if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                return Ok(None);
+            }
+            let response = response.error_for_status()?;
             let final_url = response.url().clone();
-            Ok::<_, reqwest::Error>((final_url, response.text().await?))
+            Ok::<_, reqwest::Error>(Some((final_url, response.text().await?)))
         })
         .await
         .map_err(|_| TestkitError::Protocol("HLS manifest request exceeded overall deadline".to_owned()))??;
+        let Some((final_url, manifest)) = response else {
+            unavailable_responses += 1;
+            if unavailable_responses > MANIFEST_UNAVAILABLE_RETRIES
+                || tokio::time::timeout_at(deadline, tokio::time::sleep(MANIFEST_RELOAD_INTERVAL)).await.is_err()
+            {
+                return Err(TestkitError::Protocol(format!(
+                    "HLS manifest stayed unavailable after {unavailable_responses} responses"
+                )));
+            }
+            continue;
+        };
+        unavailable_responses = 0;
         *manifest_url = final_url;
         if let Some(variant) = first_variant_uri(&manifest) {
             *manifest_url =
@@ -202,6 +221,66 @@ mod tests {
 
         assert_eq!(received, 1);
         assert_eq!(requests.lock().await.as_slice(), ["/index.m3u8", "/segment.ts"]);
+        Ok(())
+    }
+
+    async fn serve_manifest_after_unavailable(
+        unavailable_responses: usize,
+    ) -> Result<(String, Arc<Mutex<usize>>, tokio::task::JoinHandle<()>), TestkitError> {
+        let run_id = RunId::new("hls-retry");
+        let mut payload = BytesMut::new();
+        Frame::synthetic(&run_id, &OriginStreamId::new("segment"), 17, 0).encode(&mut payload)?;
+        let payload = Arc::new(payload.freeze());
+        let manifest_requests = Arc::new(Mutex::new(0_usize));
+        let app = Router::new().fallback(get({
+            let manifest_requests = Arc::clone(&manifest_requests);
+            move |uri: OriginalUri| {
+                let payload = Arc::clone(&payload);
+                let manifest_requests = Arc::clone(&manifest_requests);
+                async move {
+                    match uri.path() {
+                        "/index.m3u8" => {
+                            let mut count = manifest_requests.lock().await;
+                            *count += 1;
+                            if *count <= unavailable_responses {
+                                StatusCode::SERVICE_UNAVAILABLE.into_response()
+                            } else {
+                                "#EXTM3U\n#EXTINF:1,\nsegment.ts\n".into_response()
+                            }
+                        }
+                        "/segment.ts" => Response::new(Body::from(payload.as_ref().clone())),
+                        _ => StatusCode::NOT_FOUND.into_response(),
+                    }
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((format!("http://{address}/index.m3u8"), manifest_requests, server))
+    }
+
+    #[tokio::test]
+    async fn reloads_manifest_after_transient_unavailable_response() -> Result<(), TestkitError> {
+        let (url, manifest_requests, server) = serve_manifest_after_unavailable(1).await?;
+        let received = read_segments(&url, &RunId::new("hls-retry"), 17, 1, &BTreeMap::new()).await;
+        server.abort();
+
+        assert_eq!(received?, 1);
+        assert_eq!(*manifest_requests.lock().await, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fails_after_bounded_manifest_unavailable_retries() -> Result<(), TestkitError> {
+        let (url, manifest_requests, server) = serve_manifest_after_unavailable(usize::MAX).await?;
+        let received = read_segments(&url, &RunId::new("hls-retry"), 17, 1, &BTreeMap::new()).await;
+        server.abort();
+
+        assert!(received.is_err());
+        assert_eq!(*manifest_requests.lock().await, MANIFEST_UNAVAILABLE_RETRIES + 1);
         Ok(())
     }
 }

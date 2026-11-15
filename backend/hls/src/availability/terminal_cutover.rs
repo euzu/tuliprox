@@ -65,6 +65,15 @@ struct HlsLeaseCutoverStateSnapshot {
     observed_latency: HlsObservedRecoveryLatency,
 }
 
+impl HlsLeaseCutoverStateSnapshot {
+    /// Whether no media progress happened since this snapshot was taken.
+    fn matches_session_progress(&self, session: &crate::HlsSession) -> bool {
+        session.origin_control.progress_generation == self.progress_generation
+            && session.activity.media_readiness_generation == self.media_readiness_generation
+            && session.origin_control.last_media_progress_at_ms == self.last_media_progress_at_ms
+    }
+}
+
 #[derive(Clone, Copy)]
 struct HlsLeaseTerminalCutoverEvaluation {
     origin_path_degraded: bool,
@@ -281,13 +290,20 @@ pub async fn commit_terminal_tail_if_lease_reserve_requires_cutover(
     detailed.resolution
 }
 
-pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detailed(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HlsTerminalCutoverMode {
+    Commit,
+    Query,
+}
+
+async fn resolve_lease_terminal_cutover(
     ctx: &HlsCtx,
     session: &HlsSessionHandle,
     proxy_session_id: &ProxySessionId,
     lease: &HlsAccessLease,
     now_ms: u64,
     purpose: HlsTerminalDecisionPurpose,
+    mode: HlsTerminalCutoverMode,
 ) -> HlsDetailedTerminalResolution {
     if lease.playback_mode != crate::terminal_tail::HlsLeasePlaybackMode::Live {
         return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::Committed);
@@ -302,27 +318,39 @@ pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detai
         return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::LiveAllowed);
     }
     let evaluation = evaluate_lease_terminal_cutover(ctx, lease, manifest, &state, now_ms);
-    log::trace!("HLS terminal reserve decision: proxy_session={} lease={} start_at_ms={:?} position_known={} position_ms={} reserve_ms={} session_target_duration_ms={} snapshot_generation={} may_publish={}",
-        crate::safe_proxy_session_id(proxy_session_id), crate::safe_hls_access_lease_id(&lease.lease_id),
-        lease.playback_cursor.first_segment_started_at_ms, evaluation.reserve.playback_position_known,
-        evaluation.reserve.conservative_playback_position_ms, evaluation.reserve.guaranteed_reserve_ms,
-        state.target_duration_ms, manifest.snapshot_generation,
-        evaluation.origin_path_degraded && evaluation.reserve.is_exhausted());
-    {
-        let mut session = session.write().await;
-        if session.origin_control.progress_generation == state.progress_generation
-            && session.activity.media_readiness_generation == state.media_readiness_generation
-            && session.origin_control.last_media_progress_at_ms == state.last_media_progress_at_ms
-        {
-            session.origin_control.progress_phase = evaluation.progress_decision.next_phase;
-        } else {
-            return HlsDetailedTerminalResolution::with_deadline(
-                HlsTerminalResolution::Reevaluate,
-                evaluation.safe_deadline,
+    let may_publish = evaluation.origin_path_degraded && evaluation.reserve.is_exhausted();
+    match mode {
+        HlsTerminalCutoverMode::Commit => {
+            log::trace!(
+                "HLS terminal reserve decision: proxy_session={} lease={} start_at_ms={:?} position_known={} position_ms={} reserve_ms={} session_target_duration_ms={} snapshot_generation={} may_publish={}",
+                crate::safe_proxy_session_id(proxy_session_id),
+                crate::safe_hls_access_lease_id(&lease.lease_id),
+                lease.playback_cursor.first_segment_started_at_ms,
+                evaluation.reserve.playback_position_known,
+                evaluation.reserve.conservative_playback_position_ms,
+                evaluation.reserve.guaranteed_reserve_ms,
+                state.target_duration_ms,
+                manifest.snapshot_generation,
+                may_publish,
             );
+            let mut session = session.write().await;
+            if !state.matches_session_progress(&session) {
+                return HlsDetailedTerminalResolution::with_deadline(
+                    HlsTerminalResolution::Reevaluate,
+                    evaluation.safe_deadline,
+                );
+            }
+            session.origin_control.progress_phase = evaluation.progress_decision.next_phase;
+        }
+        HlsTerminalCutoverMode::Query => {
+            if !state.matches_session_progress(&*session.read().await) {
+                return HlsDetailedTerminalResolution::with_deadline(
+                    HlsTerminalResolution::Reevaluate,
+                    evaluation.safe_deadline,
+                );
+            }
         }
     }
-    let may_publish = evaluation.origin_path_degraded && evaluation.reserve.is_exhausted();
     let decision_context = HlsLeaseTerminalDecisionContext {
         ctx,
         session,
@@ -334,10 +362,55 @@ pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detai
         now_ms,
     };
     if may_publish {
-        commit_terminal_cutover(&decision_context).await
+        match mode {
+            HlsTerminalCutoverMode::Commit => commit_terminal_cutover(&decision_context).await,
+            HlsTerminalCutoverMode::Query => {
+                HlsDetailedTerminalResolution::with_deadline(HlsTerminalResolution::Committed, evaluation.safe_deadline)
+            }
+        }
     } else {
         resolve_terminal_cutover_before_commit_window(&decision_context)
     }
+}
+
+pub(crate) async fn query_lease_terminal_cutover_resolution(
+    ctx: &HlsCtx,
+    session: &HlsSessionHandle,
+    proxy_session_id: &ProxySessionId,
+    lease: &HlsAccessLease,
+    now_ms: u64,
+    purpose: HlsTerminalDecisionPurpose,
+) -> HlsDetailedTerminalResolution {
+    resolve_lease_terminal_cutover(
+        ctx,
+        session,
+        proxy_session_id,
+        lease,
+        now_ms,
+        purpose,
+        HlsTerminalCutoverMode::Query,
+    )
+    .await
+}
+
+pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detailed(
+    ctx: &HlsCtx,
+    session: &HlsSessionHandle,
+    proxy_session_id: &ProxySessionId,
+    lease: &HlsAccessLease,
+    now_ms: u64,
+    purpose: HlsTerminalDecisionPurpose,
+) -> HlsDetailedTerminalResolution {
+    resolve_lease_terminal_cutover(
+        ctx,
+        session,
+        proxy_session_id,
+        lease,
+        now_ms,
+        purpose,
+        HlsTerminalCutoverMode::Commit,
+    )
+    .await
 }
 
 async fn snapshot_lease_cutover_state(
