@@ -1565,6 +1565,10 @@
 
 ## 🐛 Fixes
 
+- **Shared HLS cache fetches a new segment at once.** The retry jitter of segment and map fetches also applied to the
+  first attempt, so about half of all segment fetches waited up to 100 ms before their first request. Jitter now only
+  spreads real retries.
+
 - **Stalker members of failover groups play on the shared HLS cache.** A Stalker member has no stored stream URL, so
   every playlist refresh of its shared cache session answered `503`. The session now reuses its resolved link and
   resolves a new one for the session's account only when none is stored.
