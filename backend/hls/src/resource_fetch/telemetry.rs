@@ -372,7 +372,9 @@ impl AsyncRead for ObservedBody {
 
 impl Drop for ObservedBody {
     fn drop(&mut self) {
-        if let Some(pending_since) = self.pending_since.take() {
+        // After the announced last byte the transfer counts as complete at that moment, so a later open wait
+        // is not origin wait. Incomplete and cancelled transfers keep it.
+        if let Some(pending_since) = self.pending_since.take().filter(|_| self.announced_end_at.is_none()) {
             self.origin_wait = self.origin_wait.saturating_add(pending_since.elapsed());
         }
         self.telemetry.on_reader_dropped(ObservedRead {
