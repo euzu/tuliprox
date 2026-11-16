@@ -51,10 +51,17 @@ It answers `503` while the feature is disabled.
       "transfer_quality": {
         "sample_count": 118, "window_secs": 300, "last_sample_age_ms": 800,
         "network_ms_p50": 210, "network_ms_p95": 1900,
+        "headers_ms_p50": 60, "headers_ms_p95": 180,
         "first_byte_ms_p50": 90, "first_byte_ms_p95": 400,
+        "body_origin_wait_ms_p95": 1200, "body_consumer_wait_ms_p95": 450,
         "queue_wait_ms_p95": 5, "throughput_kbps": 6200,
         "cache_write_ms_p95": 12, "postprocess_ms_p95": 3, "cache_ready_ms_p95": 2000,
         "attempt_ms_p95_incl_failed": 9800
+      },
+      "diagnosis": {
+        "ok": 115, "remote_http_error": 0, "origin_unreachable": 0,
+        "origin_slow": 2, "local_slow": 1, "downstream_slow": 0,
+        "unknown": 0, "cancelled": 2
       }
     }
   ]
@@ -69,6 +76,24 @@ It answers `503` while the feature is disabled.
   `freshness_secs`. `availability` is not nulled by freshness: `success_ratio` stays set as long as the window holds
   samples, so check `availability.last_sample_age_ms`. `sample_count` and `last_sample_age_ms` tell you how much to
   trust a value. Never treat `null` as `0`.
+* `headers_ms_p50` and `headers_ms_p95` report time to receive response headers. `body_origin_wait_ms` measures the
+  time from a Pending read until the next read, so scheduler delay after the origin data arrived counts as origin
+  wait under heavy local load, and `body_consumer_wait_ms` is the remainder.
+* `diagnosis` classifies each sample under one cause across the entire rolling window (first matching rule wins):
+  * `cancelled`: fetch was cancelled.
+  * `remote_http_error`: origin returned an HTTP error status code.
+  * `origin_unreachable`: transport error or timeout during connect or header reception.
+  * `origin_slow`: timeout or truncation during body read, or origin transfer time (`headers_ms + body_origin_wait_ms`)
+    reached or exceeded segment media duration.
+  * `local_slow`: transport error during cache write/postprocess, or local processing
+    (`queue_wait_ms + cache_write_ms + postprocess_ms`) reached half of media duration.
+  * `downstream_slow`: direct client delivery (`direct`) where consumer wait (`body_consumer_wait_ms`) reached half of
+    media duration.
+  * `ok`: successful fetch with all durations below thresholds.
+  * `unknown`: failures in the `local` phase (failed in local code or local capacity, the origin was not at fault),
+    unclassified failure or successful fetch without media duration (such as manifests).
+* Diagnosis rules name the observed boundary where latency or failure occurred. A diagnosis is not definitive proof of
+  fault on that network entity.
 * Cancelled fetches are counted but excluded from `success_ratio`.
 * `network_ms` is the time from request start to the last body byte. Queue or lease wait (`queue_wait_ms`) is
   reported apart from it. Cache-side time is reported apart from it too: `cache_write_ms_p95`, `postprocess_ms_p95` and
@@ -85,16 +110,20 @@ It answers `503` while the feature is disabled.
 
 ## 3. What is measured
 
-Per origin fetch attempt: queue wait, time to headers, first body byte, body completion, bytes read, HTTP status,
-outcome (`ok`, `http_error`, `timeout`, `truncated`, `cancelled`, `transport_error`) and the phase where it failed
-(`connect`, `headers`, `body`, `cache_write`, `postprocess`). Segment identity is an opaque salted hash that changes on
-restart.
+Per origin fetch attempt: queue wait, time to headers, first body byte, body completion, origin wait time, consumer
+wait time, delivery mode (`cache` or `direct`), bytes read, HTTP status, outcome (`ok`, `http_error`, `timeout`,
+`truncated`, `cancelled`, `transport_error`) and the phase where it failed (`connect`, `headers`, `body`,
+`cache_write`, `postprocess`, `local`). Segment identity is an opaque salted hash that changes on restart.
 
 Limits to know:
 
-* Manifest fetches are one request and body future, so headers, first byte and completion coincide.
+* Manifest fetches record real `headers_ms` and `first_byte_ms`, but do not split body time into origin and consumer
+  wait.
+* `body_consumer_wait_ms` includes consumer read pacing and decoder initialization setup.
 * A provider URL failover inside one manifest attempt appears as one sample.
 * Cache-side failures (capacity, commit) are reported as `transport_error` with phase `cache_write`.
+* Failures in local code or local capacity where the origin was not at fault are reported with error phase `local`
+  and diagnosed as `unknown`.
 * An attempt that fails before the request is sent (no free provider slot or account lease) sends nothing to the origin
   and produces no sample. Provider capacity problems therefore do not appear in `availability`.
 

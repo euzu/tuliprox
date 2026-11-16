@@ -1,22 +1,34 @@
-use super::model::{OriginFetchOutcome, OriginFetchRecord};
+use super::model::{OriginDelivery, OriginFetchOutcome, OriginFetchPhaseError, OriginFetchRecord};
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 
 /// Hard cap per input window; the oldest samples are dropped first.
 const MAX_SAMPLES_PER_WINDOW: usize = 4096;
 
-#[derive(Clone)]
-struct Sample {
-    ts_utc_ms: u64,
-    outcome: OriginFetchOutcome,
-    bytes_read: u64,
-    queue_wait_ms: u64,
-    first_byte_ms: Option<u64>,
-    network_ms: Option<u64>,
-    cache_write_ms: Option<u64>,
-    postprocess_ms: Option<u64>,
-    cache_ready_ms: Option<u64>,
-    total_ms: u64,
+/// Media duration divisor for local overhead: queue wait and cache processing taking half real time.
+const LOCAL_SLOW_DURATION_DIVISOR: u64 = 2;
+
+/// Media duration divisor for downstream backpressure: consumer wait taking half real time on direct delivery.
+const DOWNSTREAM_SLOW_DURATION_DIVISOR: u64 = 2;
+
+#[derive(Clone, Copy)]
+pub(super) struct Sample {
+    pub(super) ts_utc_ms: u64,
+    pub(super) outcome: OriginFetchOutcome,
+    pub(super) error_phase: Option<OriginFetchPhaseError>,
+    pub(super) bytes_read: u64,
+    pub(super) media_duration_ms: Option<u64>,
+    pub(super) queue_wait_ms: u64,
+    pub(super) headers_ms: Option<u64>,
+    pub(super) first_byte_ms: Option<u64>,
+    pub(super) body_origin_wait_ms: Option<u64>,
+    pub(super) body_consumer_wait_ms: Option<u64>,
+    pub(super) delivery: Option<OriginDelivery>,
+    pub(super) network_ms: Option<u64>,
+    pub(super) cache_write_ms: Option<u64>,
+    pub(super) postprocess_ms: Option<u64>,
+    pub(super) cache_ready_ms: Option<u64>,
+    pub(super) total_ms: u64,
 }
 
 pub(super) struct OriginAggregates {
@@ -38,9 +50,15 @@ impl OriginAggregates {
         window.push_back(Sample {
             ts_utc_ms: record.ts_utc_ms,
             outcome: record.outcome,
+            error_phase: record.error_phase,
             bytes_read: record.bytes_read,
+            media_duration_ms: record.media_duration_ms,
             queue_wait_ms: record.queue_wait_ms,
+            headers_ms: record.headers_ms,
             first_byte_ms: record.first_byte_ms,
+            body_origin_wait_ms: record.body_origin_wait_ms,
+            body_consumer_wait_ms: record.body_consumer_wait_ms,
+            delivery: record.delivery,
             network_ms: record.network_ms,
             cache_write_ms: record.cache_write_ms,
             postprocess_ms: record.postprocess_ms,
@@ -61,7 +79,7 @@ impl OriginAggregates {
         OriginWindows {
             window_secs: self.window_secs,
             freshness_secs: self.freshness_secs,
-            inputs: self.inputs.iter().map(|(name, window)| (name.clone(), window.iter().cloned().collect())).collect(),
+            inputs: self.inputs.iter().map(|(name, window)| (name.clone(), window.iter().copied().collect())).collect(),
         }
     }
 
@@ -97,6 +115,7 @@ impl OriginWindows {
             .map(|(input_name, window)| OriginInputSnapshot {
                 availability: availability(&window, now_ms, self.window_secs),
                 transfer_quality: transfer_quality(&window, now_ms, self.window_secs, freshness_ms),
+                diagnosis: diagnose_window(&window),
                 input_name,
             })
             .collect();
@@ -117,6 +136,19 @@ pub struct OriginInputSnapshot {
     pub input_name: String,
     pub availability: OriginAvailability,
     pub transfer_quality: OriginTransferQuality,
+    pub diagnosis: OriginDiagnosis,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct OriginDiagnosis {
+    pub ok: usize,
+    pub remote_http_error: usize,
+    pub origin_unreachable: usize,
+    pub origin_slow: usize,
+    pub local_slow: usize,
+    pub downstream_slow: usize,
+    pub unknown: usize,
+    pub cancelled: usize,
 }
 
 /// Fetch outcomes in the window. Cancelled fetches are counted but excluded from `success_ratio`.
@@ -144,8 +176,12 @@ pub struct OriginTransferQuality {
     pub last_sample_age_ms: Option<u64>,
     pub network_ms_p50: Option<u64>,
     pub network_ms_p95: Option<u64>,
+    pub headers_ms_p50: Option<u64>,
+    pub headers_ms_p95: Option<u64>,
     pub first_byte_ms_p50: Option<u64>,
     pub first_byte_ms_p95: Option<u64>,
+    pub body_origin_wait_ms_p95: Option<u64>,
+    pub body_consumer_wait_ms_p95: Option<u64>,
     pub queue_wait_ms_p95: Option<u64>,
     /// Cache-side time of completed fetches, reported apart from the origin transfer above.
     pub cache_write_ms_p95: Option<u64>,
@@ -195,8 +231,12 @@ fn transfer_quality(window: &[Sample], now_ms: u64, window_secs: u64, freshness_
         last_sample_age_ms,
         network_ms_p50: None,
         network_ms_p95: None,
+        headers_ms_p50: None,
+        headers_ms_p95: None,
         first_byte_ms_p50: None,
         first_byte_ms_p95: None,
+        body_origin_wait_ms_p95: None,
+        body_consumer_wait_ms_p95: None,
         queue_wait_ms_p95: None,
         cache_write_ms_p95: None,
         postprocess_ms_p95: None,
@@ -214,12 +254,17 @@ fn transfer_quality(window: &[Sample], now_ms: u64, window_secs: u64, freshness_
         return quality;
     }
     let mut network: Vec<u64> = completed.iter().filter_map(|s| s.network_ms).collect();
+    let mut headers: Vec<u64> = completed.iter().filter_map(|s| s.headers_ms).collect();
     let mut first_byte: Vec<u64> = completed.iter().filter_map(|s| s.first_byte_ms).collect();
     let mut queue_wait: Vec<u64> = completed.iter().map(|s| s.queue_wait_ms).collect();
     quality.network_ms_p50 = percentile(&mut network, 50);
     quality.network_ms_p95 = percentile(&mut network, 95);
+    quality.headers_ms_p50 = percentile(&mut headers, 50);
+    quality.headers_ms_p95 = percentile(&mut headers, 95);
     quality.first_byte_ms_p50 = percentile(&mut first_byte, 50);
     quality.first_byte_ms_p95 = percentile(&mut first_byte, 95);
+    quality.body_origin_wait_ms_p95 = percentile_of(completed.iter().filter_map(|s| s.body_origin_wait_ms), 95);
+    quality.body_consumer_wait_ms_p95 = percentile_of(completed.iter().filter_map(|s| s.body_consumer_wait_ms), 95);
     quality.queue_wait_ms_p95 = percentile(&mut queue_wait, 95);
     quality.cache_write_ms_p95 = percentile_of(completed.iter().filter_map(|s| s.cache_write_ms), 95);
     quality.postprocess_ms_p95 = percentile_of(completed.iter().filter_map(|s| s.postprocess_ms), 95);
@@ -232,6 +277,83 @@ fn transfer_quality(window: &[Sample], now_ms: u64, window_secs: u64, freshness_
         quality.throughput_kbps = Some(total_bytes as f64 * 8.0 / total_ms as f64);
     }
     quality
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Cause {
+    Ok,
+    RemoteHttpError,
+    OriginUnreachable,
+    OriginSlow,
+    LocalSlow,
+    DownstreamSlow,
+    Unknown,
+    Cancelled,
+}
+
+pub(super) fn diagnose(sample: &Sample) -> Cause {
+    if sample.outcome == OriginFetchOutcome::Cancelled {
+        return Cause::Cancelled;
+    }
+    if sample.outcome == OriginFetchOutcome::HttpError {
+        return Cause::RemoteHttpError;
+    }
+    if sample.error_phase == Some(OriginFetchPhaseError::Local) {
+        return Cause::Unknown;
+    }
+    if matches!(sample.outcome, OriginFetchOutcome::TransportError | OriginFetchOutcome::Timeout)
+        && matches!(sample.error_phase, Some(OriginFetchPhaseError::Connect | OriginFetchPhaseError::Headers))
+    {
+        return Cause::OriginUnreachable;
+    }
+    if matches!(sample.outcome, OriginFetchOutcome::Timeout | OriginFetchOutcome::Truncated)
+        && matches!(sample.error_phase, Some(OriginFetchPhaseError::Body))
+    {
+        return Cause::OriginSlow;
+    }
+    if sample.outcome == OriginFetchOutcome::TransportError
+        && matches!(sample.error_phase, Some(OriginFetchPhaseError::CacheWrite | OriginFetchPhaseError::Postprocess))
+    {
+        return Cause::LocalSlow;
+    }
+    let (OriginFetchOutcome::Ok, Some(media_duration_ms)) = (sample.outcome, sample.media_duration_ms) else {
+        return Cause::Unknown;
+    };
+    // Origin headers plus body wait at least as long as the media plays: the origin cannot keep real time.
+    let origin_wait = sample.headers_ms.unwrap_or(0).saturating_add(sample.body_origin_wait_ms.unwrap_or(0));
+    if origin_wait >= media_duration_ms {
+        return Cause::OriginSlow;
+    }
+    let local_overhead = sample
+        .queue_wait_ms
+        .saturating_add(sample.cache_write_ms.unwrap_or(0))
+        .saturating_add(sample.postprocess_ms.unwrap_or(0));
+    if local_overhead >= media_duration_ms / LOCAL_SLOW_DURATION_DIVISOR {
+        return Cause::LocalSlow;
+    }
+    if sample.delivery == Some(OriginDelivery::Direct)
+        && sample.body_consumer_wait_ms.unwrap_or(0) >= media_duration_ms / DOWNSTREAM_SLOW_DURATION_DIVISOR
+    {
+        return Cause::DownstreamSlow;
+    }
+    Cause::Ok
+}
+
+fn diagnose_window(window: &[Sample]) -> OriginDiagnosis {
+    let mut diagnosis = OriginDiagnosis::default();
+    for sample in window {
+        match diagnose(sample) {
+            Cause::Ok => diagnosis.ok += 1,
+            Cause::RemoteHttpError => diagnosis.remote_http_error += 1,
+            Cause::OriginUnreachable => diagnosis.origin_unreachable += 1,
+            Cause::OriginSlow => diagnosis.origin_slow += 1,
+            Cause::LocalSlow => diagnosis.local_slow += 1,
+            Cause::DownstreamSlow => diagnosis.downstream_slow += 1,
+            Cause::Unknown => diagnosis.unknown += 1,
+            Cause::Cancelled => diagnosis.cancelled += 1,
+        }
+    }
+    diagnosis
 }
 
 fn percentile_of(values: impl Iterator<Item = u64>, pct: usize) -> Option<u64> {

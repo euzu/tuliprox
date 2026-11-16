@@ -9,7 +9,7 @@ use super::{
         classify_origin_manifest_status, HlsManifestRejectLogReason, OriginManifestFetchError,
         OriginManifestStatusClass,
     },
-    telemetry::observe_manifest_attempt,
+    telemetry::{observe_manifest_attempt, FirstByteMark, ManifestTiming},
     FetchedOriginManifest, HlsManifestFetchSelection, HlsOriginManifestFetchContext, MAX_HLS_MANIFEST_BYTES,
 };
 use crate::{
@@ -34,6 +34,7 @@ use tuliprox_core::{
 };
 use url::Url;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn fetch_origin_manifest_once(
     entry_url: &Url,
     headers: &HeaderMap,
@@ -42,6 +43,7 @@ pub(super) async fn fetch_origin_manifest_once(
     use_manual_redirects: bool,
     provider_url_index: Option<usize>,
     origin_manifest_timeout_ms: u64,
+    timing: Option<Arc<ManifestTiming>>,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
     if use_manual_redirects {
         fetch_origin_manifest_with_manual_redirects(
@@ -50,6 +52,7 @@ pub(super) async fn fetch_origin_manifest_once(
             no_redirect_client,
             provider_url_index,
             origin_manifest_timeout_ms,
+            timing,
         )
         .await
     } else {
@@ -61,7 +64,14 @@ pub(super) async fn fetch_origin_manifest_once(
             .send()
             .await
             .map_err(|err| origin_manifest_fetch_error_from_reqwest_error(&err))?;
-        response_to_fetched_manifest(response, provider_url_index, entry_url.clone(), origin_manifest_timeout_ms).await
+        response_to_fetched_manifest(
+            response,
+            provider_url_index,
+            entry_url.clone(),
+            origin_manifest_timeout_ms,
+            timing,
+        )
+        .await
     }
 }
 
@@ -71,6 +81,7 @@ async fn fetch_origin_manifest_with_manual_redirects(
     client: &Client,
     provider_url_index: Option<usize>,
     origin_manifest_timeout_ms: u64,
+    timing: Option<Arc<ManifestTiming>>,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
     let mut current_url = entry_url.clone();
     let mut current_headers = headers.clone();
@@ -91,6 +102,7 @@ async fn fetch_origin_manifest_with_manual_redirects(
                 provider_url_index,
                 entry_url.clone(),
                 origin_manifest_timeout_ms,
+                timing,
             )
             .await;
         }
@@ -156,9 +168,7 @@ pub(super) async fn fetch_hls_origin_manifest_recovery_direct_target(
             return Err(OriginManifestFetchError::Request("invalid non-HTTP manifest recovery binding".to_string()));
         }
     }
-    observe_manifest_attempt(
-        context,
-        log_context.attempt_index,
+    observe_manifest_attempt(context, log_context.attempt_index, |timing| {
         timeout(
             Duration::from_millis(context.origin_manifest_timeout_ms.max(1)),
             fetch_origin_manifest_once(
@@ -169,10 +179,11 @@ pub(super) async fn fetch_hls_origin_manifest_recovery_direct_target(
                 context.use_manual_redirects,
                 binding.provider_url_index(),
                 context.origin_manifest_timeout_ms,
+                timing,
             ),
         )
-        .map(|result| result.unwrap_or_else(|_| Err(OriginManifestFetchError::Timeout))),
-    )
+        .map(|result| result.unwrap_or_else(|_| Err(OriginManifestFetchError::Timeout)))
+    })
     .await
 }
 
@@ -189,7 +200,11 @@ pub(super) async fn response_to_fetched_manifest(
     provider_url_index: Option<usize>,
     resolved_request_url: Url,
     origin_manifest_timeout_ms: u64,
+    timing: Option<Arc<ManifestTiming>>,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
+    if let Some(timing) = timing.as_deref() {
+        timing.mark_headers();
+    }
     let status = response.status();
     debug!(
         "HLS origin manifest response received: request_url={} final_url={} status={}",
@@ -199,7 +214,7 @@ pub(super) async fn response_to_fetched_manifest(
     );
     match classify_origin_manifest_status(status) {
         OriginManifestStatusClass::Success => {
-            let (decoded, body) = read_origin_manifest_body(response, origin_manifest_timeout_ms).await?;
+            let (decoded, body) = read_origin_manifest_body(response, origin_manifest_timeout_ms, timing).await?;
             let redirect_host = hls_manifest_redirect_host(&resolved_request_url, &decoded.final_url);
             let provider_session_headers = extract_hls_provider_session_header_map(&decoded.headers);
             Ok(FetchedOriginManifest {
@@ -226,6 +241,7 @@ pub(super) async fn response_to_fetched_manifest(
 async fn read_origin_manifest_body(
     response: reqwest::Response,
     origin_manifest_timeout_ms: u64,
+    timing: Option<Arc<ManifestTiming>>,
 ) -> Result<(tuliprox_core::utils::content_coding::DecodedHttpResponse, String), OriginManifestFetchError> {
     let read = async move {
         let mut decoded =
@@ -240,9 +256,13 @@ async fn read_origin_manifest_body(
                 HlsOriginContentCodingSource::Shared,
             );
         }
-        let body = read_utf8_limited(&mut decoded.body, MAX_HLS_MANIFEST_BYTES)
+        let mut body_reader = FirstByteMark::new(&mut decoded.body, timing.as_deref());
+        let body = read_utf8_limited(&mut body_reader, MAX_HLS_MANIFEST_BYTES)
             .await
             .map_err(origin_manifest_body_read_error)?;
+        if let Some(timing) = timing.as_deref() {
+            timing.mark_body_complete();
+        }
         Ok((decoded, body))
     };
     timeout(Duration::from_millis(origin_manifest_timeout_ms.max(1)), read)

@@ -1,6 +1,41 @@
 use super::*;
 
 #[tokio::test]
+async fn catchup_clean_media_eof_clears_only_media_degradation_for_later_entries() {
+    let origin =
+        spawn_test_origin("200 OK", vec![("Content-Type", "application/octet-stream")], b"complete".to_vec()).await;
+    let url = format!("{}/segment.ts", origin.base_url);
+    let fixture = TestDirectResponseFixture::new(TransientResourceKind::Segment, url.clone());
+    {
+        let mut state = fixture.session.write().await;
+        state.key = state.key.clone().with_archive_reference(123);
+        state.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
+    }
+    fixture.seed_segment_failure().await;
+    let decoded = fetch_direct_decoded(url, TransientResourceKind::Segment, None).await.unwrap();
+    let response = fixture.response(decoded);
+    assert_eq!(
+        fixture.session.read().await.origin_control.path_condition,
+        HlsOriginPathCondition::SegmentReadinessFailure,
+        "headers alone cannot clear media failure"
+    );
+    assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap().as_ref(), b"complete");
+    fixture.wait_for_segment_failure_count(0).await;
+    assert_eq!(
+        fixture.session.read().await.origin_control.path_condition,
+        HlsOriginPathCondition::ProgressExpected,
+        "clean current archive media must not leave later starts permanently degraded"
+    );
+    fixture.session.write().await.origin_control.path_condition = HlsOriginPathCondition::HardFetchFailure;
+    super::super::record_successful_transient_segment_fetch(&fixture.session, &fixture.resource).await;
+    assert_eq!(
+        fixture.session.read().await.origin_control.path_condition,
+        HlsOriginPathCondition::HardFetchFailure,
+        "an unrelated hard failure remains authoritative"
+    );
+}
+
+#[tokio::test]
 async fn direct_segment_success_resets_failure_state_only_after_clean_eof() {
     let identity = b"complete-segment";
     let origin =

@@ -194,6 +194,7 @@ async fn retryable_manifest_failure_keeps_optimistic_admission_degraded_until_me
         generation,
         &OriginManifestFetchError::RetryableStatus(axum::http::StatusCode::BAD_GATEWAY, None),
         11,
+        crate::availability::ManifestRetryUrgency::Normal,
     )
     .await;
     assert_eq!(session.read().await.origin_control.path_condition, HlsOriginPathCondition::RetryableFetchFailure);

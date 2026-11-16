@@ -1,6 +1,6 @@
 use super::{
     aggregate::{OriginAggregates, OriginTelemetrySnapshot},
-    model::{OriginFetchOutcome, OriginFetchPhaseError, OriginFetchRecord, OriginResourceKind},
+    model::{OriginDelivery, OriginFetchOutcome, OriginFetchPhaseError, OriginFetchRecord, OriginResourceKind},
 };
 use std::{
     sync::{
@@ -141,6 +141,8 @@ impl OriginTelemetryRecorder {
                 headers_ms: None,
                 first_byte_ms: None,
                 body_complete_ms: None,
+                body_origin_wait_ms: None,
+                delivery: None,
                 cache_write: Span::default(),
                 postprocess: Span::default(),
                 cache_ready_ms: None,
@@ -181,6 +183,8 @@ struct ProbeState {
     headers_ms: Option<u64>,
     first_byte_ms: Option<u64>,
     body_complete_ms: Option<u64>,
+    body_origin_wait_ms: Option<u64>,
+    delivery: Option<OriginDelivery>,
     cache_write: Span,
     postprocess: Span,
     cache_ready_ms: Option<u64>,
@@ -205,6 +209,12 @@ impl ProbeState {
         outcome: OriginFetchOutcome,
         error_phase: Option<OriginFetchPhaseError>,
     ) -> (Arc<RecorderInner>, OriginFetchRecord) {
+        let body_consumer_wait_ms = match (self.body_complete_ms, self.headers_ms, self.body_origin_wait_ms) {
+            (Some(body_complete), Some(headers), Some(body_origin_wait)) => {
+                Some(body_complete.saturating_sub(headers).saturating_sub(body_origin_wait))
+            }
+            _ => None,
+        };
         let record = OriginFetchRecord {
             seq: 0,
             ts_utc_ms: current_time_millis(),
@@ -221,6 +231,9 @@ impl ProbeState {
             headers_ms: self.headers_ms,
             first_byte_ms: self.first_byte_ms,
             body_complete_ms: self.body_complete_ms,
+            body_origin_wait_ms: self.body_origin_wait_ms,
+            body_consumer_wait_ms,
+            delivery: self.delivery,
             // Start to last byte; cache write and postprocess are separate fields.
             network_ms: self.body_complete_ms,
             cache_write_ms: self.cache_write.ms,
@@ -252,10 +265,18 @@ impl FetchProbe {
     }
 
     pub fn mark_headers(&mut self, http_status: u16, content_length: Option<u64>) {
+        self.mark_headers_at(Instant::now(), Some(http_status), content_length);
+    }
+
+    pub fn mark_headers_at(&mut self, at: Instant, http_status: Option<u16>, content_length: Option<u64>) {
         if let Some(state) = self.state.as_mut() {
-            state.headers_ms.get_or_insert_with(|| duration_ms(state.started.elapsed()));
-            state.http_status = Some(http_status);
-            state.content_length = content_length;
+            state.headers_ms.get_or_insert_with(|| duration_ms(at.saturating_duration_since(state.started)));
+            if let Some(http_status) = http_status {
+                state.http_status = Some(http_status);
+            }
+            if content_length.is_some() {
+                state.content_length = content_length;
+            }
         }
     }
 
@@ -269,9 +290,31 @@ impl FetchProbe {
         }
     }
 
-    pub fn mark_body_complete(&mut self) {
+    pub fn mark_first_byte_at(&mut self, at: Instant) {
         if let Some(state) = self.state.as_mut() {
-            state.body_complete_ms.get_or_insert_with(|| duration_ms(state.started.elapsed()));
+            if state.first_byte_ms.is_none() {
+                state.first_byte_ms = Some(duration_ms(at.saturating_duration_since(state.started)));
+            }
+        }
+    }
+
+    pub fn mark_body_complete(&mut self) { self.mark_body_complete_at(Instant::now()); }
+
+    pub fn mark_body_complete_at(&mut self, at: Instant) {
+        if let Some(state) = self.state.as_mut() {
+            state.body_complete_ms.get_or_insert_with(|| duration_ms(at.saturating_duration_since(state.started)));
+        }
+    }
+
+    pub fn set_body_origin_wait(&mut self, wait: Duration) {
+        if let Some(state) = self.state.as_mut() {
+            state.body_origin_wait_ms = Some(duration_ms(wait));
+        }
+    }
+
+    pub fn set_delivery(&mut self, delivery: OriginDelivery) {
+        if let Some(state) = self.state.as_mut() {
+            state.delivery = Some(delivery);
         }
     }
 

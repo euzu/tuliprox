@@ -11,7 +11,9 @@ mod recorder;
 mod tests;
 
 pub use self::{
-    aggregate::{OriginAvailability, OriginInputSnapshot, OriginTelemetrySnapshot, OriginTransferQuality},
-    model::{OriginFetchOutcome, OriginFetchPhaseError, OriginFetchRecord, OriginResourceKind},
+    aggregate::{
+        OriginAvailability, OriginDiagnosis, OriginInputSnapshot, OriginTelemetrySnapshot, OriginTransferQuality,
+    },
+    model::{OriginDelivery, OriginFetchOutcome, OriginFetchPhaseError, OriginFetchRecord, OriginResourceKind},
     recorder::{FetchProbe, OriginTelemetryRecorder},
 };

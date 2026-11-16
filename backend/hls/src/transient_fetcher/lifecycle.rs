@@ -3,9 +3,10 @@ use super::{
     HlsSegmentFailureTransition, HlsSessionHandle, HlsTransientOriginIoGuard, HlsTransientReadGuard,
     SegmentFetchPolicy, TransientResourceKind, TransientResourceRef,
 };
+use crate::origin_progress::HlsOriginPathCondition;
 use log::{debug, warn};
 use std::sync::Arc;
-use tuliprox_core::utils::current_time_millis;
+use tuliprox_core::{model::PlaybackKind, utils::current_time_millis};
 
 pub async fn record_successful_transient_segment_fetch(session: &HlsSessionHandle, resource: &TransientResourceRef) {
     if !transient_resource_is_media(resource.kind) {
@@ -14,6 +15,15 @@ pub async fn record_successful_transient_segment_fetch(session: &HlsSessionHandl
     let mut session = session.write().await;
     if !transient_resource_is_current(&session, resource, current_time_millis()) {
         return;
+    }
+    // Only actual, current archive media reaching clean EOF heals this latch.
+    // Otherwise a fresh manifest can allow one retry, its success clears the
+    // counter, but every later entry is rejected as permanently degraded.
+    // Preserve live reserve policy and unrelated manifest/origin failures.
+    if session.origin_playback_kind() == PlaybackKind::Catchup
+        && session.origin_control.path_condition == HlsOriginPathCondition::SegmentReadinessFailure
+    {
+        session.origin_control.path_condition = HlsOriginPathCondition::ProgressExpected;
     }
     if let Some(reset_failures) = session.record_successful_segment_fetch() {
         if log::log_enabled!(log::Level::Debug) {
