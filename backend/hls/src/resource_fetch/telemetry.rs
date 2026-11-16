@@ -246,6 +246,9 @@ impl AttemptTelemetry {
         self.update(|state| {
             state.reader = ReaderState::Attached;
             state.expected_len = expected_len;
+            if let Some(probe) = state.probe.as_mut() {
+                probe.mark_body_observed();
+            }
         });
         Box::pin(ObservedBody {
             inner: body,

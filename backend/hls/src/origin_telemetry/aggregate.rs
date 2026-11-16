@@ -319,6 +319,9 @@ pub(super) fn diagnose(sample: &Sample) -> Cause {
     let (OriginFetchOutcome::Ok, Some(media_duration_ms)) = (sample.outcome, sample.media_duration_ms) else {
         return Cause::Unknown;
     };
+    if media_duration_ms < LOCAL_SLOW_DURATION_DIVISOR.max(DOWNSTREAM_SLOW_DURATION_DIVISOR) {
+        return Cause::Unknown;
+    }
     // Origin headers plus body wait at least as long as the media plays: the origin cannot keep real time.
     let origin_wait = sample.headers_ms.unwrap_or(0).saturating_add(sample.body_origin_wait_ms.unwrap_or(0));
     if origin_wait >= media_duration_ms {

@@ -123,7 +123,7 @@ pub struct TransientResourceRef {
     pub expires_at_ms: u64,
     pub access: Arc<CacheAccessState>,
     revision: TransientResourceRevision,
-    origin_account_generation: u64,
+    pub(crate) origin_account_generation: u64,
 }
 
 #[derive(Clone, Eq, PartialEq)]

@@ -548,6 +548,56 @@ async fn slow_consumer_with_fast_origin_gives_consumer_wait() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn delay_between_headers_and_body_attach_does_not_show_up_in_consumer_wait() {
+    use futures::task::noop_waker_ref;
+    let mut cx = std::task::Context::from_waker(noop_waker_ref());
+    let (recorder, mut rx) = recorder();
+    let telemetry = super::telemetry::AttemptTelemetry::begin(
+        &recorder,
+        "input",
+        OriginResourceKind::Segment,
+        Some("cache_key"),
+        0,
+    );
+    telemetry.mark_headers(200, Some(10));
+
+    // Time spent reading content-coding prefix / setting up decoder before body attach.
+    tokio::time::advance(Duration::from_millis(50)).await;
+
+    let reader = ControllableReader {
+        steps: std::collections::VecDeque::from([
+            std::task::Poll::Ready(Ok(vec![1, 2, 3, 4, 5])),
+            std::task::Poll::Ready(Ok(vec![6, 7, 8, 9, 10])),
+            std::task::Poll::Ready(Ok(vec![])),
+        ]),
+    };
+    let mut body = telemetry.wrap(Box::pin(reader), Some(10));
+
+    let mut buf = [0_u8; 16];
+    let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 5);
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 5);
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 0);
+
+    let result: Result<(), HlsOriginResourceFetchError> = Ok(());
+    telemetry.finish(&result);
+
+    let records = records(&mut rx);
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.outcome, OriginFetchOutcome::Ok);
+    assert_eq!(record.body_origin_wait_ms, Some(0));
+    assert_eq!(record.body_consumer_wait_ms, Some(0));
+}
+
+#[tokio::test(start_paused = true)]
 async fn direct_stream_gives_delivery_direct() {
     use futures::task::noop_waker_ref;
     let mut cx = std::task::Context::from_waker(noop_waker_ref());

@@ -119,7 +119,7 @@ Limits to know:
 
 * Manifest fetches record real `headers_ms` and `first_byte_ms`, but do not split body time into origin and consumer
   wait.
-* `body_consumer_wait_ms` includes consumer read pacing and decoder initialization setup.
+* `body_consumer_wait_ms` is measured from the moment the body reader is attached and includes consumer read pacing.
 * A provider URL failover inside one manifest attempt appears as one sample.
 * Cache-side failures (capacity, commit) are reported as `transport_error` with phase `cache_write`.
 * Failures in local code or local capacity where the origin was not at fault are reported with error phase `local`

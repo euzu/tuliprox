@@ -53,6 +53,7 @@ pub async fn record_temporary_transient_segment_fetch_failure(
     session.origin_control.path_condition =
         super::super::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure;
     if !transient_resource_is_media(resource.kind) {
+        session.segment_failure_tracker.last_failure_at_ms = Some(now_ms);
         return false;
     }
     let threshold = policy.permanent_failure_segment_threshold.max(1);
@@ -106,12 +107,15 @@ pub(super) const fn transient_resource_affects_media_readiness(kind: TransientRe
     )
 }
 
+/// The resource is still mapped and belongs to the current origin account generation. Success or failure of work
+/// started for an earlier account must not change the state of its replacement.
 fn transient_resource_is_current(
     session: &super::super::HlsSession,
     resource: &TransientResourceRef,
     now_ms: u64,
 ) -> bool {
-    session.transient.resource_matches_current(resource, now_ms)
+    resource.origin_account_generation == session.transient.origin_account_generation()
+        && session.transient.resource_matches_current(resource, now_ms)
 }
 
 impl HlsTransientReadGuard {

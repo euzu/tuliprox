@@ -139,6 +139,7 @@ impl OriginTelemetryRecorder {
                 media_duration_ms: None,
                 queue_wait_ms: 0,
                 headers_ms: None,
+                body_observed_ms: None,
                 first_byte_ms: None,
                 body_complete_ms: None,
                 body_origin_wait_ms: None,
@@ -181,6 +182,7 @@ struct ProbeState {
     media_duration_ms: Option<u64>,
     queue_wait_ms: u64,
     headers_ms: Option<u64>,
+    body_observed_ms: Option<u64>,
     first_byte_ms: Option<u64>,
     body_complete_ms: Option<u64>,
     body_origin_wait_ms: Option<u64>,
@@ -209,9 +211,10 @@ impl ProbeState {
         outcome: OriginFetchOutcome,
         error_phase: Option<OriginFetchPhaseError>,
     ) -> (Arc<RecorderInner>, OriginFetchRecord) {
-        let body_consumer_wait_ms = match (self.body_complete_ms, self.headers_ms, self.body_origin_wait_ms) {
-            (Some(body_complete), Some(headers), Some(body_origin_wait)) => {
-                Some(body_complete.saturating_sub(headers).saturating_sub(body_origin_wait))
+        let body_anchor_ms = self.body_observed_ms.or(self.headers_ms);
+        let body_consumer_wait_ms = match (self.body_complete_ms, body_anchor_ms, self.body_origin_wait_ms) {
+            (Some(body_complete), Some(body_observed), Some(body_origin_wait)) => {
+                Some(body_complete.saturating_sub(body_observed).saturating_sub(body_origin_wait))
             }
             _ => None,
         };
@@ -277,6 +280,14 @@ impl FetchProbe {
             if content_length.is_some() {
                 state.content_length = content_length;
             }
+        }
+    }
+
+    pub fn mark_body_observed(&mut self) { self.mark_body_observed_at(Instant::now()); }
+
+    pub fn mark_body_observed_at(&mut self, at: Instant) {
+        if let Some(state) = self.state.as_mut() {
+            state.body_observed_ms.get_or_insert_with(|| duration_ms(at.saturating_duration_since(state.started)));
         }
     }
 

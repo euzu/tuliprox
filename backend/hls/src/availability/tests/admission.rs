@@ -1,4 +1,53 @@
 use super::*;
+use crate::{SegmentFetchPolicy, TransientResourceKind, TransientResourceRef};
+
+#[tokio::test]
+async fn catchup_reentry_after_key_failure_allows_new_current_manifest() {
+    let ctx = crate::HlsCtx::for_test(Config::default());
+    let mut state =
+        HlsSession::new(HlsSessionKey::new(1, "archive-key-reentry").with_archive_reference(123), b"secret", 0);
+    state.mode = crate::HlsSessionMode::TransientPassthrough {
+        reason: crate::TransientPassthroughReason::UnsupportedTag { tag: "EXT-X-ENDLIST".into() },
+    };
+    let key_resource = TransientResourceRef::new(
+        TransientResourceKind::Key,
+        "http://127.0.0.1/enc.key",
+        b"secret",
+        0,
+        60_000,
+        Some("key".to_string()),
+    );
+    state.transient.upsert_resources([key_resource.clone()]);
+    let session = Arc::new(tokio::sync::RwLock::new(state));
+    let policy = SegmentFetchPolicy::default();
+
+    assert!(
+        !crate::transient_fetcher::record_temporary_transient_segment_fetch_failure(
+            &session,
+            &key_resource,
+            &policy,
+            100,
+        )
+        .await
+    );
+
+    let body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-KEY:METHOD=AES-128,URI=\"enc.key\"\n#EXTINF:4,\n0.ts\n#EXT-X-ENDLIST\n";
+    session.write().await.transient.replace_manifest_with_semantics(body.into(), 101, Some(4_000));
+    let mut snapshot = pressure_manifest(4_000);
+    snapshot.delivery_mode = HlsManifestDeliveryMode::TransientPassthrough;
+    snapshot.source_commit_identity = session.read().await.transient.last_manifest_commit_identity().unwrap();
+
+    assert!(
+        hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 102).await,
+        "a fresh current catchup manifest must be admitted after key failure"
+    );
+    assert_eq!(
+        session.read().await.segment_failure_tracker.consecutive_temporary_failures,
+        0,
+        "failure counter stays unchanged after key-only failure"
+    );
+    assert_eq!(session.read().await.origin_control.path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
+}
 
 #[tokio::test]
 async fn catchup_reentry_after_media_failure_can_retry_only_a_new_current_manifest() {

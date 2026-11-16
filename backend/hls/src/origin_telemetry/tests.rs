@@ -477,6 +477,45 @@ fn diagnosis_missing_media_duration_is_unknown_for_ok() {
 }
 
 #[test]
+fn diagnosis_tiny_media_duration_zero_is_unknown() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(0));
+    rec.media_duration_ms = Some(0);
+    rec.headers_ms = Some(0);
+    rec.queue_wait_ms = 0;
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.unknown, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.origin_slow, 0);
+}
+
+#[test]
+fn diagnosis_tiny_media_duration_one_is_unknown() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(0));
+    rec.media_duration_ms = Some(1);
+    rec.headers_ms = Some(0);
+    rec.queue_wait_ms = 0;
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.unknown, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.local_slow, 0);
+}
+
+#[test]
+fn diagnosis_tiny_media_duration_two_keeps_today_classification() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(0));
+    rec.media_duration_ms = Some(2);
+    rec.headers_ms = Some(0);
+    rec.queue_wait_ms = 0;
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.ok, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.unknown, 0);
+}
+
+#[test]
 fn diagnosis_precedence_http_error_beats_slow() {
     let mut aggregates = OriginAggregates::new(300, 60);
     let mut rec = sample("a", 1_000, OriginFetchOutcome::HttpError, None);
