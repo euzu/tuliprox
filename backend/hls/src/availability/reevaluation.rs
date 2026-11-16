@@ -7,7 +7,7 @@
 
 use super::{
     hls_manifest_acceptance_directive_for_reevaluation, HlsManifestAcceptanceDirective, HlsTerminalFailedClosedReason,
-    HlsTerminalResolution, HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS, HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS,
+    HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS, HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS,
     HLS_AVAILABILITY_REEVALUATION_MAX_BACKOFF_MS, HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS,
 };
 use crate::{
@@ -19,9 +19,9 @@ use crate::{
     hls_ctx::HlsCtx,
     origin_account_runtime::HlsMemberUnhealthyReason,
     post_refresh_availability::{
-        evaluate_active_terminal_leases_for_reevaluation, evaluate_owner_failure_fallback,
-        query_active_terminal_leases_for_reevaluation, wait_for_owner_resolution, HlsLiveReserveDeadline,
-        HlsPostRefreshOwnerResolution, HlsPostRefreshOwnerWaitOutcome, HlsPostRefreshTerminalEvaluation,
+        evaluate_active_terminal_leases_for_reevaluation, evaluate_owner_failure_fallback, wait_for_owner_resolution,
+        HlsLiveReserveDeadline, HlsPostRefreshOwnerResolution, HlsPostRefreshOwnerWaitOutcome,
+        HlsPostRefreshTerminalEvaluation,
     },
     refresh::{
         maybe_trigger_origin_refresh_with_outcome, HlsOriginRefreshTriggerOutcome, HlsPostRefreshAvailabilityAction,
@@ -427,23 +427,13 @@ pub(crate) async fn evaluate_post_refresh_terminal_attempt(
                 .terminal_playback_snapshots_for_session(&owner_key.proxy_session_id, now_ms)
                 .await
                 .is_empty();
+            // Request the switch while the playback reserve still covers it, so the player does not
+            // stall; the reserve check alone would allow live until the reserve is spent.
             if has_active_leases {
-                let resolution =
-                    query_active_terminal_leases_for_reevaluation(ctx, session, &owner_key.proxy_session_id, now_ms)
-                        .await;
-                // A re-evaluation request is not evidence of a pending terminal tail; only a lease
-                // that reached a terminal answer may notify the member.
-                if matches!(
-                    resolution,
-                    HlsTerminalResolution::Committed
-                        | HlsTerminalResolution::Pending { .. }
-                        | HlsTerminalResolution::FailedClosed { .. }
-                ) {
-                    runtime.notify_member_unhealthy(session, HlsMemberUnhealthyReason::TerminalPending);
-                    let defer_until_ms = now_ms.saturating_add(HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS);
-                    cycle.handoff_defer_until_ms = Some(defer_until_ms);
-                    return defer_post_refresh_terminal_for_handoff(owner_key, cycle, defer_until_ms, now_ms);
-                }
+                runtime.notify_member_unhealthy(session, HlsMemberUnhealthyReason::TerminalPending);
+                let defer_until_ms = now_ms.saturating_add(HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS);
+                cycle.handoff_defer_until_ms = Some(defer_until_ms);
+                return defer_post_refresh_terminal_for_handoff(owner_key, cycle, defer_until_ms, now_ms);
             }
         }
     }
