@@ -136,15 +136,7 @@ fn media_server_playback_urls_are_proxy_only_redirect_guard_candidates() {
 
 #[test]
 fn test_resolve_request_url_for_logging_respects_sanitization_setting() {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    struct SanitizeSettingGuard(bool);
-    impl Drop for SanitizeSettingGuard {
-        fn drop(&mut self) { shared::utils::set_sanitize_sensitive_info(self.0); }
-    }
-    let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    let prev = shared::utils::is_sanitize_sensitive_info_enabled();
-    let _restore = SanitizeSettingGuard(prev);
+    let _sanitize = crate::api::model::lock_sanitize_flag(true);
 
     let m3u_input = ConfigInput { input_type: InputType::M3u, ..ConfigInput::default() };
     let media_ref = "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fsecret_key";

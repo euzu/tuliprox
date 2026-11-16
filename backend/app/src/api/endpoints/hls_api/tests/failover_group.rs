@@ -17,7 +17,7 @@ use shared::{
     utils::Internable,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tuliprox_hls::api::{HlsMemberUnhealthyReason, HlsSessionHandle, HlsSessionKey};
+use tuliprox_hls::api::{HlsMemberUnhealthyReason, HlsOriginAccountRuntime, HlsSessionHandle, HlsSessionKey};
 use tuliprox_repository::{
     stalker_generation_repository::{save_active_manifest, ClusterFiles, StalkerActiveManifest},
     stalker_repository::{ensure_stalker_storage_path, get_stalker_file_path, persist_stalker_items},
@@ -772,6 +772,16 @@ async fn wait_for_bound_member(session: &HlsSessionHandle, input: &str) {
     );
 }
 
+async fn wait_for_member_handoff_idle(runtime: &Arc<dyn HlsOriginAccountRuntime>) {
+    for _ in 0..100 {
+        if !runtime.member_handoff_pending() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!runtime.member_handoff_pending(), "pending flag must clear once handoff completes");
+}
+
 #[tokio::test]
 async fn member_handoff_moves_group_session_to_next_member() {
     let env = GroupPlaybackEnv::builder(&["solis", "korath"])
@@ -1065,6 +1075,141 @@ async fn member_handoff_single_item_session_is_noop() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let after = session.read().await.origin_source.clone();
     assert_eq!(before, after, "single-item sessions must ignore member-unhealthy notifications");
+}
+
+#[tokio::test]
+async fn member_handoff_pending_reflects_in_flight_flag() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::HlsAdvancing)
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    let first_variant = env.get(&variant_uri).await;
+    assert_eq!(first_variant.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    let runtime = session.read().await.origin_account_runtime.clone().expect("origin runtime");
+
+    assert!(!runtime.member_handoff_pending(), "pending flag must be false before handoff");
+
+    let prepare_lock = Arc::clone(&session.read().await.origin_account_prepare_lock);
+    let prepare_guard = prepare_lock.lock().await;
+
+    runtime.notify_member_unhealthy(&session, HlsMemberUnhealthyReason::ManifestFailure);
+
+    // Wait for the spawned task to reach the prepare lock
+    let mut pending_observed = false;
+    for _ in 0..100 {
+        if runtime.member_handoff_pending() {
+            pending_observed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(pending_observed, "pending flag must be true while handoff is running");
+
+    drop(prepare_guard);
+    wait_for_bound_member(&session, "korath").await;
+    wait_for_member_handoff_idle(&runtime).await;
+}
+
+#[tokio::test]
+async fn member_handoff_retry_same_failed_refresh_leads_to_next_switch() {
+    let solis_faults = OriginFaults::default();
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .with_failover(FailoverGroupRuntimeConfig {
+            stable_after_secs: 0,
+            same_source_retries: 1,
+            ..Default::default()
+        })
+        .origin_mode("solis", solis_faults.mode(0))
+        .origin_mode("korath", FakeOriginMode::HlsAdvancing)
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    let first_variant = env.get(&variant_uri).await;
+    assert_eq!(first_variant.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    let runtime = session.read().await.origin_account_runtime.clone().expect("origin runtime");
+
+    // Establish playback progress so FailoverBudget considers the source stable and chooses RetrySame
+    runtime.notify_member_progress(&*session.read().await);
+
+    // Break solis so the same-source retry fails
+    solis_faults.fail_manifests(503);
+
+    runtime.notify_member_unhealthy(&session, HlsMemberUnhealthyReason::ManifestFailure);
+
+    // In the single handoff call, RetrySame must fail, re-trigger budget to Next, and switch to korath
+    wait_for_bound_member(&session, "korath").await;
+
+    let session_guard = session.read().await;
+    assert_eq!(session_guard.origin_source.input_name.as_ref(), "korath");
+    assert_eq!(
+        session_guard.origin_account_binding.as_ref().map(|binding| binding.input_name.as_ref()),
+        Some("korath")
+    );
+    drop(session_guard);
+    wait_for_member_handoff_idle(&runtime).await;
+}
+
+#[tokio::test]
+async fn member_handoff_retry_same_succeeding_refresh_does_not_switch() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .with_failover(FailoverGroupRuntimeConfig {
+            stable_after_secs: 0,
+            same_source_retries: 1,
+            ..Default::default()
+        })
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::HlsAdvancing)
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    let first_variant = env.get(&variant_uri).await;
+    assert_eq!(first_variant.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    let runtime = session.read().await.origin_account_runtime.clone().expect("origin runtime");
+
+    // Establish playback progress so FailoverBudget considers the source stable
+    runtime.notify_member_progress(&*session.read().await);
+
+    let commits_before = session.read().await.origin_manifest_commits();
+
+    // solis is healthy; trigger handoff
+    runtime.notify_member_unhealthy(&session, HlsMemberUnhealthyReason::ManifestFailure);
+
+    // Wait for the handoff to finish
+    for _ in 0..100 {
+        if !runtime.member_handoff_pending() && session.read().await.origin_manifest_commits() > commits_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let session_guard = session.read().await;
+    assert_eq!(session_guard.origin_source.input_name.as_ref(), "solis", "recovered same member must remain bound");
+    assert!(
+        session_guard.origin_manifest_commits() > commits_before,
+        "successful retry must increment origin_manifest_commits"
+    );
+    drop(session_guard);
+    assert!(!runtime.member_handoff_pending());
 }
 
 #[tokio::test]

@@ -14,6 +14,8 @@ pub enum HlsMemberUnhealthyReason {
     SegmentFailure,
     Stall,
     SlowDelivery,
+    /// Availability reevaluation is about to commit terminal on a failover-enabled session.
+    TerminalPending,
 }
 
 impl HlsMemberUnhealthyReason {
@@ -21,7 +23,9 @@ impl HlsMemberUnhealthyReason {
     /// triggers are stream-level signals, not account or capacity errors.
     pub const fn failure_class(self) -> FailureClass {
         match self {
-            Self::ManifestFailure | Self::SegmentFailure | Self::Stall | Self::SlowDelivery => FailureClass::Stream,
+            Self::ManifestFailure | Self::SegmentFailure | Self::Stall | Self::SlowDelivery | Self::TerminalPending => {
+                FailureClass::Stream
+            }
         }
     }
 }
@@ -114,6 +118,9 @@ pub trait HlsOriginAccountRuntime: Send + Sync + fmt::Debug {
     /// spawn the handoff, keep at most one handoff per session in flight, and coalesce
     /// concurrent notifications.
     fn notify_member_unhealthy(&self, _session: &HlsSessionHandle, _reason: HlsMemberUnhealthyReason) {}
+
+    /// True while a member handoff started by `notify_member_unhealthy` is running.
+    fn member_handoff_pending(&self) -> bool { false }
 
     /// Thresholds for the member-health triggers. `None` (the default) turns every trigger off, which
     /// is the case for single-item sessions and for groups with runtime failover disabled.

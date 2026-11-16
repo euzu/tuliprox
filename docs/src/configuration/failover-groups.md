@@ -128,7 +128,8 @@ prefers members with the same codec, resolution and audio as the one that played
 Rules of a switch:
 
 - A member that played for at least `failover.stable_after_secs` is retried `failover.same_source_retries` times before
-  others.
+  others. The retry performs a real same-member reopen or refresh; if that fails, the switch moves to the next member
+  within the same handoff.
 - Runtime switches never use the provider grace slot and never preempt other streams.
 - A member whose slot was preempted by a higher-priority stream is not failed over; the stream ends as before.
 - Members that refuse the account or have no capacity, or that deliver no MPEG-TS, are not asked again within the
@@ -173,20 +174,25 @@ Live HLS group streams fail over at start and while playing:
   Individual media segments, encryption keys, initialization maps, and alternative variants are not checked.
 - **Runtime switch.** While a player is streaming, Tuliprox switches to the next member when the bound member fails.
   The player keeps its playlist URL and does not reconnect. Triggers:
-  - Manifest refresh: two hard failures in a row (`404`, `410`, `5xx`, transport errors, timeouts), or repeated
-    failures without a successful refresh for `failover.no_data_timeout_secs`. A single retryable error never
+  - Manifest refresh: two hard failures in a row (`404`, `410`, `5xx`, transport errors, timeouts), an exhausted
+    refresh retry budget (such as persistent `503` errors or a frozen manifest whose segment list no longer advances),
+    or repeated failures without a successful refresh for `failover.no_data_timeout_secs`. Terminal availability commit
+    is deferred while a member handoff runs. A single transient retryable error that recovers inside its retries never
     switches.
   - Segment or initialization map: a fetch that still fails after its retries (`404`, `410`, `5xx`, transport
     errors).
   - Stall: no new segment for `failover.no_data_timeout_secs` or two target durations, whichever is longer.
   - Slow delivery (shared cache only): segments arrive at less than `failover.slow_source_pct` of real time, measured
     over `failover.slow_source_secs` with at least three segments.
+  - Last resort (shared cache only): before the shared cache ends a playback that still has active players, it
+    requests one switch to the next member. The playback ends only when no member can take over.
 
-  The switch follows the [MPEG-TS switch rules](#failover-while-watching-mpeg-ts): `same_source_retries`, `stable_after_secs`,
-  `max_outage_secs` and `max_switches` apply unchanged, and there is no switch back to a higher-priority member while
-  the stream runs. The new member joins at its live edge. The playlist continues its `EXT-X-MEDIA-SEQUENCE` and marks
-  the boundary with `EXT-X-DISCONTINUITY`; keys and initialization maps start again after the boundary. Different
-  delays between providers are not aligned.
+  The switch follows the [MPEG-TS switch rules](#failover-while-watching-mpeg-ts): `same_source_retries` (performing a
+  real same-member reopen, then moving to the next member if it fails), `stable_after_secs`, `max_outage_secs` and
+  `max_switches` apply unchanged, and there is no switch back to a higher-priority member while the stream runs. The new
+  member joins at its live edge. The playlist continues its `EXT-X-MEDIA-SEQUENCE` and marks the boundary with
+  `EXT-X-DISCONTINUITY`; keys and initialization maps start again after the boundary. Different delays between providers
+  are not aligned.
 - **Failure classes.** Probe failures are classified using the same rules as MPEG-TS stream starts:
   - Auth / account (`401 Unauthorized`, `403 Forbidden`, or provider account errors).
   - Capacity (`429 Too Many Requests`).
@@ -199,7 +205,11 @@ Live HLS group streams fail over at start and while playing:
   an extra probe. If the session is degraded or failing, a new viewer re-probes and the session switches if another
   member is selected.
 - **Without shared cache.** Each player session switches on its own, on manifest and segment failures only (no stall
-  or slow-delivery detection). Tuliprox rewrites the new member's playlist so the media sequence continues.
+  or slow-delivery detection). Tuliprox rewrites the new member's playlist so the media sequence continues. In master/child
+  setups, stale child playlist URLs of the previous member that a player continues polling after a member switch are
+  served from the newly selected member (matching variant bandwidth or falling back to the first variant), preventing
+  404 rejections. For a Stalker member, Tuliprox resolves a fresh link first. Alternate audio renditions
+  (`#EXT-X-MEDIA`) of the previous member are not matched yet; such a URL receives the new member's variant playlist.
 - **Top-level master playlists.** A live member that answers with a single-variant master playlist is followed to its
   media playlist by the shared cache as well, like at start.
 - **Stalker links.** When a portal rejects a cached Stalker link during the probe, Tuliprox requests a fresh link

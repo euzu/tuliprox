@@ -46,6 +46,10 @@ use std::future::Future;
 const HLS_AVAILABILITY_STATE_ACCESS_ATTEMPTS: usize = 3;
 const HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS: u8 = 64;
 const HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS: u64 = 2_000;
+/// Maximum duration to defer a post-refresh terminal commit while a member handoff is pending.
+/// A member handoff is itself bounded by the failover budget; this cap only guarantees that
+/// the terminal commit happens even if a handoff hangs.
+pub(crate) const HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS: u64 = 15_000;
 const HLS_AVAILABILITY_REEVALUATION_MAX_BACKOFF_MS: u64 = 50;
 const HLS_TERMINAL_PENDING_RETRY_AFTER_MS: u64 = 50;
 const HLS_TERMINAL_ASSET_REVALIDATION_ATTEMPTS: usize = 2;

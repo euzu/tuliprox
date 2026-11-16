@@ -12,6 +12,26 @@ use std::sync::Arc;
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
 
+static SANITIZE_FLAG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds the process-global sanitization setting for one test and restores it on drop.
+pub struct SanitizeFlagTestGuard {
+    previous: bool,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for SanitizeFlagTestGuard {
+    fn drop(&mut self) { shared::utils::set_sanitize_sensitive_info(self.previous); }
+}
+
+/// Serializes tests that set or depend on the sanitization setting and sets it to `enabled`.
+pub fn lock_sanitize_flag(enabled: bool) -> SanitizeFlagTestGuard {
+    let lock = SANITIZE_FLAG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = shared::utils::is_sanitize_sensitive_info_enabled();
+    shared::utils::set_sanitize_sensitive_info(enabled);
+    SanitizeFlagTestGuard { previous, _lock: lock }
+}
+
 /// A current-thread runtime and a count of the threads it has started. It has no
 /// worker threads, so each one is a blocking-pool thread: a test sees that code
 /// ran `spawn_blocking` when the count grows.

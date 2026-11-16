@@ -210,7 +210,7 @@ impl OwnerTokenFixture {
     }
 
     fn seal(&self, session_token: Option<&str>, url: &str, kind: HlsResourceKind, origin: Option<&str>) -> String {
-        create_hls_resource_token(&self.app_state.get_encrypt_secret(), session_token, url, Some(kind), origin)
+        create_hls_resource_token(&self.app_state.get_encrypt_secret(), session_token, url, Some(kind), origin, None)
     }
 
     fn decode(&self, token: &str) -> crate::processing::parser::hls::HlsResourceToken {

@@ -164,6 +164,15 @@ impl Default for FixtureStalker {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixtureFailoverGroupsRuntime {
+    #[serde(default)]
+    pub stable_after_secs: Option<u64>,
+    #[serde(default)]
+    pub same_source_retries: Option<u8>,
+}
+
 /// Replaces the single generated provider input with one m3u input per name, each served as
 /// its own origin account, and turns failover groups on for the generated target. All inputs
 /// carry the same channels, so the target groups them automatically.
@@ -171,6 +180,8 @@ impl Default for FixtureStalker {
 #[serde(deny_unknown_fields)]
 pub struct FixtureFailoverGroups {
     pub inputs: Vec<String>,
+    #[serde(default)]
+    pub runtime: Option<FixtureFailoverGroupsRuntime>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1400,6 +1411,26 @@ tuliprox:
     #[test]
     fn failover_groups_fixture_accepts_two_unique_inputs() -> Result<(), TestkitError> {
         failover_scenario("  failover_groups: { inputs: [input-a, input-b] }")?.validate()
+    }
+
+    #[test]
+    fn failover_groups_fixture_accepts_runtime_overrides() -> Result<(), TestkitError> {
+        let scenario = failover_scenario(
+            "  failover_groups:\n    inputs: [input-a, input-b]\n    runtime:\n      stable_after_secs: 3\n      same_source_retries: 1",
+        )?;
+        scenario.validate()?;
+        let runtime = scenario.tuliprox.failover_groups.as_ref().and_then(|f| f.runtime).expect("runtime present");
+        assert_eq!(runtime.stable_after_secs, Some(3));
+        assert_eq!(runtime.same_source_retries, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn failover_groups_fixture_rejects_unknown_runtime_keys() {
+        assert!(failover_scenario(
+            "  failover_groups:\n    inputs: [input-a, input-b]\n    runtime:\n      unknown_field: 42"
+        )
+        .is_err());
     }
 
     #[test]

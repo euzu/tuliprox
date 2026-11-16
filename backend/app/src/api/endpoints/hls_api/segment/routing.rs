@@ -532,9 +532,11 @@ pub(in crate::api::endpoints::hls_api) async fn hls_api_stream_resolved(
 
         if is_manifest {
             let manifest_stage = match decoded_hls_token.kind {
-                Some(HlsResourceKind::Manifest(source)) => {
-                    HlsRequestStage::Variant { source, origin_provider: decoded_hls_token.origin_provider.as_deref() }
-                }
+                Some(HlsResourceKind::Manifest(source)) => HlsRequestStage::Variant {
+                    source,
+                    origin_provider: decoded_hls_token.origin_provider.as_deref(),
+                    origin_member_vid: decoded_hls_token.origin_member_vid,
+                },
                 Some(HlsResourceKind::Media) | None => HlsRequestStage::LegacyVariant,
             };
             let source = match resolve_hls_virtual_source_for_target(&app_state, &target, virtual_id).await {

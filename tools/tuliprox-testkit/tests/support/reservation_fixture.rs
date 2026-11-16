@@ -379,6 +379,7 @@ impl Fixture {
                 input_type: FixtureInputType::M3u,
                 stalker: &FixtureStalker::default(),
                 failover_inputs: &[],
+                failover_runtime: None,
             },
         )?;
         let original = std::fs::read_to_string(&paths.config_file)?;

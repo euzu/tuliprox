@@ -196,6 +196,9 @@ struct OriginState {
     observations: Arc<Mutex<Vec<OriginObservation>>>,
     faults: Arc<Mutex<FaultSchedule>>,
     hls_sequences: Arc<Mutex<HashMap<u32, u64>>>,
+    hls_frozen_sequences: Arc<Mutex<HashMap<(String, u32), u64>>>,
+    /// Wall-clock reference for a realtime HLS window; shared by every clone of the state.
+    origin_started: Instant,
     stalker: Arc<Mutex<StalkerPortal>>,
     tracker: OriginTracker,
 }
@@ -379,6 +382,8 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
                     observations: Arc::new(Mutex::new(Vec::new())),
                     faults: Arc::new(Mutex::new(FaultSchedule::default())),
                     hls_sequences: Arc::new(Mutex::new(HashMap::new())),
+                    hls_frozen_sequences: Arc::new(Mutex::new(HashMap::new())),
+                    origin_started: Instant::now(),
                     stalker: Arc::new(Mutex::new(StalkerPortal::new(
                         stalker_refuse_create_link_once,
                         stalker_refuse_create_link_markers,
@@ -1108,6 +1113,7 @@ async fn reset_origin_run(Path(run_id): Path<String>, State(state): State<Origin
     }
     *state.stream_counter.lock().await = 0;
     state.hls_sequences.lock().await.clear();
+    state.hls_frozen_sequences.lock().await.clear();
     state.observations.lock().await.clear();
     state.stalker.lock().await.reset();
     state.tracker.reset().await;
@@ -1142,10 +1148,17 @@ async fn clear_fault(Path((run_id, fault_id)): Path<(String, String)>, State(sta
     if run_id != state.run_id.0 {
         return StatusCode::NOT_FOUND;
     }
-    match state.faults.lock().await.clear(&fault_id) {
-        Ok(()) => StatusCode::NO_CONTENT,
-        Err(_) => StatusCode::NOT_FOUND,
+    let mut faults = state.faults.lock().await;
+    let Ok(fault) = faults.clear(&fault_id) else {
+        return StatusCode::NOT_FOUND;
+    };
+    // A later freeze of this account starts from the live sequence, not from the cleared freeze.
+    if let OriginFault::HlsManifestFreeze { account } = fault {
+        if !faults.is_manifest_frozen_for(&account) {
+            state.hls_frozen_sequences.lock().await.retain(|(frozen_account, _), _| *frozen_account != account);
+        }
     }
+    StatusCode::NO_CONTENT
 }
 
 fn fault_status_response(status: u16) -> Response {
@@ -1263,6 +1276,79 @@ fn has_ts_extension(path: &str) -> bool {
     std::path::Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("ts"))
 }
 
+/// First media sequence of a realtime HLS window: wall-clock time since the origin started divided
+/// by the advertised segment duration. A client polling faster than one segment then sees the window
+/// advance at the cadence the profile promises instead of once per manifest request count.
+fn hls_realtime_sequence(state: &OriginState) -> u64 {
+    let duration_secs =
+        state.hls_profile.as_ref().and_then(|profile| profile.segment_duration_secs).unwrap_or(4).max(1);
+    let segment_millis = u64::from(duration_secs) * 1000;
+    let elapsed_millis = u64::try_from(state.origin_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    elapsed_millis / segment_millis
+}
+
+async fn hls_index_manifest(
+    state: &OriginState,
+    marker: u32,
+    query: &HashMap<String, String>,
+    account: Option<&str>,
+    conn_id: u64,
+    req_id: u64,
+) -> Response {
+    // The freeze check and the frozen-sequence cache update form one step: the fault guard is held
+    // until the cache is updated (lock order faults, then frozen sequences, as in `clear_fault`).
+    let faults = state.faults.lock().await;
+    let is_frozen = account.is_some_and(|acc| faults.is_manifest_frozen_for(acc));
+    let mut frozen_map = state.hls_frozen_sequences.lock().await;
+    let key = (account.unwrap_or_default().to_string(), marker);
+    let realtime = state.hls_profile.as_ref().is_some_and(|profile| profile.realtime);
+    let sequence_val = if !is_frozen {
+        if account.is_some() {
+            frozen_map.remove(&key);
+        }
+        if realtime {
+            hls_realtime_sequence(state)
+        } else {
+            let mut sequences = state.hls_sequences.lock().await;
+            let sequence = sequences.entry(marker).or_insert(0);
+            *sequence += 1;
+            *sequence
+        }
+    } else if realtime {
+        let live = hls_realtime_sequence(state);
+        *frozen_map.entry(key).or_insert(live)
+    } else if let Some(&seq) = frozen_map.get(&key) {
+        seq
+    } else {
+        let current = *state.hls_sequences.lock().await.entry(marker).or_insert(1);
+        frozen_map.insert(key, current);
+        current
+    };
+    drop(frozen_map);
+    drop(faults);
+    let first = sequence_val.saturating_sub(1);
+    let account_query = origin_account(query).map_or_else(String::new, |account| {
+        let encoded = url::form_urlencoded::byte_serialize(account.as_bytes()).collect::<String>();
+        format!("&token={encoded}")
+    });
+    let playlist = if let Some(profile) = &state.hls_profile {
+        let duration = profile.segment_duration_secs.unwrap_or(4);
+        let first = if realtime { sequence_val } else { sequence_val.saturating_sub(1) / 10 };
+        let mut playlist =
+            format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{duration}\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+        for seq in first..first + u64::from(profile.window_segments) {
+            let _ = writeln!(playlist, "#EXTINF:{duration}.0,\n{seq}.ts?run={}{account_query}", state.run_id.0);
+        }
+        playlist
+    } else {
+        format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXTINF:1.0,\n{first}.ts?run={}{account_query}\n#EXTINF:1.0,\n{sequence_val}.ts?run={}{account_query}\n",
+            state.run_id.0, state.run_id.0
+        )
+    };
+    hls_guarded_response(Bytes::from(playlist), "application/vnd.apple.mpegurl", conn_id, req_id, &state.tracker).await
+}
+
 async fn hls(
     Path(resource): Path<String>,
     Query(query): Query<HashMap<String, String>>,
@@ -1299,37 +1385,7 @@ async fn hls(
         return response;
     }
     if resource == "index.m3u8" {
-        let mut sequences = state.hls_sequences.lock().await;
-        let sequence = sequences.entry(marker).or_insert(0);
-        *sequence += 1;
-        let first = sequence.saturating_sub(1);
-        let account_query = origin_account(&query).map_or_else(String::new, |account| {
-            let encoded = url::form_urlencoded::byte_serialize(account.as_bytes()).collect::<String>();
-            format!("&token={encoded}")
-        });
-        let playlist = if let Some(profile) = &state.hls_profile {
-            let duration = profile.segment_duration_secs.unwrap_or(4);
-            let first = sequence.saturating_sub(1) / 10;
-            let mut playlist =
-                format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{duration}\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
-            for seq in first..first + u64::from(profile.window_segments) {
-                let _ = writeln!(playlist, "#EXTINF:{duration}.0,\n{seq}.ts?run={}{account_query}", state.run_id.0);
-            }
-            playlist
-        } else {
-            format!(
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXTINF:1.0,\n{first}.ts?run={}{account_query}\n#EXTINF:1.0,\n{}.ts?run={}{account_query}\n",
-            state.run_id.0, *sequence, state.run_id.0
-        )
-        };
-        return hls_guarded_response(
-            Bytes::from(playlist),
-            "application/vnd.apple.mpegurl",
-            conn_id,
-            req_id,
-            &state.tracker,
-        )
-        .await;
+        return hls_index_manifest(&state, marker, &query, account, conn_id, req_id).await;
     }
     let segment = resource.strip_suffix(".ts").and_then(|part| part.parse::<u64>().ok());
     let Some(sequence) = segment else {
@@ -2321,6 +2377,7 @@ async fn run_controller(
                         .failover_groups
                         .as_ref()
                         .map_or(&[][..], |failover| failover.inputs.as_slice()),
+                    failover_runtime: scenario.tuliprox.failover_groups.as_ref().and_then(|failover| failover.runtime),
                 },
             )
             .await
@@ -3996,6 +4053,8 @@ mod tests {
             observations: Arc::new(Mutex::new(Vec::new())),
             faults: Arc::new(Mutex::new(FaultSchedule::default())),
             hls_sequences: Arc::new(Mutex::new(HashMap::from([(17, 9)]))),
+            hls_frozen_sequences: Arc::new(Mutex::new(HashMap::new())),
+            origin_started: Instant::now(),
             stalker: Arc::new(Mutex::new(StalkerPortal::new(false, Vec::new(), false))),
             tracker: OriginTracker::new(run_id, OriginPolicy::default()),
         }
@@ -4056,10 +4115,127 @@ mod tests {
             bytes_emitted: 0,
         });
         assert_eq!(reset_origin_run(Path("other".to_owned()), State(state.clone())).await, StatusCode::NOT_FOUND);
+        state.hls_frozen_sequences.lock().await.insert(("acc-a".to_string(), 17), 9);
         assert_eq!(reset_origin_run(Path("run-a".to_owned()), State(state.clone())).await, StatusCode::NO_CONTENT);
         assert!(state.observations.lock().await.is_empty());
         assert_eq!(*state.stream_counter.lock().await, 0);
         assert!(state.hls_sequences.lock().await.is_empty());
+        assert!(state.hls_frozen_sequences.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hls_manifest_freeze_keeps_sequence_fixed_for_account() {
+        let state = test_origin_state("freeze-run");
+        let query: HashMap<String, String> =
+            [("run".to_string(), "freeze-run".to_string()), ("token".to_string(), "acc-a".to_string())]
+                .into_iter()
+                .collect();
+        let resp =
+            hls(Path("17/index.m3u8".to_string()), Query(query.clone()), State(state.clone()), None, HeaderMap::new())
+                .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body1 = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body1_str = String::from_utf8(body1.to_vec()).unwrap();
+        assert!(body1_str.contains("#EXT-X-MEDIA-SEQUENCE:9"));
+
+        let _ = state
+            .faults
+            .lock()
+            .await
+            .insert("f1".to_string(), OriginFault::HlsManifestFreeze { account: "acc-a".to_string() });
+
+        let resp =
+            hls(Path("17/index.m3u8".to_string()), Query(query.clone()), State(state.clone()), None, HeaderMap::new())
+                .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body2 = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body2_str = String::from_utf8(body2.to_vec()).unwrap();
+
+        let resp =
+            hls(Path("17/index.m3u8".to_string()), Query(query), State(state.clone()), None, HeaderMap::new()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body3 = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body3_str = String::from_utf8(body3.to_vec()).unwrap();
+        assert_eq!(body2_str, body3_str);
+
+        let query_b: HashMap<String, String> =
+            [("run".to_string(), "freeze-run".to_string()), ("token".to_string(), "acc-b".to_string())]
+                .into_iter()
+                .collect();
+        let resp = hls(
+            Path("17/index.m3u8".to_string()),
+            Query(query_b.clone()),
+            State(state.clone()),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_b1 = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body_b1_str = String::from_utf8(body_b1.to_vec()).unwrap();
+
+        let resp =
+            hls(Path("17/index.m3u8".to_string()), Query(query_b), State(state.clone()), None, HeaderMap::new()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_b2 = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body_b2_str = String::from_utf8(body_b2.to_vec()).unwrap();
+        assert_ne!(body_b1_str, body_b2_str);
+    }
+
+    fn started_ago(millis: u64) -> Instant {
+        Instant::now().checked_sub(Duration::from_millis(millis)).expect("origin start in the past")
+    }
+
+    fn realtime_origin_state(run_id: &str, started: Instant) -> OriginState {
+        let mut state = test_origin_state(run_id);
+        state.hls_profile = Some(Arc::new(tuliprox_testkit::hls_probe::HlsOriginProfile {
+            segment_duration_secs: Some(2),
+            realtime: true,
+            ..tuliprox_testkit::hls_probe::HlsOriginProfile::default()
+        }));
+        state.origin_started = started;
+        state
+    }
+
+    async fn manifest_media_sequence(state: &OriginState, account: &str) -> u64 {
+        let query =
+            HashMap::from([("run".to_owned(), state.run_id.0.clone()), ("token".to_owned(), account.to_owned())]);
+        let response =
+            hls(Path("17/index.m3u8".to_owned()), Query(query), State(state.clone()), None, HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        body.lines()
+            .find_map(|line| line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:"))
+            .and_then(|value| value.parse().ok())
+            .expect("playlist advertises a media sequence")
+    }
+
+    #[tokio::test]
+    async fn realtime_window_advances_with_wall_clock_not_request_count() {
+        let state = realtime_origin_state("realtime-run", started_ago(5_000));
+        assert_eq!(manifest_media_sequence(&state, "acc-a").await, 2);
+        assert_eq!(manifest_media_sequence(&state, "acc-a").await, 2, "a second poll must not move the window");
+
+        let advanced = realtime_origin_state("realtime-run", started_ago(11_000));
+        assert_eq!(manifest_media_sequence(&advanced, "acc-a").await, 5);
+    }
+
+    #[tokio::test]
+    async fn realtime_freeze_holds_sequence_for_one_account_only() {
+        let mut state = realtime_origin_state("realtime-freeze-run", started_ago(4_000));
+        assert_eq!(manifest_media_sequence(&state, "acc-a").await, 2);
+        state
+            .faults
+            .lock()
+            .await
+            .insert("f1".to_owned(), OriginFault::HlsManifestFreeze { account: "acc-a".to_owned() })
+            .unwrap();
+        assert_eq!(manifest_media_sequence(&state, "acc-a").await, 2, "the freeze pins the current sequence");
+
+        state.origin_started = started_ago(9_000);
+        assert_eq!(manifest_media_sequence(&state, "acc-a").await, 2, "a frozen account keeps its sequence");
+        assert_eq!(manifest_media_sequence(&state, "acc-b").await, 4, "other accounts keep advancing");
     }
 
     #[tokio::test]
@@ -4156,6 +4332,74 @@ mod tests {
             .status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn unfrozen_manifest_request_keeps_freeze_cached_after_its_check() {
+        let state = test_origin_state("freeze-race-run");
+        let key = ("input-a".to_owned(), 17);
+        // The request runs its freeze check while the frozen-sequence cache is busy.
+        let frozen_cache = state.hls_frozen_sequences.lock().await;
+        let request = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let query = HashMap::from([("token".to_owned(), "input-a".to_owned())]);
+                hls_index_manifest(&state, 17, &query, Some("input-a"), 0, 0).await
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // A freeze installed now must not be lost to the request's earlier "not frozen" answer.
+        let installed_during_request = match state.faults.try_lock() {
+            Ok(mut faults) => {
+                faults
+                    .insert("a-freeze".to_owned(), OriginFault::HlsManifestFreeze { account: "input-a".to_owned() })
+                    .unwrap();
+                true
+            }
+            Err(_) => false,
+        };
+        let mut frozen_cache = frozen_cache;
+        if installed_during_request {
+            frozen_cache.insert(key.clone(), 9);
+        }
+        drop(frozen_cache);
+        request.await.unwrap();
+        if !installed_during_request {
+            state
+                .faults
+                .lock()
+                .await
+                .insert("a-freeze".to_owned(), OriginFault::HlsManifestFreeze { account: "input-a".to_owned() })
+                .unwrap();
+            state.hls_frozen_sequences.lock().await.insert(key.clone(), 9);
+        }
+
+        assert_eq!(state.hls_frozen_sequences.lock().await.get(&key), Some(&9));
+    }
+
+    #[tokio::test]
+    async fn cleared_manifest_freeze_does_not_replay_its_sequence() {
+        let state = test_origin_state("freeze-run");
+        let freeze = || {
+            Some(Json(OriginFaultSpec {
+                kind: OriginFaultKind::HlsManifestFreeze,
+                account: "input-a".to_owned(),
+                status: None,
+                bytes_per_second: None,
+            }))
+        };
+        let path = || Path(("freeze-run".to_owned(), "a-freeze".to_owned()));
+        assert_eq!(set_fault(path(), State(state.clone()), freeze()).await, StatusCode::NO_CONTENT);
+        state.hls_frozen_sequences.lock().await.insert(("input-a".to_owned(), 17), 9);
+        state.hls_frozen_sequences.lock().await.insert(("input-b".to_owned(), 17), 4);
+
+        assert_eq!(clear_fault(path(), State(state.clone())).await, StatusCode::NO_CONTENT);
+        assert_eq!(set_fault(path(), State(state.clone()), freeze()).await, StatusCode::NO_CONTENT);
+
+        let frozen = state.hls_frozen_sequences.lock().await;
+        assert!(!frozen.contains_key(&("input-a".to_owned(), 17)));
+        assert_eq!(frozen.get(&("input-b".to_owned(), 17)), Some(&4));
     }
 
     #[tokio::test]

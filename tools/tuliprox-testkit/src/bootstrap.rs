@@ -1,7 +1,7 @@
 use crate::{
     config::{
-        is_confined_relative_path, BootstrapConfig, Channel, ExtraConfigFile, FixtureInputType, FixtureStalker,
-        PolicyContract,
+        is_confined_relative_path, BootstrapConfig, Channel, ExtraConfigFile, FixtureFailoverGroupsRuntime,
+        FixtureInputType, FixtureStalker, PolicyContract,
     },
     TestkitError,
 };
@@ -25,6 +25,7 @@ pub struct FixtureInputPlan<'a> {
     /// Names of the separate m3u inputs of a failover-group fixture; empty for the single
     /// generated input.
     pub failover_inputs: &'a [String],
+    pub failover_runtime: Option<FixtureFailoverGroupsRuntime>,
 }
 
 impl FixtureInputPlan<'_> {
@@ -77,6 +78,9 @@ impl FixturePaths {
                 let _ = writeln!(config, "    strip:\n      mode: segments\n      value: {strip}");
             }
         }
+        if let Some(block) = render_failover_groups(input.failover_runtime) {
+            config.push_str(&block);
+        }
         std::fs::write(&config_file, config)?;
         std::fs::write(
             &source_file,
@@ -86,6 +90,21 @@ impl FixturePaths {
 
         Ok(Self { _directory: directory, root, config_file, source_file, api_proxy_file, web_root })
     }
+}
+
+fn render_failover_groups(runtime: Option<FixtureFailoverGroupsRuntime>) -> Option<String> {
+    let runtime = runtime?;
+    if runtime.stable_after_secs.is_none() && runtime.same_source_retries.is_none() {
+        return None;
+    }
+    let mut block = String::from("failover_groups:\n  failover:\n");
+    if let Some(stable) = runtime.stable_after_secs {
+        let _ = writeln!(block, "    stable_after_secs: {stable}");
+    }
+    if let Some(retries) = runtime.same_source_retries {
+        let _ = writeln!(block, "    same_source_retries: {retries}");
+    }
+    Some(block)
 }
 
 impl FixturePaths {
@@ -691,6 +710,7 @@ mod tests {
                 input_type: crate::config::FixtureInputType::M3u,
                 stalker: &crate::config::FixtureStalker::default(),
                 failover_inputs: &[],
+                failover_runtime: None,
             },
         )?;
         let config = std::fs::read_to_string(&fixture.config_file)?;
@@ -730,6 +750,7 @@ mod tests {
             input_type: crate::config::FixtureInputType::M3u,
             stalker: Box::leak(Box::new(crate::config::FixtureStalker::default())),
             failover_inputs: &[],
+            failover_runtime: None,
         }
     }
 
@@ -746,6 +767,7 @@ mod tests {
             input_type: crate::config::FixtureInputType::Stalker,
             stalker: &stalker,
             failover_inputs: &[],
+            failover_runtime: None,
         };
         let source = render_sources(
             "run",
@@ -827,6 +849,32 @@ mod tests {
     }
 
     #[test]
+    fn fixture_paths_renders_failover_groups_runtime_config() -> Result<(), TestkitError> {
+        let plan = FixtureInputPlan {
+            input_type: crate::config::FixtureInputType::M3u,
+            stalker: &crate::config::FixtureStalker::default(),
+            failover_inputs: &["input-a".to_owned(), "input-b".to_owned()],
+            failover_runtime: Some(FixtureFailoverGroupsRuntime {
+                stable_after_secs: Some(3),
+                same_source_retries: Some(1),
+            }),
+        };
+        let paths = FixturePaths::create(
+            "failover-runtime-run",
+            "127.0.0.1:9910".parse::<SocketAddr>().map_err(|error| TestkitError::Configuration(error.to_string()))?,
+            "127.0.0.1:8901".parse::<SocketAddr>().map_err(|error| TestkitError::Configuration(error.to_string()))?,
+            None,
+            &HashMap::new(),
+            &crate::config::FixtureStreamOptions::default(),
+            false,
+            &plan,
+        )?;
+        let content = std::fs::read_to_string(&paths.config_file)?;
+        assert!(content.contains("failover_groups:\n  failover:\n    stable_after_secs: 3\n    same_source_retries: 1"));
+        Ok(())
+    }
+
+    #[test]
     fn extra_config_files_cannot_leave_the_config_directory() -> Result<(), TestkitError> {
         let source_root = tempfile::tempdir()?;
         std::fs::write(source_root.path().join("override.yml"), "version: 1\n")?;
@@ -874,6 +922,7 @@ mod tests {
             input_type: crate::config::FixtureInputType::M3u,
             stalker: &crate::config::FixtureStalker::default(),
             failover_inputs: &names,
+            failover_runtime: None,
         };
         let source = render_sources(
             "run",

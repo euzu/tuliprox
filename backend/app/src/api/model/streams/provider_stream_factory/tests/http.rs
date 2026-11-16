@@ -246,3 +246,18 @@ async fn preserve_origin_never_magic_sniffs_headerless_body() {
 
     assert_eq!(collect_stream(stream).await.unwrap(), body);
 }
+
+#[test]
+fn test_format_provider_response_info_contains_url_string_and_sanitizes() {
+    let _sanitize = crate::api::model::lock_sanitize_flag(true);
+
+    let url = Url::parse("http://example.com/live/alice/secretpass/1.ts").unwrap();
+    let info = Some((vec![("Content-Type".to_string(), "video/mp2t".to_string())], StatusCode::OK, Some(url), None));
+    let message = format_provider_response_info(&info);
+    assert!(
+        message.contains("http://example.com/live/alice/secretpass/1.ts"),
+        "formatted message must contain the URL in string form: {message}"
+    );
+    let sanitized = shared::utils::sanitize_sensitive_info(&message);
+    assert!(!sanitized.contains("secretpass"), "sanitizer must mask credentials in the URL string: {sanitized}");
+}

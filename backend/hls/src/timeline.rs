@@ -432,6 +432,7 @@ struct TimelineDraft {
     discontinuity_sequence: u64,
     pending_handoff_discontinuity_sequence: Option<u64>,
     pending_origin_epoch_handoff: bool,
+    fresh_manifest_commit_required: Option<crate::HlsFreshManifestRequiredReason>,
     new_proxy_only_discontinuity: Option<u64>,
     segments: BTreeMap<u64, SegmentEntry>,
     maps: BTreeMap<ProxyMapId, MapEntry>,
@@ -443,6 +444,7 @@ struct TimelineDraft {
     target_duration: Option<u32>,
     independent_segments: bool,
     origin_window_proxy_seqs: Vec<u64>,
+    last_rendered_first_proxy_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -482,6 +484,7 @@ impl From<&HlsSession> for TimelineDraft {
             discontinuity_sequence: session.discontinuity_sequence,
             pending_handoff_discontinuity_sequence: session.pending_handoff_discontinuity_sequence,
             pending_origin_epoch_handoff: session.pending_origin_epoch_handoff,
+            fresh_manifest_commit_required: session.fresh_manifest_commit_required,
             new_proxy_only_discontinuity: None,
             segments: session.segments.clone(),
             maps: session.maps.clone(),
@@ -493,6 +496,10 @@ impl From<&HlsSession> for TimelineDraft {
             target_duration: session.target_duration,
             independent_segments: session.independent_segments,
             origin_window_proxy_seqs: session.live_origin_sequences().to_vec(),
+            last_rendered_first_proxy_seq: session
+                .last_rendered_manifest
+                .as_ref()
+                .map(|manifest| manifest.first_proxy_seq),
         }
     }
 }
@@ -672,6 +679,9 @@ impl HlsSession {
             .filter_map(|seq| self.segments.get(seq).map(|entry| entry.duration_ms))
             .collect();
         self.origin_window_proxy_seqs = Some(draft.origin_window_proxy_seqs);
+        if let Some(startup) = self.startup.as_mut() {
+            startup.revisions.retain(|seq, _| self.segments.contains_key(seq));
+        }
     }
 
     /// Captures the contiguous timeline beginning at the lease's first advertised sequence.
@@ -858,7 +868,36 @@ impl TimelineDraft {
             mark_handoff_discontinuity = false;
         }
 
-        self.publishable_origin_head_proxy_seq = handoff_publishable_head_proxy_seq.or(manifest_head_proxy_seq);
+        let is_provisioning_member_handoff = origin_epoch_handoff
+            && self.fresh_manifest_commit_required == Some(crate::HlsFreshManifestRequiredReason::ProvisioningHandoff);
+        let mut handoff_head = handoff_publishable_head_proxy_seq;
+        if is_provisioning_member_handoff {
+            // Unpublished, unready entries of the previous member that the new member's window does not
+            // contain can never become renderable; left in place they block the publishable head.
+            let before = self.segments.len();
+            let last_published_first_seq = self.last_rendered_first_proxy_seq;
+            let mut pruned_hidden_discontinuities = 0_u64;
+            self.segments.retain(|proxy_seq, entry| {
+                let keep = matches!(entry.status, SegmentCacheStatus::Ready { .. })
+                    || entry.last_rendered_at_ms.is_some()
+                    || result.segment_proxy_seqs.contains(proxy_seq);
+                if !keep
+                    && entry.discontinuity_before
+                    && last_published_first_seq.is_some_and(|first_seq| *proxy_seq < first_seq)
+                {
+                    pruned_hidden_discontinuities = pruned_hidden_discontinuities.saturating_add(1);
+                }
+                keep
+            });
+            self.discontinuity_sequence = self.discontinuity_sequence.saturating_add(pruned_hidden_discontinuities);
+            if self.segments.len() != before {
+                self.origin_to_proxy.retain(|_, proxy_seq| self.segments.contains_key(proxy_seq));
+                handoff_head = None;
+            }
+        }
+
+        self.publishable_origin_head_proxy_seq =
+            handoff_head.filter(|head| self.segments.contains_key(head)).or(manifest_head_proxy_seq);
         self.publishable_origin_tail_proxy_seq = manifest_tail_proxy_seq;
         self.origin_window_proxy_seqs.clone_from(&result.segment_proxy_seqs);
         Ok(result)

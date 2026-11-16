@@ -11,7 +11,7 @@ pub(in crate::api) enum HlsRequestStage<'a> {
     /// Entry route: the URL is normalized and a media playlist may be wrapped in a master.
     Entry,
     /// Refresh of a sealed manifest token; the URL is used exactly as sealed.
-    Variant { source: HlsManifestSource, origin_provider: Option<&'a str> },
+    Variant { source: HlsManifestSource, origin_provider: Option<&'a str>, origin_member_vid: Option<u32> },
     /// Manifest token without an explicit kind (issued before tokens carried one);
     /// behaves like the token route did before.
     LegacyVariant,
@@ -128,6 +128,7 @@ pub(in crate::api) async fn wrap_media_playlist(wrap: HlsMediaPlaylistWrap<'_>, 
         sealed_url,
         Some(HlsResourceKind::Manifest(HlsManifestSource::Entry)),
         Some(provider),
+        None,
     );
     let variant_uri = build_hls_resource_uri(base_url, user, target_id, input.id, virtual_id, &token);
 
@@ -371,6 +372,7 @@ pub(super) async fn recreate_hls_session_from_token(
         HlsRequestStage::Variant {
             source: HlsManifestSource::Entry,
             origin_provider: decoded.origin_provider.as_deref(),
+            origin_member_vid: decoded.origin_member_vid,
         },
     )
     .await

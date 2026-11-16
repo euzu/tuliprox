@@ -39,7 +39,14 @@ pub struct HlsOriginProfile {
     pub unknown_length: bool,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "segment_duration")]
     pub segment_duration_secs: Option<u32>,
+    /// Advance the live window with wall-clock time instead of the manifest request count, so a
+    /// client polling faster than one segment sees the window move at the advertised cadence.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub realtime: bool,
 }
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde calls this with a reference to the field
+fn is_false(value: &bool) -> bool { !*value }
 
 impl Default for HlsOriginProfile {
     fn default() -> Self {
@@ -50,6 +57,7 @@ impl Default for HlsOriginProfile {
             abort_segments: Vec::new(),
             unknown_length: false,
             segment_duration_secs: None,
+            realtime: false,
         }
     }
 }
@@ -72,6 +80,11 @@ impl HlsOriginProfile {
                     "HLS profile segment duration must be between 1 and 60 seconds".to_owned(),
                 ));
             }
+        }
+        if self.realtime && self.segment_duration_secs.is_none() {
+            return Err(TestkitError::Configuration(
+                "HLS profile realtime mode requires segment_duration_secs".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -378,5 +391,23 @@ mod tests {
             .is_err());
         assert!(HlsOriginProfile { segment_duration_secs: Some(2), ..HlsOriginProfile::default() }.validate().is_ok());
         assert!(HlsOriginProfile::default().validate().is_ok());
+    }
+
+    #[test]
+    fn realtime_profile_requires_a_segment_duration() {
+        assert!(HlsOriginProfile { realtime: true, ..HlsOriginProfile::default() }.validate().is_err());
+        assert!(HlsOriginProfile { realtime: true, segment_duration_secs: Some(2), ..HlsOriginProfile::default() }
+            .validate()
+            .is_ok());
+        assert!(!HlsOriginProfile::default().realtime);
+    }
+
+    #[test]
+    fn realtime_flag_round_trips_through_json() {
+        let parsed: HlsOriginProfile =
+            serde_json::from_str(r#"{"segment_duration_secs":2,"realtime":true}"#).expect("profile parses");
+        assert!(parsed.realtime);
+        let serialized = serde_json::to_string(&HlsOriginProfile::default()).expect("profile serializes");
+        assert!(!serialized.contains("realtime"), "the default must not reach the origin command line: {serialized}");
     }
 }

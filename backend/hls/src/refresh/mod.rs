@@ -667,8 +667,11 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
                 session.origin_refresh.mark_failure(fetch_finished_at_ms);
                 metrics.record_refresh_failed();
                 let post_refresh_action = apply_manifest_fetch_failure_signal(&mut session, &err, fetch_finished_at_ms);
+                let origin_failure = member_origin_failure(&err);
+                let exhausted = matches!(post_refresh_action, HlsPostRefreshAvailabilityAction::Reevaluate { .. })
+                    && origin_failure.is_some();
                 member_notice =
-                    session.member_unhealthy_after_manifest_failure(member_origin_failure(&err), fetch_finished_at_ms);
+                    session.member_unhealthy_after_manifest_failure(origin_failure, exhausted, fetch_finished_at_ms);
                 warn!(
                     "HLS origin manifest refresh completed: session={} proxy_session={} result=failed error={}",
                     safe_session_key(&session.key),

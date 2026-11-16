@@ -10,6 +10,7 @@ pub enum OriginFaultKind {
     HlsManifestStatus,
     HlsSegmentStatus,
     SlowSegmentBody,
+    HlsManifestFreeze,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +34,10 @@ pub enum OriginFault {
     SlowSegmentBody {
         account: String,
         bytes_per_second: u64,
+    },
+    /// Freeze `index.m3u8` responses of `account` so the segment list no longer advances.
+    HlsManifestFreeze {
+        account: String,
     },
 }
 
@@ -66,6 +71,7 @@ impl OriginFault {
                 }
                 Ok(Self::SlowSegmentBody { account, bytes_per_second })
             }
+            OriginFaultKind::HlsManifestFreeze => Ok(Self::HlsManifestFreeze { account }),
         }
     }
 }
@@ -96,10 +102,9 @@ impl FaultSchedule {
     /// matching and must be removed with [`Self::clear`].
     pub fn take(&mut self, fault_id: &str) -> Option<OriginFault> { self.faults.remove(fault_id) }
 
-    pub fn clear(&mut self, fault_id: &str) -> Result<(), TestkitError> {
+    pub fn clear(&mut self, fault_id: &str) -> Result<OriginFault, TestkitError> {
         self.faults
             .remove(fault_id)
-            .map(|_| ())
             .ok_or_else(|| TestkitError::Configuration(format!("fault ID {fault_id} does not exist")))
     }
 
@@ -132,6 +137,13 @@ impl FaultSchedule {
                 Some(*bytes_per_second)
             }
             _ => None,
+        })
+    }
+
+    /// Whether `index.m3u8` responses of `account` should answer with a frozen manifest.
+    pub fn is_manifest_frozen_for(&self, account: &str) -> bool {
+        self.faults.values().any(|fault| {
+            matches!(fault, OriginFault::HlsManifestFreeze { account: fault_account } if fault_account == account)
         })
     }
 }
@@ -235,5 +247,23 @@ mod tests {
         );
         assert!(OriginFault::from_parts(OriginFaultKind::SlowSegmentBody, "input-a".to_owned(), None, None).is_err());
         assert!(OriginFault::from_parts(OriginFaultKind::SlowSegmentBody, "input-a".to_owned(), None, Some(0)).is_err());
+        assert!(matches!(
+            OriginFault::from_parts(OriginFaultKind::HlsManifestFreeze, "input-a".to_owned(), None, None),
+            Ok(OriginFault::HlsManifestFreeze { .. })
+        ));
+        assert!(OriginFault::from_parts(OriginFaultKind::HlsManifestFreeze, String::new(), None, None).is_err());
+    }
+
+    #[test]
+    fn manifest_freeze_persists_until_cleared() {
+        let mut schedule = FaultSchedule::default();
+        schedule
+            .insert("a-freeze".to_owned(), OriginFault::HlsManifestFreeze { account: "input-a".to_owned() })
+            .unwrap();
+
+        assert!(schedule.is_manifest_frozen_for("input-a"));
+        assert!(!schedule.is_manifest_frozen_for("input-b"));
+        schedule.clear("a-freeze").unwrap();
+        assert!(!schedule.is_manifest_frozen_for("input-a"));
     }
 }
