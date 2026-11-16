@@ -275,10 +275,10 @@ impl HlsAvailabilityReevaluationCycle {
         self.handoff_defer_until_ms.map_or(self.deadline_ms, |defer| defer.max(self.deadline_ms))
     }
 
-    /// Starts the next cycle of the same worker. A member-handoff deferral belongs to one session
-    /// incarnation, so a cycle that continues on a different session starts without it.
-    pub(crate) fn successor(&self, now_ms: u64, same_session: bool) -> Self {
-        if same_session {
+    /// Starts the next cycle of the same worker. A member-handoff deferral belongs to one handoff,
+    /// so the next cycle starts without it when that handoff is over.
+    pub(crate) fn successor(&self, now_ms: u64, same_handoff: bool) -> Self {
+        if same_handoff {
             self.restart(now_ms)
         } else {
             Self::new(now_ms)
@@ -649,6 +649,24 @@ pub(super) async fn run_hls_availability_reevaluation_attempt(
     }
 }
 
+/// Whether the next cycle still waits for the member handoff of the previous one. The same
+/// evidence keeps it, so a finished handoff still commits the terminal it deferred. New evidence
+/// keeps it only while the handoff runs on the same session; after that, a terminal evaluation may
+/// request a handoff for the current member.
+pub(super) async fn continues_member_handoff(
+    session: &HlsSessionHandle,
+    prior_owner_key: &HlsAvailabilityReevaluationOwnerKey,
+    owner_key: &HlsAvailabilityReevaluationOwnerKey,
+) -> bool {
+    if prior_owner_key == owner_key {
+        return true;
+    }
+    if prior_owner_key.session_incarnation != owner_key.session_incarnation {
+        return false;
+    }
+    session.read().await.origin_account_runtime.as_ref().is_some_and(|runtime| runtime.member_handoff_pending())
+}
+
 async fn run_hls_availability_reevaluation(
     ctx: HlsCtx,
     mut session: HlsSessionHandle,
@@ -657,14 +675,17 @@ async fn run_hls_availability_reevaluation(
     mut refresh_request: Option<OriginRefreshRequest>,
 ) {
     let mut prior_cycle: Option<HlsAvailabilityReevaluationCycle> = None;
-    let mut cycle_session_incarnation = owner_key.session_incarnation;
+    let mut cycle_owner_key = owner_key.clone();
     'cycles: loop {
         let now_ms = ctx.hls_proxy.now_ms();
-        let mut cycle = prior_cycle.as_ref().map_or_else(
-            || HlsAvailabilityReevaluationCycle::new(now_ms),
-            |prior| prior.successor(now_ms, cycle_session_incarnation == owner_key.session_incarnation),
-        );
-        cycle_session_incarnation = owner_key.session_incarnation;
+        let mut cycle = match prior_cycle.as_ref() {
+            Some(prior) => {
+                let same_handoff = continues_member_handoff(&session, &cycle_owner_key, &owner_key).await;
+                prior.successor(now_ms, same_handoff)
+            }
+            None => HlsAvailabilityReevaluationCycle::new(now_ms),
+        };
+        cycle_owner_key.clone_from(&owner_key);
         loop {
             match run_hls_availability_reevaluation_attempt(
                 &ctx,

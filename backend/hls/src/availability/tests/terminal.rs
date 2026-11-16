@@ -845,8 +845,38 @@ async fn handoff_defer_retry_backoff_grows_across_restarts_and_resets_when_defer
     assert_eq!(restarted.handoff_defer_until_ms, None);
 }
 
+#[tokio::test]
+async fn member_handoff_deferral_ends_with_its_handoff_on_new_evidence() {
+    let fixture = post_refresh_terminal_fixture("post-refresh-defer-handoff-completed", true).await;
+    let runtime = crate::member_health::test_support::RecordingMemberRuntime::new(Some(
+        crate::member_health::test_support::RecordingMemberRuntime::default_policy(),
+    ));
+    runtime.set_member_handoff_pending(true);
+    fixture.session.write().await.origin_account_runtime = Some(runtime.clone());
+    let prior_key = fixture
+        .ctx
+        .hls_proxy
+        .availability_reevaluation_owner_key(&fixture.session, &fixture.proxy_session_id)
+        .await
+        .expect("owner key");
+    let mut new_evidence_key = prior_key.clone();
+    new_evidence_key.origin_progress_generation = new_evidence_key.origin_progress_generation.saturating_add(1);
+    let mut other_session_key = new_evidence_key.clone();
+    other_session_key.session_incarnation = crate::session_store::HlsSessionIncarnation::for_test(u64::MAX);
+
+    assert!(continues_member_handoff(&fixture.session, &prior_key, &prior_key).await);
+    assert!(continues_member_handoff(&fixture.session, &prior_key, &new_evidence_key).await);
+    assert!(!continues_member_handoff(&fixture.session, &prior_key, &other_session_key).await);
+
+    // The handoff finished: the same evidence still commits the deferred terminal, new evidence
+    // starts a cycle that may request a handoff for the current member.
+    runtime.set_member_handoff_pending(false);
+    assert!(continues_member_handoff(&fixture.session, &prior_key, &prior_key).await);
+    assert!(!continues_member_handoff(&fixture.session, &prior_key, &new_evidence_key).await);
+}
+
 #[test]
-fn handoff_defer_is_kept_for_the_same_session_and_dropped_for_a_successor_session() {
+fn handoff_defer_is_kept_for_the_same_handoff_and_dropped_after_it() {
     let now_ms = 1_000;
     let mut cycle = HlsAvailabilityReevaluationCycle::new(now_ms);
     cycle.handoff_defer_until_ms = Some(now_ms + 10_000);
@@ -857,6 +887,6 @@ fn handoff_defer_is_kept_for_the_same_session_and_dropped_for_a_successor_sessio
     assert_eq!(same.attempts_completed, 3);
 
     let successor = cycle.successor(now_ms, false);
-    assert_eq!(successor.handoff_defer_until_ms, None, "a successor session must not inherit the deferral");
+    assert_eq!(successor.handoff_defer_until_ms, None, "a cycle after the handoff must not inherit the deferral");
     assert_eq!(successor.attempts_completed, 0);
 }
