@@ -4,10 +4,11 @@ use super::{
     manager::{HlsCriticalHandoffStateAccess, HlsProxyManager},
     manifest_acceptance::HlsManifestAcceptanceTrigger,
     media_reserve::{
-        evaluate_startup_admission, HlsLeaseManifestSnapshot, HlsStartupAdmissionDecision, HlsStartupAdmissionInput,
-        HlsStartupAdmissionOriginState,
+        evaluate_startup_admission, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode, HlsStartupAdmissionDecision,
+        HlsStartupAdmissionInput, HlsStartupAdmissionOriginState,
     },
     observability::HlsRecoveryTriggerDiagnostic,
+    origin_progress::HlsOriginPathCondition,
     recovery_timing::{
         bounded_manifest_request_eta_ms, HlsAcceptanceEpisodeTimingSeed, HlsOperationTimeoutMs, HlsRecoveryEtaMs,
         HlsRecoveryTimingPolicy, HlsRecoveryWorkloadEnvelope,
@@ -24,7 +25,9 @@ mod reevaluation;
 mod terminal_cutover;
 mod terminal_pending_owner;
 pub(crate) use self::{
-    manifest_failure::record_retryable_manifest_attempt_failure,
+    manifest_failure::{
+        record_retryable_manifest_attempt_failure, ManifestRetryUrgency, HLS_FAST_MANIFEST_RETRY_MAX_DELAY_MS,
+    },
     terminal_cutover::{
         commit_terminal_tail_if_lease_reserve_requires_cutover_detailed, terminal_bundle_failure_compatibility,
         terminal_bundle_incompatibility,
@@ -42,6 +45,7 @@ pub use self::{
     terminal_cutover::{commit_prepared_runtime_custom_tail, commit_terminal_tail_if_lease_reserve_requires_cutover},
 };
 use std::future::Future;
+use tuliprox_core::model::PlaybackKind;
 
 const HLS_AVAILABILITY_STATE_ACCESS_ATTEMPTS: usize = 3;
 const HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS: u8 = 64;
@@ -177,6 +181,24 @@ pub async fn hls_startup_admission_allows_snapshot(
         let session = session.read().await;
         if session.live_entry_revalidation.required {
             return false;
+        }
+        // A transient archive has no READY timeline. Rejecting its new manifest
+        // forever after a media failure prevents the client from requesting the
+        // very media needed to recover. Permit another media attempt only from
+        // the current origin commit, strictly newer than the last media failure.
+        // This does not clear degradation/failure evidence or claim media success;
+        // ordinary resource authorization, retry budgets and deadlines still apply.
+        if session.origin_playback_kind() == PlaybackKind::Catchup
+            && snapshot.delivery_mode == HlsManifestDeliveryMode::TransientPassthrough
+            && !snapshot.visible_segments.is_empty()
+            && session.origin_control.path_condition == HlsOriginPathCondition::SegmentReadinessFailure
+            && session.transient.last_manifest_commit_identity() == Some(snapshot.source_commit_identity)
+            && session
+                .segment_failure_tracker
+                .last_failure_at_ms
+                .is_some_and(|failed_at| snapshot.source_commit_identity.rendered_at_ms() > failed_at)
+        {
+            return true;
         }
         // A failed object outside a recovered entry window does not invalidate
         // that lease's fully downloaded replacement. Other origin failures keep

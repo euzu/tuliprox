@@ -1,7 +1,7 @@
 //! The refresh owner retries local admission using the manifest attempt's budget.
 use super::{commit::refresh_origin_work_generation_is_current, manifest_fetch_context, OriginRefreshRequest};
 use crate::{
-    availability::record_retryable_manifest_attempt_failure,
+    availability::{record_retryable_manifest_attempt_failure, ManifestRetryUrgency},
     manifest_fetch::{HlsManifestRecoveryUnavailableReason, OriginManifestFetchError},
     origin::{begin_hls_origin_account_io_bounded, HlsOriginAccountIoLeaseGuard},
     HlsBoundAccountAcquireErrorKind, HlsOriginIoContext,
@@ -84,6 +84,7 @@ pub(super) async fn acquire_manifest_provider(
                     progress_generation,
                     &error,
                     request.hls_proxy.now_ms(),
+                    ManifestRetryUrgency::Normal,
                 )
                 .await;
                 let delay_ms = request

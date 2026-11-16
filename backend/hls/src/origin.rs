@@ -830,7 +830,13 @@ fn settled_failed_hls_start_attempt(
         return None;
     }
     let attempt = state.origin_refresh.attempt.as_ref()?;
-    (attempt.provider_failure().is_some() || state.start_segments_exhausted()).then(|| Arc::clone(attempt))
+    // A terminal manifest failure can leave no segments at all. Release that
+    // unstarted account too, so re-entry can select another configured alias.
+    // Established playback and unsettled/superseded work retain their fences.
+    (attempt.provider_failure().is_some()
+        || state.start_segments_exhausted()
+        || (attempt.failed() && !attempt.active_live_playback))
+        .then(|| Arc::clone(attempt))
 }
 
 pub fn hls_origin_account_status(ctx: &HlsCtx, binding: &HlsOriginAccountBinding) -> HlsOriginAccountStatus {
@@ -1337,6 +1343,60 @@ mod tests {
     };
     use crate::{build_proxy_session_id, HlsSession, HlsSessionKey, ProxySessionId};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn hard_manifest_failure_releases_unstarted_binding_and_preserves_protected_work() {
+        #[derive(Clone, Copy, Debug)]
+        enum Protection {
+            None,
+            EstablishedPlayback,
+            OriginWork,
+            SegmentWork,
+            Successor,
+        }
+        for protection in [
+            Protection::None,
+            Protection::EstablishedPlayback,
+            Protection::OriginWork,
+            Protection::SegmentWork,
+            Protection::Successor,
+        ] {
+            let ctx = crate::hls_ctx::HlsCtx::for_test(tuliprox_core::model::Config::default());
+            let mut state = HlsSession::new(HlsSessionKey::new(1, "failed-manifest-cleanup"), b"secret", 1_000);
+            state.origin_account_binding = Some(HlsOriginAccountBinding::new(
+                Arc::from("input"),
+                Arc::from("account"),
+                &state.proxy_session_id,
+                1_000,
+            ));
+            let attempt = Arc::new(crate::HlsManifestAttemptContext::new(
+                crate::HlsManifestCommitRequirement::CommittedManifestAllowed,
+                matches!(protection, Protection::EstablishedPlayback),
+                None,
+            ));
+            attempt.finish(true); // A hard manifest 404 has no failed segments or capacity classification.
+            assert_eq!(attempt.provider_failure(), None);
+            state.origin_refresh.attempt = Some(attempt);
+            let expected = crate::origin_account_runtime::HlsOriginAccountSnapshot::from_session(&state);
+            match protection {
+                Protection::OriginWork => {
+                    state.activity.active_origin_work_count.store(1, std::sync::atomic::Ordering::Release);
+                }
+                Protection::SegmentWork => state.active_segment_fetches = 1,
+                Protection::Successor => state.invalidate_queued_origin_work(),
+                _ => {}
+            }
+            let session = Arc::new(tokio::sync::RwLock::new(state));
+            super::finish_failed_hls_start_for_context(&ctx, &session, Some(expected.generation), Some(&expected))
+                .await;
+            let current = session.read().await;
+            assert_eq!(
+                current.origin_account_binding.as_ref().unwrap().is_detached(),
+                matches!(protection, Protection::None),
+                "{protection:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn healthy_start_cleanup_does_not_wait_for_the_global_lease_store() {

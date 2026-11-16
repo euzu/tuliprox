@@ -2,6 +2,13 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum OriginDelivery {
+    Cache,
+    Direct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OriginResourceKind {
     Segment,
     Map,
@@ -29,6 +36,8 @@ pub enum OriginFetchPhaseError {
     Body,
     CacheWrite,
     Postprocess,
+    /// Failed in local code or local capacity, the origin was not at fault.
+    Local,
 }
 
 /// One origin fetch attempt. All `*_ms` marks are milliseconds since the fetch started,
@@ -50,6 +59,9 @@ pub struct OriginFetchRecord {
     pub headers_ms: Option<u64>,
     pub first_byte_ms: Option<u64>,
     pub body_complete_ms: Option<u64>,
+    pub body_origin_wait_ms: Option<u64>,
+    pub body_consumer_wait_ms: Option<u64>,
+    pub delivery: Option<OriginDelivery>,
     pub network_ms: Option<u64>,
     pub cache_write_ms: Option<u64>,
     pub postprocess_ms: Option<u64>,

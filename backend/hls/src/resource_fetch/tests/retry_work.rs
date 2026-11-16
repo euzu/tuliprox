@@ -253,3 +253,29 @@ async fn retained_work_expires_without_polling_despite_new_viewers_and_manifest_
     drop(work);
     assert_eq!(session.read().await.activity.active_origin_work_count.load(Ordering::Acquire), 0);
 }
+
+#[tokio::test(start_paused = true)]
+async fn catchup_resource_work_is_bounded_and_protected_before_account_preparation() {
+    let key = HlsSessionKey::new(1, "catchup-retry-work")
+        .with_archive_reference(123)
+        .with_archive_identity("synthetic-archive");
+    let session = Arc::new(tokio::sync::RwLock::new(HlsSession::new(key, b"secret", 0)));
+    assert_eq!(session.read().await.origin_playback_kind(), tuliprox_core::model::PlaybackKind::Catchup);
+    let policy = SegmentFetchPolicy::default();
+    let work = HlsOriginRetryWork::for_resource(
+        &session,
+        None,
+        &policy,
+        HlsResourceFetchKind::Segment,
+        HlsResourceFetchSource::Transient,
+    )
+    .await
+    .expect("catchup resource preparation must own bounded work protection");
+    assert_eq!(session.read().await.activity.active_origin_work_count.load(Ordering::Acquire), 1);
+    let deadline = work.deadline();
+    tokio::time::advance(deadline.saturating_duration_since(tokio::time::Instant::now())).await;
+    tokio::task::yield_now().await;
+    assert_eq!(session.read().await.activity.active_origin_work_count.load(Ordering::Acquire), 0);
+    drop(work);
+    assert_eq!(session.read().await.activity.active_origin_work_count.load(Ordering::Acquire), 0);
+}

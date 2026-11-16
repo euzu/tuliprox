@@ -5,6 +5,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use tokio::time::Instant;
+use tuliprox_core::model::PlaybackKind;
 use tuliprox_session::{ActiveProviderManager, ProviderWorkReservation};
 
 /// One fixed resource budget, shared by attempts and (for direct streams) body.
@@ -16,6 +17,7 @@ pub struct HlsOriginRetryWork {
     active: AtomicBool,
     provider: Mutex<Option<ProviderWorkReservation>>,
     timer: Mutex<Option<tokio::task::AbortHandle>>,
+    protects_provider: bool,
 }
 
 impl std::fmt::Debug for HlsOriginRetryWork {
@@ -63,10 +65,12 @@ impl HlsOriginRetryWork {
         deadline: Instant,
     ) -> Option<Arc<Self>> {
         let mut state = session.write().await;
-        if state.origin_playback_kind() != tuliprox_core::model::PlaybackKind::LiveHls {
-            return None;
-        }
-        let provider = manager.and_then(|manager| {
+        let protects_provider = match state.origin_playback_kind() {
+            PlaybackKind::LiveHls => true,
+            PlaybackKind::Catchup => false,
+            _ => return None,
+        };
+        let provider = manager.filter(|_| protects_provider).and_then(|manager| {
             let binding = state.origin_account_binding.as_ref()?;
             manager.reserve_hls_origin_work(
                 &binding.session_owner,
@@ -83,6 +87,7 @@ impl HlsOriginRetryWork {
             active: AtomicBool::new(true),
             provider: Mutex::new(provider),
             timer: Mutex::new(None),
+            protects_provider,
         });
         let weak = Arc::downgrade(&work);
         let timer = tokio::spawn(async move {
@@ -111,6 +116,11 @@ impl HlsOriginRetryWork {
         let mut provider = self.provider.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.active.load(Ordering::Acquire) || Instant::now() >= self.deadline {
             return Err(HlsOriginResourceFetchError::Timeout);
+        }
+        // Catchup keeps the existing per-attempt I/O allocation contract.
+        // Its bounded work counter only prevents lifecycle detachment during preparation.
+        if !self.protects_provider {
+            return Ok(());
         }
         if let Some(right) = provider.as_ref() {
             return if right.is_current() {

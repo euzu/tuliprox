@@ -219,6 +219,13 @@
 
 ## 🌟 New Features
 
+- **HLS origin telemetry timing split and diagnosis.** Shared HLS origin fetch telemetry splits segment body duration
+  into origin wait and consumer wait, marks real manifest response headers, and reports delivery mode (`cache` or
+  `direct`). Aggregate snapshots gain transfer-quality percentiles (`headers_ms_p50`, `headers_ms_p95`,
+  `body_origin_wait_ms_p95`, `body_consumer_wait_ms_p95`) and a per-input `diagnosis` block that counts samples under
+  discrete causes (`ok`, `remote_http_error`, `origin_unreachable`, `origin_slow`, `local_slow`, `downstream_slow`,
+  `unknown`, `cancelled`). See [Shared HLS Origin Telemetry](docs/src/operator/hls-origin-telemetry.md).
+
 - **Plugins can provide a media library (`media-provider-v1-1`).** A new additive ABI interface lets a `type: plugin`
   input deliver movies, series, seasons and episodes with metadata (hook `media.fetch`, world `media-input-plugin`).
   The host maps them with the same mapper and storage as the Plex, Emby, Jellyfin and Silo inputs, so plugin series
@@ -1564,6 +1571,26 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Catchup resource retry preparation retains bounded work ownership.** Catchup preparation now acquires bounded
+  retry work across attempts without provider reservation, preventing idle lifecycle handling from detaching the
+  session between attempts.
+
+- **Fresh catchup manifest can retry after segment readiness failure.** Catchup startup admission now permits a current,
+  nonempty snapshot when its commit is strictly newer than the recorded media failure, allowing the session to fetch the
+  media needed to recover.
+
+- **Clean catchup media EOF clears segment readiness degradation.** Successful catchup segment downloads now reset
+  segment readiness failure condition back to progress expected only after clean EOF of the media resource.
+
+- **First short Live manifest 5xx defers terminal fallback.** A temporary HTTP 5xx error on the first shared manifest
+  attempt of a healthy Live session with a retry delay of at most 250 ms no longer commits the terminal "channel
+  unavailable" fallback and does not mark the session as degraded. The scheduled retry gets a chance to restore
+  progress; a failed retry records the degradation with the normal policy.
+
+- **Hard initial manifest failure releases unstarted provider account binding.** Terminal failed startup attempts
+  without active live playback now release their account binding when no segments exist, allowing re-entry to select
+  another configured alias instead of exhausting provider connection limits.
 
 - **Exhausted manifest refresh triggers member failover instead of terminal state.** When an active HLS group member's
   manifest refresh fails persistently (such as repeated HTTP 503 errors or an origin manifest that freezes and stops

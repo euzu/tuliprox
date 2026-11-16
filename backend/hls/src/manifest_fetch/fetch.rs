@@ -12,9 +12,14 @@ use super::{
 #[cfg(any(test, feature = "test-support"))]
 use super::{model::LiveHlsOriginEntry, selection_log::log_origin_refresh_retry_scheduled};
 use crate::{
-    append_hls_provider_session_headers, availability::record_retryable_manifest_attempt_failure,
-    headers::merge_hls_provider_session_headers, manifest_origin_binding::HlsManifestOriginBinding,
-    observability::hls_origin_log_value, scrub_hls_origin_headers, MAX_MANUAL_REDIRECTS,
+    append_hls_provider_session_headers,
+    availability::{
+        record_retryable_manifest_attempt_failure, ManifestRetryUrgency, HLS_FAST_MANIFEST_RETRY_MAX_DELAY_MS,
+    },
+    headers::merge_hls_provider_session_headers,
+    manifest_origin_binding::HlsManifestOriginBinding,
+    observability::hls_origin_log_value,
+    scrub_hls_origin_headers, MAX_MANUAL_REDIRECTS,
 };
 use axum::http::HeaderMap;
 use futures::FutureExt;
@@ -183,12 +188,13 @@ async fn fetch_hls_origin_manifest_global_policy(
         if !reuse_recovery_attempt && context.attempt.as_ref().is_some_and(|attempt| !attempt.begin_logical_attempt()) {
             return Err(OriginManifestFetchError::RetryExhausted);
         }
-        let fetch_result = observe_manifest_attempt(context, shared_index, async {
+        let input_ref = &input_source;
+        let fetch_result = observe_manifest_attempt(context, shared_index, |timing| async move {
             let response_result = if context.use_manual_redirects {
                 send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
                     &context.app_config,
                     &context.no_redirect_client,
-                    &input_source,
+                    input_ref,
                     Some(&context.headers),
                     context.origin_entry.url(),
                     MAX_MANUAL_REDIRECTS,
@@ -199,7 +205,7 @@ async fn fetch_hls_origin_manifest_global_policy(
                 send_input_with_retry_and_provider_policy_with_options_result(
                     &context.app_config,
                     &context.client,
-                    &input_source,
+                    input_ref,
                     Some(&context.headers),
                     context.origin_entry.url(),
                     fetch_options,
@@ -210,7 +216,7 @@ async fn fetch_hls_origin_manifest_global_policy(
                 Ok(response_result) => {
                     let provider_url_index = response_result.provider_url_index;
                     let resolved_request_url = resolved_hls_manifest_request_url_from_input(
-                        &input_source,
+                        input_ref,
                         provider_url_index,
                         context.origin_entry.url(),
                     );
@@ -219,6 +225,7 @@ async fn fetch_hls_origin_manifest_global_policy(
                         provider_url_index,
                         resolved_request_url,
                         context.origin_manifest_timeout_ms,
+                        timing,
                     )
                     .await
                 }
@@ -238,8 +245,6 @@ async fn fetch_hls_origin_manifest_global_policy(
         match fetch_result {
             Ok(fetched) => return Ok(fetched.with_attempts(attempt_index + 1)),
             Err(err) if is_hls_retryable_initial_manifest_fetch_error(&err) && shared_index + 1 < attempts => {
-                record_retryable_manifest_attempt_failure(context, progress_generation, &err, current_time_millis())
-                    .await;
                 let retry_after_ms = match &err {
                     OriginManifestFetchError::RetryableStatus(_, Some(retry_after_ms)) => {
                         let session = context.session.read().await;
@@ -249,6 +254,19 @@ async fn fetch_hls_origin_manifest_global_policy(
                 };
                 let jitter_ms = if retry_after_ms.is_some() { 0 } else { context.retry_policy.sample_jitter_ms() };
                 let delay_ms = next_retry_delay_ms(&context.retry_policy, shared_index, retry_after_ms, jitter_ms);
+                let first_fast_retry = shared_index == 0
+                    && delay_ms <= HLS_FAST_MANIFEST_RETRY_MAX_DELAY_MS
+                    && matches!(&err, OriginManifestFetchError::RetryableStatus(status, _) if status.is_server_error());
+                let urgency =
+                    if first_fast_retry { ManifestRetryUrgency::FirstFastRetry } else { ManifestRetryUrgency::Normal };
+                record_retryable_manifest_attempt_failure(
+                    context,
+                    progress_generation,
+                    &err,
+                    current_time_millis(),
+                    urgency,
+                )
+                .await;
                 log_manifest_retry_scheduled(
                     context,
                     ManifestRetryLogKind::InitialFetch,
@@ -293,9 +311,7 @@ async fn resolve_single_variant_master_manifest(
         &master.provider_session_headers,
         &variant_url,
     );
-    let mut variant = observe_manifest_attempt(
-        context,
-        0,
+    let mut variant = observe_manifest_attempt(context, 0, |timing| {
         timeout(
             Duration::from_millis(context.origin_manifest_timeout_ms.max(1)),
             fetch_origin_manifest_once(
@@ -306,10 +322,11 @@ async fn resolve_single_variant_master_manifest(
                 context.use_manual_redirects,
                 master.provider_url_index,
                 context.origin_manifest_timeout_ms,
+                timing,
             ),
         )
-        .map(|result| result.unwrap_or_else(|_| Err(OriginManifestFetchError::Timeout))),
-    )
+        .map(|result| result.unwrap_or_else(|_| Err(OriginManifestFetchError::Timeout)))
+    })
     .await?;
     if classify_hls_playlist(&variant.body) != HlsPlaylistKind::Media {
         return Err(OriginManifestFetchError::Request(
@@ -418,8 +435,7 @@ pub(super) async fn refresh_from_live_hls_entrypoint_with_retries(
 
     for attempt_index in 0..attempts {
         let delay_ms = retry_after_delay_ms.take().unwrap_or_else(|| {
-            let jitter = retry_policy.sample_jitter_ms();
-            retry_policy.delay_for_attempt_ms(attempt_index, jitter).unwrap_or_default()
+            retry_policy.delay_for_attempt_ms(attempt_index, retry_policy.sample_jitter_ms()).unwrap_or_default()
         });
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -435,6 +451,7 @@ pub(super) async fn refresh_from_live_hls_entrypoint_with_retries(
                 use_manual_redirects,
                 None,
                 origin_manifest_timeout_ms,
+                None,
             ),
         )
         .await

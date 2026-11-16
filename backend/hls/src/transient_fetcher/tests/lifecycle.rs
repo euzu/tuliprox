@@ -1,6 +1,78 @@
 use super::*;
 
 #[tokio::test]
+async fn stale_generation_clean_media_eof_does_not_heal_new_account() {
+    let origin =
+        spawn_test_origin("200 OK", vec![("Content-Type", "application/octet-stream")], b"complete".to_vec()).await;
+    let url = format!("{}/segment.ts", origin.base_url);
+    let fixture = TestDirectResponseFixture::new(TransientResourceKind::Segment, url.clone());
+    {
+        let mut state = fixture.session.write().await;
+        state.key = state.key.clone().with_archive_reference(123);
+        state.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
+    }
+    fixture.seed_segment_failure().await;
+    assert_eq!(fixture.segment_failure_count().await, 1);
+
+    // Bump the account generation after the resource was created.
+    fixture.session.write().await.transient.invalidate_origin_resources();
+
+    let decoded = fetch_direct_decoded(url, TransientResourceKind::Segment, None).await.unwrap();
+    let response = fixture.response(decoded);
+    assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap().as_ref(), b"complete");
+
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        fixture.session.read().await.origin_control.path_condition,
+        HlsOriginPathCondition::SegmentReadinessFailure,
+        "stale generation success must leave SegmentReadinessFailure unchanged"
+    );
+    assert_eq!(
+        fixture.segment_failure_count().await,
+        1,
+        "stale generation success must leave failure counter unchanged"
+    );
+}
+
+#[tokio::test]
+async fn catchup_clean_media_eof_clears_only_media_degradation_for_later_entries() {
+    let origin =
+        spawn_test_origin("200 OK", vec![("Content-Type", "application/octet-stream")], b"complete".to_vec()).await;
+    let url = format!("{}/segment.ts", origin.base_url);
+    let fixture = TestDirectResponseFixture::new(TransientResourceKind::Segment, url.clone());
+    {
+        let mut state = fixture.session.write().await;
+        state.key = state.key.clone().with_archive_reference(123);
+        state.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
+    }
+    fixture.seed_segment_failure().await;
+    let decoded = fetch_direct_decoded(url, TransientResourceKind::Segment, None).await.unwrap();
+    let response = fixture.response(decoded);
+    assert_eq!(
+        fixture.session.read().await.origin_control.path_condition,
+        HlsOriginPathCondition::SegmentReadinessFailure,
+        "headers alone cannot clear media failure"
+    );
+    assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap().as_ref(), b"complete");
+    fixture.wait_for_segment_failure_count(0).await;
+    assert_eq!(
+        fixture.session.read().await.origin_control.path_condition,
+        HlsOriginPathCondition::ProgressExpected,
+        "clean current archive media must not leave later starts permanently degraded"
+    );
+    fixture.session.write().await.origin_control.path_condition = HlsOriginPathCondition::HardFetchFailure;
+    super::super::record_successful_transient_segment_fetch(&fixture.session, &fixture.resource).await;
+    assert_eq!(
+        fixture.session.read().await.origin_control.path_condition,
+        HlsOriginPathCondition::HardFetchFailure,
+        "an unrelated hard failure remains authoritative"
+    );
+}
+
+#[tokio::test]
 async fn direct_segment_success_resets_failure_state_only_after_clean_eof() {
     let identity = b"complete-segment";
     let origin =
@@ -384,4 +456,32 @@ async fn direct_stream_deadline_releases_origin_without_downstream_polling() {
     assert!(to_bytes(response.into_body(), usize::MAX).await.is_err());
     assert_eq!(fixture.segment_failure_count().await, 1);
     assert_eq!(origin.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn stale_generation_key_failure_does_not_degrade_new_account() {
+    let fixture = TestDirectResponseFixture::new(TransientResourceKind::Key, "http://127.0.0.1:9/key.bin".to_string());
+    {
+        let mut state = fixture.session.write().await;
+        state.key = state.key.clone().with_archive_reference(123);
+        // The resource keeps the old account generation; the session moves on to a new account.
+        state.transient.invalidate_origin_resources();
+    }
+
+    let permanent = super::super::record_temporary_transient_segment_fetch_failure(
+        &fixture.session,
+        &fixture.resource,
+        &SegmentFetchPolicy::default(),
+        1_000,
+    )
+    .await;
+
+    assert!(!permanent);
+    let session = fixture.session.read().await;
+    assert_eq!(
+        session.origin_control.path_condition,
+        HlsOriginPathCondition::ProgressExpected,
+        "a failure of the previous account must not degrade the new account"
+    );
+    assert_eq!(session.segment_failure_tracker.last_failure_at_ms, None);
 }

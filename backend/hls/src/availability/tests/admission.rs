@@ -1,4 +1,110 @@
 use super::*;
+use crate::{SegmentFetchPolicy, TransientResourceKind, TransientResourceRef};
+
+#[tokio::test]
+async fn catchup_reentry_after_key_failure_allows_new_current_manifest() {
+    let ctx = crate::HlsCtx::for_test(Config::default());
+    let mut state =
+        HlsSession::new(HlsSessionKey::new(1, "archive-key-reentry").with_archive_reference(123), b"secret", 0);
+    state.mode = crate::HlsSessionMode::TransientPassthrough {
+        reason: crate::TransientPassthroughReason::UnsupportedTag { tag: "EXT-X-ENDLIST".into() },
+    };
+    let key_resource = TransientResourceRef::new(
+        TransientResourceKind::Key,
+        "http://127.0.0.1/enc.key",
+        b"secret",
+        0,
+        60_000,
+        Some("key".to_string()),
+    );
+    state.transient.upsert_resources([key_resource.clone()]);
+    let session = Arc::new(tokio::sync::RwLock::new(state));
+    let policy = SegmentFetchPolicy::default();
+
+    assert!(
+        !crate::transient_fetcher::record_temporary_transient_segment_fetch_failure(
+            &session,
+            &key_resource,
+            &policy,
+            100,
+        )
+        .await
+    );
+
+    let body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-KEY:METHOD=AES-128,URI=\"enc.key\"\n#EXTINF:4,\n0.ts\n#EXT-X-ENDLIST\n";
+    session.write().await.transient.replace_manifest_with_semantics(body.into(), 101, Some(4_000));
+    let mut snapshot = pressure_manifest(4_000);
+    snapshot.delivery_mode = HlsManifestDeliveryMode::TransientPassthrough;
+    snapshot.source_commit_identity = session.read().await.transient.last_manifest_commit_identity().unwrap();
+
+    assert!(
+        hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 102).await,
+        "a fresh current catchup manifest must be admitted after key failure"
+    );
+    assert_eq!(
+        session.read().await.segment_failure_tracker.consecutive_temporary_failures,
+        0,
+        "failure counter stays unchanged after key-only failure"
+    );
+    assert_eq!(session.read().await.origin_control.path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
+}
+
+#[tokio::test]
+async fn catchup_reentry_after_media_failure_can_retry_only_a_new_current_manifest() {
+    let ctx = crate::HlsCtx::for_test(Config::default());
+    let mut state = HlsSession::new(HlsSessionKey::new(1, "archive-reentry").with_archive_reference(123), b"secret", 0);
+    state.mode = crate::HlsSessionMode::TransientPassthrough {
+        reason: crate::TransientPassthroughReason::UnsupportedTag { tag: "EXT-X-ENDLIST".into() },
+    };
+    state.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
+    state.segment_failure_tracker.last_failure_at_ms = Some(100);
+    state.segment_failure_tracker.consecutive_temporary_failures = 3;
+    let body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\n0.ts\n#EXT-X-ENDLIST\n";
+    state.transient.replace_manifest_with_semantics(body.into(), 101, Some(4_000));
+    let mut snapshot = pressure_manifest(4_000);
+    snapshot.delivery_mode = HlsManifestDeliveryMode::TransientPassthrough;
+    snapshot.source_commit_identity = state.transient.last_manifest_commit_identity().unwrap();
+    let session = Arc::new(tokio::sync::RwLock::new(state));
+    assert!(
+        hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 102).await,
+        "a new archive entry must be able to attempt media after a fresh manifest"
+    );
+    assert_eq!(
+        session.read().await.segment_failure_tracker.consecutive_temporary_failures,
+        3,
+        "manifest publication must not pretend that media recovered"
+    );
+    assert_eq!(session.read().await.origin_control.path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
+    session.write().await.segment_failure_tracker.last_failure_at_ms = Some(101);
+    assert!(
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 102).await,
+        "old manifest cannot revive a later failed attempt"
+    );
+    session.write().await.segment_failure_tracker.last_failure_at_ms = Some(100);
+    snapshot.source_commit_identity = HlsManifestCommitIdentity::committed(99, 102);
+    assert!(
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 103).await,
+        "foreign snapshot cannot grant retry"
+    );
+    snapshot.source_commit_identity = session.read().await.transient.last_manifest_commit_identity().unwrap();
+    session.write().await.key = HlsSessionKey::new(1, "live");
+    assert!(
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 103).await,
+        "live admission stays unchanged"
+    );
+    session.write().await.key = HlsSessionKey::new(1, "archive-reentry").with_archive_reference(123);
+    session.write().await.origin_control.path_condition = HlsOriginPathCondition::HardFetchFailure;
+    assert!(
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 103).await,
+        "manifest failure cannot be bypassed"
+    );
+    session.write().await.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
+    session.write().await.require_live_entry_revalidation(1);
+    assert!(
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 103).await,
+        "revalidation remains fail closed"
+    );
+}
 
 #[tokio::test]
 async fn terminal_pending_capacity_failure_commits_terminal_unavailable() {

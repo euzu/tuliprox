@@ -654,7 +654,7 @@ async fn shared_manifest_decodes_supported_origin_content_codings_and_keeps_prov
         headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("br"));
 
         let fetched =
-            fetch_origin_manifest_once(&entry_url, &headers, &client, &no_redirect_client, false, None, 1_000)
+            fetch_origin_manifest_once(&entry_url, &headers, &client, &no_redirect_client, false, None, 1_000, None)
                 .await
                 .unwrap_or_else(|error| panic!("decode {coding} manifest: {error:?}"));
 
@@ -679,10 +679,18 @@ async fn shared_manifest_magic_sniffs_gzip_only_in_manifest_mode() {
     let (entry_url, _) = spawn_test_origin(TestOriginResponse::ok(gzip(TEST_MANIFEST))).await;
     let (client, no_redirect_client) = test_clients();
 
-    let fetched =
-        fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 1_000)
-            .await
-            .expect("decode magic-sniffed gzip manifest");
+    let fetched = fetch_origin_manifest_once(
+        &entry_url,
+        &HeaderMap::new(),
+        &client,
+        &no_redirect_client,
+        false,
+        None,
+        1_000,
+        None,
+    )
+    .await
+    .expect("decode magic-sniffed gzip manifest");
 
     assert_eq!(fetched.body.as_bytes(), TEST_MANIFEST);
 }
@@ -703,9 +711,10 @@ async fn direct_manual_redirect_reapplies_identity_after_cross_origin_scrubbing(
     headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
     headers.insert(header::COOKIE, HeaderValue::from_static("sid=secret"));
 
-    let fetched = fetch_origin_manifest_once(&entry_url, &headers, &client, &no_redirect_client, true, None, 1_000)
-        .await
-        .expect("follow manual manifest redirect");
+    let fetched =
+        fetch_origin_manifest_once(&entry_url, &headers, &client, &no_redirect_client, true, None, 1_000, None)
+            .await
+            .expect("follow manual manifest redirect");
     assert_eq!(fetched.body.as_bytes(), TEST_MANIFEST);
 
     let redirect_request = redirect_request_receiver.await.expect("captured redirect request");
@@ -723,10 +732,18 @@ async fn shared_manifest_limit_applies_after_decompression() {
     let (entry_url, _) = spawn_test_origin(response).await;
     let (client, no_redirect_client) = test_clients();
 
-    let error =
-        fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 2_000)
-            .await
-            .expect_err("decoded manifest above limit must fail");
+    let error = fetch_origin_manifest_once(
+        &entry_url,
+        &HeaderMap::new(),
+        &client,
+        &no_redirect_client,
+        false,
+        None,
+        2_000,
+        None,
+    )
+    .await
+    .expect_err("decoded manifest above limit must fail");
 
     assert!(matches!(
         error,
@@ -742,7 +759,7 @@ async fn shared_manifest_deadline_includes_magic_prefix_read() {
     let (client, no_redirect_client) = test_clients();
 
     let error =
-        fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 10)
+        fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 10, None)
             .await
             .expect_err("prefix read must honor manifest deadline");
 
@@ -759,7 +776,7 @@ async fn shared_manifest_encoded_body_timeout_stays_structured_timeout() {
     let (client, no_redirect_client) = test_clients();
 
     let error =
-        fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 10)
+        fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 10, None)
             .await
             .expect_err("encoded body read must honor manifest deadline");
 
@@ -781,6 +798,7 @@ async fn shared_manifest_distinguishes_invalid_utf8_from_decoder_failure() {
         false,
         None,
         1_000,
+        None,
     )
     .await
     .expect_err("invalid UTF-8 must fail");
@@ -792,6 +810,7 @@ async fn shared_manifest_distinguishes_invalid_utf8_from_decoder_failure() {
         false,
         None,
         1_000,
+        None,
     )
     .await
     .expect_err("corrupt gzip must fail");
@@ -809,10 +828,18 @@ async fn shared_manifest_rejects_encoded_partial_content() {
     let (entry_url, _) = spawn_test_origin(response).await;
     let (client, no_redirect_client) = test_clients();
 
-    let error =
-        fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 1_000)
-            .await
-            .expect_err("encoded partial manifest must fail");
+    let error = fetch_origin_manifest_once(
+        &entry_url,
+        &HeaderMap::new(),
+        &client,
+        &no_redirect_client,
+        false,
+        None,
+        1_000,
+        None,
+    )
+    .await
+    .expect_err("encoded partial manifest must fail");
 
     assert!(matches!(error, OriginManifestFetchError::ContentCoding(ContentCodingError::EncodedPartialContent)));
 }

@@ -7,7 +7,8 @@ use super::{
 };
 use crate::{
     origin_telemetry::{
-        OriginFetchOutcome, OriginFetchPhaseError, OriginFetchRecord, OriginResourceKind, OriginTelemetryRecorder,
+        OriginDelivery, OriginFetchOutcome, OriginFetchPhaseError, OriginFetchRecord, OriginResourceKind,
+        OriginTelemetryRecorder,
     },
     HlsLogIdentity, SegmentFetchPolicy,
 };
@@ -183,6 +184,8 @@ async fn slow_http_200_body_is_network_time_and_ok() {
     assert_eq!(record.media_duration_ms, Some(4_000));
     assert!(record.network_ms.expect("network") >= 190, "{record:?}");
     assert!(record.headers_ms.expect("headers") < 150, "{record:?}");
+    assert!(record.body_origin_wait_ms.expect("origin wait") >= 180, "{record:?}");
+    assert_eq!(record.delivery, Some(OriginDelivery::Cache));
     assert!(record.first_byte_ms.is_some());
     assert!(record.segment_id.is_some());
     assert_eq!(record.input_name, "unknown");
@@ -377,6 +380,7 @@ async fn direct_stream_finishes_when_the_returned_body_is_read_or_dropped() {
     assert_eq!(finished.len(), 1);
     assert_eq!((finished[0].outcome, finished[0].bytes_read), (OriginFetchOutcome::Ok, 10));
     assert_eq!(finished[0].cache_ready_ms, None);
+    assert_eq!(finished[0].delivery, Some(OriginDelivery::Direct));
 
     let hand_off: Commit<DynReader> = Box::new(|response| async move { Ok(response.body) }.boxed());
     let abandoned = run(address, &policy, hand_off).await.expect("fetch");
@@ -384,6 +388,7 @@ async fn direct_stream_finishes_when_the_returned_body_is_read_or_dropped() {
     let cancelled = records(&mut rx);
     assert_eq!(cancelled.len(), 1);
     assert_eq!(cancelled[0].outcome, OriginFetchOutcome::Cancelled);
+    assert_eq!(cancelled[0].delivery, Some(OriginDelivery::Direct));
 }
 
 #[tokio::test]
@@ -403,4 +408,310 @@ async fn disabled_recorder_changes_nothing_and_records_nothing() {
     assert_eq!(connections.load(Ordering::Relaxed), 1);
     assert!(policy.telemetry.snapshot().is_none());
     assert!(!policy.telemetry.is_enabled());
+}
+
+struct ControllableReader {
+    steps: std::collections::VecDeque<std::task::Poll<std::io::Result<Vec<u8>>>>,
+}
+
+impl tokio::io::AsyncRead for ControllableReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.steps.pop_front() {
+            Some(std::task::Poll::Ready(Ok(data))) => {
+                buf.put_slice(&data);
+                std::task::Poll::Ready(Ok(()))
+            }
+            Some(std::task::Poll::Ready(Err(err))) => std::task::Poll::Ready(Err(err)),
+            Some(std::task::Poll::Pending) => {
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+            None => std::task::Poll::Ready(Ok(())),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_origin_body_gives_origin_wait_and_small_consumer_wait() {
+    use futures::task::noop_waker_ref;
+    let mut cx = std::task::Context::from_waker(noop_waker_ref());
+    let (recorder, mut rx) = recorder();
+    let telemetry = super::telemetry::AttemptTelemetry::begin(
+        &recorder,
+        "input",
+        OriginResourceKind::Segment,
+        Some("cache_key"),
+        0,
+    );
+    telemetry.mark_headers(200, Some(10));
+
+    let reader = ControllableReader {
+        steps: std::collections::VecDeque::from([
+            std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(vec![1, 2, 3, 4, 5])),
+            std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(vec![6, 7, 8, 9, 10])),
+            std::task::Poll::Ready(Ok(vec![])),
+        ]),
+    };
+    let mut body = telemetry.wrap(Box::pin(reader), Some(10));
+
+    let mut buf = [0_u8; 16];
+    let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_pending());
+
+    tokio::time::advance(Duration::from_millis(80)).await;
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 5);
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_pending());
+
+    tokio::time::advance(Duration::from_millis(70)).await;
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 5);
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 0);
+
+    let result: Result<(), HlsOriginResourceFetchError> = Ok(());
+    telemetry.finish(&result);
+
+    let records = records(&mut rx);
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.outcome, OriginFetchOutcome::Ok);
+    assert_eq!(record.delivery, Some(OriginDelivery::Cache));
+    assert_eq!(record.body_origin_wait_ms, Some(150));
+    assert_eq!(record.body_consumer_wait_ms, Some(0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_consumer_with_fast_origin_gives_consumer_wait() {
+    use futures::task::noop_waker_ref;
+    let mut cx = std::task::Context::from_waker(noop_waker_ref());
+    let (recorder, mut rx) = recorder();
+    let telemetry = super::telemetry::AttemptTelemetry::begin(
+        &recorder,
+        "input",
+        OriginResourceKind::Segment,
+        Some("cache_key"),
+        0,
+    );
+    telemetry.mark_headers(200, Some(10));
+
+    let reader = ControllableReader {
+        steps: std::collections::VecDeque::from([
+            std::task::Poll::Ready(Ok(vec![1, 2, 3, 4, 5])),
+            std::task::Poll::Ready(Ok(vec![6, 7, 8, 9, 10])),
+            std::task::Poll::Ready(Ok(vec![])),
+        ]),
+    };
+    let mut body = telemetry.wrap(Box::pin(reader), Some(10));
+
+    let mut buf = [0_u8; 16];
+    let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 5);
+
+    tokio::time::advance(Duration::from_millis(100)).await;
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 5);
+
+    tokio::time::advance(Duration::from_millis(40)).await;
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 0);
+
+    let result: Result<(), HlsOriginResourceFetchError> = Ok(());
+    telemetry.finish(&result);
+
+    let records = records(&mut rx);
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.outcome, OriginFetchOutcome::Ok);
+    assert_eq!(record.delivery, Some(OriginDelivery::Cache));
+    assert_eq!(record.body_origin_wait_ms, Some(0));
+    assert_eq!(record.body_consumer_wait_ms, Some(140));
+}
+
+#[tokio::test(start_paused = true)]
+async fn delay_between_headers_and_body_attach_does_not_show_up_in_consumer_wait() {
+    use futures::task::noop_waker_ref;
+    let mut cx = std::task::Context::from_waker(noop_waker_ref());
+    let (recorder, mut rx) = recorder();
+    let telemetry = super::telemetry::AttemptTelemetry::begin(
+        &recorder,
+        "input",
+        OriginResourceKind::Segment,
+        Some("cache_key"),
+        0,
+    );
+    telemetry.mark_headers(200, Some(10));
+
+    // Time spent reading content-coding prefix / setting up decoder before body attach.
+    tokio::time::advance(Duration::from_millis(50)).await;
+
+    let reader = ControllableReader {
+        steps: std::collections::VecDeque::from([
+            std::task::Poll::Ready(Ok(vec![1, 2, 3, 4, 5])),
+            std::task::Poll::Ready(Ok(vec![6, 7, 8, 9, 10])),
+            std::task::Poll::Ready(Ok(vec![])),
+        ]),
+    };
+    let mut body = telemetry.wrap(Box::pin(reader), Some(10));
+
+    let mut buf = [0_u8; 16];
+    let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 5);
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 5);
+
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 0);
+
+    let result: Result<(), HlsOriginResourceFetchError> = Ok(());
+    telemetry.finish(&result);
+
+    let records = records(&mut rx);
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.outcome, OriginFetchOutcome::Ok);
+    assert_eq!(record.body_origin_wait_ms, Some(0));
+    assert_eq!(record.body_consumer_wait_ms, Some(0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_stream_gives_delivery_direct() {
+    use futures::task::noop_waker_ref;
+    let mut cx = std::task::Context::from_waker(noop_waker_ref());
+    let (recorder, mut rx) = recorder();
+    let telemetry = super::telemetry::AttemptTelemetry::begin(
+        &recorder,
+        "input",
+        OriginResourceKind::Segment,
+        Some("cache_key"),
+        0,
+    );
+    telemetry.mark_headers(200, Some(10));
+
+    let reader = ControllableReader {
+        steps: std::collections::VecDeque::from([
+            std::task::Poll::Ready(Ok(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10])),
+            std::task::Poll::Ready(Ok(vec![])),
+        ]),
+    };
+    let mut body = telemetry.wrap(Box::pin(reader), Some(10));
+
+    let result: Result<(), HlsOriginResourceFetchError> = Ok(());
+    telemetry.finish(&result);
+
+    assert!(records(&mut rx).is_empty());
+
+    let mut buf = [0_u8; 16];
+    let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+
+    let records = records(&mut rx);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].outcome, OriginFetchOutcome::Ok);
+    assert_eq!(records[0].delivery, Some(OriginDelivery::Direct));
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_stream_dropped_after_last_byte_completes_at_delivery_time() {
+    use futures::task::noop_waker_ref;
+    let mut cx = std::task::Context::from_waker(noop_waker_ref());
+    let (recorder, mut rx) = recorder();
+    let telemetry = super::telemetry::AttemptTelemetry::begin(
+        &recorder,
+        "input",
+        OriginResourceKind::Segment,
+        Some("cache_key"),
+        0,
+    );
+    telemetry.mark_headers(200, Some(10));
+    let reader = ControllableReader {
+        steps: std::collections::VecDeque::from([std::task::Poll::Ready(Ok(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))]),
+    };
+    let mut body = telemetry.wrap(Box::pin(reader), Some(10));
+    // The commit callback returns the body unread: direct stream.
+    let result: Result<(), HlsOriginResourceFetchError> = Ok(());
+    telemetry.finish(&result);
+
+    let mut buf = [0_u8; 16];
+    let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 10);
+
+    // The client holds the reader after the announced last byte and never polls for EOF.
+    tokio::time::advance(Duration::from_millis(300)).await;
+    drop(body);
+
+    let records = records(&mut rx);
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.outcome, OriginFetchOutcome::Ok);
+    assert_eq!(record.delivery, Some(OriginDelivery::Direct));
+    assert_eq!(record.body_complete_ms, Some(0), "completion is the delivery time, not the drop time");
+    assert_eq!(record.body_consumer_wait_ms, Some(0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_stream_wait_after_last_byte_is_not_origin_wait() {
+    use futures::task::noop_waker_ref;
+    let mut cx = std::task::Context::from_waker(noop_waker_ref());
+    let (recorder, mut rx) = recorder();
+    let telemetry = super::telemetry::AttemptTelemetry::begin(
+        &recorder,
+        "input",
+        OriginResourceKind::Segment,
+        Some("cache_key"),
+        0,
+    );
+    telemetry.mark_headers(200, Some(10));
+    let reader = ControllableReader {
+        steps: std::collections::VecDeque::from([
+            std::task::Poll::Ready(Ok(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10])),
+            std::task::Poll::Pending,
+        ]),
+    };
+    let mut body = telemetry.wrap(Box::pin(reader), Some(10));
+    let result: Result<(), HlsOriginResourceFetchError> = Ok(());
+    telemetry.finish(&result);
+
+    let mut buf = [0_u8; 16];
+    let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 10);
+    // The client polls again after the announced last byte; the origin does not close the body yet.
+    read_buf.clear();
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_pending());
+    tokio::time::advance(Duration::from_millis(300)).await;
+    drop(body);
+
+    let records = records(&mut rx);
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.outcome, OriginFetchOutcome::Ok);
+    assert_eq!(record.body_complete_ms, Some(0));
+    assert_eq!(record.body_origin_wait_ms, Some(0), "a wait after the announced last byte is not origin wait");
 }

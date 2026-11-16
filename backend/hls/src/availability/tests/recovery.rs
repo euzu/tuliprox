@@ -840,3 +840,57 @@ async fn expired_observe_round_preserves_forty_then_twenty_two_seconds_of_real_r
         "unchanged no-progress stream still reaches the real safety boundary"
     );
 }
+
+#[tokio::test]
+async fn first_short_manifest_503_can_retry_before_terminal_commit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fixture = post_refresh_terminal_fixture("short-manifest-retry", true).await;
+    fixture.session.write().await.origin_control.path_condition = HlsOriginPathCondition::ProgressExpected;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let handler_hits = Arc::clone(&hits);
+    let router = axum::Router::new().route(
+        "/index.m3u8",
+        axum::routing::get(move || {
+            let handler_hits = Arc::clone(&handler_hits);
+            async move {
+                if handler_hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (axum::http::StatusCode::SERVICE_UNAVAILABLE, "temporary failure")
+                } else {
+                    (
+                        axum::http::StatusCode::OK,
+                        "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-TARGETDURATION:12\n#EXTINF:12.0,\n0.ts\n#EXTINF:12.0,\n1.ts\n#EXTINF:12.0,\n2.ts\n",
+                    )
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut request = post_refresh_owner_request(&fixture);
+    request.origin_entry =
+        crate::manifest_fetch::LiveHlsOriginEntry::parse(&format!("http://{address}/index.m3u8")).unwrap();
+    request.retry_policy.delays_ms = [0, 100, 100, 100, 100];
+    let _ = crate::refresh::trigger_origin_refresh_sync(request).await;
+    server.abort();
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "a single transient503 must reach its scheduled retry");
+    let lease = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, fixture.ctx.hls_proxy.now_ms())
+        .await
+        .unwrap();
+    assert!(
+        matches!(lease.playback_mode, HlsLeasePlaybackMode::Live),
+        "short retry must not permanently terminate the playable lease: {:?}",
+        lease.playback_mode
+    );
+    // The retry returns the same media sequence (no progress); a degradation written by the first 503 would stay.
+    assert_eq!(
+        fixture.session.read().await.origin_control.path_condition,
+        HlsOriginPathCondition::ProgressExpected,
+        "a recovered fast retry must not leave the session degraded"
+    );
+}

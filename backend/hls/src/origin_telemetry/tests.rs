@@ -1,6 +1,6 @@
 use super::{
-    aggregate::OriginAggregates, FetchProbe, OriginFetchOutcome, OriginFetchPhaseError, OriginFetchRecord,
-    OriginResourceKind, OriginTelemetryRecorder,
+    aggregate::OriginAggregates, FetchProbe, OriginDelivery, OriginFetchOutcome, OriginFetchPhaseError,
+    OriginFetchRecord, OriginResourceKind, OriginTelemetryRecorder,
 };
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
@@ -35,6 +35,9 @@ fn sample(input: &str, ts: u64, outcome: OriginFetchOutcome, network_ms: Option<
         headers_ms: Some(10),
         first_byte_ms: Some(20),
         body_complete_ms: network_ms,
+        body_origin_wait_ms: None,
+        body_consumer_wait_ms: None,
+        delivery: None,
         network_ms,
         cache_write_ms: None,
         postprocess_ms: None,
@@ -82,6 +85,37 @@ async fn phases_are_split() {
     assert_eq!(record.media_duration_ms, Some(6000));
     assert_eq!(record.outcome, OriginFetchOutcome::Ok);
     assert_eq!(record.error_phase, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn probe_calculates_body_consumer_wait_ms_and_records_delivery() {
+    let (recorder, mut rx) = new_recorder(16);
+    let start = tokio::time::Instant::now();
+    let mut probe = probe(&recorder, "k", 0);
+
+    let headers_at = start + Duration::from_millis(20);
+    probe.mark_headers_at(headers_at, Some(200), Some(100));
+
+    let first_byte_at = start + Duration::from_millis(50);
+    probe.mark_first_byte_at(first_byte_at);
+
+    probe.add_bytes(100);
+
+    let body_complete_at = start + Duration::from_millis(120);
+    probe.mark_body_complete_at(body_complete_at);
+
+    probe.set_body_origin_wait(Duration::from_millis(70));
+    probe.set_delivery(OriginDelivery::Direct);
+    probe.finish(OriginFetchOutcome::Ok, None);
+
+    let record = rx.try_recv().expect("record");
+    assert_eq!(record.headers_ms, Some(20));
+    assert_eq!(record.first_byte_ms, Some(50));
+    assert_eq!(record.body_complete_ms, Some(120));
+    assert_eq!(record.body_origin_wait_ms, Some(70));
+    // body_consumer_wait_ms = (120 - 20).saturating_sub(70) = 30
+    assert_eq!(record.body_consumer_wait_ms, Some(30));
+    assert_eq!(record.delivery, Some(OriginDelivery::Direct));
 }
 
 #[tokio::test]
@@ -282,4 +316,250 @@ fn capped_window_reports_the_time_it_really_covers() {
 #[test]
 fn max_queue_capacity_matches_tokio_channel_limit() {
     assert_eq!(shared::model::HLS_ORIGIN_TELEMETRY_MAX_QUEUE_CAPACITY, tokio::sync::Semaphore::MAX_PERMITS);
+}
+
+#[test]
+fn diagnosis_rule_cancelled() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Cancelled, None);
+    rec.error_phase = Some(OriginFetchPhaseError::Connect);
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.cancelled, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.ok, 0);
+}
+
+#[test]
+fn diagnosis_rule_remote_http_error() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::HttpError, None);
+    rec.http_status = Some(502);
+    rec.error_phase = Some(OriginFetchPhaseError::Headers);
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.remote_http_error, 1);
+}
+
+#[test]
+fn diagnosis_rule_origin_unreachable() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    for (outcome, phase) in [
+        (OriginFetchOutcome::TransportError, OriginFetchPhaseError::Connect),
+        (OriginFetchOutcome::TransportError, OriginFetchPhaseError::Headers),
+        (OriginFetchOutcome::Timeout, OriginFetchPhaseError::Connect),
+        (OriginFetchOutcome::Timeout, OriginFetchPhaseError::Headers),
+    ] {
+        let mut rec = sample("a", 1_000, outcome, None);
+        rec.error_phase = Some(phase);
+        aggregates.record(&rec);
+    }
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.origin_unreachable, 4);
+}
+
+#[test]
+fn diagnosis_rule_origin_slow_from_body_timeout_or_truncation() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    for outcome in [OriginFetchOutcome::Timeout, OriginFetchOutcome::Truncated] {
+        let mut rec = sample("a", 1_000, outcome, None);
+        rec.error_phase = Some(OriginFetchPhaseError::Body);
+        aggregates.record(&rec);
+    }
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.origin_slow, 2);
+}
+
+#[test]
+fn diagnosis_rule_local_slow_from_cache_or_postprocess_transport_error() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    for phase in [OriginFetchPhaseError::CacheWrite, OriginFetchPhaseError::Postprocess] {
+        let mut rec = sample("a", 1_000, OriginFetchOutcome::TransportError, None);
+        rec.error_phase = Some(phase);
+        aggregates.record(&rec);
+    }
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.local_slow, 2);
+}
+
+#[test]
+fn diagnosis_rule_local_phase_is_unknown() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    for outcome in [OriginFetchOutcome::TransportError, OriginFetchOutcome::Timeout, OriginFetchOutcome::Truncated] {
+        let mut rec = sample("a", 1_000, outcome, None);
+        rec.error_phase = Some(OriginFetchPhaseError::Local);
+        aggregates.record(&rec);
+    }
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.unknown, 3);
+    assert_eq!(snapshot.inputs[0].diagnosis.origin_unreachable, 0);
+    assert_eq!(snapshot.inputs[0].diagnosis.local_slow, 0);
+}
+
+#[test]
+fn diagnosis_rule_origin_slow_from_media_duration() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(6_000));
+    rec.media_duration_ms = Some(6_000);
+    rec.headers_ms = Some(2_000);
+    rec.body_origin_wait_ms = Some(4_000);
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.origin_slow, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.ok, 0);
+}
+
+#[test]
+fn diagnosis_rule_local_slow_from_media_duration() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(500));
+    rec.media_duration_ms = Some(6_000);
+    rec.headers_ms = Some(100);
+    rec.body_origin_wait_ms = Some(100);
+    rec.queue_wait_ms = 1_000;
+    rec.cache_write_ms = Some(1_500);
+    rec.postprocess_ms = Some(600);
+    // local overhead = 1000 + 1500 + 600 = 3100 >= 6000 / 2 = 3000
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.local_slow, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.ok, 0);
+}
+
+#[test]
+fn diagnosis_rule_downstream_slow_from_direct_delivery() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(3_500));
+    rec.media_duration_ms = Some(6_000);
+    rec.headers_ms = Some(100);
+    rec.body_origin_wait_ms = Some(100);
+    rec.queue_wait_ms = 10;
+    rec.delivery = Some(OriginDelivery::Direct);
+    rec.body_consumer_wait_ms = Some(3_000); // 3000 >= 6000 / 2 = 3000
+    aggregates.record(&rec);
+
+    // Cache delivery with high consumer wait does not count as downstream_slow.
+    let mut cache_rec = rec.clone();
+    cache_rec.ts_utc_ms = 1_100;
+    cache_rec.delivery = Some(OriginDelivery::Cache);
+    aggregates.record(&cache_rec);
+
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.downstream_slow, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.ok, 1);
+}
+
+#[test]
+fn diagnosis_rule_ok() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(300));
+    rec.media_duration_ms = Some(6_000);
+    rec.headers_ms = Some(50);
+    rec.body_origin_wait_ms = Some(100);
+    rec.queue_wait_ms = 10;
+    rec.cache_write_ms = Some(20);
+    rec.postprocess_ms = Some(5);
+    rec.delivery = Some(OriginDelivery::Direct);
+    rec.body_consumer_wait_ms = Some(100);
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.ok, 1);
+}
+
+#[test]
+fn diagnosis_missing_media_duration_is_unknown_for_ok() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(200));
+    rec.media_duration_ms = None;
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.unknown, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.ok, 0);
+}
+
+#[test]
+fn diagnosis_tiny_media_duration_zero_is_unknown() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(0));
+    rec.media_duration_ms = Some(0);
+    rec.headers_ms = Some(0);
+    rec.queue_wait_ms = 0;
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.unknown, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.origin_slow, 0);
+}
+
+#[test]
+fn diagnosis_tiny_media_duration_one_is_unknown() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(0));
+    rec.media_duration_ms = Some(1);
+    rec.headers_ms = Some(0);
+    rec.queue_wait_ms = 0;
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.unknown, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.local_slow, 0);
+}
+
+#[test]
+fn diagnosis_tiny_media_duration_two_keeps_today_classification() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(0));
+    rec.media_duration_ms = Some(2);
+    rec.headers_ms = Some(0);
+    rec.queue_wait_ms = 0;
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.ok, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.unknown, 0);
+}
+
+#[test]
+fn diagnosis_precedence_http_error_beats_slow() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::HttpError, None);
+    rec.media_duration_ms = Some(6_000);
+    rec.headers_ms = Some(5_000);
+    rec.body_origin_wait_ms = Some(5_000);
+    rec.error_phase = Some(OriginFetchPhaseError::Headers);
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.remote_http_error, 1);
+    assert_eq!(snapshot.inputs[0].diagnosis.origin_slow, 0);
+}
+
+#[test]
+fn diagnosis_unclassified_failure_is_unknown() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    let mut rec = sample("a", 1_000, OriginFetchOutcome::TransportError, None);
+    rec.error_phase = Some(OriginFetchPhaseError::Body);
+    aggregates.record(&rec);
+    let snapshot = aggregates.snapshot(2_000, 0, 16);
+    assert_eq!(snapshot.inputs[0].diagnosis.unknown, 1);
+}
+
+#[test]
+fn transfer_quality_reports_new_percentiles_and_freshness_nulls_them() {
+    let mut aggregates = OriginAggregates::new(300, 60);
+    for i in [20u64, 40, 60, 80, 100] {
+        let mut rec = sample("a", 1_000, OriginFetchOutcome::Ok, Some(i * 2));
+        rec.headers_ms = Some(i);
+        rec.body_origin_wait_ms = Some(i + 5);
+        rec.body_consumer_wait_ms = Some(i + 10);
+        aggregates.record(&rec);
+    }
+    let fresh = aggregates.snapshot(10_000, 0, 16);
+    let quality = &fresh.inputs[0].transfer_quality;
+    assert_eq!(quality.headers_ms_p50, Some(60));
+    assert_eq!(quality.headers_ms_p95, Some(100));
+    assert_eq!(quality.body_origin_wait_ms_p95, Some(105));
+    assert_eq!(quality.body_consumer_wait_ms_p95, Some(110));
+
+    let stale = aggregates.snapshot(65_000, 0, 16);
+    let stale_quality = &stale.inputs[0].transfer_quality;
+    assert!(stale_quality.headers_ms_p50.is_none());
+    assert!(stale_quality.headers_ms_p95.is_none());
+    assert!(stale_quality.body_origin_wait_ms_p95.is_none());
+    assert!(stale_quality.body_consumer_wait_ms_p95.is_none());
 }

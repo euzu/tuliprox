@@ -6,7 +6,7 @@
 
 use super::HlsOriginResourceFetchError;
 use crate::origin_telemetry::{
-    FetchProbe, OriginFetchOutcome, OriginFetchPhaseError, OriginResourceKind, OriginTelemetryRecorder,
+    FetchProbe, OriginDelivery, OriginFetchOutcome, OriginFetchPhaseError, OriginResourceKind, OriginTelemetryRecorder,
 };
 use std::{
     io,
@@ -15,7 +15,10 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::{
+    io::{AsyncRead, ReadBuf},
+    time::Instant,
+};
 use tuliprox_core::utils::{content_coding::DecodedHttpResponse, network::DynReader};
 
 tokio::task_local! {
@@ -43,10 +46,33 @@ struct AttemptState {
     bytes: u64,
     body_done: bool,
     reader: ReaderState,
+    was_detached: bool,
 }
 
 impl AttemptState {
     fn short_body(&self) -> bool { self.expected_len.is_some_and(|expected| self.bytes < expected) }
+
+    fn delivery(&self) -> OriginDelivery {
+        if self.was_detached || self.reader == ReaderState::Detached {
+            OriginDelivery::Direct
+        } else {
+            OriginDelivery::Cache
+        }
+    }
+
+    fn flush(&mut self, bytes: u64, first_byte_at: Option<Instant>, origin_wait: Duration) {
+        let delta = bytes.saturating_sub(self.bytes);
+        self.bytes = bytes;
+        if let Some(probe) = self.probe.as_mut() {
+            if let Some(first_byte_at) = first_byte_at {
+                probe.mark_first_byte_at(first_byte_at);
+            }
+            if delta > 0 {
+                probe.add_bytes(delta);
+            }
+            probe.set_body_origin_wait(origin_wait);
+        }
+    }
 
     /// The phase an interruption happened in.
     fn phase(&self) -> OriginFetchPhaseError {
@@ -63,6 +89,7 @@ impl AttemptState {
         let Some(mut probe) = self.probe.take() else {
             return;
         };
+        probe.set_delivery(self.delivery());
         probe.mark_body_complete();
         probe.end_cache_write();
         if cache_ready {
@@ -79,6 +106,7 @@ impl AttemptState {
         let Some(mut probe) = self.probe.take() else {
             return;
         };
+        probe.set_delivery(self.delivery());
         if let (Some(status), false) = (error_status(error), self.headers_seen) {
             probe.mark_headers(status, None);
             self.headers_seen = true;
@@ -118,7 +146,7 @@ fn classify_error(
             (OriginFetchOutcome::TransportError, phase)
         }
         E::InvalidOriginUrl | E::InvalidByteRange | E::UnsupportedStartupMedia | E::ProviderUnavailable(_) => {
-            (OriginFetchOutcome::TransportError, OriginFetchPhaseError::Connect)
+            (OriginFetchOutcome::TransportError, OriginFetchPhaseError::Local)
         }
         E::ContentCoding(_) | E::ContentDecoding(_) => {
             (OriginFetchOutcome::TransportError, OriginFetchPhaseError::Body)
@@ -158,6 +186,7 @@ impl AttemptTelemetry {
             bytes: 0,
             body_done: false,
             reader: ReaderState::Absent,
+            was_detached: false,
         }))))
     }
 
@@ -192,7 +221,10 @@ impl AttemptTelemetry {
     pub(super) fn finish<T>(&self, result: &Result<T, HlsOriginResourceFetchError>) {
         self.update(|state| match result {
             Err(error) => state.finish_failed(error),
-            Ok(_) if state.reader == ReaderState::Attached && !state.body_done => state.reader = ReaderState::Detached,
+            Ok(_) if state.reader == ReaderState::Attached && !state.body_done => {
+                state.reader = ReaderState::Detached;
+                state.was_detached = true;
+            }
             Ok(_) => state.finish_complete(true),
         });
     }
@@ -210,65 +242,94 @@ impl AttemptTelemetry {
         }
     }
 
-    fn wrap(&self, body: DynReader, expected_len: Option<u64>) -> DynReader {
+    pub(super) fn wrap(&self, body: DynReader, expected_len: Option<u64>) -> DynReader {
         self.update(|state| {
             state.reader = ReaderState::Attached;
             state.expected_len = expected_len;
+            if let Some(probe) = state.probe.as_mut() {
+                probe.mark_body_observed();
+            }
         });
-        Box::pin(ObservedBody { inner: body, telemetry: self.clone() })
+        Box::pin(ObservedBody {
+            inner: body,
+            telemetry: self.clone(),
+            expected_len,
+            bytes: 0,
+            first_byte_at: None,
+            announced_end_at: None,
+            pending_since: None,
+            origin_wait: Duration::ZERO,
+        })
     }
 
-    fn on_read(&self, bytes: u64, eof: bool) {
+    fn on_eof(&self, bytes: u64, first_byte_at: Option<Instant>, origin_wait: Duration) {
         self.update(|state| {
-            if bytes > 0 {
-                state.bytes = state.bytes.saturating_add(bytes);
-                if let Some(probe) = state.probe.as_mut() {
-                    probe.add_bytes(bytes);
+            state.flush(bytes, first_byte_at, origin_wait);
+            state.body_done = true;
+            if let Some(probe) = state.probe.as_mut() {
+                probe.mark_body_complete();
+                // A direct stream has no cache write.
+                if state.reader != ReaderState::Detached {
+                    probe.start_cache_write();
                 }
-            } else if eof {
-                state.body_done = true;
-                if let Some(probe) = state.probe.as_mut() {
-                    probe.mark_body_complete();
-                    // A direct stream has no cache write.
-                    if state.reader != ReaderState::Detached {
-                        probe.start_cache_write();
-                    }
-                }
-                if state.reader == ReaderState::Detached {
-                    state.finish_complete(false);
-                }
+            }
+            if state.reader == ReaderState::Detached {
+                state.finish_complete(false);
             }
         });
     }
 
-    fn on_read_error(&self, error: &io::Error) {
+    fn on_read_error(&self, error: &io::Error, bytes: u64, first_byte_at: Option<Instant>, origin_wait: Duration) {
         self.update(|state| {
+            state.flush(bytes, first_byte_at, origin_wait);
             if state.reader == ReaderState::Detached {
                 state.finish_failed(&HlsOriginResourceFetchError::from_body_read_error(error));
             }
         });
     }
 
-    fn on_reader_dropped(&self) {
+    fn on_reader_dropped(&self, read: ObservedRead) {
         self.update(|state| {
-            let detached = state.reader == ReaderState::Detached;
+            state.flush(read.bytes, read.first_byte_at, read.origin_wait);
+            let detached = state.reader == ReaderState::Detached || state.was_detached;
             state.reader = ReaderState::Dropped;
             if detached && state.probe.is_some() {
                 // A client that stopped after the announced length still received the whole object.
+                // It completed when the last announced byte was read, not when the reader was dropped.
                 if state.expected_len.is_some() && !state.short_body() {
+                    if let (Some(probe), Some(at)) = (state.probe.as_mut(), read.announced_end_at) {
+                        probe.mark_body_complete_at(at);
+                    }
                     state.finish_complete(false);
-                } else {
-                    state.probe = None;
+                } else if let Some(mut probe) = state.probe.take() {
+                    probe.set_delivery(OriginDelivery::Direct);
+                    probe.finish(OriginFetchOutcome::Cancelled, Some(state.phase()));
                 }
             }
         });
     }
 }
 
+/// What the body reader observed, handed to the shared state when the reader is dropped.
+#[derive(Clone, Copy)]
+struct ObservedRead {
+    bytes: u64,
+    first_byte_at: Option<Instant>,
+    /// When the announced length was reached; a client may drop the reader later without polling EOF.
+    announced_end_at: Option<Instant>,
+    origin_wait: Duration,
+}
+
 /// Counts body bytes and marks body completion for one attempt.
 struct ObservedBody {
     inner: DynReader,
     telemetry: AttemptTelemetry,
+    expected_len: Option<u64>,
+    bytes: u64,
+    first_byte_at: Option<Instant>,
+    announced_end_at: Option<Instant>,
+    pending_since: Option<Instant>,
+    origin_wait: Duration,
 }
 
 impl AsyncRead for ObservedBody {
@@ -277,18 +338,52 @@ impl AsyncRead for ObservedBody {
         let poll = self.inner.as_mut().poll_read(cx, buf);
         match &poll {
             Poll::Ready(Ok(())) => {
-                let read = buf.filled().len().saturating_sub(before);
-                self.telemetry.on_read(read as u64, buf.remaining() > 0);
+                if let Some(pending_since) = self.pending_since.take() {
+                    self.origin_wait = self.origin_wait.saturating_add(pending_since.elapsed());
+                }
+                let read = buf.filled().len().saturating_sub(before) as u64;
+                if read > 0 {
+                    if self.first_byte_at.is_none() {
+                        self.first_byte_at = Some(Instant::now());
+                    }
+                    self.bytes = self.bytes.saturating_add(read);
+                    if self.announced_end_at.is_none() && self.expected_len.is_some_and(|len| self.bytes >= len) {
+                        self.announced_end_at = Some(Instant::now());
+                    }
+                } else if buf.remaining() > 0 {
+                    self.telemetry.on_eof(self.bytes, self.first_byte_at, self.origin_wait);
+                }
             }
-            Poll::Ready(Err(error)) => self.telemetry.on_read_error(error),
-            Poll::Pending => {}
+            Poll::Ready(Err(error)) => {
+                if let Some(pending_since) = self.pending_since.take() {
+                    self.origin_wait = self.origin_wait.saturating_add(pending_since.elapsed());
+                }
+                self.telemetry.on_read_error(error, self.bytes, self.first_byte_at, self.origin_wait);
+            }
+            Poll::Pending => {
+                if self.pending_since.is_none() {
+                    self.pending_since = Some(Instant::now());
+                }
+            }
         }
         poll
     }
 }
 
 impl Drop for ObservedBody {
-    fn drop(&mut self) { self.telemetry.on_reader_dropped(); }
+    fn drop(&mut self) {
+        // After the announced last byte the transfer counts as complete at that moment, so a later open wait
+        // is not origin wait. Incomplete and cancelled transfers keep it.
+        if let Some(pending_since) = self.pending_since.take().filter(|_| self.announced_end_at.is_none()) {
+            self.origin_wait = self.origin_wait.saturating_add(pending_since.elapsed());
+        }
+        self.telemetry.on_reader_dropped(ObservedRead {
+            bytes: self.bytes,
+            first_byte_at: self.first_byte_at,
+            announced_end_at: self.announced_end_at,
+            origin_wait: self.origin_wait,
+        });
+    }
 }
 
 /// Origin responses whose body the retry loop can observe.
