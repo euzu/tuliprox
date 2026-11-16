@@ -275,6 +275,16 @@ impl HlsAvailabilityReevaluationCycle {
         self.handoff_defer_until_ms.map_or(self.deadline_ms, |defer| defer.max(self.deadline_ms))
     }
 
+    /// Starts the next cycle of the same worker. A member-handoff deferral belongs to one session
+    /// incarnation, so a cycle that continues on a different session starts without it.
+    pub(crate) fn successor(&self, now_ms: u64, same_session: bool) -> Self {
+        if same_session {
+            self.restart(now_ms)
+        } else {
+            Self::new(now_ms)
+        }
+    }
+
     pub(crate) fn restart(&self, now_ms: u64) -> Self {
         let mut cycle = Self::new(now_ms);
         cycle.handoff_defer_until_ms = self.handoff_defer_until_ms;
@@ -647,11 +657,14 @@ async fn run_hls_availability_reevaluation(
     mut refresh_request: Option<OriginRefreshRequest>,
 ) {
     let mut prior_cycle: Option<HlsAvailabilityReevaluationCycle> = None;
+    let mut cycle_session_incarnation = owner_key.session_incarnation;
     'cycles: loop {
+        let now_ms = ctx.hls_proxy.now_ms();
         let mut cycle = prior_cycle.as_ref().map_or_else(
-            || HlsAvailabilityReevaluationCycle::new(ctx.hls_proxy.now_ms()),
-            |prior| prior.restart(ctx.hls_proxy.now_ms()),
+            || HlsAvailabilityReevaluationCycle::new(now_ms),
+            |prior| prior.successor(now_ms, cycle_session_incarnation == owner_key.session_incarnation),
         );
+        cycle_session_incarnation = owner_key.session_incarnation;
         loop {
             match run_hls_availability_reevaluation_attempt(
                 &ctx,

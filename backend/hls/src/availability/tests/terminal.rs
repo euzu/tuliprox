@@ -844,3 +844,19 @@ async fn handoff_defer_retry_backoff_grows_across_restarts_and_resets_when_defer
     assert_eq!(restarted.attempts_completed, 0);
     assert_eq!(restarted.handoff_defer_until_ms, None);
 }
+
+#[test]
+fn handoff_defer_is_kept_for_the_same_session_and_dropped_for_a_successor_session() {
+    let now_ms = 1_000;
+    let mut cycle = HlsAvailabilityReevaluationCycle::new(now_ms);
+    cycle.handoff_defer_until_ms = Some(now_ms + 10_000);
+    cycle.attempts_completed = 3;
+
+    let same = cycle.successor(now_ms, true);
+    assert_eq!(same.handoff_defer_until_ms, Some(now_ms + 10_000));
+    assert_eq!(same.attempts_completed, 3);
+
+    let successor = cycle.successor(now_ms, false);
+    assert_eq!(successor.handoff_defer_until_ms, None, "a successor session must not inherit the deferral");
+    assert_eq!(successor.attempts_completed, 0);
+}
