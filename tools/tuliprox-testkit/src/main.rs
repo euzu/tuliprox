@@ -1295,43 +1295,37 @@ async fn hls_index_manifest(
     conn_id: u64,
     req_id: u64,
 ) -> Response {
-    let is_frozen = match account {
-        Some(acc) => state.faults.lock().await.is_manifest_frozen_for(acc),
-        None => false,
-    };
+    // The freeze check and the frozen-sequence cache update form one step: the fault guard is held
+    // until the cache is updated (lock order faults, then frozen sequences, as in `clear_fault`).
+    let faults = state.faults.lock().await;
+    let is_frozen = account.is_some_and(|acc| faults.is_manifest_frozen_for(acc));
+    let mut frozen_map = state.hls_frozen_sequences.lock().await;
+    let key = (account.unwrap_or_default().to_string(), marker);
     let realtime = state.hls_profile.as_ref().is_some_and(|profile| profile.realtime);
-    let sequence_val = if realtime {
-        let live = hls_realtime_sequence(state);
-        if is_frozen {
-            let key = (account.unwrap_or_default().to_string(), marker);
-            *state.hls_frozen_sequences.lock().await.entry(key).or_insert(live)
-        } else {
-            if let Some(acc) = account {
-                state.hls_frozen_sequences.lock().await.remove(&(acc.to_string(), marker));
-            }
-            live
+    let sequence_val = if !is_frozen {
+        if account.is_some() {
+            frozen_map.remove(&key);
         }
-    } else if is_frozen {
-        let key = (account.unwrap_or_default().to_string(), marker);
-        let mut frozen_map = state.hls_frozen_sequences.lock().await;
-        if let Some(&seq) = frozen_map.get(&key) {
-            seq
+        if realtime {
+            hls_realtime_sequence(state)
         } else {
             let mut sequences = state.hls_sequences.lock().await;
-            let seq = sequences.entry(marker).or_insert(1);
-            let current = *seq;
-            frozen_map.insert(key, current);
-            current
+            let sequence = sequences.entry(marker).or_insert(0);
+            *sequence += 1;
+            *sequence
         }
+    } else if realtime {
+        let live = hls_realtime_sequence(state);
+        *frozen_map.entry(key).or_insert(live)
+    } else if let Some(&seq) = frozen_map.get(&key) {
+        seq
     } else {
-        if let Some(acc) = account {
-            state.hls_frozen_sequences.lock().await.remove(&(acc.to_string(), marker));
-        }
-        let mut sequences = state.hls_sequences.lock().await;
-        let sequence = sequences.entry(marker).or_insert(0);
-        *sequence += 1;
-        *sequence
+        let current = *state.hls_sequences.lock().await.entry(marker).or_insert(1);
+        frozen_map.insert(key, current);
+        current
     };
+    drop(frozen_map);
+    drop(faults);
     let first = sequence_val.saturating_sub(1);
     let account_query = origin_account(query).map_or_else(String::new, |account| {
         let encoded = url::form_urlencoded::byte_serialize(account.as_bytes()).collect::<String>();
@@ -4338,6 +4332,50 @@ mod tests {
             .status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn unfrozen_manifest_request_keeps_freeze_cached_after_its_check() {
+        let state = test_origin_state("freeze-race-run");
+        let key = ("input-a".to_owned(), 17);
+        // The request runs its freeze check while the frozen-sequence cache is busy.
+        let frozen_cache = state.hls_frozen_sequences.lock().await;
+        let request = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let query = HashMap::from([("token".to_owned(), "input-a".to_owned())]);
+                hls_index_manifest(&state, 17, &query, Some("input-a"), 0, 0).await
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // A freeze installed now must not be lost to the request's earlier "not frozen" answer.
+        let installed_during_request = match state.faults.try_lock() {
+            Ok(mut faults) => {
+                faults
+                    .insert("a-freeze".to_owned(), OriginFault::HlsManifestFreeze { account: "input-a".to_owned() })
+                    .unwrap();
+                true
+            }
+            Err(_) => false,
+        };
+        let mut frozen_cache = frozen_cache;
+        if installed_during_request {
+            frozen_cache.insert(key.clone(), 9);
+        }
+        drop(frozen_cache);
+        request.await.unwrap();
+        if !installed_during_request {
+            state
+                .faults
+                .lock()
+                .await
+                .insert("a-freeze".to_owned(), OriginFault::HlsManifestFreeze { account: "input-a".to_owned() })
+                .unwrap();
+            state.hls_frozen_sequences.lock().await.insert(key.clone(), 9);
+        }
+
+        assert_eq!(state.hls_frozen_sequences.lock().await.get(&key), Some(&9));
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use crate::{
     processing::parser::hls::{classify_hls_playlist, HlsManifestSource, HlsPlaylistKind},
     utils::{content_coding::OutboundContentCodingPolicy, request},
 };
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap};
 use shared::{defaults::HLS_EXT, utils::replace_url_extension};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tuliprox_core::model::{PlaybackRequestId, PlaybackRequestOutcome, ProviderBindingTag};
@@ -247,14 +247,22 @@ pub(in crate::api::endpoints::hls_api) enum StaleChildDecision {
 
 /// Decides whether a child manifest request should be accepted as sealed, re-resolved for the
 /// bound member of a switched live legacy group, or rejected with 404.
+/// `selected_member_vid` is the member currently bound to the session; a child of another member
+/// of the same provider is stale even when its provider matches. Tokens without a member id keep
+/// the provider-only match.
 pub(in crate::api::endpoints::hls_api) fn evaluate_child_manifest_source(
     stage: HlsRequestStage<'_>,
     selected_provider: &str,
+    selected_member_vid: Option<u32>,
     is_live_legacy_group: bool,
 ) -> StaleChildDecision {
     match stage {
-        HlsRequestStage::Variant { source: HlsManifestSource::Child, origin_provider } => {
-            if origin_provider == Some(selected_provider) {
+        HlsRequestStage::Variant { source: HlsManifestSource::Child, origin_provider, origin_member_vid } => {
+            let member_matches = match (origin_member_vid, selected_member_vid) {
+                (Some(origin), Some(bound)) => origin == bound,
+                _ => true,
+            };
+            if origin_provider == Some(selected_provider) && member_matches {
                 StaleChildDecision::Accept
             } else if is_live_legacy_group {
                 StaleChildDecision::ReResolveBoundMember
@@ -264,6 +272,18 @@ pub(in crate::api::endpoints::hls_api) fn evaluate_child_manifest_source(
         }
         _ => StaleChildDecision::Accept,
     }
+}
+
+/// Appends the stale master response's `Set-Cookie` headers to the served child's headers, so the
+/// provider session keeps the cookies of both responses instead of only the child's.
+pub(in crate::api::endpoints::hls_api) fn merge_master_response_cookies(
+    mut child: ClassifiedHlsManifest,
+    master_response_headers: &HeaderMap,
+) -> ClassifiedHlsManifest {
+    for value in master_response_headers.get_all(header::SET_COOKIE) {
+        child.2.append(header::SET_COOKIE, value.clone());
+    }
+    child
 }
 
 /// When a stale child manifest request for a switched group session re-resolves the bound member's
@@ -354,28 +374,110 @@ mod tests {
 
     #[test]
     fn evaluate_child_manifest_source_decision() {
-        let stale_child_stage =
-            HlsRequestStage::Variant { source: HlsManifestSource::Child, origin_provider: Some("provider-a") };
+        let stale_child_stage = HlsRequestStage::Variant {
+            source: HlsManifestSource::Child,
+            origin_provider: Some("provider-a"),
+            origin_member_vid: None,
+        };
         // Live legacy group session with stale child => ReResolveBoundMember
         assert_eq!(
-            evaluate_child_manifest_source(stale_child_stage, "provider-b", true),
+            evaluate_child_manifest_source(stale_child_stage, "provider-b", None, true),
             StaleChildDecision::ReResolveBoundMember
         );
         // Non-group or non-live session with stale child => RejectNotFound
         assert_eq!(
-            evaluate_child_manifest_source(stale_child_stage, "provider-b", false),
+            evaluate_child_manifest_source(stale_child_stage, "provider-b", None, false),
             StaleChildDecision::RejectNotFound
         );
         // Matching provider => Accept
-        assert_eq!(evaluate_child_manifest_source(stale_child_stage, "provider-a", true), StaleChildDecision::Accept);
-        assert_eq!(evaluate_child_manifest_source(stale_child_stage, "provider-a", false), StaleChildDecision::Accept);
+        assert_eq!(
+            evaluate_child_manifest_source(stale_child_stage, "provider-a", None, true),
+            StaleChildDecision::Accept
+        );
+        assert_eq!(
+            evaluate_child_manifest_source(stale_child_stage, "provider-a", None, false),
+            StaleChildDecision::Accept
+        );
 
         // Entry or other variant stages => Accept (not a child variant stage)
         let entry_stage = HlsRequestStage::Entry;
-        assert_eq!(evaluate_child_manifest_source(entry_stage, "provider-b", true), StaleChildDecision::Accept);
-        let entry_variant_stage =
-            HlsRequestStage::Variant { source: HlsManifestSource::Entry, origin_provider: Some("provider-a") };
-        assert_eq!(evaluate_child_manifest_source(entry_variant_stage, "provider-b", true), StaleChildDecision::Accept);
+        assert_eq!(evaluate_child_manifest_source(entry_stage, "provider-b", None, true), StaleChildDecision::Accept);
+        let entry_variant_stage = HlsRequestStage::Variant {
+            source: HlsManifestSource::Entry,
+            origin_provider: Some("provider-a"),
+            origin_member_vid: None,
+        };
+        assert_eq!(
+            evaluate_child_manifest_source(entry_variant_stage, "provider-b", None, true),
+            StaleChildDecision::Accept
+        );
+    }
+
+    #[test]
+    fn evaluate_child_manifest_source_distinguishes_members_of_the_same_provider() {
+        // Two failover members of the same provider: only the bound member's child is current.
+        let child_of_member = |member_vid| HlsRequestStage::Variant {
+            source: HlsManifestSource::Child,
+            origin_provider: Some("provider-a"),
+            origin_member_vid: member_vid,
+        };
+
+        assert_eq!(
+            evaluate_child_manifest_source(child_of_member(Some(1)), "provider-a", Some(2), true),
+            StaleChildDecision::ReResolveBoundMember,
+            "a child of the previous member must re-resolve the bound member"
+        );
+        assert_eq!(
+            evaluate_child_manifest_source(child_of_member(Some(2)), "provider-a", Some(2), true),
+            StaleChildDecision::Accept,
+            "a child of the bound member stays accepted"
+        );
+        // Tokens sealed before member ids fall back to the provider-only match.
+        assert_eq!(
+            evaluate_child_manifest_source(child_of_member(None), "provider-a", Some(2), true),
+            StaleChildDecision::Accept
+        );
+        // Non-group sessions keep the provider-only behavior.
+        assert_eq!(
+            evaluate_child_manifest_source(child_of_member(Some(1)), "provider-a", None, false),
+            StaleChildDecision::Accept
+        );
+        assert_eq!(
+            evaluate_child_manifest_source(child_of_member(Some(1)), "provider-b", None, false),
+            StaleChildDecision::RejectNotFound
+        );
+    }
+
+    #[test]
+    fn stale_child_success_keeps_master_and_variant_cookies() {
+        use tuliprox_hls::api::extract_hls_provider_session_headers;
+
+        let mut variant_headers = HeaderMap::new();
+        variant_headers.append(header::SET_COOKIE, "variant=1; Path=/".parse().expect("variant cookie"));
+        let mut master_headers = HeaderMap::new();
+        master_headers.append(header::SET_COOKIE, "master=1; Path=/".parse().expect("master cookie"));
+
+        // Before the merge the success path persisted only the child response's cookies.
+        let child_only = extract_hls_provider_session_headers(&variant_headers);
+        assert!(!child_only.cookies.iter().any(|cookie| cookie.starts_with("master=1")));
+
+        let served_child = merge_master_response_cookies(
+            (String::new(), String::new(), variant_headers, HlsPlaylistKind::Media),
+            &master_headers,
+        );
+        let persisted = extract_hls_provider_session_headers(&served_child.2);
+        assert!(
+            persisted.cookies.iter().any(|cookie| cookie.starts_with("variant=1")),
+            "the child response cookies are persisted: {:?}",
+            persisted.cookies
+        );
+        assert!(
+            persisted.cookies.iter().any(|cookie| cookie.starts_with("master=1")),
+            "the stale master response cookies are persisted too: {:?}",
+            persisted.cookies
+        );
+        let cookie = persisted.headers.get(axum::http::header::COOKIE.as_str()).expect("persisted cookie header");
+        assert!(cookie.contains("variant=1") && cookie.contains("master=1"), "{cookie}");
     }
 
     #[test]

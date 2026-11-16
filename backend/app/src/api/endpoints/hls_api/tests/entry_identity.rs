@@ -374,6 +374,7 @@ async fn legacy_hls_token_route_renders_channel_unavailable_inline_when_target_h
             input_id: input.id,
             user_token: Some("legacy-session-token"),
             origin_provider: None,
+            origin_member_vid: None,
             playlist_kind: None,
             rebase: None,
         },

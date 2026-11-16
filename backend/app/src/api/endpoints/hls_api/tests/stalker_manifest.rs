@@ -11,7 +11,7 @@ const SELECTED: &str = "alias-a";
 
 /// Variant request stage for `source` sealed by `origin_provider`.
 fn variant(source: HlsManifestSource, origin_provider: Option<&str>) -> super::super::HlsRequestStage<'_> {
-    super::super::HlsRequestStage::Variant { source, origin_provider }
+    super::super::HlsRequestStage::Variant { source, origin_provider, origin_member_vid: None }
 }
 
 /// An entry refresh resolves a fresh link; a legacy token without a kind is rejected.

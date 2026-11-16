@@ -492,9 +492,11 @@ pub(in crate::api) async fn handle_hls_stream_request(
         // A Stalker URL is account-bound: refreshes resolve a fresh link, sealed variants stay with their account.
         // A group member session follows the same account-bound rules as any other Stalker session.
         let is_live_legacy_group = is_live_hls && bound_member_info.is_some();
+        let selected_member_vid = bound_member_info.as_ref().map(|(member_vid, ..)| *member_vid);
         let child_decision = super::legacy::evaluate_child_manifest_source(
             stage,
             selected_provider_config.name.as_ref(),
+            selected_member_vid,
             is_live_legacy_group,
         );
         is_stale_child_legacy_group = child_decision == super::legacy::StaleChildDecision::ReResolveBoundMember;
@@ -1024,6 +1026,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
     if is_stale_child_legacy_group {
         if let Ok((content, response_url, response_headers, HlsPlaylistKind::Master)) = &download_result {
             let target_bandwidth = stream_context.known_bitrate_bps().map(u64::from);
+            // The served child replaces the master, but the master's cookies still belong to the
+            // provider session; both sets are persisted below.
+            let master_response_headers = response_headers.clone();
             download_result = super::legacy::resolve_stale_child_master_variant(
                 app_state,
                 effective_input,
@@ -1033,7 +1038,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 &headers,
                 target_bandwidth,
             )
-            .await;
+            .await
+            .map(|variant| super::legacy::merge_master_response_cookies(variant, &master_response_headers));
         }
     }
     match download_result {
@@ -1105,6 +1111,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 input_id: effective_input.id,
                 user_token: session_token.as_deref(),
                 origin_provider: selected_provider_name.as_deref(),
+                origin_member_vid: legacy_group_session.then_some(effective_virtual_id),
                 playlist_kind: Some(playlist_kind),
                 rebase: rebase_props,
             };
@@ -1559,6 +1566,7 @@ async fn switch_legacy_hls_group_member(
         input_id: resolved.input.id,
         user_token: Some(session_token),
         origin_provider: Some(&provider_name),
+        origin_member_vid: Some(resolved.member.member_vid.get()),
         playlist_kind: Some(playlist_kind),
         rebase: rebase_props,
     };
@@ -2041,6 +2049,7 @@ mod playback_provider_tests {
         let solis_child_stage = HlsRequestStage::Variant {
             source: crate::processing::parser::hls::HlsManifestSource::Child,
             origin_provider: Some("solis"),
+            origin_member_vid: None,
         };
         let solis_hits_before = env.origin_hits("solis");
         let korath_hits_before = env.origin_hits("korath");
@@ -2113,6 +2122,116 @@ mod playback_provider_tests {
         assert_eq!(non_group_response.status(), StatusCode::NOT_FOUND);
         assert_eq!(env.origin_hits("korath"), korath_hits_after_first);
         assert_eq!(env.origin_hits("solis"), solis_hits_after_first);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn stale_child_of_another_member_of_the_same_provider_re_resolves() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use shared::utils::Internable;
+        use std::net::SocketAddr;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().m3u("solis").m3u("korath").build().await;
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("test user");
+        let korath_input = env.app_state.app_config.get_input_by_name(&"korath".intern()).expect("korath input");
+        let korath_cfg = env.app_state.active_provider.find_provider_config(&"korath".intern()).expect("korath cfg");
+        let korath_origin = env.origins.get("korath").expect("origin").addr;
+        let solis_member_vid = env.member_vid("solis");
+        let korath_member_vid = env.member_vid("korath");
+        let addr: SocketAddr = "127.0.0.1:12345".parse().expect("addr");
+        let fingerprint = Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let token = "test-same-provider-member-session";
+
+        env.app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: token,
+                virtual_id: env.group_vid,
+                provider: &korath_cfg.name,
+                stream_url: &format!("http://{korath_origin}/live/101"),
+                addr: &addr,
+                connection_permission: shared::model::UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        env.app_state
+            .active_users
+            .bind_member(
+                &user.username,
+                token,
+                tuliprox_session::MemberBinding {
+                    group_vid: env.group_vid,
+                    member_vid: korath_member_vid,
+                    member_index: 1,
+                    input_name: Arc::clone(&korath_input.name),
+                    member_title: "Korath".intern(),
+                    provider: Arc::clone(&korath_cfg.name),
+                },
+            )
+            .await;
+        let session = env.app_state.active_users.get_and_update_user_session(&user.username, token).await;
+        assert!(session.is_some(), "session exists");
+        let stream_source = crate::api::endpoints::hls_api::resolve_hls_virtual_source_for_target(
+            &env.app_state,
+            &env.target,
+            env.group_vid,
+        )
+        .await
+        .expect("source");
+        // Both members resolve through the same provider account; only the member id tells them apart.
+        let child_stage = |member_vid| HlsRequestStage::Variant {
+            source: crate::processing::parser::hls::HlsManifestSource::Child,
+            origin_provider: Some(korath_cfg.name.as_ref()),
+            origin_member_vid: Some(member_vid),
+        };
+        let sealed_child_url = format!("http://{korath_origin}/sealed/child.m3u8");
+        let empty_headers = HeaderMap::new();
+        let request = |stage| {
+            let session = session.as_ref();
+            handle_hls_stream_request(
+                &fingerprint,
+                &env.app_state,
+                &user,
+                &env.target,
+                session,
+                None,
+                &sealed_child_url,
+                None,
+                stream_source.stream_context.clone(),
+                &korath_input,
+                &empty_headers,
+                shared::model::UserConnectionPermission::Allowed,
+                None,
+                "/iptv/hls/viewer/secret/live/1.m3u8",
+                stage,
+            )
+        };
+        let sealed_child_hits = || {
+            let origin = env.origins.get("korath").expect("korath origin");
+            origin
+                .requests
+                .lock()
+                .expect("mutex")
+                .iter()
+                .filter(|request| request.contains("/sealed/child.m3u8"))
+                .count()
+        };
+
+        // The child of the bound member is accepted as sealed and fetched as-is.
+        let bound_child = request(child_stage(korath_member_vid)).await.into_response();
+        assert_eq!(bound_child.status(), StatusCode::OK);
+        assert_eq!(sealed_child_hits(), 1, "the bound member's child URL is fetched as sealed");
+
+        // The child of the previous member of the same provider is stale and must re-resolve instead.
+        let korath_hits_before = env.origin_hits("korath");
+        let solis_hits_before = env.origin_hits("solis");
+        let stale_child = request(child_stage(solis_member_vid)).await.into_response();
+        assert_eq!(stale_child.status(), StatusCode::OK);
+        assert_eq!(sealed_child_hits(), 1, "the stale child URL of the old member must not be fetched");
+        assert_eq!(env.origin_hits("korath"), korath_hits_before + 1, "the bound member's own playlist is fetched");
+        assert_eq!(env.origin_hits("solis"), solis_hits_before, "the stale member's origin must not be hit");
     }
 
     #[tokio::test]
@@ -2210,6 +2329,7 @@ mod playback_provider_tests {
         let solis_child_stage = HlsRequestStage::Variant {
             source: crate::processing::parser::hls::HlsManifestSource::Child,
             origin_provider: Some("solis"),
+            origin_member_vid: None,
         };
         let solis_hits_before = env.origin_hits("solis");
         let korath_hits_before = env.origin_hits("korath");

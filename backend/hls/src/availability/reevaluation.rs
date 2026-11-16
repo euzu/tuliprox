@@ -316,7 +316,7 @@ impl HlsAvailabilityReevaluationCycle {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HlsAvailabilityCycleDecision {
+pub(crate) enum HlsAvailabilityCycleDecision {
     ContinueAttempts(HlsAvailabilityAttemptSchedule),
     RestartCycle,
     FinishCycle,
@@ -431,7 +431,14 @@ pub(crate) async fn evaluate_post_refresh_terminal_attempt(
                 let resolution =
                     query_active_terminal_leases_for_reevaluation(ctx, session, &owner_key.proxy_session_id, now_ms)
                         .await;
-                if resolution != HlsTerminalResolution::LiveAllowed {
+                // A re-evaluation request is not evidence of a pending terminal tail; only a lease
+                // that reached a terminal answer may notify the member.
+                if matches!(
+                    resolution,
+                    HlsTerminalResolution::Committed
+                        | HlsTerminalResolution::Pending { .. }
+                        | HlsTerminalResolution::FailedClosed { .. }
+                ) {
                     runtime.notify_member_unhealthy(session, HlsMemberUnhealthyReason::TerminalPending);
                     let defer_until_ms = now_ms.saturating_add(HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS);
                     cycle.handoff_defer_until_ms = Some(defer_until_ms);
@@ -530,7 +537,7 @@ async fn evaluate_availability_refresh_attempt(
     }
 }
 
-async fn run_hls_availability_reevaluation_attempt(
+pub(super) async fn run_hls_availability_reevaluation_attempt(
     ctx: &HlsCtx,
     session: &mut HlsSessionHandle,
     owner_key: &mut HlsAvailabilityReevaluationOwnerKey,
@@ -579,6 +586,11 @@ async fn run_hls_availability_reevaluation_attempt(
         // Keep this reserve-only owner parked until that evidence changes.
         HlsAvailabilityAttemptSchedule::EvidenceOrDeadline
     } else {
+        // Inside a member-handoff deferral every attempt is a completed deferral even without a
+        // refresh request; counting it lets the retained cycle restart with a larger backoff.
+        if cycle.handoff_defer_until_ms.is_some_and(|defer_until_ms| attempt_now_ms < defer_until_ms) {
+            cycle.attempts_completed = cycle.attempts_completed.saturating_add(1);
+        }
         return HlsAvailabilityCycleDecision::FinishCycle;
     };
     let retry_from_ms = ctx.hls_proxy.now_ms();

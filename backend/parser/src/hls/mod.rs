@@ -59,6 +59,8 @@ pub struct HlsResourceToken {
     pub kind: Option<HlsResourceKind>,
     /// Provider (account) whose credentials or resolution produced `url`.
     pub origin_provider: Option<String>,
+    /// Failover-group member that produced `url`; `None` for legacy tokens and non-group sessions.
+    pub origin_member_vid: Option<u32>,
 }
 
 impl HlsResourceToken {
@@ -74,7 +76,9 @@ pub fn create_hls_resource_token(
     stream_url: &str,
     kind: Option<HlsResourceKind>,
     origin_provider: Option<&str>,
+    origin_member_vid: Option<u32>,
 ) -> String {
+    let member = origin_member_vid.map(|vid| vid.to_string()).unwrap_or_default();
     let payload = concat_string!(
         session_token.unwrap_or_default(),
         TOKEN_SEPARATOR_STR,
@@ -82,7 +86,9 @@ pub fn create_hls_resource_token(
         TOKEN_SEPARATOR_STR,
         kind.map_or("", HlsResourceKind::token_field),
         TOKEN_SEPARATOR_STR,
-        origin_provider.unwrap_or_default()
+        origin_provider.unwrap_or_default(),
+        TOKEN_SEPARATOR_STR,
+        &member
     );
     let token = seal_hls_resource_url(secret, &payload);
     let ext = if kind.is_some_and(HlsResourceKind::is_manifest) {
@@ -107,21 +113,34 @@ pub fn get_hls_session_token_and_url_from_token(secret: &[u8; 16], token: &str) 
     let decrypted = open_hls_resource_url(secret, remove_any_ext(token)).ok()?;
     let parts: Vec<&str> = decrypted.split(TOKEN_SEPARATOR).collect();
     match parts.as_slice() {
+        [session, url, kind, origin, member] => Some(HlsResourceToken {
+            session_token: (!session.is_empty()).then(|| (*session).to_string()),
+            url: (*url).to_string(),
+            kind: HlsResourceKind::from_token_field(kind),
+            origin_provider: (!origin.is_empty()).then(|| (*origin).to_string()),
+            origin_member_vid: member.parse().ok(),
+        }),
         [session, url, kind, origin] => Some(HlsResourceToken {
             session_token: (!session.is_empty()).then(|| (*session).to_string()),
             url: (*url).to_string(),
             kind: HlsResourceKind::from_token_field(kind),
             origin_provider: (!origin.is_empty()).then(|| (*origin).to_string()),
+            origin_member_vid: None,
         }),
         [session, url] => Some(HlsResourceToken {
             session_token: Some((*session).to_string()),
             url: (*url).to_string(),
             kind: None,
             origin_provider: None,
+            origin_member_vid: None,
         }),
-        [url] => {
-            Some(HlsResourceToken { session_token: None, url: (*url).to_string(), kind: None, origin_provider: None })
-        }
+        [url] => Some(HlsResourceToken {
+            session_token: None,
+            url: (*url).to_string(),
+            kind: None,
+            origin_provider: None,
+            origin_member_vid: None,
+        }),
         _ => None,
     }
 }
@@ -207,6 +226,8 @@ pub struct RewriteHlsProps<'a> {
     pub user_token: Option<&'a str>,
     /// Provider (account) that served the playlist being rewritten.
     pub origin_provider: Option<&'a str>,
+    /// Failover-group member that produced the child URLs; `None` outside group sessions.
+    pub origin_member_vid: Option<u32>,
     /// Kind of `content` when the caller has classified it already; classified here otherwise.
     pub playlist_kind: Option<HlsPlaylistKind>,
     /// Opt-in timeline rebase for a switched failover-group member's media playlist. `None` keeps
@@ -428,7 +449,14 @@ fn rewrite_resource_uri(
     resource_url: &str,
     kind: Option<HlsResourceKind>,
 ) -> String {
-    let token = create_hls_resource_token(props.secret, props.user_token, resource_url, kind, props.origin_provider);
+    let token = create_hls_resource_token(
+        props.secret,
+        props.user_token,
+        resource_url,
+        kind,
+        props.origin_provider,
+        props.origin_member_vid,
+    );
     build_hls_resource_uri(props.base_url, user, props.target_id, props.input_id, props.virtual_id, &token)
 }
 
@@ -644,6 +672,7 @@ mod test {
             input_id: 1,
             user_token: Some("m3u-catchup|fp|alice|42|archive|1717200000|3600"),
             origin_provider: None,
+            origin_member_vid: None,
             playlist_kind: None,
             rebase: None,
         };
@@ -674,6 +703,7 @@ mod test {
             input_id: 1,
             user_token: None,
             origin_provider: None,
+            origin_member_vid: None,
             playlist_kind: None,
             rebase: None,
         };
@@ -835,6 +865,7 @@ mod test {
             input_id: 11,
             user_token: None,
             origin_provider: None,
+            origin_member_vid: None,
             playlist_kind: None,
             rebase: None,
         };
@@ -877,6 +908,7 @@ mod test {
             input_id: 11,
             user_token,
             origin_provider: Some("provider_a"),
+            origin_member_vid: None,
             playlist_kind: None,
             rebase: None,
         }
@@ -899,7 +931,8 @@ mod test {
     #[test]
     fn resource_token_round_trips_four_fields() {
         let manifest = HlsResourceKind::Manifest(HlsManifestSource::Entry);
-        let token = create_hls_resource_token(&SECRET, Some("session"), "http://a/x.m3u8", Some(manifest), Some("p1"));
+        let token =
+            create_hls_resource_token(&SECRET, Some("session"), "http://a/x.m3u8", Some(manifest), Some("p1"), None);
         assert_eq!(
             decode(&token),
             HlsResourceToken {
@@ -907,10 +940,12 @@ mod test {
                 url: "http://a/x.m3u8".to_string(),
                 kind: Some(manifest),
                 origin_provider: Some("p1".to_string()),
+                origin_member_vid: None,
             }
         );
 
-        let token = create_hls_resource_token(&SECRET, None, "http://a/seg.ts", Some(HlsResourceKind::Media), None);
+        let token =
+            create_hls_resource_token(&SECRET, None, "http://a/seg.ts", Some(HlsResourceKind::Media), None, None);
         let decoded = decode(&token);
         assert_eq!(decoded.session_token, None);
         assert_eq!(decoded.origin_provider, None);
@@ -923,8 +958,24 @@ mod test {
             "http://a/c.m3u8",
             Some(HlsResourceKind::Manifest(HlsManifestSource::Child)),
             None,
+            None,
         );
         assert_eq!(decode(&token).kind, Some(HlsResourceKind::Manifest(HlsManifestSource::Child)));
+    }
+
+    #[test]
+    fn resource_token_round_trips_origin_member_and_keeps_legacy_tokens() {
+        let child = Some(HlsResourceKind::Manifest(HlsManifestSource::Child));
+        let token = create_hls_resource_token(&SECRET, Some("s"), "http://a/c.m3u8", child, Some("p1"), Some(42));
+        let decoded = decode(&token);
+        assert_eq!(decoded.origin_provider.as_deref(), Some("p1"));
+        assert_eq!(decoded.origin_member_vid, Some(42));
+
+        let sep = TOKEN_SEPARATOR_STR;
+        let legacy = seal_hls_resource_url(&SECRET, &format!("s{sep}http://a/c.m3u8{sep}mc{sep}p1"));
+        let decoded = decode(&format!("{legacy}.m3u8"));
+        assert_eq!(decoded.origin_provider.as_deref(), Some("p1"));
+        assert_eq!(decoded.origin_member_vid, None);
     }
 
     #[test]
@@ -951,16 +1002,17 @@ mod test {
     #[test]
     fn manifest_tokens_always_end_in_m3u8() {
         let manifest = Some(HlsResourceKind::Manifest(HlsManifestSource::Entry));
-        let ts = create_hls_resource_token(&SECRET, Some("s"), "http://a/timeshift_abs-1.ts?utc=1", manifest, None);
+        let ts =
+            create_hls_resource_token(&SECRET, Some("s"), "http://a/timeshift_abs-1.ts?utc=1", manifest, None, None);
         assert!(has_extension(&ts, "m3u8"), "{ts}");
-        let bare = create_hls_resource_token(&SECRET, Some("s"), "http://a/play/1234", manifest, None);
+        let bare = create_hls_resource_token(&SECRET, Some("s"), "http://a/play/1234", manifest, None, None);
         assert!(has_extension(&bare, "m3u8"), "{bare}");
         assert!(decode(&bare).is_manifest());
         let media =
-            create_hls_resource_token(&SECRET, Some("s"), "http://a/seg.ts", Some(HlsResourceKind::Media), None);
+            create_hls_resource_token(&SECRET, Some("s"), "http://a/seg.ts", Some(HlsResourceKind::Media), None, None);
         assert!(has_extension(&media, "ts"), "{media}");
         let media_m3u8 =
-            create_hls_resource_token(&SECRET, Some("s"), "http://a/x.m3u8", Some(HlsResourceKind::Media), None);
+            create_hls_resource_token(&SECRET, Some("s"), "http://a/x.m3u8", Some(HlsResourceKind::Media), None, None);
         assert!(!decode(&media_m3u8).is_manifest());
         let legacy = seal_hls_resource_url(&SECRET, "http://a/x.m3u8");
         assert!(decode(&legacy).is_manifest());
@@ -1027,6 +1079,24 @@ mod test {
         assert_eq!(variant.origin_provider.as_deref(), Some("provider_a"));
         assert_eq!(variant.session_token.as_deref(), Some("s"));
         assert!(line("#EXT-X-MEDIA").contains(".m3u8\""));
+    }
+
+    #[test]
+    fn rewrite_hls_seals_the_origin_member_into_child_tokens() {
+        let user = test_user();
+        let content = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\ntracks-v1/index.m3u8";
+        let group_props = RewriteHlsProps { origin_member_vid: Some(77), ..rewrite_props(content, Some("s")) };
+        let rewritten = rewrite_hls(&user, &group_props);
+        let variant =
+            token_of_uri(rewritten.lines().find(|line| line.starts_with("http://proxy/hls/")).expect("variant uri"));
+        assert_eq!(variant.origin_member_vid, Some(77));
+        assert_eq!(variant.origin_provider.as_deref(), Some("provider_a"));
+
+        // Without a member (non-group session) the token stays provider-only.
+        let plain = rewrite_hls(&user, &rewrite_props(content, Some("s")));
+        let variant =
+            token_of_uri(plain.lines().find(|line| line.starts_with("http://proxy/hls/")).expect("variant uri"));
+        assert_eq!(variant.origin_member_vid, None);
     }
 
     #[test]

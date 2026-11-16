@@ -767,6 +767,109 @@ async fn post_refresh_terminal_live_allowed_with_policy_does_not_notify_terminal
     assert!(cycle.awaiting_evidence);
 }
 
+#[test]
+fn lease_reevaluation_aggregation_keeps_reevaluate_distinct_from_live_allowed() {
+    use crate::{
+        availability::HlsTerminalResolution, post_refresh_availability::aggregate_lease_reevaluation_resolution,
+    };
+
+    assert_eq!(
+        aggregate_lease_reevaluation_resolution([HlsTerminalResolution::LiveAllowed]),
+        HlsTerminalResolution::LiveAllowed,
+        "a single live lease stays live"
+    );
+    assert_eq!(
+        aggregate_lease_reevaluation_resolution([HlsTerminalResolution::Reevaluate]),
+        HlsTerminalResolution::Reevaluate,
+        "a lease asking for re-evaluation must not be reported as live"
+    );
+    assert_eq!(
+        aggregate_lease_reevaluation_resolution([
+            HlsTerminalResolution::LiveAllowed,
+            HlsTerminalResolution::Reevaluate,
+        ]),
+        HlsTerminalResolution::Reevaluate,
+        "re-evaluation outranks plain live"
+    );
+    assert_eq!(
+        aggregate_lease_reevaluation_resolution([
+            HlsTerminalResolution::Reevaluate,
+            HlsTerminalResolution::Committed,
+            HlsTerminalResolution::LiveAllowed,
+        ]),
+        HlsTerminalResolution::Committed,
+        "a terminal answer wins over re-evaluation"
+    );
+    assert_eq!(
+        aggregate_lease_reevaluation_resolution([
+            HlsTerminalResolution::LiveAllowed,
+            HlsTerminalResolution::Pending { retry_after_ms: 25 },
+        ]),
+        HlsTerminalResolution::Pending { retry_after_ms: 25 }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn handoff_deferral_on_the_retained_worker_path_advances_the_backoff() {
+    let fixture = post_refresh_terminal_fixture("post-refresh-defer-retained-worker", true).await;
+    let runtime = crate::member_health::test_support::RecordingMemberRuntime::new(Some(
+        crate::member_health::test_support::RecordingMemberRuntime::default_policy(),
+    ));
+    runtime.set_member_handoff_pending(true);
+    fixture.session.write().await.origin_account_runtime = Some(runtime);
+
+    let owner_key = fixture
+        .ctx
+        .hls_proxy
+        .availability_reevaluation_owner_key(&fixture.session, &fixture.proxy_session_id)
+        .await
+        .expect("owner key");
+    let now_ms = fixture.ctx.hls_proxy.now_ms();
+    let (tx, rx) = oneshot::channel();
+    let ctx = fixture.ctx.clone();
+    let session = Arc::clone(&fixture.session);
+    let key = owner_key.clone();
+    assert_eq!(
+        ctx.hls_proxy.availability_reevaluations().register(
+            owner_key,
+            HlsAvailabilityReevaluationMode::PostRefresh(
+                crate::refresh::HlsPostRefreshAvailabilityReason::RetryableManifestFailure,
+            ),
+            move |ownership| async move {
+                let mut session = session;
+                let mut key = key;
+                let mut cycle = HlsAvailabilityReevaluationCycle::new(now_ms);
+                let mut retry_delays = Vec::new();
+                let mut attempts = Vec::new();
+                for _ in 0..3 {
+                    // The retained owner runs without a refresh request while the handoff defers.
+                    let mut refresh_request: Option<OriginRefreshRequest> = None;
+                    let decision = run_hls_availability_reevaluation_attempt(
+                        &ctx,
+                        &mut session,
+                        &mut key,
+                        &ownership,
+                        &mut refresh_request,
+                        &mut cycle,
+                    )
+                    .await;
+                    assert_eq!(decision, HlsAvailabilityCycleDecision::FinishCycle);
+                    let deadline = cycle.live_reserve_deadline.expect("handoff defer deadline");
+                    retry_delays.push(deadline.next_reevaluation_at_ms.saturating_sub(now_ms));
+                    attempts.push(cycle.attempts_completed);
+                    cycle = cycle.restart(now_ms);
+                }
+                let _ = tx.send((retry_delays, attempts));
+            },
+        ),
+        HlsAvailabilityReevaluationRegistration::Scheduled
+    );
+
+    let (retry_delays, attempts) = rx.await.expect("worker reports its retained-cycle backoff");
+    assert_eq!(attempts, vec![1, 2, 3], "each handoff deferral must count as a completed attempt");
+    assert_eq!(retry_delays, vec![1, 1, 2], "the deferred retry must keep backing off across restarts");
+}
+
 #[tokio::test]
 async fn handoff_defer_retry_backoff_grows_across_restarts_and_resets_when_deferral_ends() {
     let fixture = post_refresh_terminal_fixture("post-refresh-defer-backoff-growth", true).await;

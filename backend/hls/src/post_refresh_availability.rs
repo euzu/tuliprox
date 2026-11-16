@@ -221,9 +221,7 @@ pub(super) async fn query_active_terminal_leases_for_reevaluation(
 ) -> HlsTerminalResolution {
     ctx.hls_proxy.sync_recovery_binding_protection(&ctx.active_provider, session, now_ms).await;
     let leases = ctx.hls_proxy.terminal_playback_snapshots_for_session(proxy_session_id, now_ms).await;
-    if leases.is_empty() {
-        return HlsTerminalResolution::LiveAllowed;
-    }
+    let mut resolutions = Vec::with_capacity(leases.len());
     for lease in &leases {
         let detailed = query_lease_terminal_cutover_resolution(
             ctx,
@@ -234,13 +232,29 @@ pub(super) async fn query_active_terminal_leases_for_reevaluation(
             HlsTerminalDecisionPurpose::OrdinaryCutover,
         )
         .await;
-        if detailed.resolution != HlsTerminalResolution::LiveAllowed
-            && detailed.resolution != HlsTerminalResolution::Reevaluate
-        {
-            return detailed.resolution;
+        resolutions.push(detailed.resolution);
+    }
+    aggregate_lease_reevaluation_resolution(resolutions)
+}
+
+/// Aggregates per-lease query resolutions: a terminal answer wins over live, and any lease that asks
+/// for `Reevaluate` outranks plain `LiveAllowed` so the caller can look again instead of notifying.
+pub(super) fn aggregate_lease_reevaluation_resolution(
+    resolutions: impl IntoIterator<Item = HlsTerminalResolution>,
+) -> HlsTerminalResolution {
+    let mut reevaluate = false;
+    for resolution in resolutions {
+        match resolution {
+            HlsTerminalResolution::LiveAllowed => {}
+            HlsTerminalResolution::Reevaluate => reevaluate = true,
+            resolution => return resolution,
         }
     }
-    HlsTerminalResolution::LiveAllowed
+    if reevaluate {
+        HlsTerminalResolution::Reevaluate
+    } else {
+        HlsTerminalResolution::LiveAllowed
+    }
 }
 
 fn earliest_deadline(
