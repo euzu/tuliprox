@@ -253,8 +253,10 @@ impl AttemptTelemetry {
         Box::pin(ObservedBody {
             inner: body,
             telemetry: self.clone(),
+            expected_len,
             bytes: 0,
             first_byte_at: None,
+            announced_end_at: None,
             pending_since: None,
             origin_wait: Duration::ZERO,
         })
@@ -286,14 +288,18 @@ impl AttemptTelemetry {
         });
     }
 
-    fn on_reader_dropped(&self, bytes: u64, first_byte_at: Option<Instant>, origin_wait: Duration) {
+    fn on_reader_dropped(&self, read: ObservedRead) {
         self.update(|state| {
-            state.flush(bytes, first_byte_at, origin_wait);
+            state.flush(read.bytes, read.first_byte_at, read.origin_wait);
             let detached = state.reader == ReaderState::Detached || state.was_detached;
             state.reader = ReaderState::Dropped;
             if detached && state.probe.is_some() {
                 // A client that stopped after the announced length still received the whole object.
+                // It completed when the last announced byte was read, not when the reader was dropped.
                 if state.expected_len.is_some() && !state.short_body() {
+                    if let (Some(probe), Some(at)) = (state.probe.as_mut(), read.announced_end_at) {
+                        probe.mark_body_complete_at(at);
+                    }
                     state.finish_complete(false);
                 } else if let Some(mut probe) = state.probe.take() {
                     probe.set_delivery(OriginDelivery::Direct);
@@ -304,12 +310,24 @@ impl AttemptTelemetry {
     }
 }
 
+/// What the body reader observed, handed to the shared state when the reader is dropped.
+#[derive(Clone, Copy)]
+struct ObservedRead {
+    bytes: u64,
+    first_byte_at: Option<Instant>,
+    /// When the announced length was reached; a client may drop the reader later without polling EOF.
+    announced_end_at: Option<Instant>,
+    origin_wait: Duration,
+}
+
 /// Counts body bytes and marks body completion for one attempt.
 struct ObservedBody {
     inner: DynReader,
     telemetry: AttemptTelemetry,
+    expected_len: Option<u64>,
     bytes: u64,
     first_byte_at: Option<Instant>,
+    announced_end_at: Option<Instant>,
     pending_since: Option<Instant>,
     origin_wait: Duration,
 }
@@ -329,6 +347,9 @@ impl AsyncRead for ObservedBody {
                         self.first_byte_at = Some(Instant::now());
                     }
                     self.bytes = self.bytes.saturating_add(read);
+                    if self.announced_end_at.is_none() && self.expected_len.is_some_and(|len| self.bytes >= len) {
+                        self.announced_end_at = Some(Instant::now());
+                    }
                 } else if buf.remaining() > 0 {
                     self.telemetry.on_eof(self.bytes, self.first_byte_at, self.origin_wait);
                 }
@@ -354,7 +375,12 @@ impl Drop for ObservedBody {
         if let Some(pending_since) = self.pending_since.take() {
             self.origin_wait = self.origin_wait.saturating_add(pending_since.elapsed());
         }
-        self.telemetry.on_reader_dropped(self.bytes, self.first_byte_at, self.origin_wait);
+        self.telemetry.on_reader_dropped(ObservedRead {
+            bytes: self.bytes,
+            first_byte_at: self.first_byte_at,
+            announced_end_at: self.announced_end_at,
+            origin_wait: self.origin_wait,
+        });
     }
 }
 

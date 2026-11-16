@@ -635,3 +635,42 @@ async fn direct_stream_gives_delivery_direct() {
     assert_eq!(records[0].outcome, OriginFetchOutcome::Ok);
     assert_eq!(records[0].delivery, Some(OriginDelivery::Direct));
 }
+
+#[tokio::test(start_paused = true)]
+async fn direct_stream_dropped_after_last_byte_completes_at_delivery_time() {
+    use futures::task::noop_waker_ref;
+    let mut cx = std::task::Context::from_waker(noop_waker_ref());
+    let (recorder, mut rx) = recorder();
+    let telemetry = super::telemetry::AttemptTelemetry::begin(
+        &recorder,
+        "input",
+        OriginResourceKind::Segment,
+        Some("cache_key"),
+        0,
+    );
+    telemetry.mark_headers(200, Some(10));
+    let reader = ControllableReader {
+        steps: std::collections::VecDeque::from([std::task::Poll::Ready(Ok(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))]),
+    };
+    let mut body = telemetry.wrap(Box::pin(reader), Some(10));
+    // The commit callback returns the body unread: direct stream.
+    let result: Result<(), HlsOriginResourceFetchError> = Ok(());
+    telemetry.finish(&result);
+
+    let mut buf = [0_u8; 16];
+    let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+    assert!(body.as_mut().poll_read(&mut cx, &mut read_buf).is_ready());
+    assert_eq!(read_buf.filled().len(), 10);
+
+    // The client holds the reader after the announced last byte and never polls for EOF.
+    tokio::time::advance(Duration::from_millis(300)).await;
+    drop(body);
+
+    let records = records(&mut rx);
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.outcome, OriginFetchOutcome::Ok);
+    assert_eq!(record.delivery, Some(OriginDelivery::Direct));
+    assert_eq!(record.body_complete_ms, Some(0), "completion is the delivery time, not the drop time");
+    assert_eq!(record.body_consumer_wait_ms, Some(0));
+}
