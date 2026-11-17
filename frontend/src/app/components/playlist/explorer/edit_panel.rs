@@ -269,8 +269,8 @@ pub fn patch_playlist_item_from_patch(
     // 6. Rating
     if let Some(ref op) = patch.rating {
         match op {
-            OverrideFieldOp::Set(r) => updated.rating = *r,
-            OverrideFieldOp::Clear => updated.rating = 0.0,
+            OverrideFieldOp::Set(r) => updated.set_provider_rating(Some(*r)),
+            OverrideFieldOp::Clear => updated.set_provider_rating(None),
             OverrideFieldOp::Reset => updated.rating = 0.0,
         }
     }

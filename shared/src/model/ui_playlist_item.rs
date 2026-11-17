@@ -281,6 +281,27 @@ fn get_rating(props: Option<&StreamProperties>) -> f64 {
 
 /// Computes rating origin: `Imdb` when `effective_rating` is `Some` and equals `imdb_rating`,
 /// `Provider` when `Some` otherwise, and `None` when no effective rating.
+impl UiPlaylistItem {
+    /// Applies a provider-rating override to an item the explorer already shows.
+    ///
+    /// `None` clears the rating. An item whose effective rating comes from `IMDb` keeps
+    /// it; otherwise the provider rating becomes the effective one, the same rule the
+    /// next update applies for `imdb_then_provider`. The origin is set explicitly and
+    /// never derived from value equality, so a provider value that happens to equal
+    /// the `IMDb` rating stays a provider rating.
+    pub fn set_provider_rating(&mut self, rating: Option<f64>) {
+        let rating = rating.filter(|value| value.is_finite() && *value > 0.0);
+        self.rating = rating.unwrap_or(0.0);
+        if self.rating_origin == Some(UiRatingOrigin::Imdb) {
+            return;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let effective = rating.map(|value| value as f32);
+        self.effective_rating = effective;
+        self.rating_origin = effective.map(|_| UiRatingOrigin::Provider);
+    }
+}
+
 #[inline]
 pub fn compute_rating_origin(effective_rating: Option<f32>, imdb_rating: Option<f32>) -> Option<UiRatingOrigin> {
     effective_rating.map(|eff| if imdb_rating == Some(eff) { UiRatingOrigin::Imdb } else { UiRatingOrigin::Provider })

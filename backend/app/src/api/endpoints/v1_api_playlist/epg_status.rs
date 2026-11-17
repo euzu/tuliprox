@@ -18,8 +18,8 @@ use chrono::Utc;
 use shared::{
     error::TuliproxError,
     model::{
-        compute_rating_origin, ExplorerEpgState, FieldDelta, ItemOverride, OverrideItemKind, TargetType,
-        UiItemExplorerMeta, UiOverrideState, UiPlaylistItem, UiRatingOrigin,
+        ExplorerEpgState, FieldDelta, ItemOverride, OverrideItemKind, TargetType, UiItemExplorerMeta, UiOverrideState,
+        UiPlaylistItem,
     },
 };
 use std::{
@@ -455,22 +455,8 @@ fn apply_override_to_ui_item(item: &mut UiPlaylistItem, ov: &ItemOverride) {
     }
     match ov.rating {
         FieldDelta::Keep => {}
-        FieldDelta::Clear => {
-            item.rating = 0.0;
-            if item.rating_origin != Some(UiRatingOrigin::Imdb) {
-                item.effective_rating = None;
-                item.rating_origin = compute_rating_origin(item.effective_rating, item.imdb_rating);
-            }
-        }
-        FieldDelta::Set(v) => {
-            item.rating = v;
-            if item.rating_origin != Some(UiRatingOrigin::Imdb) {
-                #[allow(clippy::cast_possible_truncation)]
-                let eff = (v.is_finite() && v > 0.0).then_some(v as f32);
-                item.effective_rating = eff;
-                item.rating_origin = compute_rating_origin(item.effective_rating, item.imdb_rating);
-            }
-        }
+        FieldDelta::Clear => item.set_provider_rating(None),
+        FieldDelta::Set(v) => item.set_provider_rating(Some(v)),
     }
     match &ov.epg_channel_id {
         FieldDelta::Keep => {}
@@ -741,7 +727,7 @@ fn apply_lookup_overlay(
 mod tests {
     use super::*;
     use crate::utils::Internable;
-    use shared::model::XtreamCluster;
+    use shared::model::{UiRatingOrigin, XtreamCluster};
 
     #[test]
     fn epg_status_four_cases() {
@@ -1424,6 +1410,26 @@ mod tests {
 
         assert_eq!(items[0].title.as_ref(), "WRAL HD Custom");
         assert_eq!(items[1].title.as_ref(), "WRAL DT Custom");
+    }
+
+    #[test]
+    fn provider_override_equal_to_imdb_value_keeps_provider_origin() {
+        // An unrated-by-IMDb item (strict threshold not met) with an IMDb value of 8.
+        let mut item = UiPlaylistItem { imdb_rating: Some(8.0), imdb_votes: Some(10), ..Default::default() };
+        let set = |rating| ItemOverride { rating: FieldDelta::Set(rating), ..Default::default() };
+
+        apply_override_to_ui_item(&mut item, &set(8.0));
+        assert_eq!(item.effective_rating, Some(8.0));
+        assert_eq!(item.rating_origin, Some(UiRatingOrigin::Provider));
+
+        apply_override_to_ui_item(&mut item, &set(9.0));
+        assert_eq!(item.effective_rating, Some(9.0));
+        assert_eq!(item.rating_origin, Some(UiRatingOrigin::Provider));
+
+        apply_override_to_ui_item(&mut item, &ItemOverride { rating: FieldDelta::Clear, ..Default::default() });
+        assert_eq!(item.rating, 0.0);
+        assert_eq!(item.effective_rating, None);
+        assert_eq!(item.rating_origin, None);
     }
 
     #[test]

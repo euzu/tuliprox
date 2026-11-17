@@ -1722,7 +1722,9 @@ Tuliprox supports the following filter expression types:
   `Votes` is the raw IMDb vote count. An item without a known vote count never matches a numeric comparison, so
   select it with `Votes IS EMPTY`; `Votes IS NOT EMPTY` matches items with a known count.
   Series use the series rating, not episode ratings.
-  Requires [`metadata_update.imdb`](metadata-update.md#5-imdb-ratings-imdb).
+  `Votes` requires [`metadata_update.imdb`](metadata-update.md#5-imdb-ratings-imdb); `Rating` works without it (it is
+  then the provider rating) and needs `metadata_update.imdb` only for IMDb-based ratings (`rating_source` `imdb` or
+  `imdb_then_provider`).
   Examples: `Rating > 6`, `Rating >= 6.5 AND Votes >= 5000`, `Type = movie AND (Rating >= 7 OR Rating IS EMPTY)`.
 * Filters don't have operator precedence, so please use parentheses
 * You can apply Morgan’s Law `NOT (A) AND NOT (B)`is the same as `NOT( A OR B)`

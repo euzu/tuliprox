@@ -216,7 +216,6 @@ impl AppState {
             return Err(TuliproxError::ConfigWebUi("web auth changes require a server restart".to_string()));
         }
         let old_storage_dir = current_config.storage_dir.clone();
-        let old_imdb_enabled = current_config.is_imdb_enabled();
         let old_imdb_url = current_config.metadata_update.as_ref().map(|m| m.imdb.url.clone());
         let new_imdb_url = config.metadata_update.as_ref().map(|m| m.imdb.url.clone());
         let imdb_url_changed = old_imdb_url != new_imdb_url;
@@ -265,7 +264,7 @@ impl AppState {
         }
 
         if changes.flags.contains(UpdateChangesFlags::Imdb) {
-            self.reload_imdb_index(use_imdb, imdb_url_changed && old_imdb_enabled, &storage_dir).await;
+            self.reload_imdb_index(use_imdb, imdb_url_changed, &storage_dir).await;
         }
 
         shared::model::REGEX_CACHE.sweep();

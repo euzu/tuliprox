@@ -21,11 +21,12 @@ use crate::{
 use axum::response::IntoResponse;
 use serde_json::json;
 use shared::{
-    model::{InputPersistence, TargetType, UiPlaylistItem, XtreamCluster},
+    model::{ImdbRatingSource, InputPersistence, TargetType, UiPlaylistItem, XtreamCluster},
     utils::{concat_path, concat_path_leading_slash, interner_gc, seal_web_ui_resource_url, Internable},
 };
 use std::sync::Arc;
 use tokio_stream::StreamExt;
+use tuliprox_core::model::ImdbConfig;
 
 pub(in crate::api::endpoints) const STALKER_RESOURCE_SCHEME: &str = "stalker://";
 
@@ -105,6 +106,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
                 return empty_json_list_response();
             };
             if explorer {
+                let imdb_config = config.metadata_update.as_ref().map(|m| &m.imdb);
                 let mut items = collect_explorer_items(
                     channel_iterator,
                     |item| {
@@ -112,7 +114,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
                             Some(rewrite_resource_url(
                                 &encrypt_secret,
                                 &resource_url,
-                                UiPlaylistItem::from_xtream(item, true),
+                                apply_raw_item_effective_rating(UiPlaylistItem::from_xtream(item, true), imdb_config),
                             ))
                         } else {
                             None
@@ -187,6 +189,17 @@ pub(in crate::api::endpoints) fn rewrite_resource_url(
     item
 }
 
+pub(crate) fn apply_raw_item_effective_rating(
+    mut item: UiPlaylistItem,
+    imdb_config: Option<&ImdbConfig>,
+) -> UiPlaylistItem {
+    let imdb_rating_only = imdb_config.is_some_and(|cfg| cfg.enabled && cfg.rating_source == ImdbRatingSource::Imdb);
+    if !imdb_rating_only && item.rating > 0.0 && item.effective_rating.is_none() {
+        item.set_provider_rating(Some(item.rating));
+    }
+    item
+}
+
 /// Item as handed to the Web UI: icon wrapped into a proxy link, playback URL routed through the
 /// resource route.
 ///
@@ -229,13 +242,14 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 return empty_json_list_response();
             };
             if explorer {
+                let imdb_config = config.metadata_update.as_ref().map(|m| &m.imdb);
                 let mut items = collect_explorer_items(
                     channel_iterator,
                     |item| {
                         Some(rewrite_resource_url(
                             &encrypt_secret,
                             &resource_url,
-                            UiPlaylistItem::from_xtream(item, true),
+                            apply_raw_item_effective_rating(UiPlaylistItem::from_xtream(item, true), imdb_config),
                         ))
                     },
                     &input.name,
@@ -387,9 +401,11 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                 let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
                 let encrypt_secret = app_state.get_encrypt_secret();
                 let input_id = input.id;
+                let imdb_config = cfg.metadata_update.as_ref().map(|m| m.imdb.clone());
                 let converted_stream =
                     tokio_stream::iter(result.into_iter().flat_map(|g| g.channels).map(move |pli| {
-                        preview_item(&encrypt_secret, &resource_url, input_id, UiPlaylistItem::from(&pli))
+                        let item = apply_raw_item_effective_rating(UiPlaylistItem::from(&pli), imdb_config.as_ref());
+                        preview_item(&encrypt_secret, &resource_url, input_id, item)
                     }));
                 stream_json_or_bin_response_stream(accept, converted_stream).into_response()
             }
@@ -586,5 +602,79 @@ mod tests {
                 .into_response();
 
         assert_eq!(explorer_response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[test]
+    fn raw_item_effective_rating_without_imdb_sets_provider_rating() {
+        let mut item = sample_item("");
+        item.rating = 7.5;
+        assert_eq!(item.effective_rating, None);
+
+        let item = super::apply_raw_item_effective_rating(item, None);
+        assert_eq!(item.effective_rating, Some(7.5));
+        assert_eq!(item.rating_origin, Some(shared::model::UiRatingOrigin::Provider));
+    }
+
+    #[test]
+    fn raw_item_effective_rating_with_imdb_disabled_sets_provider_rating() {
+        let mut item = sample_item("");
+        item.rating = 8.0;
+        let imdb_config =
+            super::ImdbConfig { enabled: false, rating_source: super::ImdbRatingSource::Imdb, ..Default::default() };
+
+        let item = super::apply_raw_item_effective_rating(item, Some(&imdb_config));
+        assert_eq!(item.effective_rating, Some(8.0));
+        assert_eq!(item.rating_origin, Some(shared::model::UiRatingOrigin::Provider));
+    }
+
+    #[test]
+    fn raw_item_effective_rating_with_imdb_fallback_sets_provider_rating() {
+        let mut item = sample_item("");
+        item.rating = 6.5;
+        let imdb_config = super::ImdbConfig {
+            enabled: true,
+            rating_source: super::ImdbRatingSource::ImdbThenProvider,
+            ..Default::default()
+        };
+
+        let item = super::apply_raw_item_effective_rating(item, Some(&imdb_config));
+        assert_eq!(item.effective_rating, Some(6.5));
+        assert_eq!(item.rating_origin, Some(shared::model::UiRatingOrigin::Provider));
+    }
+
+    #[test]
+    fn raw_item_effective_rating_with_strict_imdb_leaves_unrated() {
+        let mut item = sample_item("");
+        item.rating = 7.5;
+        let imdb_config =
+            super::ImdbConfig { enabled: true, rating_source: super::ImdbRatingSource::Imdb, ..Default::default() };
+
+        let item = super::apply_raw_item_effective_rating(item, Some(&imdb_config));
+        assert_eq!(item.effective_rating, None);
+        assert_eq!(item.rating_origin, None);
+    }
+
+    #[test]
+    fn raw_item_effective_rating_preserves_existing_effective_rating() {
+        let mut item = sample_item("");
+        item.rating = 6.0;
+        item.set_provider_rating(Some(9.0));
+        assert_eq!(item.effective_rating, Some(9.0));
+
+        let item = super::apply_raw_item_effective_rating(item, None);
+        assert_eq!(item.effective_rating, Some(9.0));
+    }
+
+    #[test]
+    fn raw_item_effective_rating_ignores_zero_or_negative_provider_rating() {
+        let mut zero_item = sample_item("");
+        zero_item.rating = 0.0;
+        let zero_item = super::apply_raw_item_effective_rating(zero_item, None);
+        assert_eq!(zero_item.effective_rating, None);
+
+        let mut neg_item = sample_item("");
+        neg_item.rating = -1.0;
+        let neg_item = super::apply_raw_item_effective_rating(neg_item, None);
+        assert_eq!(neg_item.effective_rating, None);
     }
 }

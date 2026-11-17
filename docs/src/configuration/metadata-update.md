@@ -181,7 +181,9 @@ A failed, truncated or non-gzip download never blocks a playlist update; the las
 table with less than half the rows of the current table is rejected. Without any table the feature does nothing and
 logs a warning.
 
-Ratings are looked up during every playlist update against the newest table, so stored ratings never go stale.
+Each update uses the latest stored table, which is only as fresh as the last successful download; without a
+scheduled refresh, or when a refresh fails, the last good table stays in use, so operators must refresh it (schedule
+`ImdbRatingsUpdate` or manual update) to get newer ratings.
 
 ### IMDb ID Sources
 

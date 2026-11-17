@@ -326,6 +326,16 @@ fn join_parts<'a>(parts: impl Iterator<Item = &'a str>, separator: char) -> Stri
 }
 
 impl SeriesStreamProperties {
+    /// Copies the per-update `IMDb` values from `other`. Processing derives them
+    /// before the target filter; a resolve that replaces the properties afterwards
+    /// keeps them with this.
+    pub fn copy_imdb_fields_from(&mut self, other: &Self) {
+        self.imdb = other.imdb.or(self.imdb);
+        self.imdb_rating = other.imdb_rating;
+        self.imdb_votes = other.imdb_votes;
+        self.effective_rating = other.effective_rating;
+    }
+
     pub(super) fn from_info_base(info: &XtreamSeriesInfo, series_id: u32) -> SeriesStreamProperties {
         SeriesStreamProperties {
             name: info.info.name.clone(),
@@ -410,10 +420,7 @@ impl SeriesStreamProperties {
         // IMDb values are derived per update before the target filter; the info
         // resolve that runs after it must not drop them.
         if let Some(StreamProperties::Series(series)) = pli.get_additional_properties() {
-            props.imdb = series.imdb;
-            props.imdb_rating = series.imdb_rating;
-            props.imdb_votes = series.imdb_votes;
-            props.effective_rating = series.effective_rating;
+            props.copy_imdb_fields_from(series);
         }
         props
     }

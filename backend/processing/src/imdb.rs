@@ -155,17 +155,11 @@ pub fn spawn_imdb_ratings_update(app_config: Arc<AppConfig>, http_client: reqwes
     });
 }
 
+/// The gzip decoder validates the header itself, across chunk boundaries; a
+/// body that is not gzip fails on the first read.
 async fn stream_and_parse_gzip<R: tokio::io::AsyncRead + Unpin>(
-    mut reader: BufReader<R>,
+    reader: BufReader<R>,
 ) -> Result<(ImdbTree, ParseStats), ImdbUpdateError> {
-    let buffer = reader.fill_buf().await.map_err(|e| ImdbUpdateError::DownloadFailed(e.to_string()))?;
-
-    if buffer.len() < 2 || buffer[0] != 0x1f || buffer[1] != 0x8b {
-        return Err(ImdbUpdateError::ProcessFailed(
-            "Downloaded file is not a valid gzip stream (missing gzip magic 0x1f 0x8b)".to_string(),
-        ));
-    }
-
     let gzip_decoder = GzipDecoder::new(reader);
     let mut text_reader = BufReader::new(gzip_decoder);
 
@@ -265,8 +259,10 @@ impl ImdbRatingRuntime {
         }
 
         let _gate = inner.open_gate.lock().await;
-        // Another target may have opened the table while this task waited.
-        if inner.open_attempted.swap(true, Ordering::AcqRel) {
+        // Another target may have opened the table while this task waited. The
+        // flag is published only after the outcome is stored (below), so a caller
+        // that sees it never applies ratings before the lookup is in place.
+        if inner.open_attempted.load(Ordering::Acquire) {
             return;
         }
         let Some(app_config) = inner.app_config.clone() else { return };
@@ -295,6 +291,7 @@ impl ImdbRatingRuntime {
                 warn!("Failed to open the IMDb ratings table (read task failed: {err}); the feature is a no-op for this run");
             }
         }
+        inner.open_attempted.store(true, Ordering::Release);
     }
 
     pub fn apply(&self, items: &mut [PlaylistItem]) {
@@ -880,6 +877,34 @@ mod tests {
     fn stored_lookup(storage_dir: &str, disk_based: bool) -> ImdbLookup {
         let path = get_imdb_ratings_path(storage_dir);
         ImdbLookup::open(&path, disk_based).expect("open stored table").expect("table is stored")
+    }
+
+    #[tokio::test]
+    async fn test_stream_and_parse_gzip_across_split_magic_header_chunks() {
+        let tsv_content = "\
+tconst\taverageRating\tnumVotes
+tt0000001\t5.7\t2112
+tt0000002\t8.1\t1500
+tt0000003\t7.0\t3000
+";
+        let gzip_body = compress_to_gzip(tsv_content);
+        assert!(gzip_body.len() >= 2);
+        assert_eq!(gzip_body[0], 0x1f);
+        assert_eq!(gzip_body[1], 0x8b);
+
+        let chunk1 = std::io::Cursor::new(vec![gzip_body[0]]);
+        let chunk2 = std::io::Cursor::new(gzip_body[1..].to_vec());
+        let stream = futures::stream::iter(vec![Ok::<_, std::io::Error>(chunk1), Ok::<_, std::io::Error>(chunk2)]);
+        let reader = tokio_util::io::StreamReader::new(stream);
+        let buf_reader = tokio::io::BufReader::new(reader);
+
+        let (tree, stats) = stream_and_parse_gzip(buf_reader).await.expect("parse split gzip stream");
+        assert_eq!(stats.skipped_rows, 0);
+        assert_eq!(stats.duplicate_rows, 0);
+        assert_eq!(tree.len(), 3);
+        assert_eq!(tree.query(&1).map(|e| (e.rating_x10, e.votes)), Some((57, 2112)));
+        assert_eq!(tree.query(&2).map(|e| (e.rating_x10, e.votes)), Some((81, 1500)));
+        assert_eq!(tree.query(&3).map(|e| (e.rating_x10, e.votes)), Some((70, 3000)));
     }
 
     #[tokio::test]
