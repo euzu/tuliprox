@@ -324,8 +324,7 @@ pub fn compute_policy_rating_origin(
     effective_rating?;
     let imdb_selected = match source {
         None | Some(ImdbRatingSource::Provider) => false,
-        Some(ImdbRatingSource::Imdb) => true,
-        Some(ImdbRatingSource::ImdbThenProvider) => {
+        Some(ImdbRatingSource::Imdb | ImdbRatingSource::ImdbThenProvider) => {
             imdb_rating.is_some() && imdb_votes.is_some_and(|votes| votes >= min_votes)
         }
     };
@@ -448,7 +447,9 @@ impl UiPlaylistItem {
             meta.override_source_url = (!item.input_url.is_empty()).then(|| Arc::clone(&item.input_url));
             meta
         });
-        let (effective_rating, imdb_rating, imdb_votes, rating_origin) = extract_ratings(None);
+        let (effective_rating, imdb_rating, imdb_votes, rating_origin) =
+            extract_ratings(item.additional_properties.as_ref());
+        let rating = provider_rating(item.additional_properties.as_ref());
         Self {
             virtual_id: item.virtual_id.get(),
             provider_id: Arc::clone(&item.provider_id),
@@ -460,7 +461,7 @@ impl UiPlaylistItem {
             item_type: item.item_type,
             xtream_cluster: item.item_type.cluster(),
             category_id: 0,
-            rating: 0.0,
+            rating,
             input_name: Arc::clone(&item.input_name),
             input_stream_id: Arc::clone(&item.input_stream_id),
             epg_channel_id: item.epg_channel_id,
@@ -739,7 +740,7 @@ mod tests {
             category_id: Some(1),
             input_name: "test".into(),
             epg_channel_id: None,
-            additional_properties: Some(video_imdb),
+            additional_properties: Some(video_imdb.clone()),
         };
         let item_imdb = UiPlaylistItem::from_common(&common_imdb, false);
         assert_eq!(item_imdb.rating, 6.8);
@@ -870,6 +871,28 @@ mod tests {
         assert_eq!(item_m3u.imdb_rating, None);
         assert_eq!(item_m3u.imdb_votes, None);
         assert_eq!(item_m3u.rating_origin, None);
+
+        // 6. M3U item with Video properties (preserves ratings)
+        let m3u_video = M3uPlaylistItem::from(&PlaylistItem {
+            header: PlaylistItemHeader {
+                virtual_id: VirtualId::new(6),
+                id: "m3u6".into(),
+                name: "M3U Movie".into(),
+                title: "M3U Movie".into(),
+                group: "Movies".into(),
+                url: "http://example.com/movie.mp4".into(),
+                item_type: PlaylistItemType::Video,
+                chno: 6,
+                input_name: "test".into(),
+                additional_properties: Some(video_imdb),
+                ..Default::default()
+            },
+        });
+        let item_m3u_video = UiPlaylistItem::from_m3u(m3u_video, false);
+        assert_eq!(item_m3u_video.effective_rating, Some(4.2));
+        assert_eq!(item_m3u_video.imdb_rating, Some(4.2));
+        assert_eq!(item_m3u_video.imdb_votes, Some(12345));
+        assert_eq!(item_m3u_video.rating_origin, Some(UiRatingOrigin::Imdb));
     }
 
     #[test]
@@ -987,10 +1010,15 @@ mod tests {
             Some(UiRatingOrigin::Provider)
         );
 
-        // Imdb source -> Imdb when effective is Some
+        // Imdb source -> Imdb when a qualifying IMDb rating exists
+        assert_eq!(
+            compute_policy_rating_origin(Some(7.0), Some(7.0), Some(100), Some(ImdbRatingSource::Imdb), 100),
+            Some(UiRatingOrigin::Imdb)
+        );
+        // Imdb source with stale provider data from an older config -> Provider
         assert_eq!(
             compute_policy_rating_origin(Some(7.0), None, None, Some(ImdbRatingSource::Imdb), 100),
-            Some(UiRatingOrigin::Imdb)
+            Some(UiRatingOrigin::Provider)
         );
 
         // ImdbThenProvider -> Imdb iff imdb_rating is Some and imdb_votes >= min_votes

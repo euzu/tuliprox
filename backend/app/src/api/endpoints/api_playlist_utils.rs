@@ -141,6 +141,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
                 return empty_json_list_response();
             };
             if explorer {
+                let imdb_config = config.metadata_update.as_ref().map(|m| &m.imdb);
                 let mut items = collect_explorer_items(
                     channel_iterator,
                     |pli| {
@@ -148,7 +149,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
                             Some(rewrite_resource_url(
                                 &encrypt_secret,
                                 &resource_url,
-                                UiPlaylistItem::from_m3u(pli, true),
+                                apply_raw_item_effective_rating(UiPlaylistItem::from_m3u(pli, true), imdb_config),
                             ))
                         } else {
                             None
@@ -280,10 +281,15 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 return empty_json_list_response();
             };
             if explorer {
+                let imdb_config = config.metadata_update.as_ref().map(|m| &m.imdb);
                 let mut items = collect_explorer_items(
                     channels,
                     |item| {
-                        Some(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from_m3u(item, true)))
+                        Some(rewrite_resource_url(
+                            &encrypt_secret,
+                            &resource_url,
+                            apply_raw_item_effective_rating(UiPlaylistItem::from_m3u(item, true), imdb_config),
+                        ))
                     },
                     &input.name,
                 )

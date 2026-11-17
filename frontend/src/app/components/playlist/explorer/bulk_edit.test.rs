@@ -1,6 +1,7 @@
 use super::*;
 use shared::model::{
-    OverrideFieldOp, OverrideItemKind, PlaylistItemType, UiItemExplorerMeta, UiOverrideState, XtreamCluster,
+    OverrideFieldOp, OverrideItemKind, OverrideScopeDto, PlaylistItemType, UiItemExplorerMeta, UiOverrideState,
+    UiRatingOrigin, XtreamCluster,
 };
 use std::sync::Arc;
 
@@ -147,7 +148,8 @@ fn bulk_keeps_other_item_deltas() {
     let patch =
         ItemOverridePatch { group: Some(OverrideFieldOp::Set("New Bulk Group".to_string())), ..Default::default() };
 
-    let patched = patch_playlist_item_bulk(&original, &patch, ImdbRatingSource::ImdbThenProvider);
+    let patched =
+        patch_playlist_item_bulk(&original, &patch, OverrideScopeDto::Input, None, ImdbRatingSource::ImdbThenProvider);
 
     assert_eq!(&*patched.group, "New Bulk Group");
     // Existing fields like name, title, epg_channel_id must NOT be altered or wiped
@@ -173,7 +175,8 @@ fn bulk_patch_supports_all_ui_fields() {
         ..Default::default()
     };
 
-    let patched = patch_playlist_item_bulk(&original, &patch, ImdbRatingSource::ImdbThenProvider);
+    let patched =
+        patch_playlist_item_bulk(&original, &patch, OverrideScopeDto::Input, None, ImdbRatingSource::ImdbThenProvider);
     assert_eq!(&*patched.name, "Bulk Name");
     assert_eq!(&*patched.title, "Bulk Title");
     assert_eq!(&*patched.group, "Bulk Group");
@@ -191,13 +194,35 @@ fn bulk_patch_supports_all_ui_fields() {
         ..Default::default()
     };
 
-    let cleared = patch_playlist_item_bulk(&patched, &clear_patch, ImdbRatingSource::ImdbThenProvider);
+    let cleared = patch_playlist_item_bulk(
+        &patched,
+        &clear_patch,
+        OverrideScopeDto::Input,
+        None,
+        ImdbRatingSource::ImdbThenProvider,
+    );
     assert_eq!(&*cleared.name, "");
     assert_eq!(&*cleared.title, "");
     assert_eq!(&*cleared.group, "");
     assert_eq!(&*cleared.logo, "");
     assert_eq!(cleared.epg_channel_id, None);
     assert_eq!(cleared.rating, 0.0);
+}
+
+#[test]
+fn bulk_rating_reset_leaves_rating_unchanged_when_no_provenance() {
+    let mut original = (*make_test_item(1, "p1", "Item", "input-a", PlaylistItemType::Live)).clone();
+    original.rating = 8.5;
+    original.effective_rating = Some(8.5);
+    original.rating_origin = Some(UiRatingOrigin::Provider);
+
+    let patch = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+
+    let patched =
+        patch_playlist_item_bulk(&original, &patch, OverrideScopeDto::Input, None, ImdbRatingSource::ImdbThenProvider);
+    assert_eq!(patched.rating, 8.5);
+    assert_eq!(patched.effective_rating, Some(8.5));
+    assert_eq!(patched.rating_origin, Some(UiRatingOrigin::Provider));
 }
 
 #[test]

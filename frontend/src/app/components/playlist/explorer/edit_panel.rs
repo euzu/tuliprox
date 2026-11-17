@@ -194,6 +194,7 @@ pub fn build_item_patch(
 pub fn patch_playlist_item_from_patch(
     item: &UiPlaylistItem,
     patch: &ItemOverridePatch,
+    scope: OverrideScopeDto,
     provenance: Option<&OverrideProvenanceDto>,
     has_remaining_deltas: bool,
     rating_source: ImdbRatingSource,
@@ -273,10 +274,12 @@ pub fn patch_playlist_item_from_patch(
         match op {
             OverrideFieldOp::Set(r) => updated.set_provider_rating(Some(*r), rating_source),
             OverrideFieldOp::Clear => updated.set_provider_rating(None, rating_source),
-            OverrideFieldOp::Reset => updated.set_provider_rating(
-                provenance.and_then(|pr| pr.provider.as_ref()).and_then(|p| p.rating),
-                rating_source,
-            ),
+            OverrideFieldOp::Reset => {
+                // Without provenance the underlying rating is unknown: keep the item as shown.
+                if let Some(prov) = provenance {
+                    updated.set_provider_rating(rating_reset_value(scope, prov), rating_source);
+                }
+            }
         }
     }
 
@@ -301,6 +304,7 @@ pub fn patch_playlist_item(
     item: &UiPlaylistItem,
     form: &PlaylistOverrideDto,
     deltas: &FieldDeltas,
+    scope: OverrideScopeDto,
     provenance: Option<&OverrideProvenanceDto>,
     has_remaining_deltas: bool,
     rating_source: ImdbRatingSource,
@@ -340,7 +344,19 @@ pub fn patch_playlist_item(
         patch.rating = Some(OverrideFieldOp::Set(rating));
     }
 
-    patch_playlist_item_from_patch(item, &patch, provenance, has_remaining_deltas, rating_source)
+    patch_playlist_item_from_patch(item, &patch, scope, provenance, has_remaining_deltas, rating_source)
+}
+
+/// Rating that remains after a rating override is reset: the input override (target scope), else the
+/// provider record. The processed record is no fallback, it still carries the override being reset.
+fn rating_reset_value(scope: OverrideScopeDto, provenance: &OverrideProvenanceDto) -> Option<f64> {
+    let fallback = reset_fallback(scope, "rating", provenance);
+    match fallback.source {
+        FallbackSource::InputOverride | FallbackSource::Provider => {
+            fallback.value.as_deref().and_then(parse_localized_float)
+        }
+        FallbackSource::Processed | FallbackSource::Base => None,
+    }
 }
 
 /// Rating source the explorer applies to provider-rating edits; `IMDb` disabled counts as `Provider`.
@@ -580,6 +596,7 @@ fn get_field_from_item_fields(fields: &ItemFieldsDto, field: &str) -> Option<Str
         "audio_track" => Some(fields.audio_track.clone()),
         "time_shift" => Some(fields.time_shift.clone()),
         "rec" => Some(fields.rec.clone()),
+        "rating" => fields.rating.map(|r| r.to_string()),
         _ => None,
     }
 }
@@ -1476,6 +1493,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                                     &item,
                                     &form,
                                     &saved_deltas,
+                                    active_scope,
                                     prov_opt.as_ref(),
                                     has_remaining_deltas,
                                     rating_source,
