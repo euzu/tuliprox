@@ -165,6 +165,14 @@ fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, proce
     );
 }
 
+pub(crate) fn apply_resolved_series_properties(pli: &mut PlaylistItem, updated_props: &SeriesStreamProperties) {
+    let mut in_memory_props = updated_props.clone();
+    if let Some(StreamProperties::Series(current)) = pli.header.additional_properties.as_ref() {
+        in_memory_props.copy_imdb_fields_from(current);
+    }
+    pli.header.additional_properties = Some(StreamProperties::Series(Box::new(in_memory_props)));
+}
+
 fn queue_background_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     ctx: &PlaylistProcessingContext<E, M, P>,
     fpl: &mut FetchedPlaylist<'_>,
@@ -358,8 +366,7 @@ async fn process_immediate_series_info<E: EventSink + Clone + 'static, M: Metada
                     .await
                     {
                         Ok(Some(updated_props)) => {
-                            pli.header.additional_properties =
-                                Some(StreamProperties::Series(Box::new(updated_props.clone())));
+                            apply_resolved_series_properties(pli, &updated_props);
                             batch.push((provider_id.clone(), updated_props));
 
                             if batch.len() >= BATCH_SIZE {
@@ -463,8 +470,7 @@ async fn process_immediate_series_info<E: EventSink + Clone + 'static, M: Metada
                 series_probe_settings,
             ),
             apply_properties: |retry_pli, updated_props| {
-                retry_pli.header.additional_properties =
-                    Some(StreamProperties::Series(Box::new(updated_props.clone())));
+                apply_resolved_series_properties(retry_pli, updated_props);
             },
             persist: |updates| persist_input_series_info_batch(
                 &ctx.config,
@@ -1140,5 +1146,60 @@ impl EnrichableMetadata for SeriesStreamProperties {
     fn set_plugin_fingerprint(&mut self, fingerprint: Option<String>) -> bool {
         let fingerprint: Option<Arc<str>> = fingerprint.map(Arc::from);
         std::mem::replace(&mut self.plugin_fingerprint, fingerprint.clone()) != fingerprint
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::{
+        model::{PlaylistItemHeader, XtreamCluster},
+        utils::Internable,
+    };
+
+    #[test]
+    fn apply_resolved_series_properties_preserves_in_memory_imdb_fields() {
+        let mut pli = PlaylistItem {
+            header: PlaylistItemHeader {
+                title: "Series".intern(),
+                xtream_cluster: XtreamCluster::Series,
+                additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                    imdb: Some(7_654_321),
+                    imdb_rating: Some(9.0),
+                    imdb_votes: Some(50_000),
+                    effective_rating: Some(9.0),
+                    rating: 8.0,
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            },
+        };
+
+        let updated_props = SeriesStreamProperties {
+            imdb: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            effective_rating: None,
+            rating: 8.5,
+            series_id: 99,
+            ..Default::default()
+        };
+
+        apply_resolved_series_properties(&mut pli, &updated_props);
+
+        // updated_props itself is not modified
+        assert_eq!(updated_props.imdb, None);
+        assert_eq!(updated_props.effective_rating, None);
+
+        // pli has updated fields, but keeps IMDb fields from current in-memory properties
+        let StreamProperties::Series(saved) = pli.header.additional_properties.as_ref().unwrap() else {
+            panic!("expected series properties");
+        };
+        assert_eq!(saved.series_id, 99);
+        assert_eq!(saved.imdb, Some(7_654_321));
+        assert_eq!(saved.imdb_rating, Some(9.0));
+        assert_eq!(saved.imdb_votes, Some(50_000));
+        assert_eq!(saved.effective_rating, Some(9.0));
+        assert_eq!(saved.rating, 8.5);
     }
 }

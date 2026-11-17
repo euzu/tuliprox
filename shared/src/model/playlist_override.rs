@@ -999,6 +999,9 @@ pub struct ItemFieldsDto {
     pub audio_track: String,
     pub time_shift: String,
     pub rec: String,
+    /// Provider rating of a VOD or series record; `None` when the record has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<f64>,
 }
 
 /// Which layer an item's fields currently come from.

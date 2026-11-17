@@ -18,6 +18,7 @@ fn sample_options() -> XtreamMappingOptions {
         encrypt_secret: [0u8; 16],
         resource_host_policies: Arc::default(),
         default_container_extensions: Arc::default(),
+        replace_rating: false,
     }
 }
 

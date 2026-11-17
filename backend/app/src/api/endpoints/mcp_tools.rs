@@ -427,6 +427,16 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         redact_secrets: false,
         destructive: false,
     },
+    McpTool {
+        name: "update_imdb_ratings",
+        description: "Download the IMDb ratings dataset and rebuild the ratings table. Requires metadata_update.imdb.enabled. Answers {rows}; 409 while a download is running. The new ratings apply on the next playlist update (update_playlists).",
+        input_schema: NO_ARGUMENTS,
+        method: McpToolMethod::Get,
+        path: "/imdb/update",
+        kind: McpToolKind::Write,
+        redact_secrets: false,
+        destructive: false,
+    },
 ];
 
 pub(super) fn find_tool(name: &str) -> Option<&'static McpTool> { MCP_TOOLS.iter().find(|tool| tool.name == name) }

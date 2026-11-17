@@ -340,6 +340,7 @@ pub fn SchedulesConfigView() -> Html {
                                         ScheduleTaskType::PlaylistUpdate => "LABEL.PLAYLIST_UPDATE",
                                         ScheduleTaskType::LibraryScan => "LABEL.LIBRARY",
                                         ScheduleTaskType::GeoIpUpdate => "LABEL.GEOIP",
+                                        ScheduleTaskType::ImdbRatingsUpdate => "LABEL.IMDB",
                                         ScheduleTaskType::PluginTask => "LABEL.PLUGINS",
                                     })},
                                     ScheduleColumn::Targets => html! {<div class="tp__config-view__tags">
@@ -394,6 +395,11 @@ pub fn SchedulesConfigView() -> Html {
                 label: html! { translate.t("LABEL.GEOIP") },
                 selected: *selected_type == ScheduleTaskType::GeoIpUpdate,
             },
+            DropDownOption {
+                id: "ImdbRatingsUpdate".to_string(),
+                label: html! { translate.t("LABEL.IMDB") },
+                selected: *selected_type == ScheduleTaskType::ImdbRatingsUpdate,
+            },
         ]);
 
         html! {
@@ -410,6 +416,8 @@ pub fn SchedulesConfigView() -> Html {
                               set_selected_type.set(ScheduleTaskType::LibraryScan);
                           } else if option == "GeoIpUpdate" {
                               set_selected_type.set(ScheduleTaskType::GeoIpUpdate);
+                          } else if option == "ImdbRatingsUpdate" {
+                              set_selected_type.set(ScheduleTaskType::ImdbRatingsUpdate);
                           }
                       })}
                       options={types}

@@ -142,6 +142,7 @@ impl StreamProperties {
         category_id: u32,
         configured_extension: Option<&Arc<str>>,
     ) -> XtreamSeriesInfoDoc {
+        let replaced_rating = options.replaced_rating(series.effective_rating);
         XtreamSeriesInfoDoc {
             seasons: if let Some(seasons) = series.details.as_ref().and_then(|d| d.seasons.as_ref()) {
                 self.series_seasons_to_info_document(options, item_type, virtual_id, seasons)
@@ -160,8 +161,14 @@ impl StreamProperties {
                 release_date: series.release_date.as_ref().map_or_else(|| "".intern(), Arc::clone),
                 release_date_alternate: series.release_date.as_ref().map_or_else(|| "".intern(), Arc::clone),
                 last_modified: series.last_modified.as_ref().map_or_else(|| "".intern(), Arc::clone),
-                rating: InfoDocUtils::limited(series.rating).intern(),
-                rating_5based: InfoDocUtils::limited(series.rating_5based).intern(),
+                rating: replaced_rating.map_or_else(
+                    || InfoDocUtils::limited(series.rating).intern(),
+                    |effective| InfoDocUtils::limited(effective).intern(),
+                ),
+                rating_5based: replaced_rating.map_or_else(
+                    || InfoDocUtils::limited(series.rating_5based).intern(),
+                    |effective| InfoDocUtils::limited(effective / 2.0).intern(),
+                ),
                 backdrop_path: series.backdrop_path.as_ref().map_or_else(Vec::new, |b| {
                     b.iter()
                         .enumerate()

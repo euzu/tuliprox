@@ -41,7 +41,7 @@ use crate::{
         RateLimitConfig, MAINTENANCE_FILE,
     },
     processing::processor::{exec_processing, next_playlist_update_run_order, ProcessingRun},
-    repository::{get_geoip_path, GeoIp},
+    repository::{get_geoip_path, get_imdb_ratings_path, GeoIp},
     utils::{exec_file_lock_prune, get_default_web_root_path},
     VERSION,
 };
@@ -338,6 +338,38 @@ fn populate_initial_member_health(storage_dir: &std::path::Path, member_health: 
     member_health.replace_qos(entries);
 }
 
+async fn load_initial_geoip(app_config: &Arc<AppConfig>, config: &Config) -> Arc<ArcSwapOption<GeoIp>> {
+    if !config.is_geoip_enabled() {
+        return Arc::new(ArcSwapOption::from(None));
+    }
+    let path = get_geoip_path(&config.storage_dir);
+    let _file_lock = app_config.file_locks.read_lock(&path).await;
+    match GeoIp::load(&path) {
+        Ok(db) => {
+            info!("GeoIp db loaded");
+            Arc::new(ArcSwapOption::from(Some(Arc::new(db))))
+        }
+        Err(err) => {
+            info!("No GeoIp db found: {err}");
+            Arc::new(ArcSwapOption::from(None))
+        }
+    }
+}
+
+/// The ratings table lives on disk and is only opened during a playlist update,
+/// so startup only has to make sure a table exists at all.
+fn should_download_initial_imdb(config: &Config) -> bool {
+    if !config.is_imdb_enabled() {
+        return false;
+    }
+    let path = get_imdb_ratings_path(&config.storage_dir);
+    let exists = path.try_exists().unwrap_or(false);
+    if !exists {
+        warn!("IMDb ratings table not found; scheduling background download");
+    }
+    !exists
+}
+
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
@@ -351,23 +383,8 @@ async fn create_shared_data(
     )
     .map_err(|err| TuliproxError::Io(format!("failed to open the recording repository: {err}")))?;
 
-    let use_geoip = config.is_geoip_enabled();
-    let geoip = if use_geoip {
-        let path = get_geoip_path(&config.storage_dir);
-        let _file_lock = app_config.file_locks.read_lock(&path).await;
-        match GeoIp::load(&path) {
-            Ok(db) => {
-                info!("GeoIp db loaded");
-                Arc::new(ArcSwapOption::from(Some(Arc::new(db))))
-            }
-            Err(err) => {
-                info!("No GeoIp db found: {err}");
-                Arc::new(ArcSwapOption::from(None))
-            }
-        }
-    } else {
-        Arc::new(ArcSwapOption::from(None))
-    };
+    let geoip = load_initial_geoip(app_config, &config).await;
+    let spawn_imdb_download = should_download_initial_imdb(&config);
 
     let cache = Arc::new(ArcSwapOption::from(create_cache(&config)));
     let event_manager = Arc::new(EventManager::with_capacity(config.event_channel_capacity as usize));
@@ -395,6 +412,13 @@ async fn create_shared_data(
     ));
 
     let http_clients = init_http_clients(app_config)?;
+
+    if spawn_imdb_download {
+        crate::processing::imdb::spawn_imdb_ratings_update(
+            Arc::clone(app_config),
+            http_clients.default.load().as_ref().clone(),
+        );
+    }
 
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));

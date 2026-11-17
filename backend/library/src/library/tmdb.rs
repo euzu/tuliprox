@@ -290,7 +290,10 @@ pub struct TmdbSeriesInfoDetails {
     // in_production: bool,
     // languages: Option<Vec<String>>,
     pub seasons: Option<Vec<TmdbSeason>>,
-    // external_ids: Option<TmdbExternalIds>,
+    // Requested through `append_to_response=…,external_ids`; absent in cached payloads
+    // written before the field existed.
+    #[serde(default)]
+    external_ids: Option<TmdbExternalIds>,
     videos: Option<TmdbVideos>,
 }
 
@@ -302,7 +305,7 @@ impl TmdbSeriesInfoDetails {
             year: self.first_air_date.split('-').next().and_then(|y| y.parse().ok()),
             plot: Some(self.overview.clone()),
             mpaa: None,
-            imdb_id: None, // TMDB TV doesn't always provide IMDB ID
+            imdb_id: self.external_ids.as_ref().and_then(|ei| ei.imdb_id.clone()),
             tmdb_id: Some(self.id),
             tvdb_id: None, // TMDB doesn't provide TVDB ID directly
             rating: Some(self.vote_average),
@@ -502,6 +505,28 @@ mod tests {
     fn test_resolve_tmdb_url_with_blank_path() {
         let input = "   ";
         assert_eq!(resolve_tmdb_image_url(input), None);
+    }
+
+    #[test]
+    fn series_details_take_the_imdb_id_from_external_ids() {
+        let raw = r#"{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad",
+            "external_ids":{"imdb_id":"tt0903747","tvdb_id":81189}}"#;
+        let details: super::TmdbSeriesInfoDetails =
+            serde_json::from_str(raw).expect("series details with external_ids should parse");
+
+        let metadata = details.to_meta_data();
+
+        assert_eq!(metadata.imdb_id.as_deref(), Some("tt0903747"));
+    }
+
+    #[test]
+    fn series_details_without_external_ids_stay_parseable() {
+        // Cached payloads written before the field existed carry no `external_ids`.
+        let raw = r#"{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad"}"#;
+        let details: super::TmdbSeriesInfoDetails =
+            serde_json::from_str(raw).expect("cached series details should still parse");
+
+        assert_eq!(details.to_meta_data().imdb_id, None);
     }
 
     // #[test]

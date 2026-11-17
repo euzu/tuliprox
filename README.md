@@ -324,6 +324,7 @@ Tuliprox can improve incomplete provider data and make large catalogs easier to 
 - FFprobe-based codec, resolution, HDR, and audio-channel detection
 - Provider-slot-aware probing — skip work instead of stealing the last available connection
 - TMDB lookup for missing IDs and release information
+- IMDb ratings with `Rating` and `Votes` filters
 - Persistent retry/cooldown state for failed metadata operations
 - No-change cache to avoid repeating work for unchanged items
 - Periodic live-stream probing

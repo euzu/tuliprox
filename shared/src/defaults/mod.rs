@@ -77,6 +77,7 @@ mod auth;
 mod epg;
 mod hdhomerun;
 mod hls;
+mod imdb;
 mod library;
 mod mcp;
 mod media_server;
@@ -91,8 +92,8 @@ mod tmdb;
 mod trakt;
 
 pub use self::{
-    auth::*, epg::*, hdhomerun::*, hls::*, library::*, mcp::*, media_server::*, metadata::*, monitoring::*, network::*,
-    paths::*, primitives::*, qos::*, stream_history::*, tmdb::*, trakt::*,
+    auth::*, epg::*, hdhomerun::*, hls::*, imdb::*, library::*, mcp::*, media_server::*, metadata::*, monitoring::*,
+    network::*, paths::*, primitives::*, qos::*, stream_history::*, tmdb::*, trakt::*,
 };
 
 /// Streaming-side defaults (auth, hls, hdhomerun, library, mcp, `media_server`).
@@ -104,7 +105,7 @@ pub mod config {
 
 /// External-service defaults (epg, metadata, tmdb, trakt).
 pub mod integrations {
-    pub use super::{epg::*, metadata::*, tmdb::*, trakt::*};
+    pub use super::{epg::*, imdb::*, metadata::*, tmdb::*, trakt::*};
 }
 
 /// Runtime/infrastructure defaults (monitoring, network, paths, primitives, `QoS`, stream history).

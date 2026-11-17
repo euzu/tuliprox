@@ -105,6 +105,7 @@ fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
         maintenance: None,
         plugins: shared::model::NoPlugins,
         override_status: None,
+        imdb: crate::imdb::ImdbRatingRuntime::default(),
     }
 }
 

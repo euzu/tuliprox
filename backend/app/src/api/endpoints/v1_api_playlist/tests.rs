@@ -20,5 +20,6 @@ mod behavior_manual_update;
 mod behavior_provider_resolution;
 mod behavior_recording_routes;
 mod failover_groups;
+mod imdb_update;
 
 mod cluster_status_evidence;

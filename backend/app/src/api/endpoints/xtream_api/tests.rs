@@ -460,6 +460,10 @@ fn create_test_vod_item(url: &str, container_extension: &str, item_type: Playlis
         additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
             name: "Test".intern(),
             plugin_fingerprint: None,
+            imdb: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            effective_rating: None,
             category_id: 0,
             stream_id: 813_563,
             stream_icon: "".intern(),

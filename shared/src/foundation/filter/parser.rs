@@ -13,12 +13,12 @@ use strum::IntoEnumIterator;
 #[grammar_inline = r#"
 WHITESPACE = _{ " " | "\t" | "\r" | "\n"}
 field = { ^"group" | ^"title" | ^"name" | ^"genre" | ^"url" | ^"input" | ^"caption" | ^"epgid"}
-numeric_field = { ^"chno" | ^"quality" }
+numeric_field = { ^"chno" | ^"quality" | ^"rating" | ^"votes" }
 and = { ^"and" }
 or = { ^"or" }
 not = { ^"not" }
 regexp = @{ "\"" ~ ( "\\\"" | (!"\"" ~ ANY) )* ~ "\"" }
-number = @{ ASCII_DIGIT+ }
+number = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
 type_value = { ^"live" | ^"vod" | ^"movie" | ^"series" }
 type_comparison = { ^"type" ~ "=" ~ type_value }
 field_comparison_value = _{ regexp }
@@ -27,7 +27,7 @@ str_op = { "!=" | "=" | ^"contains" | ^"startswith" }
 string_comparison = { field ~ str_op ~ regexp }
 presence_negation = { ^"not" }
 presence_op = { (^"is" ~ presence_negation?) | "!=" | "=" }
-presence_comparison = { field ~ presence_op ~ ^"empty" }
+presence_comparison = { (field | numeric_field) ~ presence_op ~ ^"empty" }
 num_op = { ">=" | "<=" | "!=" | ">" | "<" | "=" }
 numeric_comparison = { numeric_field ~ num_op ~ number }
 set_values = { regexp ~ ("," ~ regexp)* }
@@ -71,7 +71,7 @@ fn check_node_budget(builder: &FilterBuilder) -> Result<(), String> {
 }
 
 fn get_parser_item_field(expr: &Pair<Rule>) -> Result<ItemField, TuliproxError> {
-    if expr.as_rule() == Rule::field {
+    if expr.as_rule() == Rule::field || expr.as_rule() == Rule::numeric_field {
         let field_text = expr.as_str();
         for item in ItemField::iter() {
             if field_text.eq_ignore_ascii_case(item.as_ref()) {
@@ -171,6 +171,27 @@ fn get_parser_presence_comparison(expr: Pair<Rule>) -> Result<Leaf, TuliproxErro
     Ok(Leaf::PresenceComparison(field, op))
 }
 
+fn parse_numeric_filter_literal(text: &str) -> Result<u64, TuliproxError> {
+    if let Some((int_part, frac_part)) = text.split_once('.') {
+        if frac_part.len() != 1 {
+            return Err(TuliproxError::FilterParse(format!(
+                "invalid number: '{text}', numeric comparison accepts at most one decimal place"
+            )));
+        }
+        let int_val =
+            int_part.parse::<u64>().map_err(|_| TuliproxError::FilterParse(format!("invalid number: {text}")))?;
+        let frac_val =
+            frac_part.parse::<u64>().map_err(|_| TuliproxError::FilterParse(format!("invalid number: {text}")))?;
+        int_val
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(frac_val))
+            .ok_or_else(|| TuliproxError::FilterParse(format!("invalid number: {text}")))
+    } else {
+        let int_val = text.parse::<u64>().map_err(|_| TuliproxError::FilterParse(format!("invalid number: {text}")))?;
+        int_val.checked_mul(10).ok_or_else(|| TuliproxError::FilterParse(format!("invalid number: {text}")))
+    }
+}
+
 fn get_parser_numeric_comparison(expr: Pair<Rule>) -> Result<Leaf, TuliproxError> {
     let mut expr_inner = expr.into_inner();
     let field_pair = next_rule(&mut expr_inner, "numeric comparison")?;
@@ -179,15 +200,16 @@ fn get_parser_numeric_comparison(expr: Pair<Rule>) -> Result<Leaf, TuliproxError
         ItemField::Chno
     } else if field_text.eq_ignore_ascii_case("quality") {
         ItemField::Quality
+    } else if field_text.eq_ignore_ascii_case("rating") {
+        ItemField::Rating
+    } else if field_text.eq_ignore_ascii_case("votes") {
+        ItemField::Votes
     } else {
         return Err(TuliproxError::FilterParse(format!("unknown numeric field: {field_text}")));
     };
     let op = get_parser_numeric_operator(&next_rule(&mut expr_inner, "numeric comparison")?)?;
     let value_pair = next_rule(&mut expr_inner, "numeric comparison")?;
-    let value = value_pair
-        .as_str()
-        .parse::<u32>()
-        .map_err(|_| TuliproxError::FilterParse(format!("invalid number: {}", value_pair.as_str())))?;
+    let value = parse_numeric_filter_literal(value_pair.as_str())?;
     Ok(Leaf::NumericComparison(field, op, value))
 }
 

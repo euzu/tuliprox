@@ -1,5 +1,5 @@
 use crate::{
-    model::{info_doc_utils::InfoDocUtils, PlaylistEntry, XtreamSeriesInfo, XtreamSeriesInfoDoc},
+    model::{info_doc_utils::InfoDocUtils, PlaylistEntry, StreamProperties, XtreamSeriesInfo, XtreamSeriesInfoDoc},
     utils::{
         arc_str_none_default_on_null, arc_str_null_is_none_serde, arc_str_option_null_if_empty_serde,
         arc_str_option_serde, deserialize_as_option_arc_str, deserialize_as_string_array,
@@ -227,6 +227,18 @@ pub struct SeriesStreamProperties {
     /// older record without it decodes to `None`.
     #[serde(default)]
     pub plugin_fingerprint: Option<Arc<str>>,
+    /// Numeric part of the `IMDb` id `tt…`.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub imdb: Option<u32>,
+    /// Raw `IMDb` dataset rating value.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub imdb_rating: Option<f32>,
+    /// Raw `IMDb` dataset vote count value.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub imdb_votes: Option<u32>,
+    /// Rating after the configured rating source and minimum votes, set by processing, read by the `Rating` filter.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub effective_rating: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -314,10 +326,24 @@ fn join_parts<'a>(parts: impl Iterator<Item = &'a str>, separator: char) -> Stri
 }
 
 impl SeriesStreamProperties {
+    /// Copies the per-update `IMDb` values from `other`. Processing derives them
+    /// before the target filter; a resolve that replaces the properties afterwards
+    /// keeps them with this.
+    pub fn copy_imdb_fields_from(&mut self, other: &Self) {
+        self.imdb = other.imdb.or(self.imdb);
+        self.imdb_rating = other.imdb_rating;
+        self.imdb_votes = other.imdb_votes;
+        self.effective_rating = other.effective_rating;
+    }
+
     pub(super) fn from_info_base(info: &XtreamSeriesInfo, series_id: u32) -> SeriesStreamProperties {
         SeriesStreamProperties {
             name: info.info.name.clone(),
             plugin_fingerprint: None,
+            imdb: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            effective_rating: None,
             category_id: info.info.category_id,
             series_id,
             backdrop_path: info.info.backdrop_path.clone(),
@@ -390,7 +416,13 @@ impl SeriesStreamProperties {
     where
         P: PlaylistEntry,
     {
-        Self::from_info_base(info, pli.get_virtual_id().get())
+        let mut props = Self::from_info_base(info, pli.get_virtual_id().get());
+        // IMDb values are derived per update before the target filter; the info
+        // resolve that runs after it must not drop them.
+        if let Some(StreamProperties::Series(series)) = pli.get_additional_properties() {
+            props.copy_imdb_fields_from(series);
+        }
+        props
     }
 
     pub fn from_info_without_existing(info: &XtreamSeriesInfo, series_id: u32) -> SeriesStreamProperties {
@@ -402,6 +434,10 @@ impl SeriesStreamProperties {
         SeriesStreamProperties {
             name: info.info.name.clone(),
             plugin_fingerprint: None,
+            imdb: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            effective_rating: None,
             category_id: info.info.category_id.parse::<u32>().unwrap_or_else(|_| {
                 warn!("Failed to parse category_id {}", info.info.category_id);
                 0

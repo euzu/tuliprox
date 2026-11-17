@@ -451,6 +451,8 @@ fn refresh_generation_from_guard_name(leaf: &str) -> Option<Uuid> {
 
 pub fn get_geoip_path(storage_dir: &str) -> PathBuf { Path::new(storage_dir).join("geoip.db") }
 
+pub fn get_imdb_ratings_path(storage_dir: &str) -> PathBuf { Path::new(storage_dir).join("imdb_ratings.db") }
+
 // The sorted-index sidecar name is part of the B+Tree on-disk layout, so the
 // engine owns it. Re-exported here because every repository already reaches for
 // it through `repository::storage`.

@@ -368,3 +368,22 @@ async fn playlist_update_status_for_sources(
         .collect();
     Ok(PlaylistUpdateStatusDto { inputs: statuses, active_updates })
 }
+
+pub(in crate::api) fn imdb_update_result_to_response(
+    result: Result<usize, crate::processing::imdb::ImdbUpdateError>,
+) -> Response {
+    match result {
+        Ok(rows) => (StatusCode::OK, axum::Json(shared::model::ImdbUpdateResponseDto { rows })).into_response(),
+        Err(crate::processing::imdb::ImdbUpdateError::Disabled) => StatusCode::BAD_REQUEST.into_response(),
+        Err(crate::processing::imdb::ImdbUpdateError::AlreadyRunning) => StatusCode::CONFLICT.into_response(),
+        Err(crate::processing::imdb::ImdbUpdateError::DownloadFailed(_)) => StatusCode::BAD_GATEWAY.into_response(),
+        Err(err) => {
+            error!("IMDb ratings update failed: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub(super) async fn imdb_update(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> Response {
+    imdb_update_result_to_response(app_state.update_imdb_ratings().await)
+}

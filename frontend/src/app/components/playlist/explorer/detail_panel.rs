@@ -4,9 +4,9 @@ use crate::{
             playlist::explorer::{
                 edit_panel::ExplorerEditPanel,
                 identity::Id,
-                sort::{cluster_label_key, is_edited, item_chno},
+                sort::{cluster_label_key, effective_rating_display, is_edited, item_chno},
             },
-            IconButton, RadioButtonGroup, TextButton,
+            Chip, IconButton, RadioButtonGroup, TextButton,
         },
         context::PlaylistExplorerContext,
     },
@@ -14,9 +14,10 @@ use crate::{
     hooks::use_service_context,
     html_if,
     i18n::{use_translation, YewI18n},
+    model::format_number,
 };
 use shared::{
-    model::{OverrideScopeDto, Permission, PlaylistRequest, UiPlaylistItem, XtreamCluster},
+    model::{OverrideScopeDto, Permission, PlaylistRequest, UiPlaylistItem, UiRatingOrigin, XtreamCluster},
     utils::format_float_localized,
 };
 use std::rc::Rc;
@@ -206,8 +207,70 @@ pub fn ExplorerDetailPanel(props: &ExplorerDetailPanelProps) -> Html {
 
                     {
                         if item.rating > 0.001 {
+                            let is_effective = item.rating_origin == Some(UiRatingOrigin::Provider);
+                            let eff_title = if is_effective {
+                                effective_rating_display(item, &translate).map(|(_, tip)| tip)
+                            } else {
+                                None
+                            };
                             html! {
-                                { config_field_custom!(translate.t("LABEL.RATING"), html! { <span class="det-rating">{ format!("★ {}", format_float_localized(item.rating, 1, false)) }</span> }, Some("PLAYLIST_OVERRIDE.RATING".to_string())) }
+                                { config_field_custom!(
+                                    translate.t("LABEL.PROVIDER_RATING"),
+                                    html! {
+                                        <div class="tp__explorer-rating-value" title={eff_title}>
+                                            <span class="det-rating">{ format!("★ {}", format_float_localized(item.rating, 1, false)) }</span>
+                                            {
+                                                if is_effective {
+                                                    html! { <Chip label={translate.t("LABEL.EFFECTIVE")} class={Some("active".to_string())} /> }
+                                                } else {
+                                                    html! {}
+                                                }
+                                            }
+                                        </div>
+                                    },
+                                    Some("PLAYLIST_OVERRIDE.RATING".to_string())
+                                ) }
+                            }
+                        } else {
+                            html! {}
+                        }
+                    }
+
+                    {
+                        if let Some(imdb_rating) = item.imdb_rating.filter(|r| r.is_finite() && *r > 0.001) {
+                            let is_effective = item.rating_origin == Some(UiRatingOrigin::Imdb);
+                            let eff_title = if is_effective {
+                                effective_rating_display(item, &translate).map(|(_, tip)| tip)
+                            } else {
+                                None
+                            };
+                            let rating_str = format!("★ {}", format_float_localized(imdb_rating as f64, 1, false));
+                            let votes_str = item.imdb_votes.map(|v| {
+                                format!(" · {} {}", format_number(v as usize), translate.t("LABEL.VOTES"))
+                            });
+                            html! {
+                                { config_field_custom!(
+                                    translate.t("LABEL.IMDB_RATING"),
+                                    html! {
+                                        <div class="tp__explorer-rating-value" title={eff_title}>
+                                            <span class="det-rating">{ rating_str }</span>
+                                            {
+                                                if let Some(v_text) = votes_str {
+                                                    html! { <span class="det-votes">{ v_text }</span> }
+                                                } else {
+                                                    html! {}
+                                                }
+                                            }
+                                            {
+                                                if is_effective {
+                                                    html! { <Chip label={translate.t("LABEL.EFFECTIVE")} class={Some("active".to_string())} /> }
+                                                } else {
+                                                    html! {}
+                                                }
+                                            }
+                                        </div>
+                                    }
+                                ) }
                             }
                         } else {
                             html! {}

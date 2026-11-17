@@ -8,18 +8,22 @@ use crate::{
             },
             dto_field_id,
             number_input::NumberInput,
-            Card,
+            Card, Chip, DropDownOption, DropDownSelection, Select,
         },
         context::ConfigContext,
     },
-    config_field, config_field_bool, config_field_optional, edit_field_bool, edit_field_number, edit_field_number_i8,
-    edit_field_number_option_u64, edit_field_number_u16, edit_field_number_u64, edit_field_number_u8,
-    edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_number,
+    edit_field_number_i8, edit_field_number_option_u64, edit_field_number_u16, edit_field_number_u32,
+    edit_field_number_u64, edit_field_number_u8, edit_field_number_usize, edit_field_text, edit_field_text_option,
+    generate_form_reducer,
     i18n::use_translation,
+    use_default_form_reducer,
 };
 use shared::model::{
-    FfprobeConfigDto, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto, ResolveConfigDto, TmdbConfigDto,
+    FfprobeConfigDto, ImdbConfigDto, ImdbRatingSource, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto,
+    ResolveConfigDto, TmdbConfigDto,
 };
+use std::rc::Rc;
 use yew::prelude::*;
 
 const LABEL_QUEUE_LOG_INTERVAL: &str = "LABEL.METADATA_QUEUE_LOG_INTERVAL";
@@ -61,7 +65,41 @@ const LABEL_RATE_LIMIT_MS: &str = "LABEL.RATE_LIMIT_MS";
 const LABEL_CACHE_DURATION_DAYS: &str = "LABEL.CACHE_DURATION_DAYS";
 const LABEL_TMDB_MATCH_THRESHOLD: &str = "LABEL.MATCH_THRESHOLD";
 const LABEL_LANGUAGE: &str = "LABEL.LANGUAGE";
+const LABEL_IMDB_RATINGS: &str = "LABEL.IMDB_RATINGS";
+const LABEL_IMDB_ENABLED: &str = "LABEL.IMDB_ENABLED";
+const LABEL_IMDB_URL: &str = "LABEL.IMDB_URL";
+const LABEL_IMDB_MIN_VOTES: &str = "LABEL.IMDB_MIN_VOTES";
+const LABEL_IMDB_RATING_SOURCE: &str = "LABEL.IMDB_RATING_SOURCE";
+const LABEL_IMDB_RATING_SOURCE_IMDB_THEN_PROVIDER: &str = "LABEL.IMDB_RATING_SOURCE_IMDB_THEN_PROVIDER";
+const LABEL_IMDB_RATING_SOURCE_IMDB: &str = "LABEL.IMDB_RATING_SOURCE_IMDB";
+const LABEL_IMDB_RATING_SOURCE_PROVIDER: &str = "LABEL.IMDB_RATING_SOURCE_PROVIDER";
+const LABEL_IMDB_REPLACE_RATING: &str = "LABEL.IMDB_REPLACE_RATING";
 const BACKOFF_JITTER_PERCENT_VALIDATION_KEY: &str = "BACKOFF_JITTER_PERCENT_VALIDATION";
+
+fn imdb_rating_source_id(source: ImdbRatingSource) -> &'static str {
+    match source {
+        ImdbRatingSource::ImdbThenProvider => "imdb_then_provider",
+        ImdbRatingSource::Imdb => "imdb",
+        ImdbRatingSource::Provider => "provider",
+    }
+}
+
+fn imdb_rating_source_from_id(id: &str) -> Option<ImdbRatingSource> {
+    match id {
+        "imdb_then_provider" => Some(ImdbRatingSource::ImdbThenProvider),
+        "imdb" => Some(ImdbRatingSource::Imdb),
+        "provider" => Some(ImdbRatingSource::Provider),
+        _ => None,
+    }
+}
+
+fn imdb_rating_source_label_key(source: ImdbRatingSource) -> &'static str {
+    match source {
+        ImdbRatingSource::ImdbThenProvider => LABEL_IMDB_RATING_SOURCE_IMDB_THEN_PROVIDER,
+        ImdbRatingSource::Imdb => LABEL_IMDB_RATING_SOURCE_IMDB,
+        ImdbRatingSource::Provider => LABEL_IMDB_RATING_SOURCE_PROVIDER,
+    }
+}
 
 generate_form_reducer!(
     state: MetadataUpdateConfigFormState { form: MetadataUpdateConfigDto },
@@ -138,6 +176,18 @@ generate_form_reducer!(
     }
 );
 
+generate_form_reducer!(
+    state: ImdbConfigFormState { form: ImdbConfigDto },
+    action_name: ImdbConfigFormAction,
+    fields {
+        Enabled => enabled: bool,
+        Url => url: String,
+        MinVotes => min_votes: u32,
+        RatingSource => rating_source: ImdbRatingSource,
+        ReplaceRating => replace_rating: bool,
+    }
+);
+
 #[component]
 pub fn MetadataUpdateConfigView() -> Html {
     let translate = use_translation();
@@ -157,38 +207,30 @@ pub fn MetadataUpdateConfigView() -> Html {
         use_reducer(|| FfprobeConfigFormState { form: FfprobeConfigDto::default(), modified: false });
     let tmdb_state: UseReducerHandle<TmdbConfigFormState> =
         use_reducer(|| TmdbConfigFormState { form: TmdbConfigDto::default(), modified: false });
+    let imdb_state: UseReducerHandle<ImdbConfigFormState> =
+        use_default_form_reducer!(ImdbConfigFormState { form: ImdbConfigDto::default() });
 
     {
         let deps = (
-            form_state.form.clone(),
-            log_state.form.clone(),
-            resolve_state.form.clone(),
-            probe_state.form.clone(),
-            ffprobe_state.form.clone(),
-            tmdb_state.form.clone(),
-            form_state.modified,
-            log_state.modified,
-            resolve_state.modified,
-            probe_state.modified,
-            ffprobe_state.modified,
-            tmdb_state.modified,
+            (form_state.form.clone(), form_state.modified),
+            (log_state.form.clone(), log_state.modified),
+            (resolve_state.form.clone(), resolve_state.modified),
+            (probe_state.form.clone(), probe_state.modified),
+            (ffprobe_state.form.clone(), ffprobe_state.modified),
+            (tmdb_state.form.clone(), tmdb_state.modified),
+            (imdb_state.form.clone(), imdb_state.modified),
         );
         use_emit_mapped(
             deps,
             config_view_ctx.on_form_change.clone(),
             |(
-                form,
-                log,
-                resolve,
-                probe,
-                ffprobe,
-                tmdb,
-                form_modified,
-                log_modified,
-                resolve_modified,
-                probe_modified,
-                ffprobe_modified,
-                tmdb_modified,
+                (form, form_modified),
+                (log, log_modified),
+                (resolve, resolve_modified),
+                (probe, probe_modified),
+                (ffprobe, ffprobe_modified),
+                (tmdb, tmdb_modified),
+                (imdb, imdb_modified),
             )| {
                 let mut merged = form;
                 merged.log = log;
@@ -196,13 +238,15 @@ pub fn MetadataUpdateConfigView() -> Html {
                 merged.probe = probe;
                 merged.ffprobe = ffprobe;
                 merged.tmdb = tmdb;
+                merged.imdb = imdb;
                 ConfigForm::MetadataUpdate(
                     form_modified
                         || log_modified
                         || resolve_modified
                         || probe_modified
                         || ffprobe_modified
-                        || tmdb_modified,
+                        || tmdb_modified
+                        || imdb_modified,
                     merged,
                 )
             },
@@ -216,6 +260,7 @@ pub fn MetadataUpdateConfigView() -> Html {
         let probe_state = probe_state.clone();
         let ffprobe_state = ffprobe_state.clone();
         let tmdb_state = tmdb_state.clone();
+        let imdb_state = imdb_state.clone();
 
         let metadata_update_cfg =
             config_ctx.config.as_ref().and_then(|c| c.config.metadata_update.clone()).unwrap_or_default();
@@ -226,6 +271,7 @@ pub fn MetadataUpdateConfigView() -> Html {
             probe_state.dispatch(ProbeConfigFormAction::SetAll(cfg.probe.clone()));
             ffprobe_state.dispatch(FfprobeConfigFormAction::SetAll(cfg.ffprobe.clone()));
             tmdb_state.dispatch(TmdbConfigFormAction::SetAll(cfg.tmdb.clone()));
+            imdb_state.dispatch(ImdbConfigFormAction::SetAll(cfg.imdb.clone()));
             || ()
         });
     }
@@ -251,6 +297,7 @@ pub fn MetadataUpdateConfigView() -> Html {
         let probe = &probe_state.form;
         let ffprobe = &ffprobe_state.form;
         let tmdb = &tmdb_state.form;
+        let imdb = &imdb_state.form;
 
         html! {
             <>
@@ -290,6 +337,17 @@ pub fn MetadataUpdateConfigView() -> Html {
                 </Card>
 
                 <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_IMDB_RATINGS)}</h1>
+                    { config_field_bool!(imdb, translate.t(LABEL_IMDB_ENABLED), enabled) }
+                    { config_field!(imdb, translate.t(LABEL_IMDB_URL), url) }
+                    { config_field!(imdb, translate.t(LABEL_IMDB_MIN_VOTES), min_votes) }
+                    { config_field_child!(translate.t(LABEL_IMDB_RATING_SOURCE), dto_field_id(imdb, "rating_source"), {
+                        html! { <div><Chip label={translate.t(imdb_rating_source_label_key(imdb.rating_source))} /></div> }
+                    }) }
+                    { config_field_bool!(imdb, translate.t(LABEL_IMDB_REPLACE_RATING), replace_rating) }
+                </Card>
+
+                <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_SETTINGS)}</h1>
                     { config_field!(form_state.form, translate.t(LABEL_METADATA_PATH), cache_path) }
                     { config_field!(form_state.form, translate.t(LABEL_RETRY_DELAY), retry_delay) }
@@ -324,6 +382,33 @@ pub fn MetadataUpdateConfigView() -> Html {
         let translate_for_cb = translate.clone();
         let jitter_label = translate.t(LABEL_BACKOFF_JITTER_PERCENT);
         let jitter_field_id = dto_field_id(&jitter_probe_state.form, "backoff_jitter_percent");
+        let rating_source_options = Rc::new(vec![
+            DropDownOption::new(
+                imdb_rating_source_id(ImdbRatingSource::ImdbThenProvider),
+                html! { translate.t(LABEL_IMDB_RATING_SOURCE_IMDB_THEN_PROVIDER) },
+                imdb_state.form.rating_source == ImdbRatingSource::ImdbThenProvider,
+            ),
+            DropDownOption::new(
+                imdb_rating_source_id(ImdbRatingSource::Imdb),
+                html! { translate.t(LABEL_IMDB_RATING_SOURCE_IMDB) },
+                imdb_state.form.rating_source == ImdbRatingSource::Imdb,
+            ),
+            DropDownOption::new(
+                imdb_rating_source_id(ImdbRatingSource::Provider),
+                html! { translate.t(LABEL_IMDB_RATING_SOURCE_PROVIDER) },
+                imdb_state.form.rating_source == ImdbRatingSource::Provider,
+            ),
+        ]);
+        let set_rating_source = {
+            let imdb_state = imdb_state.clone();
+            Callback::from(move |(_, selection): (String, DropDownSelection)| {
+                if let DropDownSelection::Single(id) = selection {
+                    if let Some(source) = imdb_rating_source_from_id(&id) {
+                        imdb_state.dispatch(ImdbConfigFormAction::RatingSource(source));
+                    }
+                }
+            })
+        };
 
         html! {
             <>
@@ -390,6 +475,17 @@ pub fn MetadataUpdateConfigView() -> Html {
                     { edit_field_text!(tmdb_state, translate.t(LABEL_LANGUAGE), language, TmdbConfigFormAction::Language) }
                     { edit_field_text!(tmdb_state, translate.t(LABEL_TMDB_COOLDOWN), cooldown, TmdbConfigFormAction::Cooldown) }
                     { edit_field_number_u16!(tmdb_state, translate.t(LABEL_TMDB_MATCH_THRESHOLD), match_threshold, TmdbConfigFormAction::MatchThreshold) }
+                </Card>
+
+                <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_IMDB_RATINGS)}</h1>
+                    { edit_field_bool!(imdb_state, translate.t(LABEL_IMDB_ENABLED), enabled, ImdbConfigFormAction::Enabled) }
+                    { edit_field_text!(imdb_state, translate.t(LABEL_IMDB_URL), url, ImdbConfigFormAction::Url) }
+                    { edit_field_number_u32!(imdb_state, translate.t(LABEL_IMDB_MIN_VOTES), min_votes, ImdbConfigFormAction::MinVotes) }
+                    { config_field_child!(translate.t(LABEL_IMDB_RATING_SOURCE), dto_field_id(&imdb_state.form, "rating_source"), {
+                        html! { <Select name="rating_source" multi_select={false} options={rating_source_options} on_select={set_rating_source} /> }
+                    }) }
+                    { edit_field_bool!(imdb_state, translate.t(LABEL_IMDB_REPLACE_RATING), replace_rating, ImdbConfigFormAction::ReplaceRating) }
                 </Card>
 
                 <Card class="tp__config-view__card">

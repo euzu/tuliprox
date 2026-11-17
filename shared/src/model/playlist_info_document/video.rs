@@ -152,6 +152,8 @@ impl StreamProperties {
             .intern();
         let empty_str = "".intern();
         let zero_str = "0".intern();
+        let rating =
+            options.replaced_rating(video.effective_rating).unwrap_or_else(|| video.rating.unwrap_or_default());
 
         let info = if let Some(details) = video.details.as_ref() {
             XtreamVideoInfoData {
@@ -211,7 +213,7 @@ impl StreamProperties {
                 video: InfoDocUtils::build_value(details.video.as_ref().map(Arc::as_ref)),
                 audio: InfoDocUtils::build_value(details.audio.as_ref().map(Arc::as_ref)),
                 bitrate: details.bitrate,
-                rating: InfoDocUtils::limited(video.rating.unwrap_or_default()).intern(),
+                rating: InfoDocUtils::limited(rating).intern(),
                 runtime: details.runtime.as_ref().map_or_else(|| Arc::clone(&empty_str), Arc::clone),
                 status: details.status.as_ref().map_or_else(|| Arc::clone(&empty_str), Arc::clone),
             }
@@ -242,7 +244,7 @@ impl StreamProperties {
                 video: Value::Array(Vec::new()),
                 audio: Value::Array(Vec::new()),
                 bitrate: 0,
-                rating: InfoDocUtils::limited(video.rating.unwrap_or_default()).intern(),
+                rating: InfoDocUtils::limited(rating).intern(),
                 runtime: zero_str,
                 status: "Released".intern(),
             }

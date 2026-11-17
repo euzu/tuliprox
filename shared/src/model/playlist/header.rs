@@ -171,10 +171,32 @@ impl PlaylistItemHeader {
 
     #[inline]
     pub fn get_container_extension(&self) -> Option<Arc<str>> {
-        self.additional_properties
-            .as_ref()
-            .and_then(super::super::stream_properties::StreamProperties::get_container_extension)
+        self.additional_properties.as_ref().and_then(StreamProperties::get_container_extension)
     }
+
+    #[inline]
+    pub fn effective_rating_tenths(&self) -> Option<u64> {
+        self.additional_properties.as_ref().and_then(StreamProperties::effective_rating_tenths)
+    }
+
+    #[inline]
+    pub fn get_imdb_votes(&self) -> Option<u32> {
+        self.additional_properties.as_ref().and_then(StreamProperties::get_imdb_votes)
+    }
+
+    #[inline]
+    pub(crate) fn format_rating(&self) -> Option<String> {
+        self.effective_rating_tenths().map(crate::utils::format_decimal_tenths)
+    }
+
+    #[inline]
+    pub(crate) fn format_votes(&self) -> Option<String> { self.get_imdb_votes().map(|v| v.to_string()) }
+
+    #[inline]
+    pub(crate) fn rating_arc(&self) -> Option<Arc<str>> { self.format_rating().map(Internable::intern) }
+
+    #[inline]
+    pub(crate) fn votes_arc(&self) -> Option<Arc<str>> { self.format_votes().map(Internable::intern) }
 }
 
 impl crate::model::FieldGet for crate::model::PlaylistItemHeader {

@@ -2,17 +2,17 @@ use crate::{
     app::components::{
         playlist::explorer::{
             identity::Id,
-            sort::{extract_added, extract_last_modified, extract_year, is_edited, is_within_new_window},
+            sort::{
+                effective_rating_display, extract_added, extract_last_modified, extract_year, is_edited,
+                is_within_new_window,
+            },
         },
         table::{PagedTable, TableDefinition, PAGE_SIZES},
         AppIcon, Checkbox, IconButton,
     },
     i18n::use_translation,
 };
-use shared::{
-    model::{UiPlaylistItem, XtreamCluster},
-    utils::format_float_localized,
-};
+use shared::model::{UiPlaylistItem, XtreamCluster};
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use yew::prelude::*;
@@ -229,12 +229,11 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                         html! { <span>{ year }</span> }
                     }
                     Some(VodTableColumn::Rating) => {
-                        let rating = if pli.rating > 0.001 {
-                            format!("★ {}", format_float_localized(pli.rating, 1, false))
-                        } else {
-                            "-".to_string()
+                        let (rating, tooltip) = match effective_rating_display(&pli, &translate_cell) {
+                            Some((badge, tip)) => (badge, Some(tip)),
+                            None => ("-".to_string(), None),
                         };
-                        html! { <span class="row-cell-rating">{ rating }</span> }
+                        html! { <span class="row-cell-rating" title={tooltip}>{ rating }</span> }
                     }
                     None => html! {},
                 }
@@ -378,8 +377,8 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                                         }
                                     }
                                     {
-                                        if pli.rating > 0.001 {
-                                            html! { <span class="rt">{ format!("★ {}", format_float_localized(pli.rating, 1, false)) }</span> }
+                                        if let Some((badge, tip)) = effective_rating_display(&pli, &translate) {
+                                            html! { <span class="rt" title={tip}>{ badge }</span> }
                                         } else {
                                             html! {}
                                         }

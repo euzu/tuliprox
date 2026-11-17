@@ -719,6 +719,10 @@ schedules:
   # Every 1st of the month at 04:00:00
   - schedule: "0 0 4 1 * * *"
     type: GeoIpUpdate
+
+  # Every day at 04:00:00 (IMDb ratings index refresh)
+  - schedule: "0 0 4 * * * *"
+    type: ImdbRatingsUpdate
 ```
 
 | Parameter  | Type   | Default          | Description                                                                                                                        |
@@ -735,6 +739,10 @@ schedules:
   *Note: This requires the `library` configuration to be enabled.*
 * **`GeoIpUpdate`**: Downloads the latest MaxMind/Geo-IP database and rebuilds
   the internal binary file. *Note: Requires `reverse_proxy.geoip.enabled: true`.*
+* **`ImdbRatingsUpdate`**: Downloads the current IMDb ratings dataset and rebuilds the local rating index.
+  The aliases `imdb_ratings_update` and `imdb` are accepted.
+  *Note: Requires `metadata_update.imdb.enabled: true`.* A daily run is the recommended default.
+  See [IMDb Ratings](metadata-update.md#5-imdb-ratings-imdb).
 
 ---
 
@@ -1538,7 +1546,7 @@ mcp:
 | Parameter            | Type            | Default  | Technical Impact                                                                                                                                                                                                                                                                                           |
 | :------------------- | :-------------: | :------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `enabled`            | Bool            | `false`  | Mounts the MCP endpoint at `{web_ui_path}/mcp`. When `false`, or when the block is absent, no route exists.                                                                                                                                                                                                |
-| `read_only`          | Bool            | `true`   | Hides and rejects tools that change state (`update_playlists`, `update_geoip`). Always forced to `true` when `web_ui.auth` is disabled, because no permission layer protects the write routes.                                                                                                             |
+| `read_only`          | Bool            | `true`   | Hides and rejects tools that change state (`update_playlists`, `update_geoip`, `update_imdb_ratings`). Always forced to `true` when `web_ui.auth` is disabled, because no permission layer protects the write routes.                                                                                      |
 | `allowed_origins`    | List of Strings | `[]`     | Extra `Origin` values accepted besides the request `Host` (DNS-rebinding protection). Needed when a reverse proxy rewrites `Host`. Each entry must be an origin (`scheme://host[:port]`, custom schemes allowed) without path, query or fragment. Requests without an `Origin` header are always accepted. |
 | `max_response_bytes` | Int             | `262144` | Tool results larger than this are truncated with an explicit marker. Minimum `1024`.                                                                                                                                                                                                                       |
 

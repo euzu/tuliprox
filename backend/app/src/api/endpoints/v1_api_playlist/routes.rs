@@ -1,5 +1,5 @@
 use super::{
-    get_target_epg_channel, list_playlist_sources, playlist_analytics, playlist_analytics_unmapped_csv,
+    get_target_epg_channel, imdb_update, list_playlist_sources, playlist_analytics, playlist_analytics_unmapped_csv,
     playlist_content_live, playlist_content_series, playlist_content_vod, playlist_epg, playlist_epg_search,
     playlist_episode_item, playlist_filter_preview, playlist_override_item, playlist_overrides_discard,
     playlist_overrides_get, playlist_overrides_orphans, playlist_overrides_save, playlist_recording_stream,
@@ -19,6 +19,7 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
     router
         .route("/playlist/resolve_url", axum::routing::post(playlist_resolve_url))
         .route("/playlist/update", axum::routing::post(playlist_update))
+        .route("/imdb/update", axum::routing::get(imdb_update))
         .route("/playlist/update/status", axum::routing::get(playlist_update_status_response))
         .route("/playlist/analytics", axum::routing::get(playlist_analytics))
         .route("/playlist/analytics/{target_id}/unmapped.csv", axum::routing::get(playlist_analytics_unmapped_csv))
@@ -92,11 +93,17 @@ pub fn v1_api_playlist_register_with_permissions(
         .route("/epg/grid", axum::routing::post(epg_grid_api::playlist_epg_grid))
         .layer(permission_layer!(app_state, Permission::EpgRead));
 
-    router.nest(
+    let playlist_routes = router.nest(
         "/playlist",
         read_routes
             .merge(write_routes)
             .merge(epg_routes)
             .route("/update/status", axum::routing::get(playlist_update_status_protected)),
-    )
+    );
+
+    let imdb_write = Router::new()
+        .route("/imdb/update", axum::routing::get(imdb_update))
+        .layer(permission_layer!(app_state, Permission::PlaylistWrite));
+
+    playlist_routes.merge(imdb_write)
 }

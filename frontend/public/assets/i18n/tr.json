@@ -852,6 +852,13 @@
       "RATE_LIMIT_MS": "Minimum wait time between TMDB requests in milliseconds.\n\nHigher values are gentler to the TMDB API.\n\nExamples: `250`, `500`, `1000`.",
       "MATCH_THRESHOLD": "Minimum match score for TMDB search. Value should be between 1 - 100"
     },
+    "IMDB_CONFIG": {
+      "ENABLED": "IMDb puan dizinini etkinleştirir.\n\nKapalıyken hiçbir veri kümesi yüklenmez ve bellek kullanılmaz.",
+      "URL": "IMDb puan veri kümesinin indirme kaynağı.\n\nBoş değer varsayılan URL'yi kullanır: `https://datasets.imdbws.com/title.ratings.tsv.gz`.",
+      "MIN_VOTES": "Daha az oya sahip IMDb puanları yok sayılır.\n\n`0` tüm puanları korur.\n\nVarsayılan `1000` değeri yalnızca birkaç oyu olan bilinmeyen başlıkları eler.",
+      "RATING_SOURCE": "Geçerli puanı seçer: `imdb_then_provider`, `min_votes` eşiğini geçen IMDb puanını, aksi halde sağlayıcı puanını kullanır. `imdb` yalnızca IMDb puanlarını kullanır. `provider` sağlayıcı puanını korur.",
+      "REPLACE_RATING": "Geçerli puanı Xtream çıktı alanlarına (`rating` ve `rating_5based`) yazar.\n\nKapalıyken Xtream yanıtları olduğu gibi kalır."
+    },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "The category name used in the playlist for items from this Trakt list.",
       "FUZZY_MATCH_THRESHOLD": "Similarity threshold for matching Trakt items to provider streams (0-100).",
@@ -1333,6 +1340,16 @@
     "FRIENDLY_NAME": "Friendly Name",
     "FUZZY_MATCHING": "Fuzzy Matching",
     "GEOIP": "Geo-IP",
+    "IMDB": "IMDb",
+    "IMDB_RATINGS": "IMDb Puanları",
+    "IMDB_ENABLED": "Etkin",
+    "IMDB_URL": "URL",
+    "IMDB_MIN_VOTES": "Minimum oy sayısı",
+    "IMDB_RATING_SOURCE": "Puan kaynağı",
+    "IMDB_RATING_SOURCE_IMDB_THEN_PROVIDER": "Önce IMDb, sonra sağlayıcı",
+    "IMDB_RATING_SOURCE_IMDB": "Yalnızca IMDb",
+    "IMDB_RATING_SOURCE_PROVIDER": "Yalnızca sağlayıcı",
+    "IMDB_REPLACE_RATING": "Puanı değiştir",
     "GEOIP_UNAVAILABLE_POLICY_DENY": "Deny",
     "GEOIP_UNAVAILABLE_POLICY_ALLOW": "Allow",
     "GEOIP_UNAVAILABLE_POLICY": "Geo-IP unavailable policy",
@@ -2043,6 +2060,7 @@
     "FORCE_UPDATE_START": "Start force update",
     "UPDATE_QUALITY": "Update quality",
     "UPDATE_GEOIP_DB": "Update Geo-IP db",
+    "UPDATE_IMDB_RATINGS": "IMDb puanlarını güncelle",
     "UPDATE_LOCAL_LIBRARY": "Update Local Library",
     "UPDATE_ON_BOOT": "Update on boot",
     "LAST_UPDATE": "Last update",
@@ -2542,7 +2560,13 @@
     "CAST": "Oyuncular",
     "DIRECTOR": "Yönetmen",
     "RELEASE_DATE": "Yayın Tarihi",
-    "RATING": "Puan"
+    "RATING": "Puan",
+    "PROVIDER_RATING": "Sağlayıcı puanı",
+    "IMDB_RATING": "IMDb puanı",
+    "EFFECTIVE": "etkili",
+    "RATING_TOOLTIP_IMDB": "IMDb {rating} · {votes} oy",
+    "RATING_TOOLTIP_PROVIDER": "Sağlayıcı {rating}",
+    "VOTES": "oy"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -2842,6 +2866,11 @@
     "GEOIP": {
       "FAIL": "Failed to download Geo-IP db!",
       "SUCCESS": "Successfully downloaded Geo-IP db"
+    },
+    "IMDB": {
+      "ALREADY_RUNNING": "IMDb puanı güncellemesi zaten çalışıyor.",
+      "FAIL": "IMDb puanları güncellenemedi!",
+      "SUCCESS": "IMDb puanları başarıyla güncellendi ({rows} satır)"
     },
     "USER_BOUQUET": {
       "FAIL": "Failed to download user bouquets!"

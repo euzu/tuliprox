@@ -84,6 +84,7 @@ pub(super) fn processing_context(
         input_refresh: None,
         library_update_mode: LibraryUpdateMode::ExistingCatalog,
         override_status: None,
+        imdb: crate::imdb::ImdbRatingRuntime::default(),
     }
 }
 

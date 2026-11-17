@@ -423,6 +423,7 @@ fn rendered_get_series_json_contains_no_seasons_or_episodes() {
         encrypt_secret: [0u8; 16],
         resource_host_policies: Arc::default(),
         default_container_extensions: Arc::default(),
+        replace_rating: false,
     };
 
     let doc = item.to_document(&options);

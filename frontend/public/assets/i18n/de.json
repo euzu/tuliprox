@@ -852,6 +852,13 @@
       "RATE_LIMIT_MS": "Minimum wait time between TMDB requests in milliseconds.\n\nHigher values are gentler to the TMDB API.\n\nExamples: `250`, `500`, `1000`.",
       "MATCH_THRESHOLD": "Minimum match score for TMDB search. Value should be between 1 - 100"
     },
+    "IMDB_CONFIG": {
+      "ENABLED": "Aktiviert den IMDb-Bewertungsindex.\n\nWenn deaktiviert, wird kein Datensatz geladen und kein Speicher belegt.",
+      "URL": "Downloadquelle für den IMDb-Bewertungsdatensatz.\n\nEin leerer Wert verwendet die Standard-URL: `https://datasets.imdbws.com/title.ratings.tsv.gz`.",
+      "MIN_VOTES": "IMDb-Bewertungen mit weniger Stimmen werden ignoriert.\n\n`0` behält alle Bewertungen.\n\nDer Standardwert `1000` entfernt unbekannte Titel mit nur wenigen Stimmen.",
+      "RATING_SOURCE": "Legt die effektive Bewertung fest: `imdb_then_provider` verwendet die IMDb-Bewertung, wenn sie `min_votes` erreicht, andernfalls die Anbieter-Bewertung. `imdb` verwendet nur IMDb-Bewertungen. `provider` behält die Anbieter-Bewertung.",
+      "REPLACE_RATING": "Schreibt die effektive Bewertung in die Xtream-Ausgabefelder `rating` und `rating_5based`.\n\nWenn deaktiviert, bleiben die Xtream-Antworten unverändert."
+    },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "The category name used in the playlist for items from this Trakt list.",
       "FUZZY_MATCH_THRESHOLD": "Similarity threshold for matching Trakt items to provider streams (0-100).",
@@ -1333,6 +1340,16 @@
     "FRIENDLY_NAME": "Friendly Name",
     "FUZZY_MATCHING": "Fuzzy Matching",
     "GEOIP": "Geo-IP",
+    "IMDB": "IMDb",
+    "IMDB_RATINGS": "IMDb-Bewertungen",
+    "IMDB_ENABLED": "Aktiviert",
+    "IMDB_URL": "URL",
+    "IMDB_MIN_VOTES": "Mindestanzahl Stimmen",
+    "IMDB_RATING_SOURCE": "Bewertungsquelle",
+    "IMDB_RATING_SOURCE_IMDB_THEN_PROVIDER": "IMDb, dann Anbieter",
+    "IMDB_RATING_SOURCE_IMDB": "Nur IMDb",
+    "IMDB_RATING_SOURCE_PROVIDER": "Nur Anbieter",
+    "IMDB_REPLACE_RATING": "Bewertung ersetzen",
     "GEOIP_UNAVAILABLE_POLICY_DENY": "Deny",
     "GEOIP_UNAVAILABLE_POLICY_ALLOW": "Allow",
     "GEOIP_UNAVAILABLE_POLICY": "Geo-IP unavailable policy",
@@ -2043,6 +2060,7 @@
     "FORCE_UPDATE_START": "Start force update",
     "UPDATE_QUALITY": "Update quality",
     "UPDATE_GEOIP_DB": "Update Geo-IP db",
+    "UPDATE_IMDB_RATINGS": "IMDb-Bewertungen aktualisieren",
     "UPDATE_LOCAL_LIBRARY": "Update Local Library",
     "UPDATE_ON_BOOT": "Update on boot",
     "LAST_UPDATE": "Last update",
@@ -2542,7 +2560,13 @@
     "CAST": "Besetzung",
     "DIRECTOR": "Regisseur",
     "RELEASE_DATE": "Veröffentlichungsdatum",
-    "RATING": "Bewertung"
+    "RATING": "Bewertung",
+    "PROVIDER_RATING": "Anbieter-Bewertung",
+    "IMDB_RATING": "IMDb-Bewertung",
+    "EFFECTIVE": "effektiv",
+    "RATING_TOOLTIP_IMDB": "IMDb {rating} · {votes} Stimmen",
+    "RATING_TOOLTIP_PROVIDER": "Anbieter {rating}",
+    "VOTES": "Stimmen"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -2842,6 +2866,11 @@
     "GEOIP": {
       "FAIL": "Failed to download Geo-IP db!",
       "SUCCESS": "Successfully downloaded Geo-IP db"
+    },
+    "IMDB": {
+      "ALREADY_RUNNING": "Aktualisierung der IMDb-Bewertungen läuft bereits.",
+      "FAIL": "Aktualisierung der IMDb-Bewertungen fehlgeschlagen!",
+      "SUCCESS": "IMDb-Bewertungen erfolgreich aktualisiert ({rows} Zeilen)"
     },
     "USER_BOUQUET": {
       "FAIL": "Failed to download user bouquets!"

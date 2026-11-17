@@ -304,6 +304,8 @@ impl Config {
         self.reverse_proxy.as_ref().is_some_and(|r| r.geoip.as_ref().is_some_and(|g| g.enabled))
     }
 
+    pub fn is_imdb_enabled(&self) -> bool { self.metadata_update.as_ref().is_some_and(|m| m.imdb.enabled) }
+
     pub fn get_geoip_unavailable_policy(&self) -> GeoIpUnavailablePolicy {
         self.reverse_proxy
             .as_ref()

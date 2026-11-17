@@ -112,6 +112,14 @@ fn sync_resolved_vod_properties(provider_fpl: &mut FetchedPlaylist<'_>, processe
     );
 }
 
+pub(crate) fn apply_resolved_vod_properties(pli: &mut PlaylistItem, updated_props: &VideoStreamProperties) {
+    let mut in_memory_props = updated_props.clone();
+    if let Some(StreamProperties::Video(current)) = pli.header.additional_properties.as_ref() {
+        in_memory_props.copy_imdb_fields_from(current);
+    }
+    pli.header.additional_properties = Some(StreamProperties::Video(Box::new(in_memory_props)));
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn playlist_resolve_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     ctx: &PlaylistProcessingContext<E, M, P>,
@@ -216,8 +224,7 @@ async fn process_immediate_vod_info<E: EventSink + Clone + 'static, M: MetadataU
                 {
                     Ok(Some(updated_props)) => {
                         // Update the current item in fpl
-                        pli.header.additional_properties =
-                            Some(StreamProperties::Video(Box::new(updated_props.clone())));
+                        apply_resolved_vod_properties(pli, &updated_props);
                         batch.push((provider_id.clone(), updated_props));
                         if batch.len() >= BATCH_SIZE {
                             // Release lock before persisting to avoid deadlock (persist needs write lock)
@@ -309,7 +316,7 @@ async fn process_immediate_vod_info<E: EventSink + Clone + 'static, M: MetadataU
                 db_query_ref,
             ),
             apply_properties: |retry_pli, updated_props| {
-                retry_pli.header.additional_properties = Some(StreamProperties::Video(Box::new(updated_props.clone())));
+                apply_resolved_vod_properties(retry_pli, updated_props);
             },
             persist: |updates| persist_input_vod_info_batch(
                 &ctx.config,
@@ -1302,5 +1309,51 @@ mod enrich_metadata_tests {
         assert!(enrich_resolved_metadata(&newer, "provider", &item(), &mut record).await);
         assert_eq!(probe.calls(), 2, "a new fingerprint runs again");
         assert_eq!(record.fingerprint.as_deref(), Some("fp-2"));
+    }
+
+    #[test]
+    fn apply_resolved_vod_properties_preserves_in_memory_imdb_fields() {
+        let mut pli = PlaylistItem {
+            header: PlaylistItemHeader {
+                title: "Movie".intern(),
+                xtream_cluster: XtreamCluster::Video,
+                additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                    imdb: Some(1_234_567),
+                    imdb_rating: Some(8.5),
+                    imdb_votes: Some(10_000),
+                    effective_rating: Some(8.5),
+                    rating: Some(7.0),
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            },
+        };
+
+        let updated_props = VideoStreamProperties {
+            imdb: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            effective_rating: None,
+            rating: Some(7.2),
+            stream_id: 42,
+            ..Default::default()
+        };
+
+        apply_resolved_vod_properties(&mut pli, &updated_props);
+
+        // updated_props itself is not modified
+        assert_eq!(updated_props.imdb, None);
+        assert_eq!(updated_props.effective_rating, None);
+
+        // pli has updated fields, but keeps IMDb fields from current in-memory properties
+        let StreamProperties::Video(saved) = pli.header.additional_properties.as_ref().unwrap() else {
+            panic!("expected video properties");
+        };
+        assert_eq!(saved.stream_id, 42);
+        assert_eq!(saved.imdb, Some(1_234_567));
+        assert_eq!(saved.imdb_rating, Some(8.5));
+        assert_eq!(saved.imdb_votes, Some(10_000));
+        assert_eq!(saved.effective_rating, Some(8.5));
+        assert_eq!(saved.rating, Some(7.2));
     }
 }

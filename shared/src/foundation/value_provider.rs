@@ -20,6 +20,10 @@ macro_rules! set_genre {
                         Some($crate::model::StreamProperties::Video(Box::from($crate::model::VideoStreamProperties {
                             name: $header.title.clone(),
                             plugin_fingerprint: None,
+                            imdb: None,
+                            imdb_rating: None,
+                            imdb_votes: None,
+                            effective_rating: None,
                             category_id: $header.category_id,
                             stream_id: $header.virtual_id.get(),
                             stream_icon: $header.logo.clone(),
@@ -47,6 +51,10 @@ macro_rules! set_genre {
                         $crate::model::SeriesStreamProperties {
                             name: $header.title.clone(),
                             plugin_fingerprint: None,
+                            imdb: None,
+                            imdb_rating: None,
+                            imdb_votes: None,
+                            effective_rating: None,
                             category_id: $header.category_id,
                             series_id: $header.virtual_id.get(),
                             backdrop_path: None,
@@ -110,6 +118,8 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
                 ItemField::EpgId => header.epg_channel_id.clone().unwrap_or_else(|| "".intern()),
                 ItemField::Chno => header.chno.to_string().intern(),
                 ItemField::Quality => header_quality_rank(header).to_string().intern(),
+                ItemField::Rating => header.rating_arc().unwrap_or_else(|| "".intern()),
+                ItemField::Votes => header.votes_arc().unwrap_or_else(|| "".intern()),
                 ItemField::Caption => {
                     if header.title.is_empty() {
                         Arc::clone(&header.name)
@@ -143,7 +153,7 @@ pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: &str) ->
                     Ok(chno) => header.chno = chno,
                     Err(_) => return false,
                 },
-                ItemField::Type | ItemField::Quality => {}
+                ItemField::Type | ItemField::Quality | ItemField::Rating | ItemField::Votes => {}
             }
         };
     }
@@ -173,6 +183,12 @@ impl ValueProvider<'_> {
         if field == ItemField::Quality {
             return Some(Cow::Owned(header_quality_rank(header).to_string()));
         }
+        if field == ItemField::Rating {
+            return header.format_rating().map(Cow::Owned);
+        }
+        if field == ItemField::Votes {
+            return header.format_votes().map(Cow::Owned);
+        }
         let value = match field {
             ItemField::Group => header.group.as_ref(),
             ItemField::Name => header.name.as_ref(),
@@ -182,9 +198,9 @@ impl ValueProvider<'_> {
             ItemField::Input => header.input_name.as_ref(),
             ItemField::Type => header.item_type.as_str(),
             ItemField::EpgId => header.epg_channel_id.as_deref()?,
-            // Both are returned above; if that ever changes, reporting "no value" is better
+            // These are returned above; if that ever changes, reporting "no value" is better
             // than aborting the process on a filter evaluation.
-            ItemField::Chno | ItemField::Quality => return None,
+            ItemField::Chno | ItemField::Quality | ItemField::Rating | ItemField::Votes => return None,
             ItemField::Caption => {
                 if header.title.is_empty() {
                     header.name.as_ref()
@@ -207,6 +223,12 @@ impl ValueProvider<'_> {
         if field == ItemField::Quality {
             return Some(header_quality_rank(&self.pli.header).to_string().intern());
         }
+        if field == ItemField::Rating {
+            return self.pli.header.rating_arc();
+        }
+        if field == ItemField::Votes {
+            return self.pli.header.votes_arc();
+        }
         let value = self.pli.header.get(field.header_field()?)?;
         if self.match_as_ascii {
             return Some(deunicode_string(value.as_cow().as_ref()).into_owned().into());
@@ -218,6 +240,12 @@ impl ValueProvider<'_> {
         // Virtual field: quality tier derived from the caption, not stored on the header.
         if field.eq_ignore_ascii_case("quality") {
             return Some(header_quality_rank(&self.pli.header).to_string().intern());
+        }
+        if field.eq_ignore_ascii_case("rating") {
+            return self.get_typed(ItemField::Rating);
+        }
+        if field.eq_ignore_ascii_case("votes") {
+            return self.get_typed(ItemField::Votes);
         }
         let val = self.pli.header.get_field(field)?;
         if self.match_as_ascii {

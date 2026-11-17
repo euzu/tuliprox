@@ -736,6 +736,7 @@ pub(crate) async fn execute_pipe<'a, P: PluginHost>(
         plugins,
         overrides,
         ManagedStageItems::default(),
+        &ImdbRatingRuntime::default(),
     )
     .await
 }
@@ -751,6 +752,7 @@ pub(crate) async fn execute_pipe_with_insertions<'a, P: PluginHost>(
     plugins: &P,
     overrides: Option<&TargetOverrideSet>,
     managed: ManagedStageItems,
+    imdb: &ImdbRatingRuntime,
 ) -> Result<(FetchedPlaylist<'a>, PipelineOutcome), TuliproxError> {
     let mut source = if consume_source {
         if fpl.is_memory() {
@@ -827,6 +829,12 @@ pub(crate) async fn execute_pipe_with_insertions<'a, P: PluginHost>(
             target.name, fpl.input.name, duplicates_removed
         );
     }
+
+    // The `Rating` and `Votes` filters read these, and `replace_rating` publishes them,
+    // so every target gets them before its filter stage, filtered or not.
+    // The table is opened here, on the first batch that actually needs it.
+    imdb.ensure_open(&items).await;
+    imdb.apply(&mut items);
 
     // Owned copy: a lock guard must not be held across the plugin hooks' await points.
     let locked_owned = overrides.map(|set| set.target_locked().clone());

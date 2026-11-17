@@ -104,6 +104,13 @@ pub fn apply_fact_patch_to_video(properties: &mut VideoStreamProperties, patch: 
         }
     }
 
+    if properties.imdb.is_none() {
+        if let Some(imdb_id) = patch.imdb_id {
+            properties.imdb = Some(imdb_id);
+            changed = true;
+        }
+    }
+
     if let Some(release_date) = patch.release_date.as_deref() {
         match properties.details.as_mut() {
             Some(details) if details.release_date.is_none() => {
@@ -134,6 +141,13 @@ pub fn apply_fact_patch_to_series(properties: &mut SeriesStreamProperties, patch
         }
     }
 
+    if properties.imdb.is_none() {
+        if let Some(imdb_id) = patch.imdb_id {
+            properties.imdb = Some(imdb_id);
+            changed = true;
+        }
+    }
+
     if properties.release_date.is_none() {
         if let Some(release_date) = patch.release_date.as_deref() {
             properties.release_date = Some(Arc::<str>::from(release_date));
@@ -147,12 +161,13 @@ pub fn apply_fact_patch_to_series(properties: &mut SeriesStreamProperties, patch
 fn video_current_facts(properties: &VideoStreamProperties) -> MediaItemFacts {
     MediaItemFacts::movie(
         properties.tmdb,
+        properties.imdb,
         properties.details.as_ref().and_then(|details| details.release_date.as_ref()).map(Arc::clone),
     )
 }
 
 fn series_current_facts(properties: &SeriesStreamProperties) -> MediaItemFacts {
-    MediaItemFacts::series(properties.tmdb, properties.release_date.as_ref().map(Arc::clone))
+    MediaItemFacts::series(properties.tmdb, properties.imdb, properties.release_date.as_ref().map(Arc::clone))
 }
 
 #[cfg(test)]
@@ -169,7 +184,7 @@ mod tests {
             }),
             ..VideoStreamProperties::default()
         };
-        let patch = MediaFactPatch { tmdb_id: Some(999), release_date: Some("2000-01-01".to_string()) };
+        let patch = MediaFactPatch { tmdb_id: Some(999), imdb_id: None, release_date: Some("2000-01-01".to_string()) };
 
         assert!(!apply_fact_patch_to_video(&mut properties, &patch));
         assert_eq!(properties.tmdb, Some(603));
@@ -232,7 +247,7 @@ mod tests {
     #[test]
     fn applies_video_patch_to_missing_facts() {
         let mut properties = VideoStreamProperties::default();
-        let patch = MediaFactPatch { tmdb_id: Some(603), release_date: Some("1999-01-01".to_string()) };
+        let patch = MediaFactPatch { tmdb_id: Some(603), imdb_id: None, release_date: Some("1999-01-01".to_string()) };
 
         assert!(apply_fact_patch_to_video(&mut properties, &patch));
         assert_eq!(properties.tmdb, Some(603));
@@ -246,7 +261,7 @@ mod tests {
             release_date: Some("2008-01-20".into()),
             ..SeriesStreamProperties::default()
         };
-        let patch = MediaFactPatch { tmdb_id: Some(999), release_date: Some("2009-01-01".to_string()) };
+        let patch = MediaFactPatch { tmdb_id: Some(999), imdb_id: None, release_date: Some("2009-01-01".to_string()) };
 
         assert!(!apply_fact_patch_to_series(&mut properties, &patch));
         assert_eq!(properties.tmdb, Some(1396));
@@ -292,9 +307,39 @@ mod tests {
     }
 
     #[test]
+    fn applies_imdb_id_from_a_metadata_patch() {
+        let mut video = VideoStreamProperties::default();
+        let patch = MediaFactPatch { tmdb_id: Some(603), imdb_id: Some(133_093), release_date: None };
+        assert!(apply_fact_patch_to_video(&mut video, &patch));
+        assert_eq!(video.imdb, Some(133_093));
+
+        // An existing id is never replaced.
+        assert!(!apply_fact_patch_to_video(&mut video, &patch));
+
+        let mut series = SeriesStreamProperties::default();
+        assert!(apply_fact_patch_to_series(&mut series, &patch));
+        assert_eq!(series.imdb, Some(133_093));
+        assert!(!apply_fact_patch_to_series(&mut series, &patch));
+    }
+
+    #[test]
+    fn metadata_imdb_id_reaches_the_fact_patch() {
+        let properties = VideoStreamProperties::default();
+        let metadata = crate::library::MediaMetadata::Movie(crate::library::MovieMetadata {
+            tmdb_id: Some(603),
+            imdb_id: Some("tt0133093".to_string()),
+            ..crate::library::MovieMetadata::default()
+        });
+
+        let patch = video_fact_patch_from_metadata(&properties, &metadata);
+
+        assert_eq!(patch.imdb_id, Some(133_093));
+    }
+
+    #[test]
     fn applies_series_patch_to_missing_facts() {
         let mut properties = SeriesStreamProperties::default();
-        let patch = MediaFactPatch { tmdb_id: Some(1396), release_date: Some("2008-01-01".to_string()) };
+        let patch = MediaFactPatch { tmdb_id: Some(1396), imdb_id: None, release_date: Some("2008-01-01".to_string()) };
 
         assert!(apply_fact_patch_to_series(&mut properties, &patch));
         assert_eq!(properties.tmdb, Some(1396));

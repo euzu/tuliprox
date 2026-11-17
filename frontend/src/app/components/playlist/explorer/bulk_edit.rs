@@ -3,19 +3,20 @@ use crate::{
         custom_dialog::CustomDialog,
         input::Input,
         playlist::explorer::{
+            edit_panel::explorer_rating_source,
             epg_picker::EpgPicker,
             identity::{item_override_id, Id},
             image_preview::ImagePreview,
         },
         DropDownOption, DropDownSelection, FieldLabel, IconButton, Select, TextButton,
     },
-    hooks::use_service_context,
+    hooks::{use_service_context, Services},
     i18n::use_translation,
 };
 use shared::{
     model::{
-        FieldError, ItemOverridePatch, ItemPatchDto, OverrideFieldOp, OverrideItemKind, OverrideSaveRequest,
-        OverrideScopeDto, UiPlaylistItem,
+        FieldError, ImdbRatingSource, ItemOverridePatch, ItemPatchDto, OverrideFieldOp, OverrideItemKind,
+        OverrideProvenanceDto, OverrideSaveRequest, OverrideScopeDto, UiPlaylistItem,
     },
     utils::parse_localized_float,
 };
@@ -147,8 +148,67 @@ impl BulkResultsSummary {
 
 pub fn summarize_bulk_results(results: Vec<BulkInputResult>) -> BulkResultsSummary { BulkResultsSummary { results } }
 
-pub fn patch_playlist_item_bulk(item: &UiPlaylistItem, patch: &ItemOverridePatch) -> UiPlaylistItem {
-    crate::app::components::playlist::explorer::edit_panel::patch_playlist_item_from_patch(item, patch, None, true)
+pub fn patch_playlist_item_bulk(
+    item: &UiPlaylistItem,
+    patch: &ItemOverridePatch,
+    scope: OverrideScopeDto,
+    provenance: Option<&OverrideProvenanceDto>,
+    rating_source: ImdbRatingSource,
+) -> UiPlaylistItem {
+    crate::app::components::playlist::explorer::edit_panel::patch_playlist_item_from_patch(
+        item,
+        patch,
+        scope,
+        provenance,
+        true,
+        rating_source,
+    )
+}
+
+/// Fields whose local `Reset` needs the stored layers (provenance) to know the remaining value.
+fn patch_needs_provenance(patch: &ItemOverridePatch) -> bool {
+    let is_reset = |op: Option<&OverrideFieldOp<String>>| matches!(op, Some(OverrideFieldOp::Reset));
+    is_reset(patch.name.as_ref())
+        || is_reset(patch.title.as_ref())
+        || is_reset(patch.group.as_ref())
+        || is_reset(patch.logo.as_ref())
+        || is_reset(patch.epg_channel_id.as_ref())
+        || matches!(patch.rating, Some(OverrideFieldOp::Reset))
+        || matches!(patch.chno, Some(OverrideFieldOp::Reset))
+}
+
+/// Patches the saved items locally. A reset needs the remaining value, and an input-scope edit in a
+/// target view needs the target overrides that shadow it; only the stored layers know both, so these
+/// patches fetch each item's provenance. Other patches stay local.
+async fn patch_saved_items<'a>(
+    services: &Services,
+    items: impl Iterator<Item = &'a Rc<UiPlaylistItem>>,
+    patch: &ItemOverridePatch,
+    scope: OverrideScopeDto,
+    target_id: Option<u16>,
+    rating_source: ImdbRatingSource,
+) -> Vec<UiPlaylistItem> {
+    let needs_provenance = patch_needs_provenance(patch) || (scope == OverrideScopeDto::Input && target_id.is_some());
+    let mut patched = Vec::new();
+    for item in items {
+        let provenance = if needs_provenance {
+            services
+                .playlist
+                .get_override_item(
+                    item.input_name.as_ref(),
+                    OverrideItemKind::from(item.item_type),
+                    item_override_id(item),
+                    target_id,
+                )
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        patched.push(patch_playlist_item_bulk(item, patch, scope, provenance.as_ref(), rating_source));
+    }
+    patched
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -286,6 +346,7 @@ pub struct BulkEditPanelProps {
 pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
+    let rating_source = explorer_rating_source(use_context::<crate::app::context::ConfigContext>().as_ref());
 
     let form_data = use_state(BulkFormData::default);
     let is_saving = use_state(|| false);
@@ -339,6 +400,7 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
         let scope = *props.active_scope;
         let on_saved = props.on_saved.clone();
         let target_name = props.target_name.clone().unwrap_or_default();
+        let target_id = props.target_id;
         let translate = translate.clone();
 
         Callback::from(move |_: String| {
@@ -404,11 +466,15 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                     let successful_inputs: HashSet<String> = summary.successful_inputs().into_iter().collect();
 
                     // Locally patch items from successful inputs
-                    let patched_items: Vec<UiPlaylistItem> = items
-                        .iter()
-                        .filter(|it| successful_inputs.contains(it.input_name.as_ref()))
-                        .map(|it| patch_playlist_item_bulk(it, &patch))
-                        .collect();
+                    let patched_items = patch_saved_items(
+                        &services,
+                        items.iter().filter(|it| successful_inputs.contains(it.input_name.as_ref())),
+                        &patch,
+                        scope,
+                        target_id,
+                        rating_source,
+                    )
+                    .await;
 
                     if !patched_items.is_empty() {
                         on_saved.emit(patched_items);
@@ -454,8 +520,8 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                     let is_success = summary.is_all_success();
 
                     if is_success {
-                        let patched_items: Vec<UiPlaylistItem> =
-                            items.iter().map(|it| patch_playlist_item_bulk(it, &patch)).collect();
+                        let patched_items =
+                            patch_saved_items(&services, items.iter(), &patch, scope, target_id, rating_source).await;
                         on_saved.emit(patched_items);
                     }
 

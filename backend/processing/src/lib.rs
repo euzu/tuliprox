@@ -23,6 +23,7 @@
 pub mod epg;
 pub mod fetched_playlist;
 pub mod geoip;
+pub mod imdb;
 pub mod input_cache;
 pub mod metadata_sink;
 pub mod parser;

@@ -1,5 +1,7 @@
 use super::*;
-use shared::model::{OverrideFieldOp, OverrideItemKind, OverrideProvenanceDto, OverrideScopeDto, PlaylistItemType};
+use shared::model::{
+    OverrideFieldOp, OverrideItemKind, OverrideProvenanceDto, OverrideScopeDto, PlaylistItemType, UiRatingOrigin,
+};
 use std::collections::BTreeMap;
 
 #[test]
@@ -70,6 +72,43 @@ fn reset_fallback_reports_cleared_values() {
 }
 
 #[test]
+fn reset_fallback_and_field_provenance_handle_rating() {
+    let provenance_with_rating = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto { rating: Some(7.5), ..Default::default() }),
+        input_override: None,
+        target_override: None,
+        processed: None,
+        pending_per_target: vec![],
+        ambiguous: false,
+    };
+
+    let fallback = reset_fallback(OverrideScopeDto::Input, "rating", &provenance_with_rating);
+    assert_eq!(fallback.source, FallbackSource::Provider);
+    assert_eq!(fallback.value.as_deref(), Some("7.5"));
+    assert_eq!(fallback.value.as_deref().and_then(parse_localized_float), Some(7.5));
+
+    let prov_info = field_provenance("rating", &provenance_with_rating);
+    assert_eq!(prov_info.effective_value.as_deref(), Some("7.5"));
+    assert_eq!(prov_info.source, ProvenanceSource::Provider);
+
+    let provenance_without_rating = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto { rating: None, ..Default::default() }),
+        input_override: None,
+        target_override: None,
+        processed: None,
+        pending_per_target: vec![],
+        ambiguous: false,
+    };
+    let fallback_none = reset_fallback(OverrideScopeDto::Input, "rating", &provenance_without_rating);
+    assert_eq!(fallback_none.source, FallbackSource::Provider);
+    assert_eq!(fallback_none.value, None);
+
+    let prov_info_none = field_provenance("rating", &provenance_without_rating);
+    assert_eq!(prov_info_none.effective_value, None);
+    assert_eq!(prov_info_none.source, ProvenanceSource::None);
+}
+
+#[test]
 fn rating_prefill_is_dot_formatted_and_parsed_comma_tolerant() {
     let initial = PlaylistOverrideDto { rating: "7.5".to_string(), ..Default::default() };
     let mut current = initial.clone();
@@ -106,6 +145,7 @@ fn patch_playlist_item_applies_form_fields_and_sets_pending() {
         input_stream_id: "".into(),
         epg_channel_id: Some(Arc::from("epg-1")),
         explorer_meta: None,
+        ..Default::default()
     };
 
     let form = PlaylistOverrideDto {
@@ -118,7 +158,15 @@ fn patch_playlist_item_applies_form_fields_and_sets_pending() {
     };
     let deltas = FieldDeltas::default();
 
-    let patched = patch_playlist_item(&original, &form, &deltas, None, true);
+    let patched = patch_playlist_item(
+        &original,
+        &form,
+        &deltas,
+        OverrideScopeDto::Input,
+        None,
+        true,
+        ImdbRatingSource::ImdbThenProvider,
+    );
 
     assert_eq!(&*patched.name, "New Name");
     assert_eq!(&*patched.title, "New Title");
@@ -156,6 +204,7 @@ fn patch_playlist_item_resets_fields_and_clears_edited_when_no_deltas_remain() {
             epg_state: None,
             ..Default::default()
         }),
+        ..Default::default()
     };
 
     let provider_base = ItemFieldsDto {
@@ -170,6 +219,7 @@ fn patch_playlist_item_resets_fields_and_clears_edited_when_no_deltas_remain() {
         audio_track: String::new(),
         time_shift: String::new(),
         rec: String::new(),
+        rating: None,
     };
 
     let provenance = OverrideProvenanceDto {
@@ -190,7 +240,15 @@ fn patch_playlist_item_resets_fields_and_clears_edited_when_no_deltas_remain() {
 
     let form = PlaylistOverrideDto::default();
 
-    let patched = patch_playlist_item(&original, &form, &deltas, Some(&provenance), false);
+    let patched = patch_playlist_item(
+        &original,
+        &form,
+        &deltas,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::ImdbThenProvider,
+    );
 
     assert_eq!(&*patched.name, "Base Name");
     assert_eq!(&*patched.title, "Base Title");
@@ -224,6 +282,7 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let item2 = Rc::new(UiPlaylistItem {
@@ -242,6 +301,7 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let other_item = Rc::new(UiPlaylistItem {
@@ -260,6 +320,7 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let group1 = Rc::new(UiPlaylistGroup {
@@ -319,6 +380,7 @@ fn replace_item_in_categories_matches_only_virtual_id_even_if_provider_id_collid
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let item_input_b = Rc::new(UiPlaylistItem {
@@ -337,6 +399,7 @@ fn replace_item_in_categories_matches_only_virtual_id_even_if_provider_id_collid
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let group = Rc::new(UiPlaylistGroup {
@@ -380,6 +443,7 @@ fn replace_item_in_categories_moves_item_to_group_creates_missing_and_drops_empt
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let group1 = Rc::new(UiPlaylistGroup {
@@ -423,6 +487,7 @@ fn apply_bulk_patches_to_categories_updates_multiple_items_and_rebuilds_groups()
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
     let item2 = Rc::new(UiPlaylistItem {
         virtual_id: 2,
@@ -440,6 +505,7 @@ fn apply_bulk_patches_to_categories_updates_multiple_items_and_rebuilds_groups()
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let group = Rc::new(UiPlaylistGroup {
@@ -489,6 +555,7 @@ fn find_duplicate_chno_uses_precomputed_map() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: Some(shared::model::UiItemExplorerMeta { chno: Some(10), ..Default::default() }),
+        ..Default::default()
     });
 
     let group = Rc::new(UiPlaylistGroup {
@@ -534,13 +601,28 @@ fn patch_from_patch_updates_channel_number_meta() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: Some(shared::model::UiItemExplorerMeta { chno: Some(10), ..Default::default() }),
+        ..Default::default()
     };
     let set = ItemOverridePatch { chno: Some(OverrideFieldOp::Set(42)), ..Default::default() };
-    let updated = patch_playlist_item_from_patch(&item, &set, None, true);
+    let updated = patch_playlist_item_from_patch(
+        &item,
+        &set,
+        OverrideScopeDto::Input,
+        None,
+        true,
+        ImdbRatingSource::ImdbThenProvider,
+    );
     assert_eq!(updated.explorer_meta.as_ref().and_then(|m| m.chno), Some(42));
 
     let clear = ItemOverridePatch { chno: Some(OverrideFieldOp::Clear), ..Default::default() };
-    let cleared = patch_playlist_item_from_patch(&item, &clear, None, true);
+    let cleared = patch_playlist_item_from_patch(
+        &item,
+        &clear,
+        OverrideScopeDto::Input,
+        None,
+        true,
+        ImdbRatingSource::ImdbThenProvider,
+    );
     assert_eq!(cleared.explorer_meta.as_ref().and_then(|m| m.chno), None);
 }
 
@@ -563,6 +645,7 @@ fn apply_bulk_patches_to_categories_ignores_same_virtual_id_in_other_cluster() {
             input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         })
     };
     let live = make_item("Live", "Live Group", PlaylistItemType::Live, XtreamCluster::Live);
@@ -612,6 +695,7 @@ fn bulk_patch_map_keeps_same_virtual_id_of_different_clusters_apart() {
             input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         })
     };
     let live = make_item("Live", "Live Group", PlaylistItemType::Live, XtreamCluster::Live);
@@ -640,4 +724,339 @@ fn bulk_patch_map_keeps_same_virtual_id_of_different_clusters_apart() {
     let updated = apply_bulk_patches_to_categories(&categories, &patch_map);
     assert_eq!(&*updated.live.as_ref().unwrap()[0].channels[0].name, "Live Patched");
     assert_eq!(&*updated.vod.as_ref().unwrap()[0].channels[0].name, "Movie Patched");
+}
+
+#[test]
+fn rating_reset_restores_provider_rating_and_keeps_imdb_origin() {
+    use shared::model::UiRatingOrigin;
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto { rating: Some(6.0), ..Default::default() }),
+        input_override: None,
+        target_override: None,
+        processed: None,
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+
+    let overridden = UiPlaylistItem {
+        rating: 9.0,
+        effective_rating: Some(9.0),
+        rating_origin: Some(UiRatingOrigin::Provider),
+        ..Default::default()
+    };
+    let restored = patch_playlist_item_from_patch(
+        &overridden,
+        &reset,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::ImdbThenProvider,
+    );
+    assert_eq!(restored.rating, 6.0);
+    assert_eq!(restored.effective_rating, Some(6.0));
+    assert_eq!(restored.rating_origin, Some(UiRatingOrigin::Provider));
+
+    let imdb_item = UiPlaylistItem {
+        rating: 9.0,
+        effective_rating: Some(7.5),
+        imdb_rating: Some(7.5),
+        rating_origin: Some(UiRatingOrigin::Imdb),
+        ..Default::default()
+    };
+    let kept = patch_playlist_item_from_patch(
+        &imdb_item,
+        &reset,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::ImdbThenProvider,
+    );
+    assert_eq!(kept.rating, 6.0);
+    assert_eq!(kept.effective_rating, Some(7.5));
+    assert_eq!(kept.rating_origin, Some(UiRatingOrigin::Imdb));
+
+    let strict = patch_playlist_item_from_patch(
+        &UiPlaylistItem::default(),
+        &ItemOverridePatch { rating: Some(OverrideFieldOp::Set(8.0)), ..Default::default() },
+        OverrideScopeDto::Input,
+        None,
+        true,
+        ImdbRatingSource::Imdb,
+    );
+    assert_eq!(strict.rating, 8.0);
+    assert_eq!(strict.effective_rating, None);
+}
+
+#[test]
+fn rating_reset_target_scope_falls_back_to_input_override_set() {
+    let mut input_override = BTreeMap::new();
+    input_override.insert("rating".to_string(), serde_json::json!(7.0));
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto { rating: Some(5.0), ..Default::default() }),
+        input_override: Some(input_override),
+        target_override: None,
+        processed: None,
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+    let overridden = UiPlaylistItem {
+        rating: 9.0,
+        effective_rating: Some(9.0),
+        rating_origin: Some(UiRatingOrigin::Provider),
+        ..Default::default()
+    };
+    let patched = patch_playlist_item_from_patch(
+        &overridden,
+        &reset,
+        OverrideScopeDto::Target,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(patched.rating, 7.0);
+    assert_eq!(patched.effective_rating, Some(7.0));
+    assert_eq!(patched.rating_origin, Some(UiRatingOrigin::Provider));
+}
+
+#[test]
+fn rating_reset_target_scope_falls_back_to_input_override_clear() {
+    let mut input_override = BTreeMap::new();
+    input_override.insert("rating".to_string(), serde_json::Value::Null);
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto { rating: Some(5.0), ..Default::default() }),
+        input_override: Some(input_override),
+        target_override: None,
+        processed: None,
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+    let overridden = UiPlaylistItem {
+        rating: 9.0,
+        effective_rating: Some(9.0),
+        rating_origin: Some(UiRatingOrigin::Provider),
+        ..Default::default()
+    };
+    let patched = patch_playlist_item_from_patch(
+        &overridden,
+        &reset,
+        OverrideScopeDto::Target,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(patched.rating, 0.0);
+    assert_eq!(patched.effective_rating, None);
+    assert_eq!(patched.rating_origin, None);
+}
+
+#[test]
+fn rating_reset_input_scope_falls_back_to_provider() {
+    let mut input_override = BTreeMap::new();
+    input_override.insert("rating".to_string(), serde_json::json!(7.0));
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto { rating: Some(5.0), ..Default::default() }),
+        input_override: Some(input_override),
+        target_override: None,
+        processed: None,
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+    let overridden = UiPlaylistItem {
+        rating: 9.0,
+        effective_rating: Some(9.0),
+        rating_origin: Some(UiRatingOrigin::Provider),
+        ..Default::default()
+    };
+    let patched = patch_playlist_item_from_patch(
+        &overridden,
+        &reset,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(patched.rating, 5.0);
+    assert_eq!(patched.effective_rating, Some(5.0));
+    assert_eq!(patched.rating_origin, Some(UiRatingOrigin::Provider));
+}
+
+#[test]
+fn rating_reset_without_provenance_leaves_rating_unchanged() {
+    let reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+    let item = UiPlaylistItem {
+        rating: 8.5,
+        effective_rating: Some(8.5),
+        rating_origin: Some(UiRatingOrigin::Provider),
+        ..Default::default()
+    };
+    let patched =
+        patch_playlist_item_from_patch(&item, &reset, OverrideScopeDto::Input, None, true, ImdbRatingSource::Provider);
+    assert_eq!(patched.rating, 8.5);
+    assert_eq!(patched.effective_rating, Some(8.5));
+    assert_eq!(patched.rating_origin, Some(UiRatingOrigin::Provider));
+}
+
+#[test]
+fn rating_reset_never_falls_back_to_processed_record() {
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto { rating: None, ..Default::default() }),
+        input_override: None,
+        target_override: None,
+        processed: Some(ItemFieldsDto { rating: Some(9.0), ..Default::default() }),
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+    let overridden = UiPlaylistItem {
+        rating: 9.0,
+        effective_rating: Some(9.0),
+        rating_origin: Some(UiRatingOrigin::Provider),
+        ..Default::default()
+    };
+    let patched = patch_playlist_item_from_patch(
+        &overridden,
+        &reset,
+        OverrideScopeDto::Target,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(patched.rating, 0.0);
+    assert_eq!(patched.effective_rating, None);
+    assert_eq!(patched.rating_origin, None);
+}
+
+#[test]
+fn target_reset_resolves_input_override_layer_for_text_fields() {
+    let mut input_override = BTreeMap::new();
+    input_override.insert("group".to_string(), serde_json::json!("Input Group"));
+    input_override.insert("name".to_string(), serde_json::Value::Null);
+    input_override.insert("chno".to_string(), serde_json::json!(42));
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto {
+            name: "Provider Name".to_string(),
+            title: "Provider Title".to_string(),
+            group: "Provider Group".to_string(),
+            chno: 7,
+            ..Default::default()
+        }),
+        input_override: Some(input_override),
+        target_override: None,
+        processed: Some(ItemFieldsDto { group: "Target Group".to_string(), ..Default::default() }),
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let reset = ItemOverridePatch {
+        name: Some(OverrideFieldOp::Reset),
+        title: Some(OverrideFieldOp::Reset),
+        group: Some(OverrideFieldOp::Reset),
+        chno: Some(OverrideFieldOp::Reset),
+        ..Default::default()
+    };
+    let item = UiPlaylistItem {
+        name: Arc::from("Target Name"),
+        title: Arc::from("Target Title"),
+        group: Arc::from("Target Group"),
+        ..Default::default()
+    };
+
+    let target = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Target,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*target.group, "Input Group");
+    assert_eq!(&*target.name, "");
+    assert_eq!(&*target.title, "Provider Title");
+    assert_eq!(target.explorer_meta.as_ref().and_then(|m| m.chno), Some(42));
+
+    let input = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*input.group, "Provider Group");
+    assert_eq!(&*input.name, "Provider Name");
+    assert_eq!(input.explorer_meta.as_ref().and_then(|m| m.chno), Some(7));
+
+    let unknown = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Target,
+        None,
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*unknown.group, "Target Group");
+    assert_eq!(&*unknown.name, "Target Name");
+}
+
+#[test]
+fn input_scope_edit_keeps_fields_the_target_overrides() {
+    let mut target_override = BTreeMap::new();
+    target_override.insert("group".to_string(), serde_json::json!("Target Group"));
+    target_override.insert("rating".to_string(), serde_json::Value::Null);
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto {
+            name: "Provider Name".to_string(),
+            group: "Provider Group".to_string(),
+            rating: Some(6.0),
+            ..Default::default()
+        }),
+        input_override: None,
+        target_override: Some(target_override),
+        processed: None,
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let item = UiPlaylistItem { name: Arc::from("Shown Name"), group: Arc::from("Target Group"), ..Default::default() };
+
+    let reset = ItemOverridePatch {
+        name: Some(OverrideFieldOp::Reset),
+        group: Some(OverrideFieldOp::Reset),
+        rating: Some(OverrideFieldOp::Reset),
+        ..Default::default()
+    };
+    let input = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*input.group, "Target Group");
+    assert_eq!(input.effective_rating, None);
+    assert_eq!(&*input.name, "Provider Name");
+
+    let set = ItemOverridePatch { group: Some(OverrideFieldOp::Set("Input Group".to_string())), ..Default::default() };
+    let input_set = patch_playlist_item_from_patch(
+        &item,
+        &set,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*input_set.group, "Target Group");
+
+    let target = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Target,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*target.group, "Provider Group");
 }

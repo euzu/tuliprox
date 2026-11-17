@@ -1386,6 +1386,18 @@
     handling for TS output.
   - Introduced live HLS reverse-proxy caching with lifecycle scheduling, garbage collection, and improved demand/prefetch backpressure.
   - Added smarter HLS playback access/admission handling for consistent manifest responses.
+- **IMDb ratings for VOD and series, with rating and vote filters.** Tuliprox downloads the official IMDb
+  non-commercial ratings dataset into a B+Tree table (`imdb_ratings.db`) that is read only during a playlist update:
+  loaded for that run, or queried on disk with `disk_based_processing: true`. It uses no memory between updates.
+  It resolves the IMDb id of each movie and series from title tags, provider ids, TMDB ids or local metadata.
+  Filters gain `Rating` (effective rating) and `Votes` (IMDb vote count), for example
+  `Rating >= 6.5 AND Votes >= 5000` or `Type = movie AND (Rating >= 7 OR Rating IS EMPTY)`. The `rating_source`
+  setting chooses whether the IMDb rating, the provider rating or a combination wins, and `replace_rating` writes
+  the effective rating to the Xtream output. A manual update can be triggered via `GET /api/v1/imdb/update`, the Web UI
+  button in the playlist update view, or the `update_imdb_ratings` MCP tool. The IMDb datasets are for personal and
+  non-commercial use only. See [IMDb Ratings](docs/src/configuration/metadata-update.md#5-imdb-ratings-imdb).
+  The playlist explorer shows the effective rating with its source; the detail panel shows the provider and the IMDb
+  rating side by side.
 
 ## ⚙️ Optimizations
 
@@ -2625,6 +2637,15 @@
     - `allowed_networks`: CIDR ranges such as `192.168.0.0/16` or `10.0.0.1/32`.
     - `allowed_countries`: ISO-style country codes resolved through GeoIP.
   - The rules use OR semantics: any matching CIDR or country allows the request.
+
+- **config.yml (`metadata_update.imdb`)**:
+  - Added `enabled` (bool, default `false`), `url` (string, default
+    `https://datasets.imdbws.com/title.ratings.tsv.gz`, empty uses the default), `min_votes` (int, default `1000`),
+    `rating_source` (`imdb_then_provider` | `imdb` | `provider`, default `imdb_then_provider`) and `replace_rating`
+    (bool, default `false`). See
+    [IMDb Ratings](docs/src/configuration/metadata-update.md#5-imdb-ratings-imdb).
+  - Added the schedule type `ImdbRatingsUpdate` (aliases `imdb_ratings_update`, `imdb`) to refresh the IMDb ratings
+    table. It requires `metadata_update.imdb.enabled: true`; a daily run is the recommended default.
 
 ## 🛠 Maintenance
 

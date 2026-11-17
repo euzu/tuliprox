@@ -40,6 +40,9 @@ pub struct XtreamMappingOptions {
     /// The map is built per request from the live configuration, so a config change takes effect on
     /// the next response and nothing has to be persisted into a playlist item.
     pub default_container_extensions: Arc<HashMap<Arc<str>, Arc<str>>>,
+    /// Publish the stored effective rating as `rating` and half of it as `rating_5based`
+    /// (`metadata_update.imdb.replace_rating`). Off by default: the Xtream responses stay as they are.
+    pub replace_rating: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,6 +61,18 @@ impl XtreamMappingOptions {
 
     #[inline]
     pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool { self.reverse_item_types.is_set(item_type) }
+
+    /// The rating to publish instead of the stored provider rating.
+    ///
+    /// `Some` only when `replace_rating` is set and the stored effective rating is usable. The
+    /// stored fields are never rewritten, so the provider rating stays the fallback of a later update.
+    #[must_use]
+    pub fn replaced_rating(&self, effective_rating: Option<f32>) -> Option<f64> {
+        if !self.replace_rating {
+            return None;
+        }
+        effective_rating.filter(|rating| rating.is_finite() && *rating > 0.0).map(f64::from)
+    }
 
     pub(super) fn is_trusted_web_ui_resource_path(resource_url: &str) -> bool {
         crate::model::is_internal_resource_path(resource_url)

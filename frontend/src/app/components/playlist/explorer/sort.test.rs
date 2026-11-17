@@ -14,6 +14,8 @@ fn create_test_item(
     epg_state: Option<ExplorerEpgState>,
     edited: bool,
 ) -> Rc<UiPlaylistItem> {
+    let effective_rating = (rating > 0.001).then_some(rating as f32);
+    let rating_origin = (rating > 0.001).then_some(UiRatingOrigin::Provider);
     Rc::new(UiPlaylistItem {
         virtual_id,
         provider_id: Arc::from(provider_id),
@@ -34,6 +36,10 @@ fn create_test_item(
             epg_state,
             ..Default::default()
         }),
+        effective_rating,
+        imdb_rating: None,
+        imdb_votes: None,
+        rating_origin,
     })
 }
 
@@ -206,6 +212,7 @@ fn create_timestamp_item(
             chno: None,
             ..Default::default()
         }),
+        ..Default::default()
     })
 }
 
@@ -295,6 +302,113 @@ fn rating_filter_uses_selected_threshold_only_when_active() {
     assert!(passes_rating_filter(&item, false, 9));
     assert!(passes_rating_filter(&item, true, 6));
     assert!(!passes_rating_filter(&item, true, 7));
+
+    // Test with None effective rating
+    let unrated = create_test_item(2, "p2", "Unrated", "Unrated", 0.0, XtreamCluster::Video, None, None, false);
+    assert!(passes_rating_filter(&unrated, false, 5));
+    assert!(!passes_rating_filter(&unrated, true, 1));
+    assert!(passes_rating_filter(&unrated, true, 0));
+}
+
+#[test]
+fn test_effective_rating_display_helper() {
+    let mock_translator = |key: &str| match key {
+        "LABEL.RATING_TOOLTIP_IMDB" => "IMDb {rating} · {votes} votes".to_string(),
+        "LABEL.RATING_TOOLTIP_PROVIDER" => "Provider {rating}".to_string(),
+        _ => key.to_string(),
+    };
+
+    // 1. IMDb tooltip with votes
+    let imdb_item = UiPlaylistItem {
+        rating: 6.0,
+        effective_rating: Some(4.2),
+        imdb_rating: Some(4.2),
+        imdb_votes: Some(12345),
+        rating_origin: Some(UiRatingOrigin::Imdb),
+        ..Default::default()
+    };
+    let display = effective_rating_display(&imdb_item, &mock_translator);
+    assert_eq!(display, Some(("★ 4,2".to_string(), "IMDb 4,2 · 12,345 votes".to_string())));
+
+    // 2. Provider tooltip
+    let provider_item = UiPlaylistItem {
+        rating: 6.8,
+        effective_rating: Some(6.8),
+        imdb_rating: None,
+        imdb_votes: None,
+        rating_origin: Some(UiRatingOrigin::Provider),
+        ..Default::default()
+    };
+    let display = effective_rating_display(&provider_item, &mock_translator);
+    assert_eq!(display, Some(("★ 6,8".to_string(), "Provider 6,8".to_string())));
+
+    // 3. None / unrated
+    let unrated_item = UiPlaylistItem {
+        rating: 0.0,
+        effective_rating: None,
+        imdb_rating: None,
+        imdb_votes: None,
+        rating_origin: None,
+        ..Default::default()
+    };
+    assert_eq!(effective_rating_display(&unrated_item, &mock_translator), None);
+
+    // 4. Zero effective rating returns None
+    let zero_item = UiPlaylistItem {
+        rating: 0.0,
+        effective_rating: Some(0.0),
+        imdb_rating: None,
+        imdb_votes: None,
+        rating_origin: None,
+        ..Default::default()
+    };
+    assert_eq!(effective_rating_display(&zero_item, &mock_translator), None);
+}
+
+#[test]
+fn test_sort_by_effective_rating_imdb_and_provider() {
+    let imdb_item = Rc::new(UiPlaylistItem {
+        virtual_id: 1,
+        provider_id: Arc::from("p1"),
+        rating: 5.0,
+        effective_rating: Some(8.2),
+        imdb_rating: Some(8.2),
+        imdb_votes: Some(5000),
+        rating_origin: Some(UiRatingOrigin::Imdb),
+        ..Default::default()
+    });
+    let provider_item = Rc::new(UiPlaylistItem {
+        virtual_id: 2,
+        provider_id: Arc::from("p2"),
+        rating: 6.5,
+        effective_rating: Some(6.5),
+        imdb_rating: None,
+        imdb_votes: None,
+        rating_origin: Some(UiRatingOrigin::Provider),
+        ..Default::default()
+    });
+    let unrated_item = Rc::new(UiPlaylistItem {
+        virtual_id: 3,
+        provider_id: Arc::from("p3"),
+        rating: 0.0,
+        effective_rating: None,
+        imdb_rating: None,
+        imdb_votes: None,
+        rating_origin: None,
+        ..Default::default()
+    });
+
+    let mut asc = vec![Rc::clone(&imdb_item), Rc::clone(&unrated_item), Rc::clone(&provider_item)];
+    sort_items(&mut asc, ExplorerSort::Rating, false);
+    assert_eq!(asc[0].provider_id.as_ref(), "p2"); // 6.5
+    assert_eq!(asc[1].provider_id.as_ref(), "p1"); // 8.2
+    assert_eq!(asc[2].provider_id.as_ref(), "p3"); // unrated -> last
+
+    let mut desc = vec![Rc::clone(&provider_item), Rc::clone(&unrated_item), Rc::clone(&imdb_item)];
+    sort_items(&mut desc, ExplorerSort::Rating, true);
+    assert_eq!(desc[0].provider_id.as_ref(), "p1"); // 8.2
+    assert_eq!(desc[1].provider_id.as_ref(), "p2"); // 6.5
+    assert_eq!(desc[2].provider_id.as_ref(), "p3"); // unrated -> last
 }
 
 #[test]

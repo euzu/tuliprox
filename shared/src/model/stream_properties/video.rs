@@ -110,13 +110,39 @@ pub struct VideoStreamProperties {
     /// older record without it decodes to `None`.
     #[serde(default)]
     pub plugin_fingerprint: Option<Arc<str>>,
+    /// Numeric part of the `IMDb` id `tt…`.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub imdb: Option<u32>,
+    /// Raw `IMDb` dataset rating value.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub imdb_rating: Option<f32>,
+    /// Raw `IMDb` dataset vote count value.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub imdb_votes: Option<u32>,
+    /// Rating after the configured rating source and minimum votes, set by processing, read by the `Rating` filter.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub effective_rating: Option<f32>,
 }
 
 impl VideoStreamProperties {
+    /// Copies the per-update `IMDb` values from `other`. Processing derives them
+    /// before the target filter; a resolve that replaces the properties afterwards
+    /// keeps them with this.
+    pub fn copy_imdb_fields_from(&mut self, other: &Self) {
+        self.imdb = other.imdb.or(self.imdb);
+        self.imdb_rating = other.imdb_rating;
+        self.imdb_votes = other.imdb_votes;
+        self.effective_rating = other.effective_rating;
+    }
+
     pub(super) fn from_info_base(info: &XtreamVideoInfo) -> VideoStreamProperties {
         VideoStreamProperties {
             name: info.info.name.clone(),
             plugin_fingerprint: None,
+            imdb: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            effective_rating: None,
             category_id: info.movie_data.category_id,
             stream_id: info.movie_data.stream_id,
             stream_icon: info.info.movie_image.as_ref().map_or_else(|| "".intern(), Clone::clone),
@@ -177,6 +203,9 @@ impl VideoStreamProperties {
                 props.trailer = video.trailer.clone();
             }
             props.is_adult = video.is_adult;
+            // IMDb values are derived per update before the target filter; the info
+            // resolve that runs after it must not drop them.
+            props.copy_imdb_fields_from(video);
         }
 
         props

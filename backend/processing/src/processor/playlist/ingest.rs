@@ -4,6 +4,7 @@ use super::{
     fetch_outcome::{apply_playlist_fetch_outcome, report_force_updates, CacheStatusScope},
     *,
 };
+use crate::imdb::ImdbRatingRuntime;
 
 /// What acquiring an input left in the current run.
 #[derive(Debug, Clone)]
@@ -143,6 +144,8 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     /// Plugin hooks awaited by the pipeline; [`NoPlugins`] compiles them out.
     pub plugins: P,
     pub override_status: Option<Arc<tuliprox_repository::OverrideStatusStore>>,
+    /// `IMDb` ratings of this run: one config and one table snapshot for every target.
+    pub imdb: ImdbRatingRuntime,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -173,6 +176,7 @@ impl PlaylistProcessingContext<shared::model::NoopSink> {
             partial_refresh: Arc::default(),
             had_quality_rejections: Arc::default(),
             replace_target_contents: false,
+            imdb: ImdbRatingRuntime::default(),
             publication_deadline: None,
             input_refresh: None,
             library_update_mode: LibraryUpdateMode::ExistingCatalog,

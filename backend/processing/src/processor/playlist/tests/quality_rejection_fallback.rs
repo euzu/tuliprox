@@ -248,6 +248,7 @@ fn processing_context_with_events<E: EventSink>(storage_dir: &Path, events: E) -
         maintenance: None,
         plugins: shared::model::NoPlugins,
         override_status: None,
+        imdb: crate::imdb::ImdbRatingRuntime::default(),
     }
 }
 

@@ -163,6 +163,12 @@ impl XtreamPlaylistItem {
             XtreamCluster::Live => XtreamInfoDocument::Empty(XtreamEmptyDoc {}),
             XtreamCluster::Video => {
                 let stream_icon = self.get_stream_icon(options);
+                let replaced_rating = match self.additional_properties.as_ref() {
+                    Some(StreamProperties::Video(video)) => options.replaced_rating(video.effective_rating),
+                    _ => None,
+                };
+                let rating =
+                    replaced_rating.map_or_else(|| Arc::clone(&empty_str), |r| InfoDocUtils::limited(r).intern());
                 XtreamInfoDocument::Video(XtreamVideoInfoDoc {
                     info: XtreamVideoInfoData {
                         kinopoisk_url: Arc::clone(&empty_str),
@@ -190,7 +196,7 @@ impl XtreamPlaylistItem {
                         video: Value::Array(Vec::new()),
                         audio: Value::Array(Vec::new()),
                         bitrate: 0,
-                        rating: Arc::clone(&empty_str),
+                        rating,
                         runtime: Arc::clone(&empty_str),
                         status: "Released".intern(),
                     },
@@ -211,6 +217,14 @@ impl XtreamPlaylistItem {
             }
             XtreamCluster::Series => {
                 let stream_icon = self.get_stream_icon(options);
+                let replaced_rating = match self.additional_properties.as_ref() {
+                    Some(StreamProperties::Series(series)) => options.replaced_rating(series.effective_rating),
+                    _ => None,
+                };
+                let rating =
+                    replaced_rating.map_or_else(|| Arc::clone(&empty_str), |r| InfoDocUtils::limited(r).intern());
+                let rating_5based =
+                    replaced_rating.map_or_else(|| Arc::clone(&empty_str), |r| InfoDocUtils::limited(r / 2.0).intern());
                 XtreamInfoDocument::Series(XtreamSeriesInfoDoc {
                     seasons: Vec::new(),
                     info: XtreamSeriesInfoData {
@@ -223,8 +237,8 @@ impl XtreamPlaylistItem {
                         release_date_alternate: Arc::clone(&empty_str),
                         release_date: Arc::clone(&empty_str),
                         last_modified: Arc::clone(&empty_str),
-                        rating: Arc::clone(&empty_str),
-                        rating_5based: Arc::clone(&empty_str),
+                        rating,
+                        rating_5based,
                         backdrop_path: if stream_icon.is_empty() { vec![] } else { vec![Arc::clone(&stream_icon)] },
                         tmdb: Arc::clone(&empty_str),
                         youtube_trailer: Arc::clone(&empty_str),
@@ -256,6 +270,7 @@ impl XtreamPlaylistItem {
     #[allow(clippy::redundant_closure_for_method_calls)]
     fn series_to_document(&self, options: &XtreamMappingOptions, series: &SeriesStreamProperties) -> XtreamDocument {
         let empty_str = "".intern();
+        let replaced_rating = options.replaced_rating(series.effective_rating);
         XtreamDocument::Series(XtreamSeriesDoc {
             num: self.channel_no,
             name: self.title.clone(),
@@ -268,8 +283,12 @@ impl XtreamPlaylistItem {
             release_date: series.release_date.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
             release_date_alternate: series.release_date.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
             last_modified: series.last_modified.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
-            rating: InfoDocUtils::limited(series.rating).intern(),
-            rating_5based: InfoDocUtils::limited(series.rating_5based).intern(),
+            rating: replaced_rating
+                .map_or_else(|| InfoDocUtils::limited(series.rating).intern(), |r| InfoDocUtils::limited(r).intern()),
+            rating_5based: replaced_rating.map_or_else(
+                || InfoDocUtils::limited(series.rating_5based).intern(),
+                |r| InfoDocUtils::limited(r / 2.0).intern(),
+            ),
             backdrop_path: series.backdrop_path.as_ref().map_or_else(
                 || {
                     let res_url = self.get_stream_resource(options, &series.cover, "cover");
@@ -311,14 +330,18 @@ impl XtreamPlaylistItem {
     fn video_to_document(&self, options: &XtreamMappingOptions, video: &VideoStreamProperties) -> XtreamDocument {
         let stream_icon = self.get_stream_icon(options);
         let empty_str = "".intern();
+        let replaced_rating = options.replaced_rating(video.effective_rating);
         XtreamDocument::Video(XtreamVideoDoc {
             num: self.channel_no,
             name: self.title.clone(),
             stream_type: video.stream_type.clone().unwrap_or_else(default_as_movie),
             stream_id: self.virtual_id.get(),
             stream_icon,
-            rating: video.rating.map_or_else(|| Arc::clone(&empty_str), |v| InfoDocUtils::limited(v).intern()),
-            rating_5based: video.rating_5based.unwrap_or_default(),
+            rating: replaced_rating.map_or_else(
+                || video.rating.map_or_else(|| Arc::clone(&empty_str), |v| InfoDocUtils::limited(v).intern()),
+                |r| InfoDocUtils::limited(r).intern(),
+            ),
+            rating_5based: replaced_rating.map_or_else(|| video.rating_5based.unwrap_or_default(), |r| r / 2.0),
             tmdb: video.tmdb.map_or_else(|| Arc::clone(&empty_str), |v| v.intern()),
             trailer: video.trailer.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
             added: video.added.clone(),
@@ -464,8 +487,8 @@ pub enum XtreamDocument {
 mod tests {
     use super::*;
     use crate::model::{
-        PlaylistEntry, PlaylistItemType, PlaylistItemTypeSet, VideoStreamDetailProperties, VideoStreamProperties,
-        VirtualId,
+        PlaylistEntry, PlaylistItemType, PlaylistItemTypeSet, SeriesStreamDetailProperties, SeriesStreamProperties,
+        VideoStreamDetailProperties, VideoStreamProperties, VirtualId,
     };
 
     fn sample_options() -> XtreamMappingOptions {
@@ -481,6 +504,7 @@ mod tests {
             encrypt_secret: [0u8; 16],
             resource_host_policies: Arc::default(),
             default_container_extensions: Arc::default(),
+            replace_rating: false,
         }
     }
 
@@ -659,6 +683,218 @@ mod tests {
         // `XtreamLiveDoc` has no container_extension field, so a configured default cannot leak
         // into live even when the input sets one; the type is the guarantee.
         assert!(matches!(live.to_document(&options), XtreamDocument::Live(_)));
+    }
+
+    fn series_item(properties: StreamProperties) -> XtreamPlaylistItem {
+        let mut item = video_item("", Some(properties));
+        item.xtream_cluster = XtreamCluster::Series;
+        item.item_type = PlaylistItemType::SeriesInfo;
+        item
+    }
+
+    fn series_properties(rating: f64, rating_5based: f64) -> StreamProperties {
+        StreamProperties::Series(Box::new(SeriesStreamProperties {
+            name: "Test".intern(),
+            rating,
+            rating_5based,
+            details: Some(SeriesStreamDetailProperties::new(None, vec![], None)),
+            ..SeriesStreamProperties::default()
+        }))
+    }
+
+    /// The four rating fields added for `IMDb` must not leak into any Xtream document.
+    #[test]
+    fn new_stream_property_fields_stay_out_of_the_xtream_documents() {
+        let options = sample_options();
+
+        let video_plain = video_item("http://provider.example/movie/x.mp4", Some(video_properties("mp4", true)));
+        let mut video_props = video_properties("mp4", true);
+        if let StreamProperties::Video(video) = &mut video_props {
+            video.imdb = Some(6_549_510);
+            video.imdb_rating = Some(4.2);
+            video.imdb_votes = Some(5_000);
+            video.effective_rating = Some(4.2);
+        }
+        let video_rated = video_item("http://provider.example/movie/x.mp4", Some(video_props));
+
+        let series_plain = series_item(series_properties(6.8, 3.4));
+        let mut series_props = series_properties(6.8, 3.4);
+        if let StreamProperties::Series(series) = &mut series_props {
+            series.imdb = Some(6_549_510);
+            series.imdb_rating = Some(4.2);
+            series.imdb_votes = Some(5_000);
+            series.effective_rating = Some(4.2);
+        }
+        let series_rated = series_item(series_props);
+
+        let documents = [
+            (
+                serde_json::to_string(&video_plain.to_document(&options)).expect("video list document"),
+                serde_json::to_string(&video_rated.to_document(&options)).expect("rated video list document"),
+            ),
+            (
+                serde_json::to_string(&series_plain.to_document(&options)).expect("series list document"),
+                serde_json::to_string(&series_rated.to_document(&options)).expect("rated series list document"),
+            ),
+            (
+                serde_json::to_string(&video_plain.to_info_document(&options)).expect("video info document"),
+                serde_json::to_string(&video_rated.to_info_document(&options)).expect("rated video info document"),
+            ),
+            (
+                serde_json::to_string(&series_plain.to_info_document(&options)).expect("series info document"),
+                serde_json::to_string(&series_rated.to_info_document(&options)).expect("rated series info document"),
+            ),
+        ];
+
+        for (plain, rated) in documents {
+            assert_eq!(plain, rated, "the new fields must not change the Xtream response");
+            for key in ["\"imdb\"", "\"imdb_rating\"", "\"imdb_votes\"", "\"effective_rating\""] {
+                assert!(!rated.contains(key), "{key} must not appear in the Xtream response: {rated}");
+            }
+        }
+    }
+
+    #[test]
+    fn replace_rating_publishes_the_effective_rating_in_the_list_documents() {
+        let options = XtreamMappingOptions { replace_rating: true, ..sample_options() };
+
+        let mut video_props = video_properties("mp4", true);
+        if let StreamProperties::Video(video) = &mut video_props {
+            video.rating = Some(6.8);
+            video.rating_5based = Some(3.4);
+            video.imdb_rating = Some(4.2);
+            video.effective_rating = Some(4.25);
+        }
+        let XtreamDocument::Video(video_doc) = video_item("", Some(video_props)).to_document(&options) else {
+            panic!("expected a video document");
+        };
+        assert_eq!(video_doc.rating.as_ref(), "4.25");
+        assert!((video_doc.rating_5based - 2.125).abs() < f64::EPSILON);
+
+        let mut series_props = series_properties(6.8, 3.4);
+        if let StreamProperties::Series(series) = &mut series_props {
+            series.effective_rating = Some(4.25);
+        }
+        let XtreamDocument::Series(series_doc) = series_item(series_props).to_document(&options) else {
+            panic!("expected a series document");
+        };
+        assert_eq!(series_doc.rating.as_ref(), "4.25");
+        assert_eq!(series_doc.rating_5based.as_ref(), "2.12");
+    }
+
+    #[test]
+    fn replace_rating_publishes_the_effective_rating_in_the_info_documents() {
+        let options = XtreamMappingOptions { replace_rating: true, ..sample_options() };
+
+        let mut video_props = video_properties("mp4", true);
+        if let StreamProperties::Video(video) = &mut video_props {
+            video.rating = Some(6.8);
+            video.effective_rating = Some(4.2);
+        }
+        let XtreamInfoDocument::Video(video_doc) = video_item("", Some(video_props)).to_info_document(&options) else {
+            panic!("expected a video info document");
+        };
+        assert_eq!(video_doc.info.rating.as_ref(), "4.2");
+
+        let mut series_props = series_properties(6.8, 3.4);
+        if let StreamProperties::Series(series) = &mut series_props {
+            series.effective_rating = Some(4.2);
+        }
+        let XtreamInfoDocument::Series(series_doc) = series_item(series_props).to_info_document(&options) else {
+            panic!("expected a series info document");
+        };
+        assert_eq!(series_doc.info.rating.as_ref(), "4.2");
+        assert_eq!(series_doc.info.rating_5based.as_ref(), "2.1");
+    }
+
+    #[test]
+    fn replace_rating_publishes_the_effective_rating_in_info_documents_without_details() {
+        let options_on = XtreamMappingOptions { replace_rating: true, ..sample_options() };
+        let options_off = XtreamMappingOptions { replace_rating: false, ..sample_options() };
+
+        let mut video_props = video_properties("mp4", false);
+        if let StreamProperties::Video(video) = &mut video_props {
+            video.rating = Some(6.8);
+            video.effective_rating = Some(4.2);
+        }
+        let video = video_item("", Some(video_props));
+
+        let XtreamInfoDocument::Video(doc_on) = video.to_info_document(&options_on) else {
+            panic!("expected a video info document");
+        };
+        assert_eq!(doc_on.info.rating.as_ref(), "4.2");
+
+        let XtreamInfoDocument::Video(doc_off) = video.to_info_document(&options_off) else {
+            panic!("expected a video info document");
+        };
+        assert_eq!(doc_off.info.rating.as_ref(), "");
+
+        let plain_video = video_item("", Some(video_properties("mp4", false)));
+        let XtreamInfoDocument::Video(doc_plain) = plain_video.to_info_document(&options_off) else {
+            panic!("expected a video info document");
+        };
+        assert_eq!(
+            serde_json::to_string(&doc_off).unwrap(),
+            serde_json::to_string(&doc_plain).unwrap(),
+            "replace off must produce unchanged output"
+        );
+
+        let mut series_props = series_properties(6.8, 3.4);
+        if let StreamProperties::Series(series) = &mut series_props {
+            series.details = None;
+            series.effective_rating = Some(4.2);
+        }
+        let series = series_item(series_props);
+
+        let XtreamInfoDocument::Series(series_doc_on) = series.to_info_document(&options_on) else {
+            panic!("expected a series info document");
+        };
+        assert_eq!(series_doc_on.info.rating.as_ref(), "4.2");
+        assert_eq!(series_doc_on.info.rating_5based.as_ref(), "2.1");
+
+        let XtreamInfoDocument::Series(series_doc_off) = series.to_info_document(&options_off) else {
+            panic!("expected a series info document");
+        };
+        assert_eq!(series_doc_off.info.rating.as_ref(), "");
+        assert_eq!(series_doc_off.info.rating_5based.as_ref(), "");
+
+        let mut plain_series_props = series_properties(6.8, 3.4);
+        if let StreamProperties::Series(series) = &mut plain_series_props {
+            series.details = None;
+        }
+        let plain_series = series_item(plain_series_props);
+        let XtreamInfoDocument::Series(series_doc_plain) = plain_series.to_info_document(&options_off) else {
+            panic!("expected a series info document");
+        };
+        assert_eq!(
+            serde_json::to_string(&series_doc_off).unwrap(),
+            serde_json::to_string(&series_doc_plain).unwrap(),
+            "replace off must produce unchanged output"
+        );
+    }
+
+    #[test]
+    fn replace_rating_without_an_effective_rating_keeps_the_provider_values() {
+        let options = XtreamMappingOptions { replace_rating: true, ..sample_options() };
+
+        let mut video_props = video_properties("mp4", true);
+        if let StreamProperties::Video(video) = &mut video_props {
+            video.rating = Some(6.8);
+            video.rating_5based = Some(3.4);
+        }
+        let XtreamDocument::Video(video_doc) = video_item("", Some(video_props)).to_document(&options) else {
+            panic!("expected a video document");
+        };
+        assert_eq!(video_doc.rating.as_ref(), "6.8");
+        assert!((video_doc.rating_5based - 3.4).abs() < f64::EPSILON);
+
+        let XtreamInfoDocument::Series(series_doc) =
+            series_item(series_properties(6.8, 3.4)).to_info_document(&options)
+        else {
+            panic!("expected a series info document");
+        };
+        assert_eq!(series_doc.info.rating.as_ref(), "6.8");
+        assert_eq!(series_doc.info.rating_5based.as_ref(), "3.4");
     }
 
     #[test]

@@ -758,6 +758,7 @@ async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() 
             maintenance: None,
             override_status: None,
             plugins: host,
+            imdb: crate::imdb::ImdbRatingRuntime::default(),
         };
 
     let input = ConfigInput { name: "test-input".intern(), ..ConfigInput::default() };
@@ -851,6 +852,7 @@ async fn managed_target_binding_runs_once_and_retains_each_source_input() {
             &host,
             None,
             staged,
+            &crate::imdb::ImdbRatingRuntime::default(),
         )
         .await
         .unwrap();
@@ -909,6 +911,7 @@ async fn managed_insertion_respects_filter_position_and_later_rename_stages() {
             &NoPlugins,
             None,
             staged,
+            &crate::imdb::ImdbRatingRuntime::default(),
         )
         .await
         .unwrap();

@@ -52,7 +52,7 @@ fn malformed_filters_are_rejected() {
         ("unknown field", r#"Foo = "a""#),
         ("unknown operator", r#"Name LIKE "a""#),
         ("non numeric chno value", r"Chno >= x"),
-        ("chno exceeds u32", r"Chno >= 4294967296"),
+        ("number overflow", r"Chno >= 18446744073709551616"),
         ("type without value", r#"Name = "a" AND Type ="#),
         ("unsupported type value", r"Type = unsupported"),
         ("only a boolean operator", "AND"),
@@ -80,7 +80,7 @@ fn syntax_errors_report_their_position() {
 /// A semantic error has no position, and its message must not repeat the error category.
 #[test]
 fn semantic_errors_have_no_position_and_one_prefix() {
-    let (error, position) = get_filter_detailed(r"Chno >= 4294967296", None).expect_err("value out of range");
+    let (error, position) = get_filter_detailed(r"Chno >= 18446744073709551616", None).expect_err("value out of range");
     assert!(position.is_none(), "a semantic error has no source position");
     let message = error.to_string();
     assert!(message.contains("invalid number"), "unexpected message: {message}");
@@ -464,7 +464,11 @@ fn clone_survives_dropping_the_source() {
 fn long_alternating_chain_renders_and_evaluates() {
     let terms = 2_000usize;
     let mut builder = FilterBuilder::new();
-    let leaf = builder.leaf(Leaf::NumericComparison(ItemField::Chno, NumericOperator::GreaterOrEqual, u32::MAX));
+    let leaf = builder.leaf(Leaf::NumericComparison(
+        ItemField::Chno,
+        NumericOperator::GreaterOrEqual,
+        u64::from(u32::MAX) * 10,
+    ));
     let mut root = leaf;
     for i in 0..terms {
         root = if i % 2 == 0 { builder.or(root, leaf) } else { builder.and(root, leaf) };

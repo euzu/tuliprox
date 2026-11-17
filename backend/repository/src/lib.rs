@@ -15,6 +15,7 @@ mod epg_repository;
 pub mod failover_group_repository;
 mod failover_repository;
 mod geoip;
+mod imdb;
 mod library_repository;
 mod lineup_guide_index;
 mod live_stream_metadata_repository;
@@ -56,6 +57,7 @@ pub use epg_repository::*;
 pub use failover_group_repository::*;
 pub use failover_repository::*;
 pub use geoip::*;
+pub use imdb::*;
 pub use library_repository::*;
 pub use lineup_guide_index::*;
 pub use live_stream_metadata_repository::{

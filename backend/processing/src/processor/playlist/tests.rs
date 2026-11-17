@@ -137,6 +137,8 @@ mod curation_selection;
 
 mod filter_rename;
 
+mod imdb_ratings;
+
 mod identity_serialization;
 
 mod pipeline_transparency;

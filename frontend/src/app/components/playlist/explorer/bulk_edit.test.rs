@@ -1,6 +1,7 @@
 use super::*;
 use shared::model::{
-    OverrideFieldOp, OverrideItemKind, PlaylistItemType, UiItemExplorerMeta, UiOverrideState, XtreamCluster,
+    OverrideFieldOp, OverrideItemKind, OverrideScopeDto, PlaylistItemType, UiItemExplorerMeta, UiOverrideState,
+    UiRatingOrigin, XtreamCluster,
 };
 use std::sync::Arc;
 
@@ -36,6 +37,7 @@ fn make_test_item(
             epg_state: None,
             ..Default::default()
         }),
+        ..Default::default()
     })
 }
 
@@ -146,7 +148,8 @@ fn bulk_keeps_other_item_deltas() {
     let patch =
         ItemOverridePatch { group: Some(OverrideFieldOp::Set("New Bulk Group".to_string())), ..Default::default() };
 
-    let patched = patch_playlist_item_bulk(&original, &patch);
+    let patched =
+        patch_playlist_item_bulk(&original, &patch, OverrideScopeDto::Input, None, ImdbRatingSource::ImdbThenProvider);
 
     assert_eq!(&*patched.group, "New Bulk Group");
     // Existing fields like name, title, epg_channel_id must NOT be altered or wiped
@@ -172,7 +175,8 @@ fn bulk_patch_supports_all_ui_fields() {
         ..Default::default()
     };
 
-    let patched = patch_playlist_item_bulk(&original, &patch);
+    let patched =
+        patch_playlist_item_bulk(&original, &patch, OverrideScopeDto::Input, None, ImdbRatingSource::ImdbThenProvider);
     assert_eq!(&*patched.name, "Bulk Name");
     assert_eq!(&*patched.title, "Bulk Title");
     assert_eq!(&*patched.group, "Bulk Group");
@@ -190,7 +194,13 @@ fn bulk_patch_supports_all_ui_fields() {
         ..Default::default()
     };
 
-    let cleared = patch_playlist_item_bulk(&patched, &clear_patch);
+    let cleared = patch_playlist_item_bulk(
+        &patched,
+        &clear_patch,
+        OverrideScopeDto::Input,
+        None,
+        ImdbRatingSource::ImdbThenProvider,
+    );
     assert_eq!(&*cleared.name, "");
     assert_eq!(&*cleared.title, "");
     assert_eq!(&*cleared.group, "");
@@ -200,9 +210,37 @@ fn bulk_patch_supports_all_ui_fields() {
 }
 
 #[test]
+fn bulk_rating_reset_leaves_rating_unchanged_when_no_provenance() {
+    let mut original = (*make_test_item(1, "p1", "Item", "input-a", PlaylistItemType::Live)).clone();
+    original.rating = 8.5;
+    original.effective_rating = Some(8.5);
+    original.rating_origin = Some(UiRatingOrigin::Provider);
+
+    let patch = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+
+    let patched =
+        patch_playlist_item_bulk(&original, &patch, OverrideScopeDto::Input, None, ImdbRatingSource::ImdbThenProvider);
+    assert_eq!(patched.rating, 8.5);
+    assert_eq!(patched.effective_rating, Some(8.5));
+    assert_eq!(patched.rating_origin, Some(UiRatingOrigin::Provider));
+}
+
+#[test]
 fn bulk_inputs_list_class_matches_stylesheet() {
     let source = include_str!("bulk_edit.rs").split("#[cfg(test)]").next().unwrap();
     assert!(source.contains("class=\"tp__bulk-inputs-list\""));
     let styles = include_str!("../../../../../scss/app/components/playlist/_playlist_explorer.scss");
     assert!(styles.contains(".tp__bulk-inputs-list"));
+}
+
+#[test]
+fn bulk_fetches_provenance_only_for_resets() {
+    let set = ItemOverridePatch { group: Some(OverrideFieldOp::Set("G".to_string())), ..Default::default() };
+    assert!(!patch_needs_provenance(&set));
+    let clear = ItemOverridePatch { rating: Some(OverrideFieldOp::Clear), ..Default::default() };
+    assert!(!patch_needs_provenance(&clear));
+    let group_reset = ItemOverridePatch { group: Some(OverrideFieldOp::Reset), ..Default::default() };
+    assert!(patch_needs_provenance(&group_reset));
+    let rating_reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+    assert!(patch_needs_provenance(&rating_reset));
 }

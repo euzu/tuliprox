@@ -9,6 +9,36 @@ pub enum UnsignedInputError {
     Range,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum I64InputDecision {
+    Emit(Option<i64>),
+    Restore,
+}
+
+fn decide_i64_input(raw: &str, allow_empty: bool, min: Option<i64>, max: Option<i64>) -> I64InputDecision {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        if (min.is_some() || max.is_some()) && !allow_empty {
+            I64InputDecision::Restore
+        } else {
+            I64InputDecision::Emit(None)
+        }
+    } else {
+        match raw.parse::<i64>() {
+            Ok(value) if min.is_none_or(|min| value >= min) && max.is_none_or(|max| value <= max) => {
+                I64InputDecision::Emit(Some(value))
+            }
+            _ => {
+                if min.is_some() || max.is_some() {
+                    I64InputDecision::Restore
+                } else {
+                    I64InputDecision::Emit(None)
+                }
+            }
+        }
+    }
+}
+
 fn parse_unsigned_input(
     raw: &str,
     allow_empty: bool,
@@ -52,6 +82,8 @@ pub struct NumberInputProps {
     pub min_i64: Option<i64>,
     #[prop_or_default]
     pub max_i64: Option<i64>,
+    #[prop_or_default]
+    pub allow_empty_i64: bool,
     #[prop_or_default]
     pub u64_value: Option<u64>,
     #[prop_or_default]
@@ -101,6 +133,7 @@ pub fn NumberInput(props: &NumberInputProps) -> Html {
         let int_value = props.value;
         let min_i64 = props.min_i64;
         let max_i64 = props.max_i64;
+        let allow_empty_i64 = props.allow_empty_i64;
         let u64_value = props.u64_value;
         let min_u64 = props.min_u64;
         let max_u64 = props.max_u64;
@@ -125,36 +158,21 @@ pub fn NumberInput(props: &NumberInputProps) -> Html {
                     return;
                 }
 
-                if raw.is_empty() {
-                    if prefers_float {
+                if prefers_float {
+                    if raw.is_empty() {
                         if let Some(cb) = onchange_float.as_ref() {
                             cb.emit(None);
                         }
-                    } else if min_i64.is_some() || max_i64.is_some() {
-                        input.set_value(&int_value.map(|value| value.to_string()).unwrap_or_default());
-                    } else {
-                        onchange_int.emit(None);
-                    }
-                    return;
-                }
-
-                if prefers_float {
-                    if let Some(cb) = onchange_float.as_ref() {
+                    } else if let Some(cb) = onchange_float.as_ref() {
                         let parsed = parse_localized_float(&raw);
                         cb.emit(parsed);
                     }
                 } else {
-                    let parsed = raw.parse::<i64>().ok();
-                    if min_i64.is_some() || max_i64.is_some() {
-                        if parsed.is_some_and(|value| {
-                            min_i64.is_none_or(|min| value >= min) && max_i64.is_none_or(|max| value <= max)
-                        }) {
-                            onchange_int.emit(parsed);
-                        } else {
+                    match decide_i64_input(&raw, allow_empty_i64, min_i64, max_i64) {
+                        I64InputDecision::Emit(val) => onchange_int.emit(val),
+                        I64InputDecision::Restore => {
                             input.set_value(&int_value.map(|value| value.to_string()).unwrap_or_default());
                         }
-                    } else {
-                        onchange_int.emit(parsed);
                     }
                 }
             }
@@ -226,6 +244,35 @@ mod tests {
         assert_eq!(parse_unsigned_input("9", false, Some(10), None), Err(UnsignedInputError::Range));
         assert_eq!(parse_unsigned_input("101", false, None, Some(100)), Err(UnsignedInputError::Range));
         assert_eq!(parse_unsigned_input("10", false, Some(10), Some(10)), Ok(Some(10)));
+    }
+
+    #[test]
+    fn decide_i64_input_decision_logic() {
+        let min = Some(0);
+        let max = Some(i64::from(u32::MAX));
+
+        // When allow_empty is true, empty input emits None instead of restoring
+        assert_eq!(decide_i64_input("", true, min, max), I64InputDecision::Emit(None));
+        assert_eq!(decide_i64_input("   ", true, min, max), I64InputDecision::Emit(None));
+
+        // When allow_empty is false, empty input with bounds restores
+        assert_eq!(decide_i64_input("", false, min, max), I64InputDecision::Restore);
+
+        // Valid values within bounds emit value
+        assert_eq!(decide_i64_input("0", true, min, max), I64InputDecision::Emit(Some(0)));
+        assert_eq!(decide_i64_input("42", true, min, max), I64InputDecision::Emit(Some(42)));
+        assert_eq!(
+            decide_i64_input(&u32::MAX.to_string(), true, min, max),
+            I64InputDecision::Emit(Some(i64::from(u32::MAX)))
+        );
+
+        // Rejected values (negative, overflow, non-number) restore saved value
+        assert_eq!(decide_i64_input("-1", true, min, max), I64InputDecision::Restore);
+        assert_eq!(decide_i64_input("4294967296", true, min, max), I64InputDecision::Restore);
+        assert_eq!(decide_i64_input("abc", true, min, max), I64InputDecision::Restore);
+
+        // Without bounds, empty emits None
+        assert_eq!(decide_i64_input("", false, None, None), I64InputDecision::Emit(None));
     }
 }
 

@@ -666,6 +666,7 @@ pub(crate) async fn prepare_playlist_for_target<
             &ctx.plugins,
             Some(&target_overrides),
             insertion,
+            &ctx.imdb,
         )
         .await
         .map_err(|err| vec![err])?;

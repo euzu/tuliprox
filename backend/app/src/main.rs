@@ -582,7 +582,9 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
     crate::api::model::migrate_settings_for_run(&plugins, &cfg).await;
     // The status store holds no cache and writes under a cross-process lock, so recording the
     // applied override revisions here never overwrites what a running server recorded.
-    let override_status = Arc::new(tuliprox_repository::OverrideStatusStore::new(storage_dir));
+    let override_status = Arc::new(tuliprox_repository::OverrideStatusStore::new(storage_dir.clone()));
+    // A one-shot run serves no download task: the run uses the stored ratings
+    // table as-is and never downloads one.
     exec_processing(
         ProcessingRun::new(client, cfg, targets, shared::model::NoopSink)
             .with_maintenance(maintenance)

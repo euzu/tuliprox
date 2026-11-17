@@ -65,6 +65,7 @@ pub struct PlaylistService {
     overrides_discard_path: String,
     epg_search_path: String,
     overrides_orphans_path: String,
+    imdb_update_api_path: String,
 }
 impl Default for PlaylistService {
     fn default() -> Self { Self::new() }
@@ -95,6 +96,7 @@ impl PlaylistService {
             overrides_discard_path: api("overrides/discard"),
             epg_search_path: api("epg/search"),
             overrides_orphans_path: api("overrides/orphans"),
+            imdb_update_api_path: concat_path_leading_slash(base_href, "api/v1/imdb/update"),
         }
     }
     pub async fn update_targets(&self, targets: &[&str]) -> bool {
@@ -141,6 +143,10 @@ impl PlaylistService {
 
     pub async fn get_update_status(&self) -> Result<Option<PlaylistUpdateViewSnapshotDto>, Error> {
         request_get(&format!("{}?include_scope=true", self.playlist_update_status_path), None, None).await
+    }
+
+    pub async fn update_imdb_ratings(&self) -> Result<Option<shared::model::ImdbUpdateResponseDto>, Error> {
+        request_get(&self.imdb_update_api_path, None, None).await
     }
 
     pub async fn get_target_analytics(&self) -> Result<super::ResponseMeta<TargetAnalyticsResponseDto>, Error> {

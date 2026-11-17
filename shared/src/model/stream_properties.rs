@@ -189,6 +189,33 @@ impl StreamProperties {
         }
     }
 
+    pub fn get_effective_rating(&self) -> Option<f32> {
+        match self {
+            StreamProperties::Video(video) => video.effective_rating,
+            StreamProperties::Series(series) => series.effective_rating,
+            StreamProperties::Live(_) | StreamProperties::Episode(_) => None,
+        }
+    }
+
+    /// The effective rating in tenths. Computed in `f32`: widening to `f64` first
+    /// would turn 6.45 into 6.4499998 and round it down to 64.
+    pub fn effective_rating_tenths(&self) -> Option<u64> {
+        let r = self.get_effective_rating()?;
+        if r.is_finite() && r >= 0.0 {
+            Some((r * 10.0).round().clamp(0.0, 1000.0) as u64)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_imdb_votes(&self) -> Option<u32> {
+        match self {
+            StreamProperties::Video(video) => video.imdb_votes,
+            StreamProperties::Series(series) => series.imdb_votes,
+            StreamProperties::Live(_) | StreamProperties::Episode(_) => None,
+        }
+    }
+
     pub fn get_release_date(&self) -> Option<Arc<str>> {
         match self {
             StreamProperties::Live(_) => None,

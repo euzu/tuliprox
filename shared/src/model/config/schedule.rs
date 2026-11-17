@@ -4,6 +4,7 @@ pub enum ScheduleTaskType {
     PlaylistUpdate,
     LibraryScan,
     GeoIpUpdate,
+    ImdbRatingsUpdate,
     /// A plugin's `tasks:` entry, named by the schedule's `plugin` + `task`
     /// (plan §7 *Scheduled plugin tasks*). A unit variant, like `InputType::Plugin`
     /// (§18 Q6), so the enum stays `Copy`.
@@ -18,6 +19,9 @@ fn parse_schedule_task_type(value: &str) -> Option<ScheduleTaskType> {
         "libraryscan" | "library_scan" | "library-scan" | "scan" => Some(ScheduleTaskType::LibraryScan),
         "geoipupdate" | "geo_ip_update" | "geoip_update" | "geoip-update" | "geoip" => {
             Some(ScheduleTaskType::GeoIpUpdate)
+        }
+        "imdbratingsupdate" | "imdb_ratings_update" | "imdb-ratings-update" | "imdb" => {
+            Some(ScheduleTaskType::ImdbRatingsUpdate)
         }
         "plugintask" | "plugin_task" | "plugin-task" => Some(ScheduleTaskType::PluginTask),
         _ => None,
@@ -48,7 +52,7 @@ where
                 Ok(task_type)
             } else {
                 Err(serde::de::Error::custom(format!(
-                    "invalid schedule type '{raw}', expected one of: PlaylistUpdate, LibraryScan, GeoIpUpdate, PluginTask"
+                    "invalid schedule type '{raw}', expected one of: PlaylistUpdate, LibraryScan, GeoIpUpdate, ImdbRatingsUpdate, PluginTask"
                 )))
             }
         }
@@ -111,6 +115,15 @@ mod tests {
         let legacy: ScheduleConfigDto =
             serde_saphyr::from_str("schedule: \"0 0 * * * * *\"\ntype: geoip").expect("geoip alias should parse");
         assert_eq!(legacy.task_type, ScheduleTaskType::GeoIpUpdate);
+    }
+
+    #[test]
+    fn accepts_imdb_ratings_update_aliases() {
+        for alias in ["imdbratingsupdate", "imdb_ratings_update", "imdb-ratings-update", "imdb"] {
+            let yaml = format!("schedule: \"0 0 * * * * *\"\ntype: {alias}");
+            let dto: ScheduleConfigDto = serde_saphyr::from_str(&yaml).expect("imdb alias should parse");
+            assert_eq!(dto.task_type, ScheduleTaskType::ImdbRatingsUpdate, "failed for alias: {alias}");
+        }
     }
 
     #[test]
