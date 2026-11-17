@@ -381,3 +381,49 @@ async fn network_access_checks_allow_a_user_without_network_rules() {
     assert!(state.check_network_access(&user, &fingerprint).is_ok());
     assert!(state.try_check_network_access(&user, &fingerprint).is_ok());
 }
+
+#[tokio::test]
+async fn imdb_config_change_detection() {
+    use super::change_detection::UpdateChangesFlags;
+    use shared::model::MetadataUpdateConfigDto;
+
+    let base_config = Config::default();
+    let state = super::create_test_app_state(base_config.clone());
+
+    // 1. Enabling IMDb sets Imdb and Scheduler flags
+    let mut enabled_dto = MetadataUpdateConfigDto::default();
+    enabled_dto.imdb.enabled = true;
+    let enabled_config = Config { metadata_update: Some((&enabled_dto).into()), ..base_config.clone() };
+    let changes = state.detect_changes_for_config(&enabled_config);
+    assert!(changes.flags.contains(UpdateChangesFlags::Imdb));
+    assert!(changes.flags.contains(UpdateChangesFlags::Scheduler));
+
+    // Update state to enabled
+    state.app_config.set_config(enabled_config.clone()).unwrap();
+
+    // 2. Changing URL when enabled sets Imdb flag
+    let mut new_url_dto = enabled_dto.clone();
+    new_url_dto.imdb.url = "https://example.com/ratings.tsv.gz".to_string();
+    let new_url_config = Config { metadata_update: Some((&new_url_dto).into()), ..base_config.clone() };
+    let changes = state.detect_changes_for_config(&new_url_config);
+    assert!(changes.flags.contains(UpdateChangesFlags::Imdb));
+
+    // 3. Changing storage dir when enabled sets Imdb flag
+    let storage_dir_config = Config {
+        storage_dir: "/new/storage".to_string(),
+        metadata_update: Some((&enabled_dto).into()),
+        ..base_config.clone()
+    };
+    let changes = state.detect_changes_for_config(&storage_dir_config);
+    assert!(changes.flags.contains(UpdateChangesFlags::Imdb));
+
+    // 4. Same config does not set Imdb flag
+    let changes = state.detect_changes_for_config(&enabled_config);
+    assert!(!changes.flags.contains(UpdateChangesFlags::Imdb));
+
+    // 5. Disabling IMDb sets Imdb and Scheduler flags
+    let disabled_config = Config { metadata_update: Some((&MetadataUpdateConfigDto::default()).into()), ..base_config };
+    let changes = state.detect_changes_for_config(&disabled_config);
+    assert!(changes.flags.contains(UpdateChangesFlags::Imdb));
+    assert!(changes.flags.contains(UpdateChangesFlags::Scheduler));
+}

@@ -95,6 +95,13 @@ pub fn xtream_mapping_option_from_target_options(
         encrypt_secret,
         resource_host_policies: Arc::default(),
         default_container_extensions: default_container_extensions(app_config),
+        // Read per request, so a config change applies to the next response.
+        replace_rating: app_config
+            .config
+            .load()
+            .metadata_update
+            .as_ref()
+            .is_some_and(|metadata_update| metadata_update.imdb.replace_rating),
     })
 }
 

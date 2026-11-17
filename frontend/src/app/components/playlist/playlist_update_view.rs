@@ -298,6 +298,8 @@ pub fn PlaylistUpdateView() -> Html {
     }
 
     let library_enabled = config_ctx.config.as_ref().is_some_and(|c| c.config.is_library_enabled());
+    let imdb_enabled = config_ctx.config.as_ref().is_some_and(|c| c.config.is_imdb_enabled());
+    let imdb_updating = use_state(|| false);
     let (input_update_cards, input_update_run_views, bulk_scope) = config_ctx.config.as_ref().map_or_else(
         || (Vec::new(), Vec::new(), crate::model::PlaylistUpdateBulkScope::default()),
         |config| {
@@ -394,6 +396,40 @@ pub fn PlaylistUpdateView() -> Html {
         })
     };
 
+    let handle_imdb_update = {
+        let translate = translate.clone();
+        let services = services_ctx.clone();
+        let imdb_updating = imdb_updating.clone();
+        Callback::from(move |_| {
+            if !can_write_playlist || *imdb_updating {
+                return;
+            }
+            imdb_updating.set(true);
+            let services = services.clone();
+            let translate = translate.clone();
+            let imdb_updating = imdb_updating.clone();
+            spawn_local(async move {
+                match services.playlist.update_imdb_ratings().await {
+                    Ok(Some(response)) => {
+                        services.toastr.success(
+                            translate.t("MESSAGES.IMDB.SUCCESS").replace("{rows}", &response.rows.to_string()),
+                        );
+                    }
+                    Ok(None) => {
+                        services.toastr.success(translate.t("MESSAGES.IMDB.SUCCESS").replace("{rows}", "0"));
+                    }
+                    Err(Error::Conflict(_)) => {
+                        services.toastr.info(translate.t("MESSAGES.IMDB.ALREADY_RUNNING"));
+                    }
+                    Err(_) => {
+                        services.toastr.error(translate.t("MESSAGES.IMDB.FAIL"));
+                    }
+                }
+                imdb_updating.set(false);
+            });
+        })
+    };
+
     let on_request_accepted = {
         let card_statuses = card_statuses.clone();
         let scope_revision = scope_revision.clone();
@@ -417,6 +453,13 @@ pub fn PlaylistUpdateView() -> Html {
          <Breadcrumbs items={&*breadcrumbs}/>
          <div class="tp__playlist-update-view__header">
           <h1>{ translate.t("LABEL.UPDATE")}</h1>
+        { html_if!(can_write_playlist && imdb_enabled, {
+            <TextButton name="update_imdb_ratings"
+                   icon="Refresh"
+                   disabled={*imdb_updating}
+                   title={ translate.t("LABEL.UPDATE_IMDB_RATINGS")}
+                   onclick={handle_imdb_update}></TextButton>
+        })}
         { html_if!(can_write_playlist, {
             <TextButton name="playlist_update"
                    icon="Refresh"
@@ -525,21 +568,32 @@ mod tests {
             .split_once("{html_if!(*scope_load_failed")
             .unwrap()
             .0;
-        assert_eq!(header.matches("<TextButton").count(), 1, "only the existing bulk action belongs in the header");
+        assert_eq!(header.matches("<TextButton").count(), 2, "bulk action and imdb update belong in the header");
         assert!(header.contains("LABEL.UPDATE_ALL_INPUTS"));
+        assert!(header.contains("LABEL.UPDATE_IMDB_RATINGS"));
         assert!(header.contains("can_write_playlist"));
+        assert!(header.contains("can_write_playlist && imdb_enabled"));
+        assert!(header.contains("update_imdb_ratings"));
         assert!(header.contains("!connection_context.is_connected()"));
         assert!(!header.contains("tp__config-view__header-tools"));
         assert!(!source.contains("handle_update_content"));
         assert!(!source.contains("ACTION_UPDATE_LIBRARY"));
         assert!(!source.contains("library_updating"));
         assert!(source.contains("services.config.get_library_status().await"));
+        assert!(source.contains("services.playlist.update_imdb_ratings().await"));
+        assert!(source.contains("MESSAGES.IMDB.SUCCESS"));
+        assert!(source.contains("MESSAGES.IMDB.ALREADY_RUNNING"));
+        assert!(source.contains("MESSAGES.IMDB.FAIL"));
         assert!(source.contains("EventMessage::LibraryScanProgress(progress)"));
         assert!(source.contains("can_write_library && library_enabled"));
 
         let service = include_str!("../../../services/config_service.rs");
         assert!(!service.contains("pub async fn update_library("));
         assert!(service.contains("pub async fn get_library_status("));
+        assert!(!service.contains("pub async fn update_imdb_ratings("));
+
+        let playlist_service = include_str!("../../../services/playlist_service.rs");
+        assert!(playlist_service.contains("pub async fn update_imdb_ratings("));
     }
 
     fn reduce_event(

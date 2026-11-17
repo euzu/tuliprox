@@ -4,6 +4,7 @@ mod directed_graph;
 pub mod flags;
 mod hash_utils;
 mod hdhomerun_utils;
+mod imdb;
 mod json_utils;
 mod m3u_url;
 mod net_utils;
@@ -27,6 +28,7 @@ pub use self::{
     flags::{country_code_to_index, index_to_country_code, FlagEntry, FlagsLoader, DEFAULT_COMPRESSION_LEVEL},
     hash_utils::*,
     hdhomerun_utils::*,
+    imdb::*,
     json_utils::*,
     m3u_url::*,
     net_utils::*,

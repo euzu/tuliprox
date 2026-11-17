@@ -850,6 +850,13 @@
       "RATE_LIMIT_MS": "Минимальное время ожидания между запросами TMDB в миллисекундах.\n\nБольшие значения более бережны к API TMDB.\n\nПримеры: `250`, `500`, `1000`.",
       "MATCH_THRESHOLD": "Минимальный балл совпадения для поиска TMDB. Значение должно быть от 1 до 100."
     },
+    "IMDB_CONFIG": {
+      "ENABLED": "Включает индекс рейтингов IMDb.\n\nЕсли выключено, набор данных не загружается и память не расходуется.",
+      "URL": "Источник загрузки набора данных рейтингов IMDb.\n\nПустое значение использует URL по умолчанию: `https://datasets.imdbws.com/title.ratings.tsv.gz`.",
+      "MIN_VOTES": "Рейтинги IMDb с меньшим числом голосов игнорируются.\n\n`0` сохраняет все рейтинги.\n\nЗначение по умолчанию `1000` отсеивает малоизвестные фильмы с парой голосов.",
+      "RATING_SOURCE": "Выбирает действующий рейтинг: `imdb_then_provider` использует рейтинг IMDb, если он проходит `min_votes`, иначе рейтинг провайдера. `imdb` использует только рейтинги IMDb. `provider` сохраняет рейтинг провайдера.",
+      "REPLACE_RATING": "Записывает действующий рейтинг в поля Xtream `rating` и `rating_5based`.\n\nЕсли выключено, ответы Xtream остаются без изменений."
+    },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "Имя категории, используемое в плейлисте для элементов из этого списка Trakt.",
       "FUZZY_MATCH_THRESHOLD": "Порог сходства для сопоставления элементов Trakt с потоками провайдера (0-100).",
@@ -1326,6 +1333,16 @@
     "FRIENDLY_NAME": "Отображаемое имя",
     "FUZZY_MATCHING": "Нечеткое сопоставление",
     "GEOIP": "Geo-IP",
+    "IMDB": "IMDb",
+    "IMDB_RATINGS": "Рейтинги IMDb",
+    "IMDB_ENABLED": "Включено",
+    "IMDB_URL": "URL",
+    "IMDB_MIN_VOTES": "Минимум голосов",
+    "IMDB_RATING_SOURCE": "Источник рейтинга",
+    "IMDB_RATING_SOURCE_IMDB_THEN_PROVIDER": "Сначала IMDb, затем провайдер",
+    "IMDB_RATING_SOURCE_IMDB": "Только IMDb",
+    "IMDB_RATING_SOURCE_PROVIDER": "Только провайдер",
+    "IMDB_REPLACE_RATING": "Заменять рейтинг",
     "GEOIP_UNAVAILABLE_POLICY_DENY": "Отклонить",
     "GEOIP_UNAVAILABLE_POLICY_ALLOW": "Разрешить",
     "GEOIP_UNAVAILABLE_POLICY": "Политика недоступности Geo-IP",
@@ -1958,6 +1975,7 @@
     "FORCE_UPDATE_START": "Запустить принудительное обновление",
     "UPDATE_QUALITY": "Качество обновления",
     "UPDATE_GEOIP_DB": "Обновить Geo-IP базу",
+    "UPDATE_IMDB_RATINGS": "Обновить рейтинги IMDb",
     "UPDATE_LOCAL_LIBRARY": "Обновить локальную библиотеку",
     "UPDATE_ON_BOOT": "Обновлять при загрузке",
     "LAST_UPDATE": "Последнее обновление",
@@ -2532,6 +2550,12 @@
     "DIRECTOR": "Режиссер",
     "RELEASE_DATE": "Дата выхода",
     "RATING": "Рейтинг",
+    "PROVIDER_RATING": "Рейтинг провайдера",
+    "IMDB_RATING": "Рейтинг IMDb",
+    "EFFECTIVE": "эффективный",
+    "RATING_TOOLTIP_IMDB": "IMDb {rating} · {votes} голосов",
+    "RATING_TOOLTIP_PROVIDER": "Провайдер {rating}",
+    "VOTES": "голосов",
     "MANAGED_CHANNELS": "Управляемые каналы",
     "PLUGIN_REFERENCE_INPUT_MANAGED": "Управляемые каналы входа",
     "PLUGIN_REFERENCE_TARGET_MANAGED": "Управляемые каналы цели"
@@ -2834,6 +2858,11 @@
     "GEOIP": {
       "FAIL": "Не удалось загрузить базу Geo-IP!",
       "SUCCESS": "База Geo-IP успешно загружена"
+    },
+    "IMDB": {
+      "ALREADY_RUNNING": "Обновление рейтингов IMDb уже выполняется.",
+      "FAIL": "Не удалось обновить рейтинги IMDb!",
+      "SUCCESS": "Рейтинги IMDb успешно обновлены ({rows} строк)"
     },
     "USER_BOUQUET": {
       "FAIL": "Не удалось загрузить букеты пользователя!"

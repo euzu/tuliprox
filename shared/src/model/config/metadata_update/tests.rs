@@ -118,3 +118,43 @@ fn prepare_clamps_tmdb_match_threshold() {
 
     assert_eq!(cfg.tmdb.match_threshold, 100);
 }
+
+#[test]
+fn imdb_config_dto_defaults() {
+    let dto = super::ImdbConfigDto::default();
+    assert!(!dto.enabled);
+    assert_eq!(dto.url, "https://datasets.imdbws.com/title.ratings.tsv.gz");
+    assert_eq!(dto.min_votes, 1000);
+    assert_eq!(dto.rating_source, super::ImdbRatingSource::ImdbThenProvider);
+    assert!(!dto.replace_rating);
+    assert!(dto.is_empty());
+}
+
+#[test]
+fn imdb_rating_source_serde_names() {
+    use super::ImdbRatingSource;
+
+    let sources = [
+        (ImdbRatingSource::ImdbThenProvider, "\"imdb_then_provider\""),
+        (ImdbRatingSource::Imdb, "\"imdb\""),
+        (ImdbRatingSource::Provider, "\"provider\""),
+    ];
+
+    for (variant, json_str) in sources {
+        let serialized = serde_json::to_string(&variant).expect("serialize should work");
+        assert_eq!(serialized, json_str);
+        let deserialized: ImdbRatingSource = serde_json::from_str(json_str).expect("deserialize should work");
+        assert_eq!(deserialized, variant);
+    }
+}
+
+#[test]
+fn imdb_config_serialization_skips_defaults() {
+    let dto = super::ImdbConfigDto::default();
+    let json = serde_json::to_string(&dto).expect("serialize");
+    assert_eq!(json, "{}");
+
+    let enabled_dto = super::ImdbConfigDto { enabled: true, ..Default::default() };
+    let json = serde_json::to_string(&enabled_dto).expect("serialize");
+    assert_eq!(json, r#"{"enabled":true}"#);
+}

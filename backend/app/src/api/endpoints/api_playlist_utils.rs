@@ -425,6 +425,7 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         }
     }
 

@@ -126,10 +126,15 @@ impl Leaf {
             Self::NumericComparison(field, op, value) => {
                 // A numeric operator only accepts the numeric fields; any other field is a
                 // non-match for this comparison.
-                let actual = match field {
-                    ItemField::Chno => provider.pli.header.chno,
-                    ItemField::Quality => u32::from(provider.quality_rank()),
+                let actual: Option<u64> = match field {
+                    ItemField::Chno => Some(u64::from(provider.pli.header.chno) * 10),
+                    ItemField::Quality => Some(u64::from(provider.quality_rank()) * 10),
+                    ItemField::Votes => provider.pli.header.get_imdb_votes().map(|v| u64::from(v) * 10),
+                    ItemField::Rating => provider.pli.header.effective_rating_tenths(),
                     _ => return false,
+                };
+                let Some(actual) = actual else {
+                    return false;
                 };
                 match op {
                     NumericOperator::Eq => actual == *value,

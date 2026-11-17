@@ -8,7 +8,10 @@ use crate::{
         try_check_network_access_only, ApiUserAuthError, ApiUserContext, Fingerprint,
     },
     model::{ConfigTarget, ProxyUserCredentials},
-    processing::geoip::{update_geoip_db, GeoIpUpdateError},
+    processing::{
+        geoip::{update_geoip_db, GeoIpUpdateError},
+        imdb::{update_imdb_ratings, ImdbUpdateError},
+    },
 };
 use std::sync::Arc;
 
@@ -54,5 +57,10 @@ impl AppState {
     /// Downloads the `GeoIp` database and swaps it into the store the network checks read.
     pub async fn update_geoip_db(&self) -> Result<(), GeoIpUpdateError> {
         update_geoip_db(&self.app_config, &self.http_clients.default.load(), &self.geoip).await
+    }
+
+    /// Downloads the `IMDb` ratings dataset and swaps it into the store.
+    pub async fn update_imdb_ratings(&self) -> Result<usize, ImdbUpdateError> {
+        update_imdb_ratings(&self.app_config, &self.http_clients.default.load()).await
     }
 }

@@ -1714,6 +1714,16 @@ Tuliprox supports the following filter expression types:
 * Numeric comparison on the detected quality tier: `Quality >= 3` <br>
   The tier is derived from quality tokens in the caption: `5` = 4K/UHD/2160p, `4` = QHD/1440p, `3` = FHD/1080p,
   `2` = HD/720p, `1` = SD/480p/576p, `0` = no recognized quality token.
+* Numeric comparison on the IMDb rating: `Rating = 8`, `Rating != 8`, `Rating > 6`, `Rating >= 6.5`, `Rating < 5`,
+  `Rating <= 5.5` <br>
+  `Rating` is the effective rating from `0` to `10` with one fraction digit. An unrated item never matches a numeric
+  comparison, so select it with `Rating IS EMPTY`. `Rating IS NOT EMPTY` matches rated items.
+* Numeric comparison on the IMDb vote count: `Votes >= 5000`, `Votes < 100` <br>
+  `Votes` is the raw IMDb vote count. An item without a known vote count never matches a numeric comparison, so
+  select it with `Votes IS EMPTY`; `Votes IS NOT EMPTY` matches items with a known count.
+  Series use the series rating, not episode ratings.
+  Requires [`metadata_update.imdb`](metadata-update.md#5-imdb-ratings-imdb).
+  Examples: `Rating > 6`, `Rating >= 6.5 AND Votes >= 5000`, `Type = movie AND (Rating >= 7 OR Rating IS EMPTY)`.
 * Filters don't have operator precedence, so please use parentheses
 * You can apply Morgan’s Law `NOT (A) AND NOT (B)`is the same as `NOT( A OR B)`
 * A filter is limited to about 10000 terms in total, counted over the whole expression including nested groups. Larger

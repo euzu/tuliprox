@@ -56,8 +56,16 @@ pub struct UiItemExplorerMeta {
     pub override_source_url: Option<Arc<str>>,
 }
 
+/// Origin of the effective rating displayed in the UI explorer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiRatingOrigin {
+    Imdb,
+    Provider,
+}
+
 /// Lightweight playlist item for UI streaming.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct UiPlaylistItem {
     pub virtual_id: u32,
     pub provider_id: Arc<str>,
@@ -75,6 +83,10 @@ pub struct UiPlaylistItem {
     pub input_stream_id: Arc<str>,
     pub epg_channel_id: Option<Arc<str>>,
     pub explorer_meta: Option<UiItemExplorerMeta>,
+    pub effective_rating: Option<f32>,
+    pub imdb_rating: Option<f32>,
+    pub imdb_votes: Option<u32>,
+    pub rating_origin: Option<UiRatingOrigin>,
 }
 
 impl UiPlaylistItem {
@@ -90,7 +102,13 @@ impl Serialize for UiPlaylistItem {
     where
         S: Serializer,
     {
-        let len = if self.explorer_meta.is_some() {
+        let has_ratings = self.effective_rating.is_some()
+            || self.imdb_rating.is_some()
+            || self.imdb_votes.is_some()
+            || self.rating_origin.is_some();
+        let len = if has_ratings {
+            19
+        } else if self.explorer_meta.is_some() {
             15
         } else if self.epg_channel_id.is_some() {
             14
@@ -117,10 +135,17 @@ impl Serialize for UiPlaylistItem {
                 None => s.serialize_field(&Option::<&str>::None)?,
             }
         }
-        if len == 15 {
-            if let Some(ref meta) = self.explorer_meta {
-                s.serialize_field(meta)?;
+        if len >= 15 {
+            match &self.explorer_meta {
+                Some(meta) => s.serialize_field(meta)?,
+                None => s.serialize_field(&Option::<&UiItemExplorerMeta>::None)?,
             }
+        }
+        if len == 19 {
+            s.serialize_field(&self.effective_rating)?;
+            s.serialize_field(&self.imdb_rating)?;
+            s.serialize_field(&self.imdb_votes)?;
+            s.serialize_field(&self.rating_origin)?;
         }
         s.end()
     }
@@ -145,7 +170,7 @@ impl<'de> Deserialize<'de> for UiPlaylistItem {
             type Value = UiPlaylistItem;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a tuple struct UiPlaylistItem with 13 to 15 elements")
+                formatter.write_str("a tuple struct UiPlaylistItem with 13 to 19 elements")
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -176,6 +201,10 @@ impl<'de> Deserialize<'de> for UiPlaylistItem {
 
                 let epg_channel_id = seq.next_element::<OptionArcStrWrap>()?.and_then(|w| w.0);
                 let explorer_meta = seq.next_element::<Option<UiItemExplorerMeta>>()?.flatten();
+                let effective_rating = seq.next_element::<Option<f32>>()?.flatten();
+                let imdb_rating = seq.next_element::<Option<f32>>()?.flatten();
+                let imdb_votes = seq.next_element::<Option<u32>>()?.flatten();
+                let rating_origin = seq.next_element::<Option<UiRatingOrigin>>()?.flatten();
 
                 while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
 
@@ -195,6 +224,10 @@ impl<'de> Deserialize<'de> for UiPlaylistItem {
                     input_stream_id,
                     epg_channel_id,
                     explorer_meta,
+                    effective_rating,
+                    imdb_rating,
+                    imdb_votes,
+                    rating_origin,
                 })
             }
         }
@@ -246,6 +279,26 @@ fn get_rating(props: Option<&StreamProperties>) -> f64 {
     0.0
 }
 
+/// Computes rating origin: `Imdb` when `effective_rating` is `Some` and equals `imdb_rating`,
+/// `Provider` when `Some` otherwise, and `None` when no effective rating.
+#[inline]
+pub fn compute_rating_origin(effective_rating: Option<f32>, imdb_rating: Option<f32>) -> Option<UiRatingOrigin> {
+    effective_rating.map(|eff| if imdb_rating == Some(eff) { UiRatingOrigin::Imdb } else { UiRatingOrigin::Provider })
+}
+
+#[inline]
+fn extract_ratings(
+    props: Option<&StreamProperties>,
+) -> (Option<f32>, Option<f32>, Option<u32>, Option<UiRatingOrigin>) {
+    let (effective_rating, imdb_rating, imdb_votes) = match props {
+        Some(StreamProperties::Video(v)) => (v.effective_rating, v.imdb_rating, v.imdb_votes),
+        Some(StreamProperties::Series(s)) => (s.effective_rating, s.imdb_rating, s.imdb_votes),
+        _ => (None, None, None),
+    };
+    let rating_origin = compute_rating_origin(effective_rating, imdb_rating);
+    (effective_rating, imdb_rating, imdb_votes, rating_origin)
+}
+
 /// Helper to extract added and `last_modified` timestamps as unix seconds from `StreamProperties`.
 pub fn extract_added_and_last_modified(props: Option<&StreamProperties>) -> (Option<u64>, Option<u64>) {
     let Some(props) = props else {
@@ -285,6 +338,8 @@ fn explorer_meta_for(props: Option<&StreamProperties>, chno: u32) -> UiItemExplo
 impl UiPlaylistItem {
     pub fn from_common(item: &CommonPlaylistItem, explorer: bool) -> Self {
         let explorer_meta = explorer.then(|| explorer_meta_for(item.additional_properties.as_ref(), item.chno));
+        let (effective_rating, imdb_rating, imdb_votes, rating_origin) =
+            extract_ratings(item.additional_properties.as_ref());
         Self {
             virtual_id: item.virtual_id.get(),
             provider_id: Arc::clone(&item.provider_id),
@@ -301,6 +356,10 @@ impl UiPlaylistItem {
             input_stream_id: "".intern(),
             epg_channel_id: item.epg_channel_id.clone(),
             explorer_meta,
+            effective_rating,
+            imdb_rating,
+            imdb_votes,
+            rating_origin,
         }
     }
 
@@ -311,6 +370,8 @@ impl UiPlaylistItem {
             meta.override_source_url = (!item.input_url.is_empty()).then(|| Arc::clone(&item.input_url));
             meta
         });
+        let (effective_rating, imdb_rating, imdb_votes, rating_origin) =
+            extract_ratings(item.additional_properties.as_ref());
         Self {
             virtual_id: item.virtual_id.get(),
             provider_id: item.provider_id.to_string().into(),
@@ -327,6 +388,10 @@ impl UiPlaylistItem {
             input_stream_id: Arc::clone(&item.input_stream_id),
             epg_channel_id: item.epg_channel_id,
             explorer_meta,
+            effective_rating,
+            imdb_rating,
+            imdb_votes,
+            rating_origin,
         }
     }
 
@@ -337,6 +402,7 @@ impl UiPlaylistItem {
             meta.override_source_url = (!item.input_url.is_empty()).then(|| Arc::clone(&item.input_url));
             meta
         });
+        let (effective_rating, imdb_rating, imdb_votes, rating_origin) = extract_ratings(None);
         Self {
             virtual_id: item.virtual_id.get(),
             provider_id: Arc::clone(&item.provider_id),
@@ -353,12 +419,18 @@ impl UiPlaylistItem {
             input_stream_id: Arc::clone(&item.input_stream_id),
             epg_channel_id: item.epg_channel_id,
             explorer_meta,
+            effective_rating,
+            imdb_rating,
+            imdb_votes,
+            rating_origin,
         }
     }
 
     pub fn from_playlist_item(item: &PlaylistItem, explorer: bool) -> Self {
         let header = &item.header;
         let explorer_meta = explorer.then(|| explorer_meta_for(header.additional_properties.as_ref(), header.chno));
+        let (effective_rating, imdb_rating, imdb_votes, rating_origin) =
+            extract_ratings(header.additional_properties.as_ref());
         Self {
             virtual_id: header.virtual_id.get(),
             provider_id: Arc::clone(&header.id),
@@ -375,6 +447,10 @@ impl UiPlaylistItem {
             input_stream_id: Arc::clone(&header.input_stream_id),
             epg_channel_id: header.epg_channel_id.clone(),
             explorer_meta,
+            effective_rating,
+            imdb_rating,
+            imdb_votes,
+            rating_origin,
         }
     }
 }
@@ -417,6 +493,10 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
+            effective_rating: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            rating_origin: None,
         }
     }
 
@@ -576,5 +656,220 @@ mod tests {
         let deserialized: UiItemExplorerMeta = serde_json::from_str(&json).expect("deserialize meta");
         assert_eq!(deserialized.override_source_id, None);
         assert_eq!(deserialized.override_source_url, None);
+    }
+
+    #[test]
+    fn conversion_sets_ratings_and_origin_all_four_cases() {
+        use crate::model::{
+            stream_properties::VideoStreamProperties, CommonPlaylistItem, PlaylistItem, PlaylistItemHeader, VirtualId,
+            XtreamPlaylistItem,
+        };
+
+        // 1. IMDb effective: effective_rating == imdb_rating -> Imdb
+        let video_imdb = StreamProperties::Video(Box::new(VideoStreamProperties {
+            rating: Some(6.8),
+            imdb: Some(12345),
+            imdb_rating: Some(4.2),
+            imdb_votes: Some(12345),
+            effective_rating: Some(4.2),
+            ..Default::default()
+        }));
+        let common_imdb = CommonPlaylistItem {
+            virtual_id: VirtualId::new(1),
+            provider_id: "p1".into(),
+            name: "Movie".into(),
+            chno: 1,
+            logo: "".into(),
+            logo_small: "".into(),
+            group: "Movies".into(),
+            title: "Movie".into(),
+            parent_code: "".into(),
+            audio_track: "".into(),
+            time_shift: "".into(),
+            rec: "".into(),
+            url: "http://example.com/1.mp4".into(),
+            item_type: PlaylistItemType::Video,
+            xtream_cluster: Some(XtreamCluster::Video),
+            category_id: Some(1),
+            input_name: "test".into(),
+            epg_channel_id: None,
+            additional_properties: Some(video_imdb),
+        };
+        let item_imdb = UiPlaylistItem::from_common(&common_imdb, false);
+        assert_eq!(item_imdb.rating, 6.8);
+        assert_eq!(item_imdb.effective_rating, Some(4.2));
+        assert_eq!(item_imdb.imdb_rating, Some(4.2));
+        assert_eq!(item_imdb.imdb_votes, Some(12345));
+        assert_eq!(item_imdb.rating_origin, Some(UiRatingOrigin::Imdb));
+
+        // 2. Provider effective: effective_rating != imdb_rating -> Provider
+        let video_provider = StreamProperties::Video(Box::new(VideoStreamProperties {
+            rating: Some(6.8),
+            imdb: Some(12345),
+            imdb_rating: Some(4.2),
+            imdb_votes: Some(10),
+            effective_rating: Some(6.8),
+            ..Default::default()
+        }));
+        let xtream_provider = XtreamPlaylistItem::from(&PlaylistItem {
+            header: PlaylistItemHeader {
+                virtual_id: VirtualId::new(2),
+                id: "2".into(),
+                name: "Movie 2".into(),
+                title: "Movie 2".into(),
+                group: "Movies".into(),
+                url: "http://example.com/2.mp4".into(),
+                item_type: PlaylistItemType::Video,
+                xtream_cluster: XtreamCluster::Video,
+                category_id: 1,
+                chno: 2,
+                input_name: "test".into(),
+                input_stream_id: "2".into(),
+                additional_properties: Some(video_provider),
+                ..Default::default()
+            },
+        });
+        let item_provider = UiPlaylistItem::from_xtream(xtream_provider, false);
+        assert_eq!(item_provider.rating, 6.8);
+        assert_eq!(item_provider.effective_rating, Some(6.8));
+        assert_eq!(item_provider.imdb_rating, Some(4.2));
+        assert_eq!(item_provider.imdb_votes, Some(10));
+        assert_eq!(item_provider.rating_origin, Some(UiRatingOrigin::Provider));
+
+        // 3. No effective rating
+        let video_none = StreamProperties::Video(Box::new(VideoStreamProperties {
+            rating: None,
+            imdb: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            effective_rating: None,
+            ..Default::default()
+        }));
+        let playlist_item_none = PlaylistItem {
+            header: PlaylistItemHeader {
+                virtual_id: VirtualId::new(3),
+                id: "p3".into(),
+                name: "Unrated".into(),
+                title: "Unrated".into(),
+                group: "Movies".into(),
+                logo: "".into(),
+                logo_small: "".into(),
+                url: "http://example.com/3.mp4".into(),
+                item_type: PlaylistItemType::Video,
+                xtream_cluster: XtreamCluster::Video,
+                category_id: 1,
+                chno: 3,
+                input_name: "test".into(),
+                input_stream_id: "".into(),
+                epg_channel_id: None,
+                additional_properties: Some(video_none),
+                ..Default::default()
+            },
+        };
+        let item_none = UiPlaylistItem::from_playlist_item(&playlist_item_none, false);
+        assert_eq!(item_none.rating, 0.0);
+        assert_eq!(item_none.effective_rating, None);
+        assert_eq!(item_none.imdb_rating, None);
+        assert_eq!(item_none.imdb_votes, None);
+        assert_eq!(item_none.rating_origin, None);
+
+        // 4. Live item (all None)
+        let live_props = StreamProperties::Live(Box::default());
+        let common_live = CommonPlaylistItem {
+            virtual_id: VirtualId::new(4),
+            provider_id: "live4".into(),
+            name: "Live Channel".into(),
+            chno: 4,
+            logo: "".into(),
+            logo_small: "".into(),
+            group: "Live".into(),
+            title: "Live Channel".into(),
+            parent_code: "".into(),
+            audio_track: "".into(),
+            time_shift: "".into(),
+            rec: "".into(),
+            url: "http://example.com/live.m3u8".into(),
+            item_type: PlaylistItemType::Live,
+            xtream_cluster: Some(XtreamCluster::Live),
+            category_id: Some(1),
+            input_name: "test".into(),
+            epg_channel_id: None,
+            additional_properties: Some(live_props),
+        };
+        let item_live = UiPlaylistItem::from_common(&common_live, false);
+        assert_eq!(item_live.rating, 0.0);
+        assert_eq!(item_live.effective_rating, None);
+        assert_eq!(item_live.imdb_rating, None);
+        assert_eq!(item_live.imdb_votes, None);
+        assert_eq!(item_live.rating_origin, None);
+
+        // 5. M3U item (always None)
+        let m3u = M3uPlaylistItem::from(&PlaylistItem {
+            header: PlaylistItemHeader {
+                virtual_id: VirtualId::new(5),
+                id: "m3u5".into(),
+                name: "M3U Item".into(),
+                title: "M3U Item".into(),
+                group: "M3U".into(),
+                url: "http://example.com/m3u.m3u8".into(),
+                item_type: PlaylistItemType::Live,
+                chno: 5,
+                input_name: "test".into(),
+                ..Default::default()
+            },
+        });
+        let item_m3u = UiPlaylistItem::from_m3u(m3u, false);
+        assert_eq!(item_m3u.rating, 0.0);
+        assert_eq!(item_m3u.effective_rating, None);
+        assert_eq!(item_m3u.imdb_rating, None);
+        assert_eq!(item_m3u.imdb_votes, None);
+        assert_eq!(item_m3u.rating_origin, None);
+    }
+
+    #[test]
+    fn roundtrip_json_and_cbor_with_ratings() {
+        let item = UiPlaylistItem {
+            effective_rating: Some(4.2),
+            imdb_rating: Some(4.2),
+            imdb_votes: Some(12345),
+            rating_origin: Some(UiRatingOrigin::Imdb),
+            ..base_item()
+        };
+
+        // JSON roundtrip
+        let json = serde_json::to_string(&item).expect("serialize item with ratings to JSON");
+        let val: serde_json::Value = serde_json::from_str(&json).expect("parse JSON value");
+        let arr = val.as_array().expect("array");
+        assert_eq!(arr.len(), 19);
+        assert_eq!(arr[15].as_f64(), Some(4.2));
+        assert_eq!(arr[16].as_f64(), Some(4.2));
+        assert_eq!(arr[17].as_u64(), Some(12345));
+        assert_eq!(arr[18].as_str(), Some("imdb"));
+        let back_json: UiPlaylistItem = serde_json::from_str(&json).expect("deserialize JSON");
+        assert_eq!(back_json, item);
+
+        // CBOR roundtrip
+        let cbor = bin_serialize(&item).expect("serialize item with ratings to CBOR");
+        let back_cbor: UiPlaylistItem = bin_deserialize(&cbor).expect("deserialize CBOR");
+        assert_eq!(back_cbor, item);
+
+        // Provider rating case
+        let item_prov = UiPlaylistItem {
+            effective_rating: Some(6.8),
+            imdb_rating: None,
+            imdb_votes: None,
+            rating_origin: Some(UiRatingOrigin::Provider),
+            ..base_item()
+        };
+        let json_prov = serde_json::to_string(&item_prov).expect("serialize item_prov to JSON");
+        let val_prov: serde_json::Value = serde_json::from_str(&json_prov).expect("parse JSON value");
+        let arr_prov = val_prov.as_array().expect("array");
+        assert_eq!(arr_prov.len(), 19);
+        assert_eq!(arr_prov[18].as_str(), Some("provider"));
+        let back_json_prov: UiPlaylistItem = serde_json::from_str(&json_prov).expect("deserialize JSON");
+        assert_eq!(back_json_prov, item_prov);
+        let cbor_prov = bin_serialize(&item_prov).expect("serialize item_prov to CBOR");
+        let back_cbor_prov: UiPlaylistItem = bin_deserialize(&cbor_prov).expect("deserialize CBOR");
+        assert_eq!(back_cbor_prov, item_prov);
     }
 }

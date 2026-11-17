@@ -795,6 +795,7 @@ mod tests {
             tools_list(&view, true).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect();
         assert!(names.contains(&"get_status".to_string()));
         assert!(!names.contains(&"update_playlists".to_string()));
+        assert!(!names.contains(&"update_imdb_ratings".to_string()));
     }
 
     #[test]
@@ -1535,8 +1536,11 @@ mod tests {
         assert!(names.contains(&"get_status"));
         assert!(!names.contains(&"update_playlists"));
         assert!(!names.contains(&"update_geoip"));
+        assert!(!names.contains(&"update_imdb_ratings"));
 
         let (_, reply) = post(&router, &call("update_playlists", json!({})), &headers).await;
+        assert_eq!(reply["error"]["code"], i64::from(INVALID_PARAMS));
+        let (_, reply) = post(&router, &call("update_imdb_ratings", json!({})), &headers).await;
         assert_eq!(reply["error"]["code"], i64::from(INVALID_PARAMS));
     }
 
@@ -1547,7 +1551,10 @@ mod tests {
         let names: Vec<_> =
             reply["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
         assert!(!names.contains(&"update_playlists"));
+        assert!(!names.contains(&"update_imdb_ratings"));
         let (_, reply) = post(&router, &call("update_geoip", json!({})), &[]).await;
+        assert_eq!(reply["error"]["code"], i64::from(INVALID_PARAMS));
+        let (_, reply) = post(&router, &call("update_imdb_ratings", json!({})), &[]).await;
         assert_eq!(reply["error"]["code"], i64::from(INVALID_PARAMS));
     }
 
@@ -1563,8 +1570,13 @@ mod tests {
             reply["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"update_playlists"));
         assert!(names.contains(&"update_geoip"));
+        assert!(names.contains(&"update_imdb_ratings"));
 
         let (_, reply) = post(&router, &call("update_geoip", json!({})), &headers).await;
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(tool_text(&reply).starts_with("HTTP 403"), "{}", tool_text(&reply));
+
+        let (_, reply) = post(&router, &call("update_imdb_ratings", json!({})), &headers).await;
         assert_eq!(reply["result"]["isError"], true);
         assert!(tool_text(&reply).starts_with("HTTP 403"), "{}", tool_text(&reply));
     }

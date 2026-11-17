@@ -1,14 +1,16 @@
 use super::{MetadataUpdateConfigDto, DEFAULT_FFPROBE_TIMEOUT_SECS, MIN_DURATION_SECS};
 use crate::{
     defaults::{
-        default_metadata_ffprobe_analyze_duration, default_metadata_ffprobe_live_analyze_duration,
-        default_metadata_ffprobe_live_probe_size, default_metadata_ffprobe_probe_size, default_metadata_tmdb_cooldown,
-        default_tmdb_api_key, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_match_threshold,
-        default_tmdb_rate_limit_ms, is_default_metadata_ffprobe_analyze_duration,
-        is_default_metadata_ffprobe_live_analyze_duration, is_default_metadata_ffprobe_live_probe_size,
-        is_default_metadata_ffprobe_probe_size, is_default_metadata_tmdb_cooldown, is_default_tmdb_cache_duration_days,
-        is_default_tmdb_language, is_default_tmdb_match_threshold, is_default_tmdb_rate_limit_ms, is_false,
-        is_tmdb_default_api_key, TMDB_API_KEY,
+        default_imdb_min_votes, default_imdb_url, default_metadata_ffprobe_analyze_duration,
+        default_metadata_ffprobe_live_analyze_duration, default_metadata_ffprobe_live_probe_size,
+        default_metadata_ffprobe_probe_size, default_metadata_tmdb_cooldown, default_tmdb_api_key,
+        default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_match_threshold,
+        default_tmdb_rate_limit_ms, is_default_imdb_min_votes, is_default_imdb_url,
+        is_default_metadata_ffprobe_analyze_duration, is_default_metadata_ffprobe_live_analyze_duration,
+        is_default_metadata_ffprobe_live_probe_size, is_default_metadata_ffprobe_probe_size,
+        is_default_metadata_tmdb_cooldown, is_default_tmdb_cache_duration_days, is_default_tmdb_language,
+        is_default_tmdb_match_threshold, is_default_tmdb_rate_limit_ms, is_false, is_tmdb_default_api_key,
+        TMDB_API_KEY,
     },
     error::TuliproxError,
     model::ByteSize,
@@ -195,4 +197,81 @@ impl TmdbConfigDto {
         self.match_threshold = self.match_threshold.clamp(0, 100);
         Ok(())
     }
+}
+
+pub const fn is_default_imdb_rating_source(source: &ImdbRatingSource) -> bool {
+    matches!(source, ImdbRatingSource::ImdbThenProvider)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImdbRatingSource {
+    #[default]
+    ImdbThenProvider,
+    Imdb,
+    Provider,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ImdbConfigDto {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    #[serde(default = "default_imdb_url", skip_serializing_if = "is_default_imdb_url")]
+    pub url: String,
+    #[serde(default = "default_imdb_min_votes", skip_serializing_if = "is_default_imdb_min_votes")]
+    pub min_votes: u32,
+    #[serde(default, skip_serializing_if = "is_default_imdb_rating_source")]
+    pub rating_source: ImdbRatingSource,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub replace_rating: bool,
+}
+
+impl Default for ImdbConfigDto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: default_imdb_url(),
+            min_votes: default_imdb_min_votes(),
+            rating_source: ImdbRatingSource::default(),
+            replace_rating: false,
+        }
+    }
+}
+
+impl ImdbConfigDto {
+    pub fn is_empty(&self) -> bool {
+        !self.enabled
+            && (self.url.trim().is_empty() || is_default_imdb_url(&self.url))
+            && self.min_votes == default_imdb_min_votes()
+            && self.rating_source == ImdbRatingSource::default()
+            && !self.replace_rating
+    }
+
+    pub(super) fn clean(&mut self) {
+        let trimmed = self.url.trim();
+        if trimmed.is_empty() {
+            self.url = default_imdb_url();
+        } else if trimmed != self.url {
+            self.url = trimmed.to_string();
+        }
+    }
+
+    pub(super) fn prepare(&mut self) -> Result<(), TuliproxError> {
+        self.clean();
+        let parsed = url::Url::parse(&self.url).map_err(|err| {
+            TuliproxError::ConfigMetadataUpdate(format!("Invalid URL for `metadata_update.imdb.url`: {err}"))
+        })?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err(TuliproxError::ConfigMetadataUpdate(
+                "URL scheme for `metadata_update.imdb.url` must be http or https".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct ImdbUpdateResponseDto {
+    pub rows: usize,
 }

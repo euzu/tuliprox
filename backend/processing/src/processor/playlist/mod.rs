@@ -1,6 +1,7 @@
 use super::providers::{LibraryProvider, MediaServerProvider, StalkerProvider, XmltvEpgProvider};
 use crate::{
     fetched_playlist::FetchedPlaylist,
+    imdb::ImdbRatingRuntime,
     input_cache,
     metadata_sink::{MetadataUpdateSink, NoopMetadataSink},
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator},
@@ -52,8 +53,8 @@ use tuliprox_core::{
     model::{
         is_valid, retain_filtered_playlist, AppConfig, ClusterForceUpdate, ClusterUpdateRejection, CompiledMapping,
         ConfigFavourites, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget, CurationConfig, Epg,
-        FilterOutcome, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig,
-        TransformStage, UpdateGuard, UpdateTask,
+        FilterOutcome, ImdbConfig, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason,
+        ReverseProxyDisabledHeaderConfig, TransformStage, UpdateGuard, UpdateTask,
     },
     scripting::MappingScriptContext,
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure},
@@ -519,6 +520,14 @@ pub async fn exec_processing<
     let deadline = tokio::time::Instant::now() + max_update_duration;
     let publication_deadline = Arc::new(TargetReplacementDeadline::new(deadline));
 
+    // One ratings runtime for the whole run: a dataset replaced while the run is
+    // active must not mix two tables across targets. The table itself is opened
+    // lazily, the first time a target actually has an item to rate, and dropped
+    // with the run, so a live-only run never touches it.
+    let imdb_config =
+        app_config.config.load().metadata_update.as_ref().map_or_else(ImdbConfig::default, |m| m.imdb.clone());
+    let imdb = ImdbRatingRuntime::for_run(app_config.clone(), imdb_config);
+
     // Initialize Context
     let ctx = PlaylistProcessingContext {
         client,
@@ -551,6 +560,7 @@ pub async fn exec_processing<
         maintenance,
         plugins,
         override_status,
+        imdb,
     };
 
     let start_time = Instant::now();

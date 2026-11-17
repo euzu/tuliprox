@@ -106,6 +106,7 @@ fn patch_playlist_item_applies_form_fields_and_sets_pending() {
         input_stream_id: "".into(),
         epg_channel_id: Some(Arc::from("epg-1")),
         explorer_meta: None,
+        ..Default::default()
     };
 
     let form = PlaylistOverrideDto {
@@ -156,6 +157,7 @@ fn patch_playlist_item_resets_fields_and_clears_edited_when_no_deltas_remain() {
             epg_state: None,
             ..Default::default()
         }),
+        ..Default::default()
     };
 
     let provider_base = ItemFieldsDto {
@@ -224,6 +226,7 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let item2 = Rc::new(UiPlaylistItem {
@@ -242,6 +245,7 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let other_item = Rc::new(UiPlaylistItem {
@@ -260,6 +264,7 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let group1 = Rc::new(UiPlaylistGroup {
@@ -319,6 +324,7 @@ fn replace_item_in_categories_matches_only_virtual_id_even_if_provider_id_collid
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let item_input_b = Rc::new(UiPlaylistItem {
@@ -337,6 +343,7 @@ fn replace_item_in_categories_matches_only_virtual_id_even_if_provider_id_collid
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let group = Rc::new(UiPlaylistGroup {
@@ -380,6 +387,7 @@ fn replace_item_in_categories_moves_item_to_group_creates_missing_and_drops_empt
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let group1 = Rc::new(UiPlaylistGroup {
@@ -423,6 +431,7 @@ fn apply_bulk_patches_to_categories_updates_multiple_items_and_rebuilds_groups()
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
     let item2 = Rc::new(UiPlaylistItem {
         virtual_id: 2,
@@ -440,6 +449,7 @@ fn apply_bulk_patches_to_categories_updates_multiple_items_and_rebuilds_groups()
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: None,
+        ..Default::default()
     });
 
     let group = Rc::new(UiPlaylistGroup {
@@ -489,6 +499,7 @@ fn find_duplicate_chno_uses_precomputed_map() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: Some(shared::model::UiItemExplorerMeta { chno: Some(10), ..Default::default() }),
+        ..Default::default()
     });
 
     let group = Rc::new(UiPlaylistGroup {
@@ -534,6 +545,7 @@ fn patch_from_patch_updates_channel_number_meta() {
         input_stream_id: "".into(),
         epg_channel_id: None,
         explorer_meta: Some(shared::model::UiItemExplorerMeta { chno: Some(10), ..Default::default() }),
+        ..Default::default()
     };
     let set = ItemOverridePatch { chno: Some(OverrideFieldOp::Set(42)), ..Default::default() };
     let updated = patch_playlist_item_from_patch(&item, &set, None, true);
@@ -563,6 +575,7 @@ fn apply_bulk_patches_to_categories_ignores_same_virtual_id_in_other_cluster() {
             input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         })
     };
     let live = make_item("Live", "Live Group", PlaylistItemType::Live, XtreamCluster::Live);
@@ -612,6 +625,7 @@ fn bulk_patch_map_keeps_same_virtual_id_of_different_clusters_apart() {
             input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         })
     };
     let live = make_item("Live", "Live Group", PlaylistItemType::Live, XtreamCluster::Live);

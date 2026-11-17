@@ -73,6 +73,10 @@ fn existing_video_item() -> XtreamPlaylistItem {
             trailer: Some("legacy-trailer".into()),
             tmdb: Some(7788),
             is_adult: 1,
+            imdb: Some(133_093),
+            imdb_rating: Some(8.7),
+            imdb_votes: Some(2_000_000),
+            effective_rating: Some(8.7),
             ..Default::default()
         }))),
         item_type: PlaylistItemType::Video,
@@ -114,6 +118,10 @@ fn from_info_with_existing_keeps_existing_overrides() {
     assert_eq!(props.trailer.as_deref(), Some("legacy-trailer"));
     assert_eq!(props.tmdb, Some(7788));
     assert_eq!(props.is_adult, 1);
+    assert_eq!(props.imdb, Some(133_093));
+    assert_eq!(props.imdb_rating, Some(8.7));
+    assert_eq!(props.imdb_votes, Some(2_000_000));
+    assert_eq!(props.effective_rating, Some(8.7));
 }
 
 #[test]
@@ -221,6 +229,58 @@ fn catchup_messagepack_reads_legacy_records_without_changing_encoding() -> Resul
         vec![super::CatchupAttribute { name: "catchup-extra".into(), value: "keep".into() }]
     );
     assert_eq!(rmp_serde::to_vec(&restored)?, encoded);
+    Ok(())
+}
+
+#[test]
+fn old_video_stream_properties_without_imdb_fields_still_decodes() -> Result<(), Box<dyn std::error::Error>> {
+    #[derive(serde::Serialize)]
+    struct LegacyVideoStreamProperties {
+        name: Arc<str>,
+        category_id: u32,
+        stream_id: u32,
+        stream_icon: Arc<str>,
+        direct_source: Arc<str>,
+        custom_sid: Option<Arc<str>>,
+        added: Arc<str>,
+        container_extension: Arc<str>,
+        rating: Option<f64>,
+        rating_5based: Option<f64>,
+        stream_type: Option<Arc<str>>,
+        trailer: Option<Arc<str>>,
+        tmdb: Option<u32>,
+        is_adult: i32,
+        details: Option<VideoStreamDetailProperties>,
+        plugin_fingerprint: Option<Arc<str>>,
+    }
+
+    let legacy = LegacyVideoStreamProperties {
+        name: "Movie".into(),
+        category_id: 1,
+        stream_id: 10,
+        stream_icon: "icon".into(),
+        direct_source: "src".into(),
+        custom_sid: None,
+        added: "2026".into(),
+        container_extension: "mp4".into(),
+        rating: Some(8.0),
+        rating_5based: Some(4.0),
+        stream_type: Some("movie".into()),
+        trailer: None,
+        tmdb: Some(123),
+        is_adult: 0,
+        details: None,
+        plugin_fingerprint: Some("fp".into()),
+    };
+    let encoded = rmp_serde::to_vec(&legacy)?;
+    let decoded: VideoStreamProperties = rmp_serde::from_slice(&encoded)?;
+
+    assert_eq!(decoded.name.as_ref(), "Movie");
+    assert_eq!(decoded.plugin_fingerprint.as_deref(), Some("fp"));
+    assert_eq!(decoded.imdb, None);
+    assert_eq!(decoded.imdb_rating, None);
+    assert_eq!(decoded.imdb_votes, None);
+    assert_eq!(decoded.effective_rating, None);
     Ok(())
 }
 
@@ -364,4 +424,84 @@ fn archive_info_uses_one_rule_for_indicator_and_duration() {
     assert_eq!(archive_info(Some(&live(Some(1), None, None)), ""), (true, None));
     assert_eq!(archive_info(None, "12"), (true, Some(12)));
     assert_eq!(archive_info(None, "0"), (true, None));
+}
+
+#[test]
+fn test_effective_rating_tenths() {
+    let make_video = |rating: Option<f32>| {
+        StreamProperties::Video(Box::new(VideoStreamProperties {
+            effective_rating: rating,
+            ..VideoStreamProperties::default()
+        }))
+    };
+
+    // None
+    assert_eq!(make_video(None).effective_rating_tenths(), None);
+
+    // NaN
+    assert_eq!(make_video(Some(f32::NAN)).effective_rating_tenths(), None);
+
+    // negative
+    assert_eq!(make_video(Some(-1.0)).effective_rating_tenths(), None);
+    assert_eq!(make_video(Some(-0.1)).effective_rating_tenths(), None);
+
+    // 6.45 -> 65
+    assert_eq!(make_video(Some(6.45)).effective_rating_tenths(), Some(65));
+
+    // 10.0 -> 100
+    assert_eq!(make_video(Some(10.0)).effective_rating_tenths(), Some(100));
+
+    // Boundary and edge cases
+    assert_eq!(make_video(Some(0.0)).effective_rating_tenths(), Some(0));
+    assert_eq!(make_video(Some(100.0)).effective_rating_tenths(), Some(1000));
+    assert_eq!(make_video(Some(150.0)).effective_rating_tenths(), Some(1000));
+    assert_eq!(make_video(Some(f32::INFINITY)).effective_rating_tenths(), None);
+    assert_eq!(make_video(Some(f32::NEG_INFINITY)).effective_rating_tenths(), None);
+
+    // Series
+    let series = StreamProperties::Series(Box::new(SeriesStreamProperties {
+        effective_rating: Some(8.5),
+        ..SeriesStreamProperties::default()
+    }));
+    assert_eq!(series.effective_rating_tenths(), Some(85));
+
+    // Live has no rating
+    assert_eq!(StreamProperties::Live(Box::default()).effective_rating_tenths(), None);
+}
+
+#[test]
+fn provider_json_with_unexpected_imdb_values_still_decodes() {
+    let json = r#"{"name":"Movie","stream_id":1,"imdb":"tt0133093","imdb_rating":"n/a","imdb_votes":{"x":1},
+        "effective_rating":true}"#;
+    let props: VideoStreamProperties = serde_json::from_str(json).expect("provider json decodes");
+    assert_eq!(props.imdb, Some(133_093));
+    assert_eq!(props.imdb_rating, None);
+    assert_eq!(props.imdb_votes, None);
+    assert_eq!(props.effective_rating, None);
+    let series: SeriesStreamProperties =
+        serde_json::from_str(r#"{"name":"Show","series_id":2,"imdb":"tt0903747","imdb_votes":"12"}"#)
+            .expect("provider json decodes");
+    assert_eq!(series.imdb, Some(903_747));
+    assert_eq!(series.imdb_votes, Some(12));
+}
+
+#[test]
+fn from_series_info_keeps_imdb_fields_of_existing_item() {
+    let info: XtreamSeriesInfo =
+        serde_json::from_value(json!({ "info": { "name": "Example Show" }, "episodes": {} })).expect("series info");
+    let mut existing = existing_video_item();
+    existing.additional_properties = Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+        imdb: Some(903_747),
+        imdb_rating: Some(9.5),
+        imdb_votes: Some(2_300_000),
+        effective_rating: Some(9.5),
+        ..SeriesStreamProperties::default()
+    })));
+
+    let props = SeriesStreamProperties::from_info(&info, &existing);
+
+    assert_eq!(props.imdb, Some(903_747));
+    assert_eq!(props.imdb_rating, Some(9.5));
+    assert_eq!(props.imdb_votes, Some(2_300_000));
+    assert_eq!(props.effective_rating, Some(9.5));
 }

@@ -17,6 +17,7 @@ impl MetadataUpdateConfigDto {
             && self.probe.is_empty()
             && self.ffprobe.is_empty()
             && self.tmdb.is_empty()
+            && self.imdb.is_empty()
             && self.retry_delay == default_metadata_retry_delay()
             && self.worker_idle_timeout == default_metadata_worker_idle_timeout()
             && self.max_queue_size == default_metadata_max_queue_size()
@@ -30,6 +31,7 @@ impl MetadataUpdateConfigDto {
         }
         self.ffprobe.clean();
         self.tmdb.clean();
+        self.imdb.clean();
     }
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
@@ -41,6 +43,7 @@ impl MetadataUpdateConfigDto {
         self.probe.prepare()?;
         self.ffprobe.prepare()?;
         self.tmdb.prepare()?;
+        self.imdb.prepare()?;
 
         let retry_delay_secs = Self::parse_and_clamp_duration(&self.retry_delay, MIN_DURATION_SECS, "retry_delay")?;
         self.retry_delay = Self::canonicalize_seconds(retry_delay_secs);

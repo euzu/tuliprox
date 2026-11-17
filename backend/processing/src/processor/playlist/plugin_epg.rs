@@ -438,6 +438,7 @@ mod tests {
                 maintenance: None,
                 override_status: None,
                 plugins: EpgHost,
+                imdb: crate::imdb::ImdbRatingRuntime::default(),
             };
 
         let input = ConfigInput { name: "test-input".intern(), ..ConfigInput::default() };
@@ -536,6 +537,7 @@ mod tests {
                 maintenance: None,
                 override_status: None,
                 plugins: EmptyEpgHost,
+                imdb: crate::imdb::ImdbRatingRuntime::default(),
             };
 
         let input = ConfigInput { name: "test-input".intern(), ..ConfigInput::default() };

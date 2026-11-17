@@ -1,4 +1,4 @@
-use shared::foundation::{Filter, Leaf, Node, NodeId};
+use shared::foundation::{format_decimal_tenths, Filter, Leaf, Node, NodeId};
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq, Clone)]
@@ -127,7 +127,7 @@ impl Render<'_> {
                         <span class="comparison">
                             <span class="field">{format!("{}", field)}</span>
                             {format!(" {} ", op)}
-                            <span class="enum">{value.to_string()}</span>
+                            <span class="enum">{format_decimal_tenths(*value)}</span>
                         </span>
                     </>
                 },

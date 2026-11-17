@@ -129,7 +129,7 @@ pub enum Leaf {
     TypeComparison(ItemField, PlaylistItemType),
     StringComparison(ItemField, StringOperator, String),
     PresenceComparison(ItemField, PresenceOperator),
-    NumericComparison(ItemField, NumericOperator, u32),
+    NumericComparison(ItemField, NumericOperator, u64),
     SetComparison(ItemField, Vec<String>),
     /// `plugin.<id>.<fn>(literal, ...)`: the decision comes from a batch the host prepares
     /// before evaluation (see [`PluginCallDecisions`]). `call` is the ordinal of this term among
@@ -399,6 +399,8 @@ impl FilterBuilder {
     pub fn finish(self, root: NodeId) -> Filter { Filter { nodes: self.nodes, leaves: self.leaves, root } }
 }
 
+pub use crate::utils::format_decimal_tenths;
+
 impl std::fmt::Display for Leaf {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -423,7 +425,7 @@ impl std::fmt::Display for Leaf {
                 write!(f, "{field} {op} \"{}\"", value.replace('"', "\\\""))
             }
             Self::PresenceComparison(field, op) => write!(f, "{field} {op}"),
-            Self::NumericComparison(field, op, value) => write!(f, "{field} {op} {value}"),
+            Self::NumericComparison(field, op, value) => write!(f, "{field} {op} {}", format_decimal_tenths(*value)),
             Self::SetComparison(field, values) => {
                 write!(f, "{field} IN [")?;
                 for (index, value) in values.iter().enumerate() {

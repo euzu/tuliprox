@@ -125,7 +125,7 @@ pub enum ProbeFailureReason {
 /// `scheduled_task.failed`: a scheduled task could not complete.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ScheduledTaskFailed {
-    /// The task type (`PlaylistUpdate`, `LibraryScan`, `GeoIpUpdate`, `PluginTask`).
+    /// The task type (`PlaylistUpdate`, `LibraryScan`, `GeoIpUpdate`, `ImdbRatingsUpdate`, `PluginTask`).
     pub task: String,
     #[serde(default)]
     pub schedule: Option<String>,

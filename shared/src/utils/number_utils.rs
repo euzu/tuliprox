@@ -74,6 +74,16 @@ pub fn format_float_localized(value: f64, decimals: usize, groups: bool) -> Stri
     }
 }
 
+/// Formats a fixed-point tenths value in its shortest decimal form (e.g. 65 -> "6.5", 50 -> "5").
+#[inline]
+pub fn format_decimal_tenths(tenths: u64) -> String {
+    if tenths.is_multiple_of(10) {
+        format!("{}", tenths / 10)
+    } else {
+        format!("{}.{}", tenths / 10, tenths % 10)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +160,15 @@ mod tests {
             let diff = (parsed - v).abs();
             assert!(diff < 1e-10, "roundtrip failed for {v}: {formatted} -> {parsed}");
         }
+    }
+
+    #[test]
+    fn test_format_decimal_tenths() {
+        assert_eq!(format_decimal_tenths(0), "0");
+        assert_eq!(format_decimal_tenths(50), "5");
+        assert_eq!(format_decimal_tenths(65), "6.5");
+        assert_eq!(format_decimal_tenths(70), "7");
+        assert_eq!(format_decimal_tenths(100), "10");
+        assert_eq!(format_decimal_tenths(105), "10.5");
     }
 }

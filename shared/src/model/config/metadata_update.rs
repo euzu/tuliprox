@@ -31,6 +31,8 @@ pub struct MetadataUpdateConfigDto {
     pub ffprobe: FfprobeConfigDto,
     #[serde(default, skip_serializing_if = "TmdbConfigDto::is_empty")]
     pub tmdb: TmdbConfigDto,
+    #[serde(default, skip_serializing_if = "ImdbConfigDto::is_empty")]
+    pub imdb: ImdbConfigDto,
     #[serde(default = "default_metadata_retry_delay", skip_serializing_if = "is_default_metadata_retry_delay")]
     pub retry_delay: String,
     #[serde(
@@ -61,6 +63,7 @@ impl Default for MetadataUpdateConfigDto {
             probe: ProbeConfigDto::default(),
             ffprobe: FfprobeConfigDto::default(),
             tmdb: TmdbConfigDto::default(),
+            imdb: ImdbConfigDto::default(),
             retry_delay: default_metadata_retry_delay(),
             worker_idle_timeout: default_metadata_worker_idle_timeout(),
             max_queue_size: default_metadata_max_queue_size(),
@@ -77,4 +80,4 @@ mod normalize;
 mod policies;
 mod providers;
 pub use policies::{MetadataLogConfigDto, ProbeConfigDto, ResolveConfigDto};
-pub use providers::{FfprobeConfigDto, TmdbConfigDto};
+pub use providers::{FfprobeConfigDto, ImdbConfigDto, ImdbRatingSource, ImdbUpdateResponseDto, TmdbConfigDto};

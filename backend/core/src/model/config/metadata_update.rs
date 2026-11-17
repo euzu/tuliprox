@@ -1,20 +1,21 @@
 use crate::model::macros;
 use shared::{
     defaults::{
-        default_metadata_ffprobe_analyze_duration, default_metadata_ffprobe_live_analyze_duration,
-        default_metadata_ffprobe_live_probe_size, default_metadata_ffprobe_probe_size,
-        default_metadata_max_resolve_retry_backoff, default_metadata_probe_cooldown,
-        default_metadata_probe_retry_backoff_step_1, default_metadata_probe_retry_backoff_step_2,
-        default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay,
-        default_metadata_progress_log_interval, default_metadata_queue_log_interval,
-        default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base,
-        default_metadata_retry_delay, default_metadata_tmdb_cooldown, default_metadata_worker_idle_timeout,
-        default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_match_threshold,
-        default_tmdb_rate_limit_ms,
+        default_imdb_min_votes, default_imdb_url, default_metadata_ffprobe_analyze_duration,
+        default_metadata_ffprobe_live_analyze_duration, default_metadata_ffprobe_live_probe_size,
+        default_metadata_ffprobe_probe_size, default_metadata_max_resolve_retry_backoff,
+        default_metadata_probe_cooldown, default_metadata_probe_retry_backoff_step_1,
+        default_metadata_probe_retry_backoff_step_2, default_metadata_probe_retry_backoff_step_3,
+        default_metadata_probe_retry_load_retry_delay, default_metadata_progress_log_interval,
+        default_metadata_queue_log_interval, default_metadata_resolve_exhaustion_reset_gap,
+        default_metadata_resolve_min_retry_base, default_metadata_retry_delay, default_metadata_tmdb_cooldown,
+        default_metadata_worker_idle_timeout, default_tmdb_cache_duration_days, default_tmdb_language,
+        default_tmdb_match_threshold, default_tmdb_rate_limit_ms,
     },
+    error::TuliproxError,
     model::{
-        ByteSize, Bytes, FfprobeConfigDto, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto,
-        ResolveConfigDto, Secs, TmdbConfigDto,
+        ByteSize, Bytes, FfprobeConfigDto, ImdbConfigDto, ImdbRatingSource, MetadataLogConfigDto,
+        MetadataUpdateConfigDto, ProbeConfigDto, ResolveConfigDto, Secs, TmdbConfigDto,
     },
     utils::parse_duration_seconds,
 };
@@ -27,6 +28,7 @@ pub struct MetadataUpdateConfig {
     pub probe: ProbeConfig,
     pub ffprobe: FfprobeConfig,
     pub tmdb: TmdbConfig,
+    pub imdb: ImdbConfig,
     pub retry_delay: String,
     pub retry_delay_secs: u64,
     pub worker_idle_timeout: String,
@@ -114,6 +116,45 @@ impl Default for TmdbConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImdbConfig {
+    pub enabled: bool,
+    pub url: String,
+    pub min_votes: u32,
+    pub rating_source: ImdbRatingSource,
+    pub replace_rating: bool,
+}
+
+impl Default for ImdbConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: default_imdb_url(),
+            min_votes: default_imdb_min_votes(),
+            rating_source: ImdbRatingSource::default(),
+            replace_rating: false,
+        }
+    }
+}
+
+impl ImdbConfig {
+    pub fn validate(&self) -> Result<(), TuliproxError> {
+        let trimmed = self.url.trim();
+        if trimmed.is_empty() {
+            return Err(TuliproxError::ConfigMetadataUpdate("metadata_update.imdb.url cannot be empty".to_string()));
+        }
+        let parsed = url::Url::parse(trimmed).map_err(|err| {
+            TuliproxError::ConfigMetadataUpdate(format!("Invalid URL for `metadata_update.imdb.url`: {err}"))
+        })?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err(TuliproxError::ConfigMetadataUpdate(
+                "URL scheme for `metadata_update.imdb.url` must be http or https".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for MetadataUpdateConfig {
     fn default() -> Self { Self::from(&MetadataUpdateConfigDto::default()) }
 }
@@ -151,6 +192,7 @@ impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {
             probe: ProbeConfig::from(&normalized.probe),
             ffprobe: FfprobeConfig::from(&normalized.ffprobe),
             tmdb: TmdbConfig::from(&normalized.tmdb),
+            imdb: ImdbConfig::from(&normalized.imdb),
             retry_delay_secs: parse_duration_or_default(
                 &normalized.retry_delay,
                 &default_metadata_retry_delay(),
@@ -179,6 +221,7 @@ impl From<&MetadataUpdateConfig> for MetadataUpdateConfigDto {
             probe: ProbeConfigDto::from(&instance.probe),
             ffprobe: FfprobeConfigDto::from(&instance.ffprobe),
             tmdb: TmdbConfigDto::from(&instance.tmdb),
+            imdb: ImdbConfigDto::from(&instance.imdb),
             retry_delay: instance.retry_delay.clone(),
             worker_idle_timeout: instance.worker_idle_timeout.clone(),
             max_queue_size: instance.max_queue_size,
@@ -370,5 +413,88 @@ impl From<&TmdbConfig> for TmdbConfigDto {
             cooldown: instance.cooldown.clone(),
             match_threshold: instance.match_threshold,
         }
+    }
+}
+
+impl From<&ImdbConfigDto> for ImdbConfig {
+    fn from(dto: &ImdbConfigDto) -> Self {
+        let trimmed = dto.url.trim();
+        let url = if trimmed.is_empty() { default_imdb_url() } else { trimmed.to_string() };
+        Self {
+            enabled: dto.enabled,
+            url,
+            min_votes: dto.min_votes,
+            rating_source: dto.rating_source,
+            replace_rating: dto.replace_rating,
+        }
+    }
+}
+
+impl From<&ImdbConfig> for ImdbConfigDto {
+    fn from(instance: &ImdbConfig) -> Self {
+        Self {
+            enabled: instance.enabled,
+            url: instance.url.clone(),
+            min_votes: instance.min_votes,
+            rating_source: instance.rating_source,
+            replace_rating: instance.replace_rating,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imdb_config_empty_url_converts_to_default() {
+        let dto = ImdbConfigDto {
+            enabled: true,
+            url: "   ".to_string(),
+            min_votes: 500,
+            rating_source: ImdbRatingSource::Imdb,
+            replace_rating: true,
+        };
+        let config = ImdbConfig::from(&dto);
+        assert_eq!(config.url, default_imdb_url());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn imdb_config_validation_accepts_http_and_https() {
+        let config_https =
+            ImdbConfig { enabled: true, url: "https://example.com/ratings.tsv.gz".to_string(), ..Default::default() };
+        assert!(config_https.validate().is_ok());
+
+        let config_http =
+            ImdbConfig { enabled: true, url: "http://example.com/ratings.tsv.gz".to_string(), ..Default::default() };
+        assert!(config_http.validate().is_ok());
+    }
+
+    #[test]
+    fn imdb_config_validation_rejects_invalid_urls() {
+        let invalid_url = ImdbConfig { enabled: true, url: "not a valid url".to_string(), ..Default::default() };
+        assert!(invalid_url.validate().is_err());
+
+        let non_http =
+            ImdbConfig { enabled: true, url: "ftp://example.com/ratings.tsv.gz".to_string(), ..Default::default() };
+        assert!(non_http.validate().is_err());
+
+        let empty = ImdbConfig { enabled: true, url: String::new(), ..Default::default() };
+        assert!(empty.validate().is_err());
+    }
+
+    #[test]
+    fn imdb_config_round_trip() {
+        let original = ImdbConfig {
+            enabled: true,
+            url: "https://custom.test/ratings.tsv.gz".to_string(),
+            min_votes: 2500,
+            rating_source: ImdbRatingSource::Imdb,
+            replace_rating: true,
+        };
+        let dto = ImdbConfigDto::from(&original);
+        let converted = ImdbConfig::from(&dto);
+        assert_eq!(original, converted);
     }
 }

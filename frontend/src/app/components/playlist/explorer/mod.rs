@@ -2031,6 +2031,7 @@ mod tests {
                 override_id: Some(Arc::from("urlhash-v1:blake3hash123")),
                 ..Default::default()
             }),
+            ..Default::default()
         });
 
         let item_plain = Rc::new(UiPlaylistItem {
@@ -2049,6 +2050,7 @@ mod tests {
             input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         });
 
         let group = Rc::new(shared::model::UiPlaylistGroup {
@@ -2120,6 +2122,7 @@ mod tests {
             input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         }
     }
 

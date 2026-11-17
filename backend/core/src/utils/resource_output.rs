@@ -275,6 +275,7 @@ mod tests {
             encrypt_secret: [0; 16],
             resource_host_policies: Arc::default(),
             default_container_extensions: Arc::default(),
+            replace_rating: false,
         };
 
         prepare_xtream_resource_hosts(&item, &options).await;

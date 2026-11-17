@@ -205,6 +205,8 @@ impl ConfigDto {
         self.reverse_proxy.as_ref().is_some_and(|r| r.geoip.as_ref().is_some_and(|g| g.enabled))
     }
 
+    pub fn is_imdb_enabled(&self) -> bool { self.metadata_update.as_ref().is_some_and(|m| m.imdb.enabled) }
+
     pub fn is_library_enabled(&self) -> bool { self.library.as_ref().is_some_and(|l| l.enabled) }
 
     pub fn is_stream_history_enabled(&self) -> bool {

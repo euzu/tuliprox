@@ -110,6 +110,18 @@ pub struct VideoStreamProperties {
     /// older record without it decodes to `None`.
     #[serde(default)]
     pub plugin_fingerprint: Option<Arc<str>>,
+    /// Numeric part of the `IMDb` id `tt…`.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub imdb: Option<u32>,
+    /// Raw `IMDb` dataset rating value.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub imdb_rating: Option<f32>,
+    /// Raw `IMDb` dataset vote count value.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub imdb_votes: Option<u32>,
+    /// Rating after the configured rating source and minimum votes, set by processing, read by the `Rating` filter.
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub effective_rating: Option<f32>,
 }
 
 impl VideoStreamProperties {
@@ -117,6 +129,10 @@ impl VideoStreamProperties {
         VideoStreamProperties {
             name: info.info.name.clone(),
             plugin_fingerprint: None,
+            imdb: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            effective_rating: None,
             category_id: info.movie_data.category_id,
             stream_id: info.movie_data.stream_id,
             stream_icon: info.info.movie_image.as_ref().map_or_else(|| "".intern(), Clone::clone),
@@ -177,6 +193,12 @@ impl VideoStreamProperties {
                 props.trailer = video.trailer.clone();
             }
             props.is_adult = video.is_adult;
+            // IMDb values are derived per update before the target filter; the info
+            // resolve that runs after it must not drop them.
+            props.imdb = video.imdb;
+            props.imdb_rating = video.imdb_rating;
+            props.imdb_votes = video.imdb_votes;
+            props.effective_rating = video.effective_rating;
         }
 
         props

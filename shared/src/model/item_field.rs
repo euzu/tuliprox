@@ -17,6 +17,8 @@ pub enum ItemField {
     EpgId,
     Chno,
     Quality,
+    Rating,
+    Votes,
 }
 
 impl<'de> Deserialize<'de> for ItemField {
@@ -43,6 +45,8 @@ impl Display for ItemField {
             Self::EpgId => "EpgId",
             Self::Chno => "Chno",
             Self::Quality => "Quality",
+            Self::Rating => "Rating",
+            Self::Votes => "Votes",
         })
     }
 }
@@ -167,7 +171,7 @@ impl ItemField {
             Self::Caption => Some(HeaderField::Caption),
             Self::EpgId => Some(HeaderField::EpgChannelId),
             Self::Chno => Some(HeaderField::Chno),
-            Self::Quality => None,
+            Self::Quality | Self::Rating | Self::Votes => None,
         }
     }
 }
@@ -180,6 +184,8 @@ mod tests {
     fn item_field_from_str_keeps_legacy_case_insensitive_parsing() {
         assert_eq!(ItemField::from_str("Group").expect("legacy field casing parses"), ItemField::Group);
         assert_eq!(ItemField::from_str("TITLE").expect("upper case field parses"), ItemField::Title);
+        assert_eq!(ItemField::from_str("Rating").expect("rating parses"), ItemField::Rating);
+        assert_eq!(ItemField::from_str("votes").expect("votes parses"), ItemField::Votes);
     }
 
     #[test]
@@ -189,10 +195,14 @@ mod tests {
             ItemField::Group
         );
         assert_eq!(serde_json::from_str::<ItemField>("\"TITLE\"").expect("upper case field parses"), ItemField::Title);
+        assert_eq!(serde_json::from_str::<ItemField>("\"rating\"").expect("rating parses"), ItemField::Rating);
+        assert_eq!(serde_json::from_str::<ItemField>("\"Votes\"").expect("votes parses"), ItemField::Votes);
     }
 
     #[test]
     fn item_field_serialize_keeps_lowercase_config_shape() {
         assert_eq!(serde_json::to_string(&ItemField::Group).expect("item field serializes"), "\"group\"");
+        assert_eq!(serde_json::to_string(&ItemField::Rating).expect("item field serializes"), "\"rating\"");
+        assert_eq!(serde_json::to_string(&ItemField::Votes).expect("item field serializes"), "\"votes\"");
     }
 }

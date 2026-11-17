@@ -102,6 +102,8 @@ pub struct Constants {
     pub re_classifier_episode: Regex,
     pub re_classifier_season: Regex,
     pub re_classifier_moviedb_id: Regex,
+    /// `IMDb` ids in stream titles; the numeric part is capture group 1.
+    pub re_classifier_imdb_id: Regex,
     pub re_classifier_camel_case: Regex,
     pub re_classifier_brackets_info: Regex,
     pub re_clean_title: Regex,
@@ -187,7 +189,12 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(|| {
         re_episode_code: Regex::new(EPISODE_PATTERN).expect("episode pattern must compile"),
         re_classifier_episode: Regex::new(r"(?i)(?:e|episode|x)[\s\._-]*(\d+)").unwrap(),
         re_classifier_season: Regex::new(r"(?i)(?:s|season)[\s\._-]*(\d+)").unwrap(),
-        re_classifier_moviedb_id: Regex::new(r"(?i)\b(tmdb|tvdb|imdb)[\s._=-]?(\d+)\b").unwrap(),
+        // `tt…` forms (`imdbid-tt6549510`, `[tt6549510]`, `imdb=tt6549510`, `{imdb-tt6549510}`) are
+        // matched as well; at least 7 digits are required for them.
+        re_classifier_moviedb_id: Regex::new(
+            r"(?i)\b(tmdb|tvdb|imdb)[\s._=-]?(\d+)\b|\bimdb(?:id)?[\s._=-]*(?:tt)?(\d{7,})\b|\btt(\d{7,})\b"
+        ).unwrap(),
+        re_classifier_imdb_id: Regex::new(r"(?i)\b(?:imdb(?:id)?[\s._=-]*(?:tt)?|tt)(\d{7,})\b").unwrap(),
         re_classifier_camel_case: Regex::new(r"([a-z])([A-Z])").unwrap(),
         re_classifier_brackets_info: Regex::new(r"[\[\{\(].*?[\]\}\)]").unwrap(),
 

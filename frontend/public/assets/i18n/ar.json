@@ -850,6 +850,13 @@
       "RATE_LIMIT_MS": "الحد الأدنى لوقت الانتظار بين طلبات TMDB بالميلي ثانية.\n\nالقيم الأعلى ألطف على واجهة TMDB البرمجية.\n\nأمثلة: `250`، `500`، `1000`.",
       "MATCH_THRESHOLD": "الحد الأدنى لدرجة المطابقة لبحث TMDB. يجب أن تكون القيمة بين 1 - 100"
     },
+    "IMDB_CONFIG": {
+      "ENABLED": "يُفعّل فهرس تقييمات IMDb.\n\nعند التعطيل لا تُحمَّل أي بيانات ولا تُستهلك ذاكرة.",
+      "URL": "مصدر تنزيل مجموعة بيانات تقييمات IMDb.\n\nتستخدم القيمة الفارغة عنوان URL الافتراضي: `https://datasets.imdbws.com/title.ratings.tsv.gz`.",
+      "MIN_VOTES": "تُتجاهل تقييمات IMDb التي حصلت على أصوات أقل.\n\n`0` يحتفظ بجميع التقييمات.\n\nالقيمة الافتراضية `1000` تُزيل العناوين غير المشهورة التي حصلت على أصوات قليلة فقط.",
+      "RATING_SOURCE": "يحدد التقييم الفعّال: يستخدم `imdb_then_provider` تقييم IMDb إذا تجاوز `min_votes`، وإلا تقييم المزود. يستخدم `imdb` تقييمات IMDb فقط. ويحتفظ `provider` بتقييم المزود.",
+      "REPLACE_RATING": "يكتب التقييم الفعّال في حقلي مخرجات Xtream `rating` و`rating_5based`.\n\nعند التعطيل تبقى استجابات Xtream كما هي."
+    },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "اسم الفئة المستخدم في قائمة التشغيل للعناصر من قائمة Trakt هذه.",
       "FUZZY_MATCH_THRESHOLD": "حد التشابه لمطابقة عناصر Trakt مع تدفقات المزود (0-100).",
@@ -1326,6 +1333,16 @@
     "FRIENDLY_NAME": "اسم ودود",
     "FUZZY_MATCHING": "المطابقة الضبابية",
     "GEOIP": "Geo-IP",
+    "IMDB": "IMDb",
+    "IMDB_RATINGS": "تقييمات IMDb",
+    "IMDB_ENABLED": "مُفعّل",
+    "IMDB_URL": "URL",
+    "IMDB_MIN_VOTES": "الحد الأدنى للأصوات",
+    "IMDB_RATING_SOURCE": "مصدر التقييم",
+    "IMDB_RATING_SOURCE_IMDB_THEN_PROVIDER": "IMDb ثم المزود",
+    "IMDB_RATING_SOURCE_IMDB": "IMDb فقط",
+    "IMDB_RATING_SOURCE_PROVIDER": "المزود فقط",
+    "IMDB_REPLACE_RATING": "استبدال التقييم",
     "GEOIP_UNAVAILABLE_POLICY_DENY": "رفض",
     "GEOIP_UNAVAILABLE_POLICY_ALLOW": "سماح",
     "GEOIP_UNAVAILABLE_POLICY": "سياسة عدم توفر Geo-IP",
@@ -1972,6 +1989,7 @@
     "FORCE_UPDATE_START": "بدء التحديث الإجباري",
     "UPDATE_QUALITY": "جودة التحديث",
     "UPDATE_GEOIP_DB": "تحديث قاعدة بيانات Geo-IP",
+    "UPDATE_IMDB_RATINGS": "تحديث تقييمات IMDb",
     "UPDATE_LOCAL_LIBRARY": "تحديث المكتبة المحلية",
     "UPDATE_ON_BOOT": "التحديث عند الإقلاع",
     "LAST_UPDATE": "آخر تحديث",
@@ -2532,6 +2550,12 @@
     "DIRECTOR": "المخرج",
     "RELEASE_DATE": "تاريخ الإصدار",
     "RATING": "التقييم",
+    "PROVIDER_RATING": "تقييم المزود",
+    "IMDB_RATING": "تقييم IMDb",
+    "EFFECTIVE": "فعال",
+    "RATING_TOOLTIP_IMDB": "IMDb {rating} · {votes} صوت",
+    "RATING_TOOLTIP_PROVIDER": "المزود {rating}",
+    "VOTES": "صوت",
     "MANAGED_CHANNELS": "القنوات المُدارة",
     "PLUGIN_REFERENCE_INPUT_MANAGED": "القنوات المُدارة للإدخال",
     "PLUGIN_REFERENCE_TARGET_MANAGED": "القنوات المُدارة للهدف"
@@ -2834,6 +2858,11 @@
     "GEOIP": {
       "FAIL": "فشل تنزيل قاعدة بيانات Geo-IP!",
       "SUCCESS": "تم تنزيل قاعدة بيانات Geo-IP بنجاح"
+    },
+    "IMDB": {
+      "ALREADY_RUNNING": "تحديث تقييمات IMDb قيد التشغيل بالفعل.",
+      "FAIL": "فشل تحديث تقييمات IMDb!",
+      "SUCCESS": "تم تحديث تقييمات IMDb بنجاح ({rows} صفًا)"
     },
     "USER_BOUQUET": {
       "FAIL": "فشل تنزيل باقات المستخدم!"

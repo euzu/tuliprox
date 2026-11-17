@@ -105,6 +105,7 @@ mod tests {
                 override_id: Some(Arc::from("urlhash-v1:abc123blake3")),
                 ..Default::default()
             }),
+            ..Default::default()
         };
 
         assert_eq!(item_override_id(&item_with_override), "urlhash-v1:abc123blake3");
@@ -125,6 +126,7 @@ mod tests {
             input_stream_id: "".into(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         };
 
         assert_eq!(item_override_id(&item_without_override), "pid-456");

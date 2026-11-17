@@ -18,8 +18,8 @@ use chrono::Utc;
 use shared::{
     error::TuliproxError,
     model::{
-        ExplorerEpgState, FieldDelta, ItemOverride, OverrideItemKind, TargetType, UiItemExplorerMeta, UiOverrideState,
-        UiPlaylistItem,
+        compute_rating_origin, ExplorerEpgState, FieldDelta, ItemOverride, OverrideItemKind, TargetType,
+        UiItemExplorerMeta, UiOverrideState, UiPlaylistItem, UiRatingOrigin,
     },
 };
 use std::{
@@ -455,8 +455,22 @@ fn apply_override_to_ui_item(item: &mut UiPlaylistItem, ov: &ItemOverride) {
     }
     match ov.rating {
         FieldDelta::Keep => {}
-        FieldDelta::Clear => item.rating = 0.0,
-        FieldDelta::Set(v) => item.rating = v,
+        FieldDelta::Clear => {
+            item.rating = 0.0;
+            if item.rating_origin != Some(UiRatingOrigin::Imdb) {
+                item.effective_rating = None;
+                item.rating_origin = compute_rating_origin(item.effective_rating, item.imdb_rating);
+            }
+        }
+        FieldDelta::Set(v) => {
+            item.rating = v;
+            if item.rating_origin != Some(UiRatingOrigin::Imdb) {
+                #[allow(clippy::cast_possible_truncation)]
+                let eff = (v.is_finite() && v > 0.0).then_some(v as f32);
+                item.effective_rating = eff;
+                item.rating_origin = compute_rating_origin(item.effective_rating, item.imdb_rating);
+            }
+        }
     }
     match &ov.epg_channel_id {
         FieldDelta::Keep => {}
@@ -798,6 +812,7 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         };
 
         let mut items = vec![item];
@@ -854,6 +869,7 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None, // originally missing
             explorer_meta: None,
+            ..Default::default()
         };
 
         let mut items = vec![item];
@@ -901,6 +917,7 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         };
         let item2 = UiPlaylistItem {
             virtual_id: 2,
@@ -918,6 +935,7 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         };
 
         let mut items = vec![item1, item2];
@@ -965,6 +983,7 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         };
 
         let mut items = vec![vod_item];
@@ -996,6 +1015,7 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&item).expect("serialize item");
@@ -1029,6 +1049,7 @@ mod tests {
                 chno: Some(202_362),
                 ..Default::default()
             }),
+            ..Default::default()
         };
 
         let mut items = vec![item];
@@ -1069,6 +1090,7 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: Some(UiItemExplorerMeta { chno: Some(202_362), ..Default::default() }),
+            ..Default::default()
         };
 
         let mut set = base.clone();
@@ -1102,6 +1124,7 @@ mod tests {
             input_stream_id: "".intern(),
             epg_channel_id: None,
             explorer_meta: None,
+            ..Default::default()
         };
 
         // 1. logo: Keep, logo_small: Set("small.png") -> existing large logo is NOT overwritten
@@ -1401,5 +1424,72 @@ mod tests {
 
         assert_eq!(items[0].title.as_ref(), "WRAL HD Custom");
         assert_eq!(items[1].title.as_ref(), "WRAL DT Custom");
+    }
+
+    #[test]
+    fn override_merge_updates_effective_rating_for_provider_and_leaves_imdb() {
+        // Case 1: Provider-origin item
+        let mut provider_item = UiPlaylistItem {
+            rating: 5.0,
+            effective_rating: Some(5.0),
+            imdb_rating: None,
+            imdb_votes: None,
+            rating_origin: Some(UiRatingOrigin::Provider),
+            ..Default::default()
+        };
+
+        // Setting a new provider rating updates effective_rating and origin remains Provider
+        apply_override_to_ui_item(
+            &mut provider_item,
+            &ItemOverride { rating: FieldDelta::Set(8.5), ..Default::default() },
+        );
+        assert_eq!(provider_item.rating, 8.5);
+        assert_eq!(provider_item.effective_rating, Some(8.5));
+        assert_eq!(provider_item.rating_origin, Some(UiRatingOrigin::Provider));
+
+        // Clearing provider rating clears effective_rating and origin becomes None
+        apply_override_to_ui_item(
+            &mut provider_item,
+            &ItemOverride { rating: FieldDelta::Clear, ..Default::default() },
+        );
+        assert_eq!(provider_item.rating, 0.0);
+        assert_eq!(provider_item.effective_rating, None);
+        assert_eq!(provider_item.rating_origin, None);
+
+        // Case 2: Item with None origin
+        let mut none_item = UiPlaylistItem {
+            rating: 0.0,
+            effective_rating: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            rating_origin: None,
+            ..Default::default()
+        };
+        apply_override_to_ui_item(&mut none_item, &ItemOverride { rating: FieldDelta::Set(7.2), ..Default::default() });
+        assert_eq!(none_item.rating, 7.2);
+        assert_eq!(none_item.effective_rating, Some(7.2));
+        assert_eq!(none_item.rating_origin, Some(UiRatingOrigin::Provider));
+
+        // Case 3: IMDb-origin item
+        let mut imdb_item = UiPlaylistItem {
+            rating: 5.0,
+            effective_rating: Some(8.0),
+            imdb_rating: Some(8.0),
+            imdb_votes: Some(1500),
+            rating_origin: Some(UiRatingOrigin::Imdb),
+            ..Default::default()
+        };
+
+        // Setting a provider override changes item.rating, but leaves effective_rating and rating_origin unchanged
+        apply_override_to_ui_item(&mut imdb_item, &ItemOverride { rating: FieldDelta::Set(9.5), ..Default::default() });
+        assert_eq!(imdb_item.rating, 9.5);
+        assert_eq!(imdb_item.effective_rating, Some(8.0));
+        assert_eq!(imdb_item.rating_origin, Some(UiRatingOrigin::Imdb));
+
+        // Clearing provider override changes item.rating to 0, but leaves effective_rating and rating_origin unchanged
+        apply_override_to_ui_item(&mut imdb_item, &ItemOverride { rating: FieldDelta::Clear, ..Default::default() });
+        assert_eq!(imdb_item.rating, 0.0);
+        assert_eq!(imdb_item.effective_rating, Some(8.0));
+        assert_eq!(imdb_item.rating_origin, Some(UiRatingOrigin::Imdb));
     }
 }

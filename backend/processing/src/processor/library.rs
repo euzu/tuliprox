@@ -7,7 +7,7 @@ use shared::{
         SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, UUIDType,
         VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster,
     },
-    utils::{concat_path_leading_slash, generate_local_playlist_uuid, Internable},
+    utils::{concat_path_leading_slash, generate_local_playlist_uuid, parse_imdb_id, Internable},
 };
 use std::{collections::HashMap, path::Path, sync::Arc};
 use tuliprox_core::model::{AppConfig, ConfigInput};
@@ -333,6 +333,10 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
     let properties = VideoStreamProperties {
         name: movie.title.clone().into(),
         plugin_fingerprint: None,
+        imdb: movie.imdb_id.as_deref().and_then(parse_imdb_id),
+        imdb_rating: None,
+        imdb_votes: None,
+        effective_rating: None,
         category_id: 0,
         stream_id: 0,
         stream_icon: poster.unwrap_or("").to_owned().into(),
@@ -492,6 +496,10 @@ pub fn metadata_cache_entry_to_xtream_series_info(
     let properties = SeriesStreamProperties {
         name: series.title.clone().into(),
         plugin_fingerprint: None,
+        imdb: series.imdb_id.as_deref().and_then(parse_imdb_id),
+        imdb_rating: None,
+        imdb_votes: None,
+        effective_rating: None,
         category_id: 0,
         series_id: 0,
         backdrop_path: series
@@ -538,6 +546,61 @@ mod tests {
         entry.thumbnail_hash = Some("thumb-hash".to_string());
 
         assert_eq!(thumbnail_url(&entry, "/api/v1").as_deref(), Some("/api/v1/library/thumbnail/test-uuid-123"),);
+    }
+
+    #[test]
+    fn library_metadata_imdb_ids_become_stream_property_ids() {
+        let movie = MetadataCacheEntry::new(
+            "/tmp/movie/matrix.mkv".to_string(),
+            123,
+            456,
+            MediaMetadata::Movie(MovieMetadata {
+                title: "The Matrix".to_string(),
+                imdb_id: Some("tt0133093".to_string()),
+                ..MovieMetadata::default()
+            }),
+        );
+        let Some(StreamProperties::Video(video)) = super::metadata_cache_entry_to_xtream_movie_info(&movie, "/api/v1")
+        else {
+            panic!("expected movie stream properties");
+        };
+        assert_eq!(video.imdb, Some(133_093));
+
+        let series = MetadataCacheEntry::new(
+            "/tmp/show/S01E01.mkv".to_string(),
+            123,
+            456,
+            MediaMetadata::Series(SeriesMetadata {
+                title: "Breaking Bad".to_string(),
+                imdb_id: Some("tt0903747".to_string()),
+                ..SeriesMetadata::default()
+            }),
+        );
+        let Some(StreamProperties::Series(series_props)) =
+            metadata_cache_entry_to_xtream_series_info(&series, "/api/v1")
+        else {
+            panic!("expected series stream properties");
+        };
+        assert_eq!(series_props.imdb, Some(903_747));
+    }
+
+    #[test]
+    fn library_metadata_without_an_imdb_id_stays_unset() {
+        let entry = MetadataCacheEntry::new(
+            "/tmp/movie/matrix.mkv".to_string(),
+            123,
+            456,
+            MediaMetadata::Movie(MovieMetadata {
+                title: "The Matrix".to_string(),
+                imdb_id: Some("not-an-id".to_string()),
+                ..MovieMetadata::default()
+            }),
+        );
+        let Some(StreamProperties::Video(video)) = super::metadata_cache_entry_to_xtream_movie_info(&entry, "/api/v1")
+        else {
+            panic!("expected movie stream properties");
+        };
+        assert_eq!(video.imdb, None);
     }
 
     #[test]

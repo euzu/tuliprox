@@ -850,6 +850,13 @@
       "RATE_LIMIT_MS": "Tiempo de espera mínimo entre solicitudes a TMDB en milisegundos.\n\nValores más altos son más suaves con la API de TMDB.\n\nEjemplos: `250`, `500`, `1000`.",
       "MATCH_THRESHOLD": "Puntuación de coincidencia mínima para la búsqueda en TMDB. El valor debe estar entre 1 y 100"
     },
+    "IMDB_CONFIG": {
+      "ENABLED": "Habilita el índice de valoraciones de IMDb.\n\nSi se desactiva, no se carga ningún conjunto de datos ni se usa memoria.",
+      "URL": "Origen de descarga del conjunto de datos de valoraciones de IMDb.\n\nUn valor vacío usa la URL predeterminada: `https://datasets.imdbws.com/title.ratings.tsv.gz`.",
+      "MIN_VOTES": "Se ignoran las valoraciones de IMDb con menos votos.\n\n`0` conserva todas las valoraciones.\n\nEl valor predeterminado `1000` elimina títulos oscuros con solo unos pocos votos.",
+      "RATING_SOURCE": "Selecciona la valoración efectiva: `imdb_then_provider` usa la valoración de IMDb cuando alcanza `min_votes`; en caso contrario, la del proveedor. `imdb` usa solo valoraciones de IMDb. `provider` conserva la valoración del proveedor.",
+      "REPLACE_RATING": "Escribe la valoración efectiva en los campos de salida de Xtream `rating` y `rating_5based`.\n\nSi se desactiva, las respuestas de Xtream permanecen sin cambios."
+    },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "El nombre de categoría utilizado en la lista de reproducción para los elementos de esta lista de Trakt.",
       "FUZZY_MATCH_THRESHOLD": "Umbral de similitud para emparejar elementos de Trakt con streams de proveedor (0-100).",
@@ -1327,6 +1334,16 @@
     "FRIENDLY_NAME": "Nombre descriptivo",
     "FUZZY_MATCHING": "Coincidencia difusa",
     "GEOIP": "Geo-IP",
+    "IMDB": "IMDb",
+    "IMDB_RATINGS": "Valoraciones de IMDb",
+    "IMDB_ENABLED": "Habilitado",
+    "IMDB_URL": "URL",
+    "IMDB_MIN_VOTES": "Votos mínimos",
+    "IMDB_RATING_SOURCE": "Fuente de valoración",
+    "IMDB_RATING_SOURCE_IMDB_THEN_PROVIDER": "IMDb y luego proveedor",
+    "IMDB_RATING_SOURCE_IMDB": "Solo IMDb",
+    "IMDB_RATING_SOURCE_PROVIDER": "Solo proveedor",
+    "IMDB_REPLACE_RATING": "Reemplazar valoración",
     "GEOIP_UNAVAILABLE_POLICY_DENY": "Denegar",
     "GEOIP_UNAVAILABLE_POLICY_ALLOW": "Permitir",
     "GEOIP_UNAVAILABLE_POLICY": "Política ante Geo-IP no disponible",
@@ -2039,6 +2056,7 @@
     "FORCE_UPDATE_START": "Iniciar actualización forzada",
     "UPDATE_QUALITY": "Calidad de actualización",
     "UPDATE_GEOIP_DB": "Actualizar base de datos Geo-IP",
+    "UPDATE_IMDB_RATINGS": "Actualizar valoraciones de IMDb",
     "UPDATE_LOCAL_LIBRARY": "Actualizar biblioteca local",
     "UPDATE_ON_BOOT": "Actualizar al iniciar",
     "LAST_UPDATE": "Última actualización",
@@ -2532,6 +2550,12 @@
     "DIRECTOR": "Director",
     "RELEASE_DATE": "Fecha de estreno",
     "RATING": "Calificación",
+    "PROVIDER_RATING": "Puntuación del proveedor",
+    "IMDB_RATING": "Puntuación de IMDb",
+    "EFFECTIVE": "efectivo",
+    "RATING_TOOLTIP_IMDB": "IMDb {rating} · {votes} votos",
+    "RATING_TOOLTIP_PROVIDER": "Proveedor {rating}",
+    "VOTES": "votos",
     "MANAGED_CHANNELS": "Canales gestionados",
     "PLUGIN_REFERENCE_INPUT_MANAGED": "Canales gestionados de la entrada",
     "PLUGIN_REFERENCE_TARGET_MANAGED": "Canales gestionados del destino"
@@ -2834,6 +2858,11 @@
     "GEOIP": {
       "FAIL": "¡No se pudo descargar la base de datos Geo-IP!",
       "SUCCESS": "Base de datos Geo-IP descargada correctamente"
+    },
+    "IMDB": {
+      "ALREADY_RUNNING": "La actualización de valoraciones de IMDb ya está en ejecución.",
+      "FAIL": "¡Error al actualizar las valoraciones de IMDb!",
+      "SUCCESS": "Valoraciones de IMDb actualizadas con éxito ({rows} filas)"
     },
     "USER_BOUQUET": {
       "FAIL": "¡No se pudieron descargar los bouquets de usuario!"

@@ -1,11 +1,11 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n"}
 field = { ^"group" | ^"title" | ^"name" | ^"genre" | ^"url" | ^"input" | ^"caption" | ^"epgid"}
-numeric_field = { ^"chno" | ^"quality" }
+numeric_field = { ^"chno" | ^"quality" | ^"rating" | ^"votes" }
 and = { ^"and" }
 or = { ^"or" }
 not = { ^"not" }
 regexp = @{ "\"" ~ ( "\\\"" | (!"\"" ~ ANY) )* ~ "\"" }
-number = @{ ASCII_DIGIT+ }
+number = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
 type_value = { ^"live" | ^"vod" | ^"movie" | ^"series" }
 type_comparison = { ^"type" ~ "=" ~ type_value }
 field_comparison_value = _{ regexp }
@@ -14,7 +14,7 @@ str_op = { "!=" | "=" | ^"contains" | ^"startswith" }
 string_comparison = { field ~ str_op ~ regexp }
 presence_negation = { ^"not" }
 presence_op = { (^"is" ~ presence_negation?) | "!=" | "=" }
-presence_comparison = { field ~ presence_op ~ ^"empty" }
+presence_comparison = { (field | numeric_field) ~ presence_op ~ ^"empty" }
 num_op = { ">=" | "<=" | "!=" | ">" | "<" | "=" }
 numeric_comparison = { numeric_field ~ num_op ~ number }
 set_values = { regexp ~ ("," ~ regexp)* }

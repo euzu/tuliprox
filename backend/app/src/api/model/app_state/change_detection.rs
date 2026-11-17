@@ -26,7 +26,7 @@ pub(super) struct TargetChanges {
 }
 
 create_bitset!(
-    u8,
+    u16,
     UpdateChangesFlags,
     Scheduler,
     Hdhomerun,
@@ -35,7 +35,8 @@ create_bitset!(
     ProviderDns,
     Metadata,
     QosAggregation,
-    Downloads
+    Downloads,
+    Imdb
 );
 
 pub(in crate::api) struct UpdateChanges {
@@ -84,6 +85,11 @@ impl AppState {
 
         let geoip_enabled = config.is_geoip_enabled();
         let geoip_enabled_old = old_config.is_geoip_enabled();
+        let imdb_enabled = config.is_imdb_enabled();
+        let imdb_enabled_old = old_config.is_imdb_enabled();
+        let old_imdb = old_config.metadata_update.as_ref().map(|m| &m.imdb);
+        let new_imdb = config.metadata_update.as_ref().map(|m| &m.imdb);
+        let imdb_url_changed = old_imdb.map(|i| &i.url) != new_imdb.map(|i| &i.url);
         let changed_storage_dir = old_config.storage_dir != config.storage_dir;
         let changed_qos_aggregation = qos_aggregation_changed(&old_config, config);
         let changed_recording = change_detect!(
@@ -94,12 +100,19 @@ impl AppState {
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
         changes.set_flag_if(
-            changed_schedules || changed_library_enabled || geoip_enabled != geoip_enabled_old,
+            changed_schedules
+                || changed_library_enabled
+                || geoip_enabled != geoip_enabled_old
+                || imdb_enabled != imdb_enabled_old,
             UpdateChangesFlags::Scheduler,
         );
         changes.set_flag_if(changed_hdhomerun, UpdateChangesFlags::Hdhomerun);
         changes.set_flag_if(changed_file_watch, UpdateChangesFlags::FileWatch);
         changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
+        changes.set_flag_if(
+            imdb_enabled != imdb_enabled_old || (imdb_enabled && (imdb_url_changed || changed_storage_dir)),
+            UpdateChangesFlags::Imdb,
+        );
         changes.set_flag_if(changed_storage_dir, UpdateChangesFlags::Metadata);
         changes.set_flag_if(changed_qos_aggregation || changed_storage_dir, UpdateChangesFlags::QosAggregation);
         changes.set_flag_if(changed_recording, UpdateChangesFlags::Downloads);

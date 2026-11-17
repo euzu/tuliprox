@@ -36,6 +36,7 @@ fn make_test_item(
             epg_state: None,
             ..Default::default()
         }),
+        ..Default::default()
     })
 }
 

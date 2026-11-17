@@ -51,6 +51,10 @@ impl PlaylistItem {
                         Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                             name: header.name.clone(),
                             plugin_fingerprint: None,
+                            imdb: None,
+                            imdb_rating: None,
+                            imdb_votes: None,
+                            effective_rating: None,
                             category_id: header.category_id,
                             stream_id: header.virtual_id.get(),
                             stream_icon: "".intern(),
@@ -91,6 +95,10 @@ impl PlaylistItem {
                             Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
                                 name: header.name.clone(),
                                 plugin_fingerprint: None,
+                                imdb: None,
+                                imdb_rating: None,
+                                imdb_votes: None,
+                                effective_rating: None,
                                 category_id: header.category_id,
                                 tmdb: None,
                                 series_id: 0,

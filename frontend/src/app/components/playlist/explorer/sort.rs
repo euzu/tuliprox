@@ -1,4 +1,8 @@
-use shared::model::{ExplorerEpgState, UiPlaylistItem, XtreamCluster};
+use crate::model::{format_number, t_fmt, Translator};
+use shared::{
+    model::{ExplorerEpgState, UiPlaylistItem, UiRatingOrigin, XtreamCluster},
+    utils::format_float_localized,
+};
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,12 +99,38 @@ pub fn extract_year(name: &str, title: &str) -> Option<u32> {
 }
 
 #[must_use]
-pub fn extract_rating(rating: f64) -> Option<u64> {
-    if rating > 0.001 && !rating.is_nan() {
-        Some((rating * 1000.0).round() as u64)
-    } else {
-        None
+pub fn extract_rating(rating: Option<f32>) -> Option<u64> {
+    rating.and_then(|r| {
+        let r = f64::from(r);
+        if r > 0.001 && r.is_finite() {
+            Some((r * 1000.0).round() as u64)
+        } else {
+            None
+        }
+    })
+}
+
+/// Formats the effective rating badge and source tooltip for an item.
+/// Returns `None` if the item has no effective rating.
+#[must_use]
+pub fn effective_rating_display(item: &UiPlaylistItem, translate: &impl Translator) -> Option<(String, String)> {
+    let eff = item.effective_rating?;
+    if !eff.is_finite() || eff <= 0.001 {
+        return None;
     }
+    let eff_f64 = f64::from(eff);
+    let rating_str = format_float_localized(eff_f64, 1, false);
+    let badge = format!("★ {rating_str}");
+    let tooltip = match item.rating_origin {
+        Some(UiRatingOrigin::Imdb) => {
+            let votes_str = item.imdb_votes.map(|v| format_number(v as usize)).unwrap_or_default();
+            t_fmt(translate, "LABEL.RATING_TOOLTIP_IMDB", &[("rating", &rating_str), ("votes", &votes_str)])
+        }
+        Some(UiRatingOrigin::Provider) | None => {
+            t_fmt(translate, "LABEL.RATING_TOOLTIP_PROVIDER", &[("rating", &rating_str)])
+        }
+    };
+    Some((badge, tooltip))
 }
 
 #[must_use]
@@ -229,8 +259,8 @@ pub fn sort_items(items: &mut [Rc<UiPlaylistItem>], sort: ExplorerSort, desc: bo
             &b.provider_id,
         ),
         ExplorerSort::Rating => compare_with_missing_last(
-            extract_rating(a.rating),
-            extract_rating(b.rating),
+            extract_rating(a.effective_rating),
+            extract_rating(b.effective_rating),
             desc,
             &a.provider_id,
             &b.provider_id,
@@ -283,5 +313,11 @@ mod tests;
 /// Rating filter of VOD/series: when active, keep items rated at least `min` stars (0-10 scale).
 #[must_use]
 pub fn passes_rating_filter(item: &UiPlaylistItem, active: bool, min: u8) -> bool {
-    !active || item.rating >= f64::from(min)
+    if !active {
+        return true;
+    }
+    match item.effective_rating {
+        Some(r) => r.is_finite() && r >= f32::from(min),
+        None => min == 0,
+    }
 }

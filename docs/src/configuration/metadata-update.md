@@ -25,6 +25,7 @@ metadata_update:
   resolve:
   probe:
   tmdb:
+  imdb:
   ffprobe:
 ```
 
@@ -143,7 +144,132 @@ metadata_update:
 
 ---
 
-## 5. FFprobe Process Rules (`ffprobe`)
+## 5. IMDb Ratings (`imdb`)
+
+Downloads the official IMDb ratings dataset into a local index and exposes the rating and the vote count to filters.
+The feature is opt-in, needs no API key and works independently of TMDB.
+
+```yaml
+metadata_update:
+  imdb:
+    enabled: false
+    url: https://datasets.imdbws.com/title.ratings.tsv.gz
+    min_votes: 1000
+    rating_source: imdb_then_provider
+    replace_rating: false
+```
+
+| Parameter        | Type   | Default                                            | Description                                                                                                      |
+|:-----------------|:-------|:---------------------------------------------------|:-----------------------------------------------------------------------------------------------------------------|
+| `enabled`        | Bool   | `false`                                            | Master switch for the IMDb ratings. When disabled, the table is never read.                                      |
+| `url`            | String | `https://datasets.imdbws.com/title.ratings.tsv.gz` | Download source of the dataset. An empty value uses the default URL.                                             |
+| `min_votes`      | Int    | `1000`                                             | IMDb ratings with fewer votes are ignored. `0` keeps all ratings.                                                |
+| `rating_source`  | String | `"imdb_then_provider"`                             | Selects the effective rating: `imdb_then_provider`, `imdb` or `provider`. See [Rating Sources](#rating-sources). |
+| `replace_rating` | Bool   | `false`                                            | `true` writes the effective rating to the Xtream output fields `rating` and `rating_5based`.                     |
+
+### Download & Storage
+
+Tuliprox downloads the official IMDb non-commercial dataset `title.ratings.tsv.gz`. It has about 8 MB, contains about
+1.5 million titles and is refreshed by IMDb once per day.
+
+The table is stored as `imdb_ratings.db` in the storage directory, as a B+Tree. It is read only during a playlist
+update: the run loads it into memory once, or, with `disk_based_processing: true`, queries it on disk and loads
+nothing. Between updates the table uses no memory. If the file is missing at startup, one background download starts
+and startup continues without waiting for it.
+
+A failed, truncated or non-gzip download never blocks a playlist update; the last good table stays in place. A new
+table with less than half the rows of the current table is rejected. Without any table the feature does nothing and
+logs a warning.
+
+Ratings are looked up during every playlist update against the newest table, so stored ratings never go stale.
+
+### IMDb ID Sources
+
+Tuliprox resolves the IMDb id (`tt1234567`) of a VOD or series entry in this order:
+
+1. Title tags such as `imdbid-tt6549510`, `[tt6549510]` or `imdb=tt6549510`. The first id wins; the digits need at
+   least 7 characters.
+2. Provider data and media-server provider ids (Plex, Emby, Jellyfin).
+3. TMDB external ids (movie and TV) found by the background metadata resolution.
+4. Local library NFO or TMDB metadata.
+
+An entry whose IMDb id comes only from TMDB receives its rating on the playlist update after the background metadata
+resolution found the id. Title tags and provider ids work on the first update.
+
+### Rating Sources
+
+The result of the rating lookup is the **effective rating**:
+
+* `imdb_then_provider` (default): the IMDb rating when its votes reach `min_votes`, else the provider or TMDB
+  rating, else no rating. This is the same approach as the Jellyfin IMDb rating updater.
+* `imdb`: only IMDb ratings that pass `min_votes`; every other item stays unrated. Use `Rating IS EMPTY` in a filter
+  to find these items.
+* `provider`: the provider rating only. The filter fields still work.
+
+When IMDb is disabled, the effective rating is the provider rating.
+
+### Why `min_votes` Matters
+
+IMDb shows a rating from 5 votes, so obscure titles with a few dozen fan votes reach 8 or 9. The default `min_votes` of
+`1000` removes that long tail; the IMDb Top 250 itself requires 25,000 votes. `min_votes` is the main tuning knob.
+Example: *Kill Em All 2* (2024, `tt6549510`) has 4.2 on IMDb and 6.8 on TMDB.
+
+### Rating and Votes in Filters
+
+The filter DSL exposes two fields:
+
+* `Rating` — the effective rating from 0 to 10 with one fraction digit.
+* `Votes` — the raw IMDb vote count, not limited by `min_votes`.
+
+Series use the series rating. Episode ratings are not supported.
+
+* `Rating > 6`
+* `Rating >= 6.5 AND Votes >= 5000`
+* `Type = movie AND (Rating >= 7 OR Rating IS EMPTY)`
+
+See [Filter](source.md#322-filter) for the complete operator syntax.
+
+### Xtream Output
+
+With `replace_rating: true`, Tuliprox writes the effective rating to the Xtream output fields `rating` and
+`rating_5based` (`rating / 2`), so clients show it. With `false` (the default), the Xtream output stays unchanged.
+
+### Playlist Explorer
+
+The playlist explorer shows the effective rating in the rating column, on the poster badge, in the sort order and in
+the minimum-rating filter. The tooltip names the source, for example `IMDb 4.2 · 12,345 votes` or `Provider 6.8`.
+The detail panel lists the provider rating (editable through overrides) and the IMDb rating with its vote count,
+and marks the effective one.
+
+### Schedule
+
+Refresh the index with the schedule type `ImdbRatingsUpdate`:
+
+```yaml
+schedules:
+  - schedule: "0 0 4 * * * *"
+    type: ImdbRatingsUpdate
+```
+
+The aliases `imdb_ratings_update` and `imdb` are accepted. A daily run is the recommended default. The schedule type
+requires `metadata_update.imdb.enabled: true`.
+
+In the Web UI, the metadata update configuration page has an IMDb section, and the schedule editor offers the new
+type.
+
+### Manual Update
+
+A manual ratings download can be triggered in the Web UI via the **Update IMDb ratings** button in the playlist update
+view, by sending a `GET /api/v1/imdb/update` request over the REST API, or through the `update_imdb_ratings` MCP tool.
+A download in progress returns `409 Conflict`.
+
+> **License:** The IMDb datasets are for personal and non-commercial use only. See
+> [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/). The operator is responsible
+> for compliance.
+
+---
+
+## 6. FFprobe Process Rules (`ffprobe`)
 
 Detailed settings for the technical stream analysis process.
 

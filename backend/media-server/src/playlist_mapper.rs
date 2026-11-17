@@ -10,7 +10,7 @@ use shared::{
         SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties,
         VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster,
     },
-    utils::{generate_provider_playlist_uuid, Internable},
+    utils::{generate_provider_playlist_uuid, parse_imdb_id, Internable},
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -193,6 +193,10 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
             additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                 name: movie.title.clone(),
                 plugin_fingerprint: None,
+                imdb: provider_imdb_id(&movie.provider_hints),
+                imdb_rating: None,
+                imdb_votes: None,
+                effective_rating: None,
                 stream_id: 0,
                 stream_icon: logo,
                 direct_source: "".intern(),
@@ -243,6 +247,10 @@ fn media_server_series_to_playlist_item(series: &MediaServerSeries, seasons: &[&
             additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
                 name: series.title.clone(),
                 plugin_fingerprint: None,
+                imdb: provider_imdb_id(&series.provider_hints),
+                imdb_rating: None,
+                imdb_votes: None,
+                effective_rating: None,
                 series_id: 0,
                 cover: logo,
                 backdrop_path: None,
@@ -445,6 +453,15 @@ fn duration_secs_to_xtream_duration(duration_secs: u32) -> Arc<str> {
     let minutes = (duration_secs % 3600) / 60;
     let seconds = duration_secs % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}").into()
+}
+
+fn provider_imdb_id(hints: &[MediaServerProviderIdHint]) -> Option<u32> {
+    hints.iter().find_map(|hint| {
+        if !hint.namespace.eq_ignore_ascii_case("imdb") {
+            return None;
+        }
+        parse_imdb_id(hint.value.as_ref())
+    })
 }
 
 fn provider_tmdb_id(hints: &[MediaServerProviderIdHint]) -> Option<u32> {
@@ -1035,6 +1052,41 @@ mod tests {
             episode.movie_image.as_ref(),
             "media-server://image/emby/media_server/server/episode?image_kind=Primary&tag=tag-redacted"
         );
+    }
+
+    #[test]
+    fn maps_imdb_provider_hints_to_the_stream_properties() {
+        let mut movie = movie();
+        movie.provider_hints = vec![MediaServerProviderIdHint { namespace: "IMDb".into(), value: "tt0133093".into() }];
+        let mut series = series();
+        series.provider_hints = vec![MediaServerProviderIdHint { namespace: "imdb".into(), value: "tt0903747".into() }];
+
+        let groups = media_server_catalog_snapshot_to_playlist(&MediaServerCatalogSnapshot {
+            movies: vec![movie],
+            series: vec![series],
+            ..MediaServerCatalogSnapshot::default()
+        });
+
+        let Some(StreamProperties::Video(video)) = &groups[0].channels[0].header.additional_properties else {
+            panic!("expected video properties");
+        };
+        assert_eq!(video.imdb, Some(133_093));
+
+        let Some(StreamProperties::Series(series_props)) = &groups[1].channels[0].header.additional_properties else {
+            panic!("expected series properties");
+        };
+        assert_eq!(series_props.imdb, Some(903_747));
+    }
+
+    #[test]
+    fn ignores_invalid_media_server_imdb_hints() {
+        let hints = vec![
+            MediaServerProviderIdHint { namespace: "imdb".into(), value: "tt-redacted".into() },
+            MediaServerProviderIdHint { namespace: "imdb".into(), value: "0".into() },
+            MediaServerProviderIdHint { namespace: "imdb".into(), value: "tt99999999999".into() },
+        ];
+
+        assert_eq!(provider_imdb_id(&hints), None);
     }
 
     #[test]

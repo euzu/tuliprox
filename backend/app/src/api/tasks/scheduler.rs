@@ -6,6 +6,7 @@ use crate::{
     model::{AppConfig, ProcessTargets, ScheduleConfig},
     processing::{
         geoip::GeoIpUpdateError,
+        imdb::ImdbUpdateError,
         processor::{exec_processing, ProcessingRun},
     },
     utils::exit,
@@ -58,6 +59,7 @@ pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, cance
                 .as_ref()
                 .and_then(|reverse_proxy| reverse_proxy.geoip.as_ref())
                 .is_some_and(|geoip| geoip.enabled),
+            ScheduleTaskType::ImdbRatingsUpdate => config.is_imdb_enabled(),
             // A plugin's `tasks:` entry (plan §7 *Scheduled plugin tasks*); the
             // post-load check already rejected an unknown plugin or task.
             ScheduleTaskType::PluginTask => {
@@ -112,7 +114,10 @@ pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, cance
                     .await;
                 });
             }
-            ScheduleTaskType::LibraryScan | ScheduleTaskType::GeoIpUpdate | ScheduleTaskType::PluginTask => {
+            ScheduleTaskType::LibraryScan
+            | ScheduleTaskType::GeoIpUpdate
+            | ScheduleTaskType::ImdbRatingsUpdate
+            | ScheduleTaskType::PluginTask => {
                 tokio::spawn(async move {
                     start_scheduler(
                         http_client,
@@ -259,6 +264,9 @@ async fn start_scheduler(
                         ScheduleTaskType::GeoIpUpdate => {
                             run_geoip_update(&app_state, expression);
                         }
+                        ScheduleTaskType::ImdbRatingsUpdate => {
+                            run_imdb_ratings_update(&app_state, expression);
+                        }
                         ScheduleTaskType::PluginTask => {
                             if let Some((plugin, task)) = &plugin_task {
                                 run_scheduled_plugin_task(&app_state, plugin, task, datetime.timestamp(), expression);
@@ -336,6 +344,24 @@ fn run_geoip_update(app_state: &Arc<AppState>, schedule: &str) {
                 // an operator running on a stale database never found out.
                 let _ = app_state.event_manager.send_event(EventMessage::ScheduledTaskFailed(
                     ScheduledTaskFailure::new(ScheduleTaskType::GeoIpUpdate, err.to_string()).with_schedule(schedule),
+                ));
+            }
+        }
+    });
+}
+
+fn run_imdb_ratings_update(app_state: &Arc<AppState>, schedule: &str) {
+    let app_state = Arc::clone(app_state);
+    let schedule = schedule.to_string();
+    tokio::spawn(async move {
+        if let Err(err) = app_state.update_imdb_ratings().await {
+            // `Disabled` and `AlreadyRunning` are not failures - the task found
+            // nothing to do or coalesced into a concurrent run.
+            if !matches!(err, ImdbUpdateError::Disabled | ImdbUpdateError::AlreadyRunning) {
+                log::error!("Scheduled IMDb ratings update failed: {err}");
+                let _ = app_state.event_manager.send_event(EventMessage::ScheduledTaskFailed(
+                    ScheduledTaskFailure::new(ScheduleTaskType::ImdbRatingsUpdate, err.to_string())
+                        .with_schedule(schedule),
                 ));
             }
         }

@@ -87,6 +87,8 @@ pub use self::routes::{
     v1_api_playlist_register_protected, v1_api_playlist_register_public, v1_api_playlist_register_with_permissions,
 };
 #[cfg(test)]
+pub(in crate::api) use self::update::imdb_update_result_to_response;
+#[cfg(test)]
 use self::update::read_playlist_update_input_status;
 use self::{
     analytics::{playlist_analytics, playlist_analytics_unmapped_csv},
@@ -104,7 +106,7 @@ use self::{
         create_config_input_for_m3u, create_config_input_for_xtream, playlist_resolve_url, playlist_resource,
         resolve_provider_url_with_input,
     },
-    update::{playlist_update, playlist_update_status_protected, playlist_update_status_response},
+    update::{imdb_update, playlist_update, playlist_update_status_protected, playlist_update_status_response},
     webplayer::{build_playlist_webplayer_url, playlist_webplayer, playlist_webplayer_stream},
 };
 pub(in crate::api) use self::{

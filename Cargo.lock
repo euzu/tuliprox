@@ -5667,7 +5667,9 @@ name = "tuliprox-processing"
 version = "3.3.203"
 dependencies = [
  "arc-swap",
+ "async-compression",
  "chrono",
+ "flate2",
  "futures",
  "indexmap",
  "log",
@@ -5699,6 +5701,7 @@ dependencies = [
  "tuliprox-parser",
  "tuliprox-repository",
  "tuliprox-session",
+ "url",
 ]
 
 [[package]]

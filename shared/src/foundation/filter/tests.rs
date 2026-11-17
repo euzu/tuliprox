@@ -1,7 +1,10 @@
 use super::{Filter, FilterBuilder, Leaf, Node, StringOperator};
 use crate::{
     foundation::{filter::get_filter, prepare_templates, value_provider::ValueProvider},
-    model::{ItemField, PatternTemplate, PlaylistItem, PlaylistItemHeader, PlaylistItemType, TemplateValue},
+    model::{
+        ItemField, PatternTemplate, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties,
+        TemplateValue, VideoStreamProperties,
+    },
     utils::{Internable, CONSTANTS},
 };
 use std::borrow::Cow;
@@ -668,4 +671,144 @@ fn test_filter_drops_deep_chain_on_small_stack() {
         .expect("spawn")
         .join();
     assert!(dropped.is_ok(), "dropping a deep chain must not touch the stack");
+}
+
+#[test]
+fn test_filter_decimal_numeric_round_trip() {
+    assert_filter_round_trip("Rating >= 6.5");
+    assert_filter_round_trip("Votes >= 5000");
+    assert_filter_round_trip("Chno > 5");
+    assert_filter_round_trip("Quality >= 2");
+    assert_filter_round_trip("Rating < 7");
+}
+
+#[test]
+fn test_filter_numeric_parse_errors() {
+    assert!(get_filter("Rating >= 6.55", None).is_err());
+    assert!(get_filter("Rating >= 18446744073709551616", None).is_err());
+    assert!(get_filter("Votes >= 2000000000000000000", None).is_err());
+}
+
+#[test]
+fn test_filter_rating_and_votes_eval() {
+    let video_item = |rating: Option<f32>, votes: Option<u32>| PlaylistItem {
+        header: PlaylistItemHeader {
+            name: "Test Title".into(),
+            group: "Movies".intern(),
+            additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                effective_rating: rating,
+                imdb_votes: votes,
+                ..VideoStreamProperties::default()
+            }))),
+            ..Default::default()
+        },
+    };
+
+    let f_ge_65 = get_filter("Rating >= 6.5", None).expect("filter parses");
+    let f_lt_65 = get_filter("Rating < 6.5", None).expect("filter parses");
+    let f_ne_65 = get_filter("Rating != 6.5", None).expect("filter parses");
+    let f_eq_65 = get_filter("Rating = 6.5", None).expect("filter parses");
+
+    let p_65 = video_item(Some(6.5), None);
+    let p_64 = video_item(Some(6.4), None);
+    let unrated = video_item(None, None);
+
+    // rating 6.5 matches >= 6.5, 6.4 does not
+    assert!(f_ge_65.filter(&ValueProvider { pli: &p_65, match_as_ascii: false }));
+    assert!(!f_ge_65.filter(&ValueProvider { pli: &p_64, match_as_ascii: false }));
+
+    // unrated never matches >=, <, !=
+    assert!(!f_ge_65.filter(&ValueProvider { pli: &unrated, match_as_ascii: false }));
+    assert!(!f_lt_65.filter(&ValueProvider { pli: &unrated, match_as_ascii: false }));
+    assert!(!f_ne_65.filter(&ValueProvider { pli: &unrated, match_as_ascii: false }));
+
+    // Rating is empty selects unrated
+    let f_empty = get_filter("Rating is empty", None).expect("filter parses");
+    let f_not_empty = get_filter("Rating is not empty", None).expect("filter parses");
+    assert!(f_empty.filter(&ValueProvider { pli: &unrated, match_as_ascii: false }));
+    assert!(!f_empty.filter(&ValueProvider { pli: &p_65, match_as_ascii: false }));
+    assert!(!f_not_empty.filter(&ValueProvider { pli: &unrated, match_as_ascii: false }));
+    assert!(f_not_empty.filter(&ValueProvider { pli: &p_65, match_as_ascii: false }));
+
+    // floating input 6.45 rounds half-way away from zero to 6.5 in tenths ((6.45 * 10.0).round() == 65.0)
+    let p_645 = video_item(Some(6.45), None);
+    assert!(f_ge_65.filter(&ValueProvider { pli: &p_645, match_as_ascii: false }));
+    assert!(f_eq_65.filter(&ValueProvider { pli: &p_645, match_as_ascii: false }));
+
+    // votes
+    let f_votes = get_filter("Votes >= 5000", None).expect("filter parses");
+    let p_votes_5000 = video_item(None, Some(5000));
+    let p_votes_4999 = video_item(None, Some(4999));
+    let p_no_votes = video_item(None, None);
+    assert!(f_votes.filter(&ValueProvider { pli: &p_votes_5000, match_as_ascii: false }));
+    assert!(!f_votes.filter(&ValueProvider { pli: &p_votes_4999, match_as_ascii: false }));
+    assert!(!f_votes.filter(&ValueProvider { pli: &p_no_votes, match_as_ascii: false }));
+
+    let f_votes_empty = get_filter("Votes is empty", None).expect("filter parses");
+    let f_votes_not_empty = get_filter("Votes is not empty", None).expect("filter parses");
+    assert!(f_votes_empty.filter(&ValueProvider { pli: &p_no_votes, match_as_ascii: false }));
+    assert!(!f_votes_empty.filter(&ValueProvider { pli: &p_votes_5000, match_as_ascii: false }));
+    assert!(!f_votes_not_empty.filter(&ValueProvider { pli: &p_no_votes, match_as_ascii: false }));
+    assert!(f_votes_not_empty.filter(&ValueProvider { pli: &p_votes_5000, match_as_ascii: false }));
+
+    // string representation of rating in value provider uses shortest decimal form (7.0 -> "7", 6.5 -> "6.5")
+    let p_70 = video_item(Some(7.0), None);
+    let vp_70 = ValueProvider { pli: &p_70, match_as_ascii: false };
+    assert_eq!(vp_70.get_filter_value(ItemField::Rating), Some(Cow::Owned("7".into())));
+    assert_eq!(vp_70.get_typed(ItemField::Rating).as_deref(), Some("7"));
+    assert_eq!(vp_70.get("rating").as_deref(), Some("7"));
+    assert_eq!(crate::foundation::value_provider::get_field_value(&p_70, ItemField::Rating).as_ref(), "7");
+
+    let vp_65 = ValueProvider { pli: &p_65, match_as_ascii: false };
+    assert_eq!(vp_65.get_filter_value(ItemField::Rating), Some(Cow::Owned("6.5".into())));
+    assert_eq!(vp_65.get_typed(ItemField::Rating).as_deref(), Some("6.5"));
+    assert_eq!(vp_65.get("rating").as_deref(), Some("6.5"));
+    assert_eq!(crate::foundation::value_provider::get_field_value(&p_65, ItemField::Rating).as_ref(), "6.5");
+
+    let vp_unrated = ValueProvider { pli: &unrated, match_as_ascii: false };
+    assert_eq!(vp_unrated.get_filter_value(ItemField::Rating), None);
+    assert_eq!(vp_unrated.get_typed(ItemField::Rating), None);
+    assert_eq!(vp_unrated.get("rating"), None);
+    assert_eq!(crate::foundation::value_provider::get_field_value(&unrated, ItemField::Rating).as_ref(), "");
+
+    let vp_votes = ValueProvider { pli: &p_votes_5000, match_as_ascii: false };
+    assert_eq!(vp_votes.get_filter_value(ItemField::Votes), Some(Cow::Owned("5000".into())));
+    assert_eq!(vp_votes.get_typed(ItemField::Votes).as_deref(), Some("5000"));
+    assert_eq!(vp_votes.get("votes").as_deref(), Some("5000"));
+    assert_eq!(crate::foundation::value_provider::get_field_value(&p_votes_5000, ItemField::Votes).as_ref(), "5000");
+
+    // Chno/Quality unchanged behavior including Chno >= 4294967295 with chno = u32::MAX
+    let f_chno_max = get_filter("Chno >= 4294967295", None).expect("filter parses");
+    let mut p_chno_max = create_mock_pli("X", "G");
+    p_chno_max.header.chno = u32::MAX;
+    assert!(f_chno_max.filter(&ValueProvider { pli: &p_chno_max, match_as_ascii: false }));
+    let mut p_chno_less = create_mock_pli("X", "G");
+    p_chno_less.header.chno = u32::MAX - 1;
+    assert!(!f_chno_max.filter(&ValueProvider { pli: &p_chno_less, match_as_ascii: false }));
+
+    let f_qual = get_filter("Quality >= 2", None).expect("filter parses");
+    let mut p_qual = create_mock_pli("X", "G");
+    p_qual.header.title = "News HD".into();
+    assert!(f_qual.filter(&ValueProvider { pli: &p_qual, match_as_ascii: false }));
+}
+
+#[test]
+fn test_filter_rating_strict_greater_and_less_or_equal() {
+    let video_item = |rating: f32| PlaylistItem {
+        header: PlaylistItemHeader {
+            additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                effective_rating: Some(rating),
+                ..VideoStreamProperties::default()
+            }))),
+            ..Default::default()
+        },
+    };
+    let greater = get_filter("Rating > 6", None).expect("filter parses");
+    let less_or_equal = get_filter("Rating <= 6", None).expect("filter parses");
+    for (rating, expect_greater) in [(6.0, false), (6.1, true), (5.9, false), (10.0, true)] {
+        let item = video_item(rating);
+        let provider = ValueProvider { pli: &item, match_as_ascii: false };
+        assert_eq!(greater.filter(&provider), expect_greater, "Rating > 6 with {rating}");
+        assert_eq!(less_or_equal.filter(&provider), !expect_greater, "Rating <= 6 with {rating}");
+    }
 }

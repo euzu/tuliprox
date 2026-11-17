@@ -612,6 +612,18 @@
       color: var(--theme-brand-text-title);
     }
 
+    .det-votes {
+      font-size: var(--font-size-xs);
+      color: var(--theme-brand-explorer-text-secondary);
+    }
+
+    .tp__explorer-rating-value {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--gap-small);
+      flex-wrap: wrap;
+    }
+
     .tp__explorer-detail-series-action {
       margin-top: var(--gap-default);
       display: flex;

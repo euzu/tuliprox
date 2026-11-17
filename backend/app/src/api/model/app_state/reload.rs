@@ -9,10 +9,11 @@ use crate::{
         tasks::{exec_config_watch, exec_scheduler},
     },
     model::{Config, ProcessTargets, SourcesConfig},
-    repository::{get_geoip_path, GeoIp},
+    processing::imdb::spawn_imdb_ratings_update,
+    repository::{get_geoip_path, get_imdb_ratings_path, GeoIp},
     utils::reload_logger,
 };
-use log::error;
+use log::{error, info};
 use shared::{error::TuliproxError, model::WebAuthConfigDto};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -215,12 +216,17 @@ impl AppState {
             return Err(TuliproxError::ConfigWebUi("web auth changes require a server restart".to_string()));
         }
         let old_storage_dir = current_config.storage_dir.clone();
+        let old_imdb_enabled = current_config.is_imdb_enabled();
+        let old_imdb_url = current_config.metadata_update.as_ref().map(|m| m.imdb.url.clone());
+        let new_imdb_url = config.metadata_update.as_ref().map(|m| m.imdb.url.clone());
+        let imdb_url_changed = old_imdb_url != new_imdb_url;
         drop(current_config);
         let changes = self.detect_changes_for_config(&config);
         let log_dto = config.log.as_ref().map(shared::model::LogConfigDto::from);
         config.update_runtime();
 
         let use_geoip = config.is_geoip_enabled();
+        let use_imdb = config.is_imdb_enabled();
         let storage_dir = config.storage_dir.clone();
 
         self.active_users.update_config(&config);
@@ -256,6 +262,10 @@ impl AppState {
             };
 
             self.geoip.store(new_geoip);
+        }
+
+        if changes.flags.contains(UpdateChangesFlags::Imdb) {
+            self.reload_imdb_index(use_imdb, imdb_url_changed && old_imdb_enabled, &storage_dir).await;
         }
 
         shared::model::REGEX_CACHE.sweep();
@@ -318,5 +328,24 @@ impl AppState {
 
         shared::model::REGEX_CACHE.sweep();
         Ok(changes)
+    }
+}
+
+impl AppState {
+    /// Applies a change of the `imdb` config. The table is read only during a
+    /// playlist update, so there is nothing to load or drop here: a new URL or a
+    /// missing file schedules a download, everything else is a no-op.
+    async fn reload_imdb_index(&self, enabled: bool, url_changed: bool, storage_dir: &str) {
+        if !enabled {
+            return;
+        }
+        if !url_changed {
+            let path = get_imdb_ratings_path(storage_dir);
+            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                return;
+            }
+            info!("No stored IMDb ratings table; starting a download");
+        }
+        spawn_imdb_ratings_update(Arc::clone(&self.app_config), self.http_clients.default.load().as_ref().clone());
     }
 }

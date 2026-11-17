@@ -89,6 +89,7 @@ fn test_processing_context(
         library_update_mode: LibraryUpdateMode::ExistingCatalog,
         override_status,
         plugins: shared::model::NoPlugins,
+        imdb: crate::imdb::ImdbRatingRuntime::default(),
     }
 }
 
