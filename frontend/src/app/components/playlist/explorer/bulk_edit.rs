@@ -177,8 +177,9 @@ fn patch_needs_provenance(patch: &ItemOverridePatch) -> bool {
         || matches!(patch.chno, Some(OverrideFieldOp::Reset))
 }
 
-/// Patches the saved items locally. A reset needs the remaining value, which only the stored layers
-/// know, so a patch with a reset fetches each item's provenance; other patches stay local.
+/// Patches the saved items locally. A reset needs the remaining value, and an input-scope edit in a
+/// target view needs the target overrides that shadow it; only the stored layers know both, so these
+/// patches fetch each item's provenance. Other patches stay local.
 async fn patch_saved_items<'a>(
     services: &Services,
     items: impl Iterator<Item = &'a Rc<UiPlaylistItem>>,
@@ -187,7 +188,7 @@ async fn patch_saved_items<'a>(
     target_id: Option<u16>,
     rating_source: ImdbRatingSource,
 ) -> Vec<UiPlaylistItem> {
-    let needs_provenance = patch_needs_provenance(patch);
+    let needs_provenance = patch_needs_provenance(patch) || (scope == OverrideScopeDto::Input && target_id.is_some());
     let mut patched = Vec::new();
     for item in items {
         let provenance = if needs_provenance {

@@ -1000,3 +1000,63 @@ fn target_reset_resolves_input_override_layer_for_text_fields() {
     assert_eq!(&*unknown.group, "Target Group");
     assert_eq!(&*unknown.name, "Target Name");
 }
+
+#[test]
+fn input_scope_edit_keeps_fields_the_target_overrides() {
+    let mut target_override = BTreeMap::new();
+    target_override.insert("group".to_string(), serde_json::json!("Target Group"));
+    target_override.insert("rating".to_string(), serde_json::Value::Null);
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto {
+            name: "Provider Name".to_string(),
+            group: "Provider Group".to_string(),
+            rating: Some(6.0),
+            ..Default::default()
+        }),
+        input_override: None,
+        target_override: Some(target_override),
+        processed: None,
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let item = UiPlaylistItem { name: Arc::from("Shown Name"), group: Arc::from("Target Group"), ..Default::default() };
+
+    let reset = ItemOverridePatch {
+        name: Some(OverrideFieldOp::Reset),
+        group: Some(OverrideFieldOp::Reset),
+        rating: Some(OverrideFieldOp::Reset),
+        ..Default::default()
+    };
+    let input = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*input.group, "Target Group");
+    assert_eq!(input.effective_rating, None);
+    assert_eq!(&*input.name, "Provider Name");
+
+    let set = ItemOverridePatch { group: Some(OverrideFieldOp::Set("Input Group".to_string())), ..Default::default() };
+    let input_set = patch_playlist_item_from_patch(
+        &item,
+        &set,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*input_set.group, "Target Group");
+
+    let target = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Target,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*target.group, "Provider Group");
+}

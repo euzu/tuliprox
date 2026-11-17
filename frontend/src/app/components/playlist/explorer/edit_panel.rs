@@ -200,9 +200,15 @@ pub fn patch_playlist_item_from_patch(
     rating_source: ImdbRatingSource,
 ) -> UiPlaylistItem {
     let mut updated = item.clone();
+    // An input-scope edit does not change a field the target overrides: the target view keeps showing
+    // the target override, which stays active.
+    let target_overrides = |field: &str| {
+        scope == OverrideScopeDto::Input
+            && provenance.and_then(|p| p.target_override.as_ref()).is_some_and(|map| map.contains_key(field))
+    };
 
     // 1. Name
-    if let Some(ref op) = patch.name {
+    if let Some(op) = patch.name.as_ref().filter(|_| !target_overrides("name")) {
         match op {
             OverrideFieldOp::Set(s) => updated.name = Arc::from(s.as_str()),
             OverrideFieldOp::Clear => updated.name = Arc::from(""),
@@ -215,7 +221,7 @@ pub fn patch_playlist_item_from_patch(
     }
 
     // 2. Title
-    if let Some(ref op) = patch.title {
+    if let Some(op) = patch.title.as_ref().filter(|_| !target_overrides("title")) {
         match op {
             OverrideFieldOp::Set(s) => updated.title = Arc::from(s.as_str()),
             OverrideFieldOp::Clear => updated.title = Arc::from(""),
@@ -228,7 +234,7 @@ pub fn patch_playlist_item_from_patch(
     }
 
     // 3. Group
-    if let Some(ref op) = patch.group {
+    if let Some(op) = patch.group.as_ref().filter(|_| !target_overrides("group")) {
         match op {
             OverrideFieldOp::Set(s) => updated.group = Arc::from(s.as_str()),
             OverrideFieldOp::Clear => updated.group = Arc::from(""),
@@ -241,7 +247,7 @@ pub fn patch_playlist_item_from_patch(
     }
 
     // 4. Logo
-    if let Some(ref op) = patch.logo {
+    if let Some(op) = patch.logo.as_ref().filter(|_| !target_overrides("logo")) {
         match op {
             OverrideFieldOp::Set(s) => updated.logo = Arc::from(s.as_str()),
             OverrideFieldOp::Clear => updated.logo = Arc::from(""),
@@ -254,7 +260,7 @@ pub fn patch_playlist_item_from_patch(
     }
 
     // 5. EPG channel ID
-    if let Some(ref op) = patch.epg_channel_id {
+    if let Some(op) = patch.epg_channel_id.as_ref().filter(|_| !target_overrides("epg_channel_id")) {
         match op {
             OverrideFieldOp::Set(s) => {
                 let trimmed = s.trim();
@@ -270,7 +276,7 @@ pub fn patch_playlist_item_from_patch(
     }
 
     // 6. Rating
-    if let Some(ref op) = patch.rating {
+    if let Some(op) = patch.rating.as_ref().filter(|_| !target_overrides("rating")) {
         match op {
             OverrideFieldOp::Set(r) => updated.set_provider_rating(Some(*r), rating_source),
             OverrideFieldOp::Clear => updated.set_provider_rating(None, rating_source),
@@ -284,7 +290,7 @@ pub fn patch_playlist_item_from_patch(
 
     // 7. Explorer metadata
     let mut meta = updated.explorer_meta.take().unwrap_or_default();
-    if let Some(ref op) = patch.chno {
+    if let Some(op) = patch.chno.as_ref().filter(|_| !target_overrides("chno")) {
         match op {
             OverrideFieldOp::Set(n) => meta.chno = Some(*n).filter(|n| *n > 0),
             OverrideFieldOp::Clear => meta.chno = None,
