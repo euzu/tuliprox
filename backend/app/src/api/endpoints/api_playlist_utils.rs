@@ -189,14 +189,26 @@ pub(in crate::api::endpoints) fn rewrite_resource_url(
     item
 }
 
+/// Rating source the explorer applies; a disabled or missing `IMDb` config counts as `Provider`.
+pub(crate) fn imdb_rating_source(imdb_config: Option<&ImdbConfig>) -> ImdbRatingSource {
+    imdb_config.filter(|cfg| cfg.enabled).map_or(ImdbRatingSource::Provider, |cfg| cfg.rating_source)
+}
+
 pub(crate) fn apply_raw_item_effective_rating(
     mut item: UiPlaylistItem,
     imdb_config: Option<&ImdbConfig>,
 ) -> UiPlaylistItem {
-    let imdb_rating_only = imdb_config.is_some_and(|cfg| cfg.enabled && cfg.rating_source == ImdbRatingSource::Imdb);
-    if !imdb_rating_only && item.rating > 0.0 && item.effective_rating.is_none() {
-        item.set_provider_rating(Some(item.rating));
+    let enabled_config = imdb_config.filter(|cfg| cfg.enabled);
+    if item.rating > 0.0 && item.effective_rating.is_none() {
+        item.set_provider_rating(Some(item.rating), imdb_rating_source(imdb_config));
     }
+    item.rating_origin = shared::model::compute_policy_rating_origin(
+        item.effective_rating,
+        item.imdb_rating,
+        item.imdb_votes,
+        enabled_config.map(|cfg| cfg.rating_source),
+        enabled_config.map_or(0, |cfg| cfg.min_votes),
+    );
     item
 }
 
@@ -658,11 +670,45 @@ mod tests {
     fn raw_item_effective_rating_preserves_existing_effective_rating() {
         let mut item = sample_item("");
         item.rating = 6.0;
-        item.set_provider_rating(Some(9.0));
+        item.set_provider_rating(Some(9.0), super::ImdbRatingSource::Provider);
         assert_eq!(item.effective_rating, Some(9.0));
 
         let item = super::apply_raw_item_effective_rating(item, None);
         assert_eq!(item.effective_rating, Some(9.0));
+    }
+
+    #[test]
+    fn raw_item_effective_rating_origin_policy_not_value_equality() {
+        let mut item = sample_item("");
+        item.rating = 7.0;
+        item.effective_rating = Some(7.0);
+        item.imdb_rating = Some(7.0);
+        item.imdb_votes = Some(50);
+        item.rating_origin = Some(shared::model::UiRatingOrigin::Imdb);
+
+        let imdb_config = super::ImdbConfig {
+            enabled: true,
+            rating_source: super::ImdbRatingSource::ImdbThenProvider,
+            min_votes: 100,
+            ..Default::default()
+        };
+
+        let item = super::apply_raw_item_effective_rating(item, Some(&imdb_config));
+        assert_eq!(item.effective_rating, Some(7.0));
+        assert_eq!(item.rating_origin, Some(shared::model::UiRatingOrigin::Provider));
+
+        let mut item2 = sample_item("");
+        item2.rating = 8.0;
+        item2.effective_rating = Some(8.0);
+        item2.imdb_rating = Some(8.0);
+        item2.imdb_votes = Some(500);
+        item2.rating_origin = Some(shared::model::UiRatingOrigin::Imdb);
+
+        let imdb_config_provider =
+            super::ImdbConfig { enabled: true, rating_source: super::ImdbRatingSource::Provider, ..Default::default() };
+
+        let item2 = super::apply_raw_item_effective_rating(item2, Some(&imdb_config_provider));
+        assert_eq!(item2.rating_origin, Some(shared::model::UiRatingOrigin::Provider));
     }
 
     #[test]

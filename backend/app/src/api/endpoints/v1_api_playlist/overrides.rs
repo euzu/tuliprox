@@ -343,6 +343,7 @@ fn xtream_inventory_item(item: &XtreamPlaylistItem, aliases: &InputAliasMap) -> 
             audio_track: String::new(),
             time_shift: String::new(),
             rec: item.rec.to_string(),
+            rating: Some(shared::model::provider_rating(item.additional_properties.as_ref())).filter(|r| *r > 0.0),
         },
     })
 }
@@ -364,6 +365,7 @@ fn m3u_inventory_item(item: &M3uPlaylistItem, aliases: &InputAliasMap) -> Option
             audio_track: item.audio_track.to_string(),
             time_shift: item.time_shift.to_string(),
             rec: item.rec.to_string(),
+            rating: None,
         },
     })
 }

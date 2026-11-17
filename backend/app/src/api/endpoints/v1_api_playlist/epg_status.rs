@@ -18,8 +18,8 @@ use chrono::Utc;
 use shared::{
     error::TuliproxError,
     model::{
-        ExplorerEpgState, FieldDelta, ItemOverride, OverrideItemKind, TargetType, UiItemExplorerMeta, UiOverrideState,
-        UiPlaylistItem,
+        ExplorerEpgState, FieldDelta, ImdbRatingSource, ItemOverride, OverrideItemKind, TargetType, UiItemExplorerMeta,
+        UiOverrideState, UiPlaylistItem,
     },
 };
 use std::{
@@ -403,7 +403,7 @@ fn override_key_of_ui_item(item: &UiPlaylistItem, aliases: &InputAliasMap) -> Op
     override_key_for(id, url, &item.input_name, item.item_type, aliases)
 }
 
-fn apply_override_to_ui_item(item: &mut UiPlaylistItem, ov: &ItemOverride) {
+fn apply_override_to_ui_item(item: &mut UiPlaylistItem, ov: &ItemOverride, source: ImdbRatingSource) {
     match &ov.name {
         FieldDelta::Keep => {}
         FieldDelta::Clear => item.name = Arc::from(""),
@@ -455,8 +455,8 @@ fn apply_override_to_ui_item(item: &mut UiPlaylistItem, ov: &ItemOverride) {
     }
     match ov.rating {
         FieldDelta::Keep => {}
-        FieldDelta::Clear => item.set_provider_rating(None),
-        FieldDelta::Set(v) => item.set_provider_rating(Some(v)),
+        FieldDelta::Clear => item.set_provider_rating(None, source),
+        FieldDelta::Set(v) => item.set_provider_rating(Some(v), source),
     }
     match &ov.epg_channel_id {
         FieldDelta::Keep => {}
@@ -606,7 +606,7 @@ pub async fn apply_overlay_target(items: &mut [UiPlaylistItem], target: &ConfigT
     let epg_index = get_target_epg_status_index(app_state, target).await;
     let now = Utc::now().timestamp();
 
-    apply_lookup_overlay(items, &aliases, &merged_lookup, &epg_index, now);
+    apply_lookup_overlay(items, &aliases, &merged_lookup, &epg_index, now, explorer_rating_source(app_state));
 }
 
 /// Merges saved override values into input playlist items with ONE lookup per item,
@@ -659,7 +659,12 @@ pub async fn apply_overlay_input(items: &mut [UiPlaylistItem], input: &ConfigInp
     let epg_index = get_input_epg_status_index(app_state, input).await;
     let now = Utc::now().timestamp();
 
-    apply_lookup_overlay(items, &aliases, &merged_lookup, &epg_index, now);
+    apply_lookup_overlay(items, &aliases, &merged_lookup, &epg_index, now, explorer_rating_source(app_state));
+}
+
+fn explorer_rating_source(app_state: &AppState) -> ImdbRatingSource {
+    let config = app_state.app_config.config.load();
+    crate::api::endpoints::api_playlist_utils::imdb_rating_source(config.metadata_update.as_ref().map(|m| &m.imdb))
 }
 
 fn apply_lookup_overlay(
@@ -668,6 +673,7 @@ fn apply_lookup_overlay(
     merged_lookup: &HashMap<(Arc<str>, OverrideKey), MergedOverrideEntry>,
     epg_index: &EpgStatusIndex,
     now: i64,
+    rating_source: ImdbRatingSource,
 ) {
     let mut parent_cache: HashMap<Arc<str>, Arc<str>> = HashMap::new();
     let mut get_parent = |input_name: &Arc<str>| -> Arc<str> {
@@ -705,7 +711,7 @@ fn apply_lookup_overlay(
                 if is_ambiguous {
                     override_state = UiOverrideState { edited: true, pending: merged.pending, ambiguous: true };
                 } else {
-                    apply_override_to_ui_item(item, &merged.ov);
+                    apply_override_to_ui_item(item, &merged.ov, rating_source);
                     override_state = UiOverrideState { edited: true, pending: merged.pending, ambiguous: false };
                 }
             }
@@ -817,7 +823,7 @@ mod tests {
         merged_lookup.insert((Arc::from("test_input"), key), MergedOverrideEntry { ov, pending: true });
 
         let epg_index = EpgStatusIndex::default();
-        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now);
+        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now, ImdbRatingSource::ImdbThenProvider);
 
         assert_eq!(items[0].title.as_ref(), "Saved Title");
         assert_eq!(items[0].group.as_ref(), "Saved Group");
@@ -870,7 +876,7 @@ mod tests {
         let key = OverrideKey::new(OverrideItemKind::Live, "12345");
         merged_lookup.insert((Arc::from("test_input"), key), MergedOverrideEntry { ov, pending: false });
 
-        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now);
+        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now, ImdbRatingSource::ImdbThenProvider);
 
         assert_eq!(items[0].epg_channel_id.as_deref(), Some("bbc.one"));
         assert_eq!(
@@ -936,7 +942,7 @@ mod tests {
         merged_lookup.insert((Arc::from("test_input"), key), MergedOverrideEntry { ov, pending: false });
 
         let epg_index = EpgStatusIndex::default();
-        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now);
+        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now, ImdbRatingSource::ImdbThenProvider);
 
         // Ambiguous key with saved override -> edited: true, ambiguous: true, title not modified
         assert_eq!(items[0].title.as_ref(), "Item 1");
@@ -977,7 +983,7 @@ mod tests {
         let merged_lookup = HashMap::new();
         let epg_index = EpgStatusIndex::default();
 
-        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now);
+        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now, ImdbRatingSource::ImdbThenProvider);
 
         // Since item_type is Video, epg_state MUST be None
         assert!(items[0].explorer_meta.as_ref().and_then(|m| m.epg_state).is_none());
@@ -1044,7 +1050,7 @@ mod tests {
         let merged_lookup = HashMap::new(); // Parent has NO overrides!
         let epg_index = EpgStatusIndex::default();
 
-        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now);
+        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now, ImdbRatingSource::ImdbThenProvider);
 
         // provider_id must NOT be overwritten
         assert_eq!(items[0].provider_id.as_ref(), "orig_provider_123");
@@ -1080,15 +1086,23 @@ mod tests {
         };
 
         let mut set = base.clone();
-        apply_override_to_ui_item(&mut set, &ItemOverride { chno: FieldDelta::Set(5), ..Default::default() });
+        apply_override_to_ui_item(
+            &mut set,
+            &ItemOverride { chno: FieldDelta::Set(5), ..Default::default() },
+            ImdbRatingSource::ImdbThenProvider,
+        );
         assert_eq!(set.explorer_meta.as_ref().and_then(|m| m.chno), Some(5));
 
         let mut cleared = base.clone();
-        apply_override_to_ui_item(&mut cleared, &ItemOverride { chno: FieldDelta::Clear, ..Default::default() });
+        apply_override_to_ui_item(
+            &mut cleared,
+            &ItemOverride { chno: FieldDelta::Clear, ..Default::default() },
+            ImdbRatingSource::ImdbThenProvider,
+        );
         assert_eq!(cleared.explorer_meta.as_ref().and_then(|m| m.chno), None);
 
         let mut kept = base;
-        apply_override_to_ui_item(&mut kept, &ItemOverride::default());
+        apply_override_to_ui_item(&mut kept, &ItemOverride::default(), ImdbRatingSource::ImdbThenProvider);
         assert_eq!(kept.explorer_meta.as_ref().and_then(|m| m.chno), Some(202_362));
     }
 
@@ -1119,12 +1133,12 @@ mod tests {
             logo_small: FieldDelta::Set("http://small.png".to_string()),
             ..Default::default()
         };
-        apply_override_to_ui_item(&mut item, &ov1);
+        apply_override_to_ui_item(&mut item, &ov1, ImdbRatingSource::ImdbThenProvider);
         assert_eq!(item.logo.as_ref(), "http://large.png");
 
         // 2. empty logo, logo: Keep, logo_small: Set("small.png") -> small logo is adopted
         item.logo = "".intern();
-        apply_override_to_ui_item(&mut item, &ov1);
+        apply_override_to_ui_item(&mut item, &ov1, ImdbRatingSource::ImdbThenProvider);
         assert_eq!(item.logo.as_ref(), "http://small.png");
 
         // 3. logo: Set("large2.png"), logo_small: Clear -> large2 wins
@@ -1133,7 +1147,7 @@ mod tests {
             logo_small: FieldDelta::Clear,
             ..Default::default()
         };
-        apply_override_to_ui_item(&mut item, &ov2);
+        apply_override_to_ui_item(&mut item, &ov2, ImdbRatingSource::ImdbThenProvider);
         assert_eq!(item.logo.as_ref(), "http://large2.png");
 
         // 4. logo: Clear, logo_small: Set("small2.png") -> small2 wins
@@ -1142,12 +1156,12 @@ mod tests {
             logo_small: FieldDelta::Set("http://small2.png".to_string()),
             ..Default::default()
         };
-        apply_override_to_ui_item(&mut item, &ov3);
+        apply_override_to_ui_item(&mut item, &ov3, ImdbRatingSource::ImdbThenProvider);
         assert_eq!(item.logo.as_ref(), "http://small2.png");
 
         // 5. logo: Clear, logo_small: Clear -> cleared
         let ov4 = ItemOverride { logo: FieldDelta::Clear, logo_small: FieldDelta::Clear, ..Default::default() };
-        apply_override_to_ui_item(&mut item, &ov4);
+        apply_override_to_ui_item(&mut item, &ov4, ImdbRatingSource::ImdbThenProvider);
         assert_eq!(item.logo.as_ref(), "");
     }
 
@@ -1278,7 +1292,7 @@ mod tests {
             .insert((Arc::clone(&input_name), expected_key2.clone()), MergedOverrideEntry { ov, pending: false });
 
         let epg_index = EpgStatusIndex::default();
-        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now);
+        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now, ImdbRatingSource::ImdbThenProvider);
 
         let meta1 = items[0].explorer_meta.as_ref().expect("meta1");
         let meta2 = items[1].explorer_meta.as_ref().expect("meta2");
@@ -1400,7 +1414,7 @@ mod tests {
             .insert((Arc::clone(&input_name), expected_key2.clone()), MergedOverrideEntry { ov: ov2, pending: false });
 
         let epg_index = EpgStatusIndex::default();
-        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now);
+        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now, ImdbRatingSource::ImdbThenProvider);
 
         let meta1 = items[0].explorer_meta.as_ref().expect("meta1");
         let meta2 = items[1].explorer_meta.as_ref().expect("meta2");
@@ -1418,15 +1432,19 @@ mod tests {
         let mut item = UiPlaylistItem { imdb_rating: Some(8.0), imdb_votes: Some(10), ..Default::default() };
         let set = |rating| ItemOverride { rating: FieldDelta::Set(rating), ..Default::default() };
 
-        apply_override_to_ui_item(&mut item, &set(8.0));
+        apply_override_to_ui_item(&mut item, &set(8.0), ImdbRatingSource::ImdbThenProvider);
         assert_eq!(item.effective_rating, Some(8.0));
         assert_eq!(item.rating_origin, Some(UiRatingOrigin::Provider));
 
-        apply_override_to_ui_item(&mut item, &set(9.0));
+        apply_override_to_ui_item(&mut item, &set(9.0), ImdbRatingSource::ImdbThenProvider);
         assert_eq!(item.effective_rating, Some(9.0));
         assert_eq!(item.rating_origin, Some(UiRatingOrigin::Provider));
 
-        apply_override_to_ui_item(&mut item, &ItemOverride { rating: FieldDelta::Clear, ..Default::default() });
+        apply_override_to_ui_item(
+            &mut item,
+            &ItemOverride { rating: FieldDelta::Clear, ..Default::default() },
+            ImdbRatingSource::ImdbThenProvider,
+        );
         assert_eq!(item.rating, 0.0);
         assert_eq!(item.effective_rating, None);
         assert_eq!(item.rating_origin, None);
@@ -1448,6 +1466,7 @@ mod tests {
         apply_override_to_ui_item(
             &mut provider_item,
             &ItemOverride { rating: FieldDelta::Set(8.5), ..Default::default() },
+            ImdbRatingSource::ImdbThenProvider,
         );
         assert_eq!(provider_item.rating, 8.5);
         assert_eq!(provider_item.effective_rating, Some(8.5));
@@ -1457,6 +1476,7 @@ mod tests {
         apply_override_to_ui_item(
             &mut provider_item,
             &ItemOverride { rating: FieldDelta::Clear, ..Default::default() },
+            ImdbRatingSource::ImdbThenProvider,
         );
         assert_eq!(provider_item.rating, 0.0);
         assert_eq!(provider_item.effective_rating, None);
@@ -1471,7 +1491,11 @@ mod tests {
             rating_origin: None,
             ..Default::default()
         };
-        apply_override_to_ui_item(&mut none_item, &ItemOverride { rating: FieldDelta::Set(7.2), ..Default::default() });
+        apply_override_to_ui_item(
+            &mut none_item,
+            &ItemOverride { rating: FieldDelta::Set(7.2), ..Default::default() },
+            ImdbRatingSource::ImdbThenProvider,
+        );
         assert_eq!(none_item.rating, 7.2);
         assert_eq!(none_item.effective_rating, Some(7.2));
         assert_eq!(none_item.rating_origin, Some(UiRatingOrigin::Provider));
@@ -1487,15 +1511,56 @@ mod tests {
         };
 
         // Setting a provider override changes item.rating, but leaves effective_rating and rating_origin unchanged
-        apply_override_to_ui_item(&mut imdb_item, &ItemOverride { rating: FieldDelta::Set(9.5), ..Default::default() });
+        apply_override_to_ui_item(
+            &mut imdb_item,
+            &ItemOverride { rating: FieldDelta::Set(9.5), ..Default::default() },
+            ImdbRatingSource::ImdbThenProvider,
+        );
         assert_eq!(imdb_item.rating, 9.5);
         assert_eq!(imdb_item.effective_rating, Some(8.0));
         assert_eq!(imdb_item.rating_origin, Some(UiRatingOrigin::Imdb));
 
         // Clearing provider override changes item.rating to 0, but leaves effective_rating and rating_origin unchanged
-        apply_override_to_ui_item(&mut imdb_item, &ItemOverride { rating: FieldDelta::Clear, ..Default::default() });
+        apply_override_to_ui_item(
+            &mut imdb_item,
+            &ItemOverride { rating: FieldDelta::Clear, ..Default::default() },
+            ImdbRatingSource::ImdbThenProvider,
+        );
         assert_eq!(imdb_item.rating, 0.0);
         assert_eq!(imdb_item.effective_rating, Some(8.0));
         assert_eq!(imdb_item.rating_origin, Some(UiRatingOrigin::Imdb));
+    }
+
+    #[test]
+    fn strict_imdb_sourcing_provider_override_leaves_effective_and_origin_unchanged() {
+        let mut item = UiPlaylistItem {
+            virtual_id: 1,
+            provider_id: "100".intern(),
+            name: "Movie".intern(),
+            title: "Movie".intern(),
+            group: "Movies".intern(),
+            logo: "".intern(),
+            url: "".intern(),
+            item_type: shared::model::PlaylistItemType::Video,
+            xtream_cluster: XtreamCluster::Video,
+            category_id: 1,
+            rating: 0.0,
+            effective_rating: None,
+            imdb_rating: None,
+            imdb_votes: None,
+            rating_origin: None,
+            input_name: "test_input".intern(),
+            ..Default::default()
+        };
+
+        // When IMDb rating source is Imdb:
+        apply_override_to_ui_item(
+            &mut item,
+            &ItemOverride { rating: FieldDelta::Set(8.5), ..Default::default() },
+            ImdbRatingSource::Imdb,
+        );
+        assert_eq!(item.rating, 8.5);
+        assert_eq!(item.effective_rating, None);
+        assert_eq!(item.rating_origin, None);
     }
 }

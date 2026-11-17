@@ -1,7 +1,7 @@
 use crate::{
     model::{
-        CommonPlaylistItem, M3uPlaylistItem, PlaylistItem, PlaylistItemType, StreamProperties, XtreamCluster,
-        XtreamPlaylistItem,
+        CommonPlaylistItem, ImdbRatingSource, M3uPlaylistItem, PlaylistItem, PlaylistItemType, StreamProperties,
+        XtreamCluster, XtreamPlaylistItem,
     },
     utils::Internable,
 };
@@ -267,8 +267,9 @@ fn non_empty(s: &Arc<str>) -> Option<Arc<str>> { (!s.is_empty()).then(|| Arc::cl
 fn non_empty_opt(s: Option<&Arc<str>>) -> Option<Arc<str>> { s.and_then(non_empty) }
 
 /// Helper to get rating
+/// Provider rating of the stream properties; `0.0` when absent or for live and episode items.
 #[inline]
-fn get_rating(props: Option<&StreamProperties>) -> f64 {
+pub fn provider_rating(props: Option<&StreamProperties>) -> f64 {
     if let Some(p) = props {
         return match p {
             StreamProperties::Video(v) => v.rating.unwrap_or_default(),
@@ -279,20 +280,22 @@ fn get_rating(props: Option<&StreamProperties>) -> f64 {
     0.0
 }
 
-/// Computes rating origin: `Imdb` when `effective_rating` is `Some` and equals `imdb_rating`,
-/// `Provider` when `Some` otherwise, and `None` when no effective rating.
 impl UiPlaylistItem {
     /// Applies a provider-rating override to an item the explorer already shows.
     ///
-    /// `None` clears the rating. An item whose effective rating comes from `IMDb` keeps
-    /// it; otherwise the provider rating becomes the effective one, the same rule the
-    /// next update applies for `imdb_then_provider`. The origin is set explicitly and
-    /// never derived from value equality, so a provider value that happens to equal
-    /// the `IMDb` rating stays a provider rating.
-    pub fn set_provider_rating(&mut self, rating: Option<f64>) {
+    /// Semantics:
+    /// - `Provider`: provider value is effective, origin `Provider` (also when it equals the `IMDb` value);
+    /// - `ImdbThenProvider`: keep an `Imdb` origin, otherwise provider value is effective with origin `Provider`;
+    /// - `Imdb`: store `rating` only.
+    pub fn set_provider_rating(&mut self, rating: Option<f64>, source: ImdbRatingSource) {
         let rating = rating.filter(|value| value.is_finite() && *value > 0.0);
         self.rating = rating.unwrap_or(0.0);
-        if self.rating_origin == Some(UiRatingOrigin::Imdb) {
+        let keeps_effective = match source {
+            ImdbRatingSource::Imdb => true,
+            ImdbRatingSource::ImdbThenProvider => self.rating_origin == Some(UiRatingOrigin::Imdb),
+            ImdbRatingSource::Provider => false,
+        };
+        if keeps_effective {
             return;
         }
         #[allow(clippy::cast_possible_truncation)]
@@ -302,9 +305,31 @@ impl UiPlaylistItem {
     }
 }
 
+/// Fallback origin without a rating policy: `Imdb` when `effective_rating` equals `imdb_rating`.
 #[inline]
 pub fn compute_rating_origin(effective_rating: Option<f32>, imdb_rating: Option<f32>) -> Option<UiRatingOrigin> {
     effective_rating.map(|eff| if imdb_rating == Some(eff) { UiRatingOrigin::Imdb } else { UiRatingOrigin::Provider })
+}
+
+/// Origin from the configured rating policy, the same rule `apply_imdb_ratings` uses at update time.
+/// `None` source means `IMDb` is disabled.
+#[inline]
+pub fn compute_policy_rating_origin(
+    effective_rating: Option<f32>,
+    imdb_rating: Option<f32>,
+    imdb_votes: Option<u32>,
+    source: Option<ImdbRatingSource>,
+    min_votes: u32,
+) -> Option<UiRatingOrigin> {
+    effective_rating?;
+    let imdb_selected = match source {
+        None | Some(ImdbRatingSource::Provider) => false,
+        Some(ImdbRatingSource::Imdb) => true,
+        Some(ImdbRatingSource::ImdbThenProvider) => {
+            imdb_rating.is_some() && imdb_votes.is_some_and(|votes| votes >= min_votes)
+        }
+    };
+    Some(if imdb_selected { UiRatingOrigin::Imdb } else { UiRatingOrigin::Provider })
 }
 
 #[inline]
@@ -372,7 +397,7 @@ impl UiPlaylistItem {
             item_type: item.item_type,
             xtream_cluster: item.xtream_cluster.unwrap_or_default(),
             category_id: item.category_id.unwrap_or(0),
-            rating: get_rating(item.additional_properties.as_ref()),
+            rating: provider_rating(item.additional_properties.as_ref()),
             input_name: Arc::clone(&item.input_name),
             input_stream_id: "".intern(),
             epg_channel_id: item.epg_channel_id.clone(),
@@ -404,7 +429,7 @@ impl UiPlaylistItem {
             item_type: item.item_type,
             xtream_cluster: item.xtream_cluster,
             category_id: item.category_id,
-            rating: get_rating(item.additional_properties.as_ref()),
+            rating: provider_rating(item.additional_properties.as_ref()),
             input_name: Arc::clone(&item.input_name),
             input_stream_id: Arc::clone(&item.input_stream_id),
             epg_channel_id: item.epg_channel_id,
@@ -463,7 +488,7 @@ impl UiPlaylistItem {
             item_type: header.item_type,
             xtream_cluster: header.xtream_cluster,
             category_id: header.category_id,
-            rating: get_rating(header.additional_properties.as_ref()),
+            rating: provider_rating(header.additional_properties.as_ref()),
             input_name: Arc::clone(&header.input_name),
             input_stream_id: Arc::clone(&header.input_stream_id),
             epg_channel_id: header.epg_channel_id.clone(),
@@ -892,5 +917,104 @@ mod tests {
         let cbor_prov = bin_serialize(&item_prov).expect("serialize item_prov to CBOR");
         let back_cbor_prov: UiPlaylistItem = bin_deserialize(&cbor_prov).expect("deserialize CBOR");
         assert_eq!(back_cbor_prov, item_prov);
+    }
+
+    #[test]
+    fn set_provider_rating_semantics_across_sources() {
+        // Provider source: overwrites effective even when origin was Imdb
+        let mut item = UiPlaylistItem {
+            effective_rating: Some(8.0),
+            imdb_rating: Some(8.0),
+            rating_origin: Some(UiRatingOrigin::Imdb),
+            ..base_item()
+        };
+        item.set_provider_rating(Some(8.0), ImdbRatingSource::Provider);
+        assert_eq!(item.rating, 8.0);
+        assert_eq!(item.effective_rating, Some(8.0));
+        assert_eq!(item.rating_origin, Some(UiRatingOrigin::Provider));
+
+        // ImdbThenProvider source: preserves Imdb origin
+        let mut item_then = UiPlaylistItem {
+            effective_rating: Some(8.0),
+            imdb_rating: Some(8.0),
+            rating_origin: Some(UiRatingOrigin::Imdb),
+            ..base_item()
+        };
+        item_then.set_provider_rating(Some(9.0), ImdbRatingSource::ImdbThenProvider);
+        assert_eq!(item_then.rating, 9.0);
+        assert_eq!(item_then.effective_rating, Some(8.0));
+        assert_eq!(item_then.rating_origin, Some(UiRatingOrigin::Imdb));
+
+        // ImdbThenProvider source: updates when origin is not Imdb
+        let mut item_prov = UiPlaylistItem {
+            effective_rating: Some(6.0),
+            rating_origin: Some(UiRatingOrigin::Provider),
+            ..base_item()
+        };
+        item_prov.set_provider_rating(Some(9.0), ImdbRatingSource::ImdbThenProvider);
+        assert_eq!(item_prov.rating, 9.0);
+        assert_eq!(item_prov.effective_rating, Some(9.0));
+        assert_eq!(item_prov.rating_origin, Some(UiRatingOrigin::Provider));
+
+        // Imdb source: stores rating only, effective and origin stay unchanged
+        let mut item_imdb_strict = UiPlaylistItem { effective_rating: None, rating_origin: None, ..base_item() };
+        item_imdb_strict.set_provider_rating(Some(7.5), ImdbRatingSource::Imdb);
+        assert_eq!(item_imdb_strict.rating, 7.5);
+        assert_eq!(item_imdb_strict.effective_rating, None);
+        assert_eq!(item_imdb_strict.rating_origin, None);
+
+        // Clearing rating with 0.0 or None or NaN
+        item_prov.set_provider_rating(None, ImdbRatingSource::Provider);
+        assert_eq!(item_prov.rating, 0.0);
+        assert_eq!(item_prov.effective_rating, None);
+        assert_eq!(item_prov.rating_origin, None);
+    }
+
+    #[test]
+    fn compute_policy_rating_origin_cases() {
+        // When effective is None, origin is always None
+        assert_eq!(compute_policy_rating_origin(None, Some(8.0), Some(500), None, 100), None);
+
+        // Disabled or None config -> Provider when effective is Some
+        assert_eq!(
+            compute_policy_rating_origin(Some(7.0), Some(7.0), Some(500), None, 100),
+            Some(UiRatingOrigin::Provider)
+        );
+
+        // Provider source -> Provider even if equals imdb
+        assert_eq!(
+            compute_policy_rating_origin(Some(7.0), Some(7.0), Some(500), Some(ImdbRatingSource::Provider), 100),
+            Some(UiRatingOrigin::Provider)
+        );
+
+        // Imdb source -> Imdb when effective is Some
+        assert_eq!(
+            compute_policy_rating_origin(Some(7.0), None, None, Some(ImdbRatingSource::Imdb), 100),
+            Some(UiRatingOrigin::Imdb)
+        );
+
+        // ImdbThenProvider -> Imdb iff imdb_rating is Some and imdb_votes >= min_votes
+        assert_eq!(
+            compute_policy_rating_origin(
+                Some(7.0),
+                Some(7.0),
+                Some(100),
+                Some(ImdbRatingSource::ImdbThenProvider),
+                100
+            ),
+            Some(UiRatingOrigin::Imdb)
+        );
+        assert_eq!(
+            compute_policy_rating_origin(Some(7.0), Some(7.0), Some(0), Some(ImdbRatingSource::ImdbThenProvider), 0),
+            Some(UiRatingOrigin::Imdb)
+        );
+        assert_eq!(
+            compute_policy_rating_origin(Some(7.0), Some(7.0), Some(99), Some(ImdbRatingSource::ImdbThenProvider), 100),
+            Some(UiRatingOrigin::Provider)
+        );
+        assert_eq!(
+            compute_policy_rating_origin(Some(7.0), None, None, Some(ImdbRatingSource::ImdbThenProvider), 100),
+            Some(UiRatingOrigin::Provider)
+        );
     }
 }

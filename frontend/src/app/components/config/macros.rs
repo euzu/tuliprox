@@ -587,6 +587,9 @@ macro_rules! edit_field_number_u32 {
                     name={stringify!($field)}
                     field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field as i64}
+                    min_i64={Some(0)}
+                    max_i64={Some(i64::from(u32::MAX))}
+                    allow_empty_i64=true
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
                             Some(value) => match u32::try_from(value) {

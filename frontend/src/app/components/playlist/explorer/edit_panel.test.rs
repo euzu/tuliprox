@@ -119,7 +119,7 @@ fn patch_playlist_item_applies_form_fields_and_sets_pending() {
     };
     let deltas = FieldDeltas::default();
 
-    let patched = patch_playlist_item(&original, &form, &deltas, None, true);
+    let patched = patch_playlist_item(&original, &form, &deltas, None, true, ImdbRatingSource::ImdbThenProvider);
 
     assert_eq!(&*patched.name, "New Name");
     assert_eq!(&*patched.title, "New Title");
@@ -172,6 +172,7 @@ fn patch_playlist_item_resets_fields_and_clears_edited_when_no_deltas_remain() {
         audio_track: String::new(),
         time_shift: String::new(),
         rec: String::new(),
+        rating: None,
     };
 
     let provenance = OverrideProvenanceDto {
@@ -192,7 +193,8 @@ fn patch_playlist_item_resets_fields_and_clears_edited_when_no_deltas_remain() {
 
     let form = PlaylistOverrideDto::default();
 
-    let patched = patch_playlist_item(&original, &form, &deltas, Some(&provenance), false);
+    let patched =
+        patch_playlist_item(&original, &form, &deltas, Some(&provenance), false, ImdbRatingSource::ImdbThenProvider);
 
     assert_eq!(&*patched.name, "Base Name");
     assert_eq!(&*patched.title, "Base Title");
@@ -548,11 +550,11 @@ fn patch_from_patch_updates_channel_number_meta() {
         ..Default::default()
     };
     let set = ItemOverridePatch { chno: Some(OverrideFieldOp::Set(42)), ..Default::default() };
-    let updated = patch_playlist_item_from_patch(&item, &set, None, true);
+    let updated = patch_playlist_item_from_patch(&item, &set, None, true, ImdbRatingSource::ImdbThenProvider);
     assert_eq!(updated.explorer_meta.as_ref().and_then(|m| m.chno), Some(42));
 
     let clear = ItemOverridePatch { chno: Some(OverrideFieldOp::Clear), ..Default::default() };
-    let cleared = patch_playlist_item_from_patch(&item, &clear, None, true);
+    let cleared = patch_playlist_item_from_patch(&item, &clear, None, true, ImdbRatingSource::ImdbThenProvider);
     assert_eq!(cleared.explorer_meta.as_ref().and_then(|m| m.chno), None);
 }
 
@@ -654,4 +656,63 @@ fn bulk_patch_map_keeps_same_virtual_id_of_different_clusters_apart() {
     let updated = apply_bulk_patches_to_categories(&categories, &patch_map);
     assert_eq!(&*updated.live.as_ref().unwrap()[0].channels[0].name, "Live Patched");
     assert_eq!(&*updated.vod.as_ref().unwrap()[0].channels[0].name, "Movie Patched");
+}
+
+#[test]
+fn rating_reset_restores_provider_rating_and_keeps_imdb_origin() {
+    use shared::model::UiRatingOrigin;
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto { rating: Some(6.0), ..Default::default() }),
+        input_override: None,
+        target_override: None,
+        processed: None,
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+
+    let overridden = UiPlaylistItem {
+        rating: 9.0,
+        effective_rating: Some(9.0),
+        rating_origin: Some(UiRatingOrigin::Provider),
+        ..Default::default()
+    };
+    let restored = patch_playlist_item_from_patch(
+        &overridden,
+        &reset,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::ImdbThenProvider,
+    );
+    assert_eq!(restored.rating, 6.0);
+    assert_eq!(restored.effective_rating, Some(6.0));
+    assert_eq!(restored.rating_origin, Some(UiRatingOrigin::Provider));
+
+    let imdb_item = UiPlaylistItem {
+        rating: 9.0,
+        effective_rating: Some(7.5),
+        imdb_rating: Some(7.5),
+        rating_origin: Some(UiRatingOrigin::Imdb),
+        ..Default::default()
+    };
+    let kept = patch_playlist_item_from_patch(
+        &imdb_item,
+        &reset,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::ImdbThenProvider,
+    );
+    assert_eq!(kept.rating, 6.0);
+    assert_eq!(kept.effective_rating, Some(7.5));
+    assert_eq!(kept.rating_origin, Some(UiRatingOrigin::Imdb));
+
+    let strict = patch_playlist_item_from_patch(
+        &UiPlaylistItem::default(),
+        &ItemOverridePatch { rating: Some(OverrideFieldOp::Set(8.0)), ..Default::default() },
+        None,
+        true,
+        ImdbRatingSource::Imdb,
+    );
+    assert_eq!(strict.rating, 8.0);
+    assert_eq!(strict.effective_rating, None);
 }

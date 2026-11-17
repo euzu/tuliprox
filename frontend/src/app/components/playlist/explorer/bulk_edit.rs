@@ -3,6 +3,7 @@ use crate::{
         custom_dialog::CustomDialog,
         input::Input,
         playlist::explorer::{
+            edit_panel::explorer_rating_source,
             epg_picker::EpgPicker,
             identity::{item_override_id, Id},
             image_preview::ImagePreview,
@@ -14,8 +15,8 @@ use crate::{
 };
 use shared::{
     model::{
-        FieldError, ItemOverridePatch, ItemPatchDto, OverrideFieldOp, OverrideItemKind, OverrideSaveRequest,
-        OverrideScopeDto, UiPlaylistItem,
+        FieldError, ImdbRatingSource, ItemOverridePatch, ItemPatchDto, OverrideFieldOp, OverrideItemKind,
+        OverrideSaveRequest, OverrideScopeDto, UiPlaylistItem,
     },
     utils::parse_localized_float,
 };
@@ -147,8 +148,18 @@ impl BulkResultsSummary {
 
 pub fn summarize_bulk_results(results: Vec<BulkInputResult>) -> BulkResultsSummary { BulkResultsSummary { results } }
 
-pub fn patch_playlist_item_bulk(item: &UiPlaylistItem, patch: &ItemOverridePatch) -> UiPlaylistItem {
-    crate::app::components::playlist::explorer::edit_panel::patch_playlist_item_from_patch(item, patch, None, true)
+pub fn patch_playlist_item_bulk(
+    item: &UiPlaylistItem,
+    patch: &ItemOverridePatch,
+    rating_source: ImdbRatingSource,
+) -> UiPlaylistItem {
+    crate::app::components::playlist::explorer::edit_panel::patch_playlist_item_from_patch(
+        item,
+        patch,
+        None,
+        true,
+        rating_source,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -286,6 +297,7 @@ pub struct BulkEditPanelProps {
 pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
+    let rating_source = explorer_rating_source(use_context::<crate::app::context::ConfigContext>().as_ref());
 
     let form_data = use_state(BulkFormData::default);
     let is_saving = use_state(|| false);
@@ -407,7 +419,7 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                     let patched_items: Vec<UiPlaylistItem> = items
                         .iter()
                         .filter(|it| successful_inputs.contains(it.input_name.as_ref()))
-                        .map(|it| patch_playlist_item_bulk(it, &patch))
+                        .map(|it| patch_playlist_item_bulk(it, &patch, rating_source))
                         .collect();
 
                     if !patched_items.is_empty() {
@@ -455,7 +467,7 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
 
                     if is_success {
                         let patched_items: Vec<UiPlaylistItem> =
-                            items.iter().map(|it| patch_playlist_item_bulk(it, &patch)).collect();
+                            items.iter().map(|it| patch_playlist_item_bulk(it, &patch, rating_source)).collect();
                         on_saved.emit(patched_items);
                     }
 

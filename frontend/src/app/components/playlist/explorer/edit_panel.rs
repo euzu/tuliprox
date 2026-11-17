@@ -20,9 +20,10 @@ use crate::{
 };
 use shared::{
     model::{
-        InputRefreshPolicy, InputUpdateAction, ItemFieldsDto, ItemOverridePatch, ItemPatchDto, OverrideFieldOp,
-        OverrideItemKind, OverrideProvenanceDto, OverrideSaveRequest, OverrideScopeDto, Permission, PlaylistRequest,
-        SeriesStreamProperties, UiOverrideState, UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, XtreamCluster,
+        ImdbRatingSource, InputRefreshPolicy, InputUpdateAction, ItemFieldsDto, ItemOverridePatch, ItemPatchDto,
+        OverrideFieldOp, OverrideItemKind, OverrideProvenanceDto, OverrideSaveRequest, OverrideScopeDto, Permission,
+        PlaylistRequest, SeriesStreamProperties, UiOverrideState, UiPlaylistCategories, UiPlaylistGroup,
+        UiPlaylistItem, XtreamCluster,
     },
     utils::parse_localized_float,
 };
@@ -195,6 +196,7 @@ pub fn patch_playlist_item_from_patch(
     patch: &ItemOverridePatch,
     provenance: Option<&OverrideProvenanceDto>,
     has_remaining_deltas: bool,
+    rating_source: ImdbRatingSource,
 ) -> UiPlaylistItem {
     let mut updated = item.clone();
 
@@ -269,9 +271,12 @@ pub fn patch_playlist_item_from_patch(
     // 6. Rating
     if let Some(ref op) = patch.rating {
         match op {
-            OverrideFieldOp::Set(r) => updated.set_provider_rating(Some(*r)),
-            OverrideFieldOp::Clear => updated.set_provider_rating(None),
-            OverrideFieldOp::Reset => updated.rating = 0.0,
+            OverrideFieldOp::Set(r) => updated.set_provider_rating(Some(*r), rating_source),
+            OverrideFieldOp::Clear => updated.set_provider_rating(None, rating_source),
+            OverrideFieldOp::Reset => updated.set_provider_rating(
+                provenance.and_then(|pr| pr.provider.as_ref()).and_then(|p| p.rating),
+                rating_source,
+            ),
         }
     }
 
@@ -298,6 +303,7 @@ pub fn patch_playlist_item(
     deltas: &FieldDeltas,
     provenance: Option<&OverrideProvenanceDto>,
     has_remaining_deltas: bool,
+    rating_source: ImdbRatingSource,
 ) -> UiPlaylistItem {
     let mut patch = ItemOverridePatch::default();
 
@@ -334,7 +340,17 @@ pub fn patch_playlist_item(
         patch.rating = Some(OverrideFieldOp::Set(rating));
     }
 
-    patch_playlist_item_from_patch(item, &patch, provenance, has_remaining_deltas)
+    patch_playlist_item_from_patch(item, &patch, provenance, has_remaining_deltas, rating_source)
+}
+
+/// Rating source the explorer applies to provider-rating edits; `IMDb` disabled counts as `Provider`.
+pub fn explorer_rating_source(config_ctx: Option<&ConfigContext>) -> ImdbRatingSource {
+    config_ctx
+        .and_then(|ctx| ctx.config.as_ref())
+        .and_then(|cfg| cfg.config.metadata_update.as_ref())
+        .map(|metadata| &metadata.imdb)
+        .filter(|imdb| imdb.enabled)
+        .map_or(ImdbRatingSource::Provider, |imdb| imdb.rating_source)
 }
 
 #[must_use]
@@ -1018,6 +1034,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
     let services = use_service_context();
     let explorer_ctx = use_context::<PlaylistExplorerContext>();
     let config_ctx = use_context::<ConfigContext>();
+    let rating_source = explorer_rating_source(config_ctx.as_ref());
     let playlist_scope = use_context::<PlaylistContext>().and_then(|ctx| ctx.revision);
 
     let Some(ref item) = props.item else {
@@ -1461,6 +1478,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                                     &saved_deltas,
                                     prov_opt.as_ref(),
                                     has_remaining_deltas,
+                                    rating_source,
                                 );
                                 provenance.set(prov_opt);
                                 if let Some(ref cb) = on_saved {
