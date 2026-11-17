@@ -207,8 +207,8 @@ pub fn patch_playlist_item_from_patch(
             OverrideFieldOp::Set(s) => updated.name = Arc::from(s.as_str()),
             OverrideFieldOp::Clear => updated.name = Arc::from(""),
             OverrideFieldOp::Reset => {
-                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-                    updated.name = Arc::from(p.name.as_str());
+                if let Some(value) = reset_value(scope, "name", provenance) {
+                    updated.name = Arc::from(value.as_deref().unwrap_or(""));
                 }
             }
         }
@@ -220,8 +220,8 @@ pub fn patch_playlist_item_from_patch(
             OverrideFieldOp::Set(s) => updated.title = Arc::from(s.as_str()),
             OverrideFieldOp::Clear => updated.title = Arc::from(""),
             OverrideFieldOp::Reset => {
-                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-                    updated.title = Arc::from(p.title.as_str());
+                if let Some(value) = reset_value(scope, "title", provenance) {
+                    updated.title = Arc::from(value.as_deref().unwrap_or(""));
                 }
             }
         }
@@ -233,8 +233,8 @@ pub fn patch_playlist_item_from_patch(
             OverrideFieldOp::Set(s) => updated.group = Arc::from(s.as_str()),
             OverrideFieldOp::Clear => updated.group = Arc::from(""),
             OverrideFieldOp::Reset => {
-                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-                    updated.group = Arc::from(p.group.as_str());
+                if let Some(value) = reset_value(scope, "group", provenance) {
+                    updated.group = Arc::from(value.as_deref().unwrap_or(""));
                 }
             }
         }
@@ -246,8 +246,8 @@ pub fn patch_playlist_item_from_patch(
             OverrideFieldOp::Set(s) => updated.logo = Arc::from(s.as_str()),
             OverrideFieldOp::Clear => updated.logo = Arc::from(""),
             OverrideFieldOp::Reset => {
-                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-                    updated.logo = Arc::from(p.logo.as_deref().unwrap_or(""));
+                if let Some(value) = reset_value(scope, "logo", provenance) {
+                    updated.logo = Arc::from(value.as_deref().unwrap_or(""));
                 }
             }
         }
@@ -262,8 +262,8 @@ pub fn patch_playlist_item_from_patch(
             }
             OverrideFieldOp::Clear => updated.epg_channel_id = None,
             OverrideFieldOp::Reset => {
-                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-                    updated.epg_channel_id = p.epg_channel_id.as_ref().map(|s| Arc::from(s.as_str()));
+                if let Some(value) = reset_value(scope, "epg_channel_id", provenance) {
+                    updated.epg_channel_id = value.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(Arc::from);
                 }
             }
         }
@@ -275,9 +275,8 @@ pub fn patch_playlist_item_from_patch(
             OverrideFieldOp::Set(r) => updated.set_provider_rating(Some(*r), rating_source),
             OverrideFieldOp::Clear => updated.set_provider_rating(None, rating_source),
             OverrideFieldOp::Reset => {
-                // Without provenance the underlying rating is unknown: keep the item as shown.
-                if let Some(prov) = provenance {
-                    updated.set_provider_rating(rating_reset_value(scope, prov), rating_source);
+                if let Some(value) = reset_value(scope, "rating", provenance) {
+                    updated.set_provider_rating(value.as_deref().and_then(parse_localized_float), rating_source);
                 }
             }
         }
@@ -286,11 +285,15 @@ pub fn patch_playlist_item_from_patch(
     // 7. Explorer metadata
     let mut meta = updated.explorer_meta.take().unwrap_or_default();
     if let Some(ref op) = patch.chno {
-        meta.chno = match op {
-            OverrideFieldOp::Set(n) => Some(*n).filter(|n| *n > 0),
-            OverrideFieldOp::Clear => None,
-            OverrideFieldOp::Reset => provenance.and_then(|pr| pr.provider.as_ref()).map(|p| p.chno).filter(|n| *n > 0),
-        };
+        match op {
+            OverrideFieldOp::Set(n) => meta.chno = Some(*n).filter(|n| *n > 0),
+            OverrideFieldOp::Clear => meta.chno = None,
+            OverrideFieldOp::Reset => {
+                if let Some(value) = reset_value(scope, "chno", provenance) {
+                    meta.chno = value.and_then(|v| v.trim().parse::<u32>().ok()).filter(|n| *n > 0);
+                }
+            }
+        }
     }
     meta.override_state =
         UiOverrideState { edited: has_remaining_deltas, pending: true, ambiguous: meta.override_state.ambiguous };
@@ -347,16 +350,22 @@ pub fn patch_playlist_item(
     patch_playlist_item_from_patch(item, &patch, scope, provenance, has_remaining_deltas, rating_source)
 }
 
-/// Rating that remains after a rating override is reset: the input override (target scope), else the
-/// provider record. The processed record is no fallback, it still carries the override being reset.
-fn rating_reset_value(scope: OverrideScopeDto, provenance: &OverrideProvenanceDto) -> Option<f64> {
-    let fallback = reset_fallback(scope, "rating", provenance);
-    match fallback.source {
-        FallbackSource::InputOverride | FallbackSource::Provider => {
-            fallback.value.as_deref().and_then(parse_localized_float)
-        }
-        FallbackSource::Processed | FallbackSource::Base => None,
+/// Value a field takes after its override is reset in `scope`, in the same layer order as
+/// `reset_fallback`: an input override (Set or Clear) when a target override is reset, else the provider
+/// record. `Some(None)` means the field is cleared. `None` means the value is unknown (no provenance or
+/// no provider record): the caller keeps the item as shown. The processed record is no fallback, it
+/// still carries the override being reset.
+fn reset_value(
+    scope: OverrideScopeDto,
+    field: &str,
+    provenance: Option<&OverrideProvenanceDto>,
+) -> Option<Option<String>> {
+    let provenance = provenance?;
+    let fallback = reset_fallback(scope, field, provenance);
+    if fallback.source == FallbackSource::InputOverride {
+        return Some(fallback.value);
     }
+    provenance.provider.as_ref().map(|fields| get_field_from_item_fields(fields, field))
 }
 
 /// Rating source the explorer applies to provider-rating edits; `IMDb` disabled counts as `Provider`.

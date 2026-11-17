@@ -929,3 +929,74 @@ fn rating_reset_never_falls_back_to_processed_record() {
     assert_eq!(patched.effective_rating, None);
     assert_eq!(patched.rating_origin, None);
 }
+
+#[test]
+fn target_reset_resolves_input_override_layer_for_text_fields() {
+    let mut input_override = BTreeMap::new();
+    input_override.insert("group".to_string(), serde_json::json!("Input Group"));
+    input_override.insert("name".to_string(), serde_json::Value::Null);
+    input_override.insert("chno".to_string(), serde_json::json!(42));
+    let provenance = OverrideProvenanceDto {
+        provider: Some(ItemFieldsDto {
+            name: "Provider Name".to_string(),
+            title: "Provider Title".to_string(),
+            group: "Provider Group".to_string(),
+            chno: 7,
+            ..Default::default()
+        }),
+        input_override: Some(input_override),
+        target_override: None,
+        processed: Some(ItemFieldsDto { group: "Target Group".to_string(), ..Default::default() }),
+        pending_per_target: Vec::new(),
+        ambiguous: false,
+    };
+    let reset = ItemOverridePatch {
+        name: Some(OverrideFieldOp::Reset),
+        title: Some(OverrideFieldOp::Reset),
+        group: Some(OverrideFieldOp::Reset),
+        chno: Some(OverrideFieldOp::Reset),
+        ..Default::default()
+    };
+    let item = UiPlaylistItem {
+        name: Arc::from("Target Name"),
+        title: Arc::from("Target Title"),
+        group: Arc::from("Target Group"),
+        ..Default::default()
+    };
+
+    let target = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Target,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*target.group, "Input Group");
+    assert_eq!(&*target.name, "");
+    assert_eq!(&*target.title, "Provider Title");
+    assert_eq!(target.explorer_meta.as_ref().and_then(|m| m.chno), Some(42));
+
+    let input = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Input,
+        Some(&provenance),
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*input.group, "Provider Group");
+    assert_eq!(&*input.name, "Provider Name");
+    assert_eq!(input.explorer_meta.as_ref().and_then(|m| m.chno), Some(7));
+
+    let unknown = patch_playlist_item_from_patch(
+        &item,
+        &reset,
+        OverrideScopeDto::Target,
+        None,
+        false,
+        ImdbRatingSource::Provider,
+    );
+    assert_eq!(&*unknown.group, "Target Group");
+    assert_eq!(&*unknown.name, "Target Name");
+}

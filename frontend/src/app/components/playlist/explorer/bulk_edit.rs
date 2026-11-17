@@ -165,8 +165,20 @@ pub fn patch_playlist_item_bulk(
     )
 }
 
-/// Patches the saved items locally. A rating reset needs the underlying rating, which only the
-/// stored layers know, so it fetches each item's provenance; other patches stay local.
+/// Fields whose local `Reset` needs the stored layers (provenance) to know the remaining value.
+fn patch_needs_provenance(patch: &ItemOverridePatch) -> bool {
+    let is_reset = |op: Option<&OverrideFieldOp<String>>| matches!(op, Some(OverrideFieldOp::Reset));
+    is_reset(patch.name.as_ref())
+        || is_reset(patch.title.as_ref())
+        || is_reset(patch.group.as_ref())
+        || is_reset(patch.logo.as_ref())
+        || is_reset(patch.epg_channel_id.as_ref())
+        || matches!(patch.rating, Some(OverrideFieldOp::Reset))
+        || matches!(patch.chno, Some(OverrideFieldOp::Reset))
+}
+
+/// Patches the saved items locally. A reset needs the remaining value, which only the stored layers
+/// know, so a patch with a reset fetches each item's provenance; other patches stay local.
 async fn patch_saved_items<'a>(
     services: &Services,
     items: impl Iterator<Item = &'a Rc<UiPlaylistItem>>,
@@ -175,7 +187,7 @@ async fn patch_saved_items<'a>(
     target_id: Option<u16>,
     rating_source: ImdbRatingSource,
 ) -> Vec<UiPlaylistItem> {
-    let needs_provenance = matches!(patch.rating, Some(OverrideFieldOp::Reset));
+    let needs_provenance = patch_needs_provenance(patch);
     let mut patched = Vec::new();
     for item in items {
         let provenance = if needs_provenance {

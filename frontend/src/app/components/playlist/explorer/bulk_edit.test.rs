@@ -232,3 +232,15 @@ fn bulk_inputs_list_class_matches_stylesheet() {
     let styles = include_str!("../../../../../scss/app/components/playlist/_playlist_explorer.scss");
     assert!(styles.contains(".tp__bulk-inputs-list"));
 }
+
+#[test]
+fn bulk_fetches_provenance_only_for_resets() {
+    let set = ItemOverridePatch { group: Some(OverrideFieldOp::Set("G".to_string())), ..Default::default() };
+    assert!(!patch_needs_provenance(&set));
+    let clear = ItemOverridePatch { rating: Some(OverrideFieldOp::Clear), ..Default::default() };
+    assert!(!patch_needs_provenance(&clear));
+    let group_reset = ItemOverridePatch { group: Some(OverrideFieldOp::Reset), ..Default::default() };
+    assert!(patch_needs_provenance(&group_reset));
+    let rating_reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
+    assert!(patch_needs_provenance(&rating_reset));
+}
