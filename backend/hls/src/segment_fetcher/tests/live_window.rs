@@ -688,13 +688,59 @@ async fn active_live_window_preserves_demand_for_gap_sequences_beyond_demanded_t
         let plan = state
             .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(2) })
             .expect("active live window plan");
-        let visible_last = *plan.visible.last().expect("visible window has segments");
-        assert!(visible_last > 2, "{mode:?}: ready prefix advances past last_published");
-        let next_seq = visible_last + 1;
-        assert!(
-            plan.pending_tail.contains(&next_seq),
-            "{mode:?}: pending_tail must demand the sequence right after visible.last() ({next_seq}), got {:?}",
-            plan.pending_tail
+        assert_eq!(plan.visible, [0, 1, 2, 3, 4], "{mode:?}: the trimmed ready prefix is the visible window");
+        assert_eq!(
+            plan.pending_tail,
+            (5..=14).collect::<Vec<_>>(),
+            "{mode:?}: every unready sequence past the visible end stays demanded"
         );
+    }
+}
+
+#[tokio::test]
+async fn active_live_window_keeps_demand_for_successors_when_retained_fallback_holds_visible() {
+    let server = spawn_segment_server(0).await;
+    for mode in MODES {
+        let directory = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy::default();
+        let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+        {
+            let mut state = context.session.write().await;
+            *state = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+            state.apply_origin_manifest(&manifest(&server.base_url, 0, &[7; 8])).unwrap();
+            state.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 5 };
+            for seq in 0..=2 {
+                state.segments.get_mut(&seq).unwrap().status =
+                    SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 10 };
+            }
+        }
+        install_startup(&context, &worker, mode).await;
+        let mut state = context.session.write().await;
+        prepare_selected(&mut state, &[0, 1, 2], mode, true);
+        // Baseline is published with 8 origin sequences (0..=7), 0..=2 ready.
+        let published = state.render_and_store_manifest(10).expect("baseline is published");
+        assert_eq!(published.segment_proxy_seqs, [0, 1, 2]);
+
+        // Origin updates to 15 sequences (0..=14).
+        state.apply_origin_manifest(&manifest(&server.base_url, 0, &[7; 15])).unwrap();
+        prepare_selected(&mut state, &[3, 4], mode, true);
+        for seq in 3..=4 {
+            state.segments.get_mut(&seq).unwrap().status =
+                SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 20 };
+        }
+
+        // The ready prefix ends exactly at the last published sequence (4): the retained-window
+        // fallback keeps the previous visible end, but 5..=8 must stay demanded so the window
+        // can still advance once they become renderable.
+        let plan = state
+            .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(4) })
+            .expect("active live window plan");
+        for seq in 5..=8 {
+            assert!(
+                plan.pending_tail.contains(&seq),
+                "{mode:?}: retained-window fallback must keep demanding sequence {seq}, got pending_tail {:?}",
+                plan.pending_tail
+            );
+        }
     }
 }

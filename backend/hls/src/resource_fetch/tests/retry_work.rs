@@ -371,3 +371,46 @@ async fn lapsed_sibling_right_is_not_renewed_after_the_lease_expires() {
     );
     guard.finish(&session).await;
 }
+
+#[tokio::test]
+async fn finite_first_media_wave_after_physical_readmission_uses_only_accepted_start_window() {
+    for live_window in [true, false] {
+        let session = Arc::new(tokio::sync::RwLock::new(HlsSession::new(
+            HlsSessionKey::new(1, "readmitted-wave"),
+            b"fixture",
+            0,
+        )));
+        let (io, _) = crate::origin_attempt::tests::bound_origin_io(&session).await;
+        let now = tuliprox_core::utils::current_time_millis();
+        {
+            let mut state = session.write().await;
+            state.target_duration = Some(6);
+            let timing = state.account_overlap_timing();
+            let binding = state.origin_account_binding.as_mut().unwrap();
+            let anchor = if live_window { now } else { now - 60_000 };
+            binding.pinned_at_ms = anchor - 1_370;
+            binding.startup_protection =
+                Some(crate::origin::HlsOriginStartProtection { anchored_at_ms: anchor, timing });
+        }
+        let manager = &io.ctx.active_provider;
+        let generation = session.read().await.activity.origin_work_generation;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut operations = Vec::new();
+        for _ in 0..4 {
+            let work = HlsOriginRetryWork::begin(&session, Some(manager), deadline).await.unwrap();
+            let guard =
+                prepare_media_origin_attempt(Some(&io), &session, generation, Duration::from_secs(1)).await.unwrap();
+            let admitted = work.protect(manager, &session, generation, true).await.is_ok();
+            operations.push((guard, work, admitted));
+        }
+        let admitted_count = operations.iter().filter(|(_, _, admitted)| *admitted).count();
+        // Inside the accepted window the readmitted handle carries a start reservation. Outside it,
+        // siblings on the admitted allocation still share the first operation's work horizon.
+        assert_eq!(admitted_count, 4, "live_window={live_window}");
+        assert_eq!(manager.get_provider_connections_count(), 1, "four segment reads share one physical slot");
+        for (guard, work, _) in operations {
+            guard.finish(&session).await;
+            drop(work);
+        }
+    }
+}

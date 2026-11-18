@@ -137,6 +137,11 @@ impl HlsSegmentWorkerPool {
                         SegmentFetchOriginFailure::Permanent
                     ) {
                         member_unhealthy = session.member_unhealthy_after_media_failure(&err);
+                        if session.segments.get(&snapshot.proxy_seq).is_some_and(SegmentEntry::is_clear_ts_origin_404)
+                            && session.uses_fast_start_live_window()
+                        {
+                            session.queue_manifest_fetch_candidates(finished_at_ms, false);
+                        }
                     }
                 }
             }

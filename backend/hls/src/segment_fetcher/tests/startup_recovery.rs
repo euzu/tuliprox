@@ -186,3 +186,85 @@ async fn entry_can_render_complete_prefix_during_gateway_retry() {
     assert!(fetch.await.unwrap().is_ok());
     assert_eq!(server.requests.lock().await.len(), 3);
 }
+
+#[tokio::test]
+async fn rolled_404_head_can_admit_only_the_current_complete_origin_window() {
+    use crate::{
+        api::{
+            derive_hls_lease_manifest_snapshot, hls_startup_admission_allows_snapshot, HlsLeaseManifestSnapshotInput,
+        },
+        origin_progress::HlsOriginPathCondition,
+    };
+    use axum::http::StatusCode;
+
+    let server = spawn_segment_server(0).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (worker, context, _) = fetch_context(&server, &directory, &SegmentFetchPolicy::default()).await;
+    let ctx = crate::HlsCtx::for_test(tuliprox_core::model::Config::default());
+    let mode = HlsStartupMode::Optimistic;
+    {
+        let mut session = context.session.write().await;
+        *session = HlsSession::new(HlsSessionKey::new(1, "window"), b"secret", 0);
+        session.apply_origin_manifest(&manifest(&server.base_url, 8000, &[8; 4])).unwrap();
+        session.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    }
+    install_startup(&context, &worker, mode).await;
+    let ready = || SegmentCacheStatus::Ready { content_length: 8, ready_at_ms: 50 };
+    let missing = |status| SegmentCacheStatus::FailedPermanent { failed_at_ms: 20, status: Some(status) };
+    let mut session = context.session.write().await;
+    session.apply_origin_manifest(&manifest(&server.base_url, 8001, &[8; 4])).unwrap();
+    session.record_live_window_origin_commit(45);
+    session.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
+    session.segments.get_mut(&0).unwrap().status = missing(StatusCode::NOT_FOUND);
+    prepare_selected(&mut session, &[1, 2, 3, 4], mode, true);
+    for seq in 1..=4 {
+        session.segments.get_mut(&seq).unwrap().status = ready();
+    }
+    let plan = session.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+    assert_eq!(plan.visible, vec![1, 2, 3]);
+    assert_eq!(plan.hidden_tail, vec![4]);
+    session.segments.get_mut(&4).unwrap().status = SegmentCacheStatus::Discovered;
+    assert_eq!(session.queue_manifest_fetch_candidates(65, false).render_window_queued, 1);
+    assert_eq!(session.segment_prefetch_queue.pop_next(), Some((4, crate::SegmentFetchPriority::RenderWindow)));
+    session.segments.get_mut(&4).unwrap().status = SegmentCacheStatus::Discovered;
+    session.segments.get_mut(&0).unwrap().status = missing(StatusCode::FORBIDDEN);
+    assert_eq!(session.queue_manifest_fetch_candidates(66, false).prefetch_skipped, 1);
+    assert!(session.segment_prefetch_queue.is_empty());
+    session.segments.get_mut(&0).unwrap().status = missing(StatusCode::NOT_FOUND);
+    session.segments.get_mut(&2).unwrap().discontinuity_before = true;
+    assert_eq!(session.queue_manifest_fetch_candidates(67, false).prefetch_skipped, 1);
+    assert!(session.segment_prefetch_queue.is_empty());
+    session.segments.get_mut(&2).unwrap().discontinuity_before = false;
+    session.segments.get_mut(&4).unwrap().status = ready();
+    let rendered = HlsManifestRenderer::render_live_window(&session, &plan, 70).unwrap();
+    let snapshot = derive_hls_lease_manifest_snapshot(
+        &HlsLeaseManifestSnapshotInput::FastStartWindow {
+            session: &session,
+            plan: &plan,
+            rendered: &rendered,
+            materialized_body: &rendered.body,
+        },
+        70,
+    )
+    .unwrap()
+    .unwrap();
+    drop(session);
+    assert!(hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await);
+    let mut session = context.session.write().await;
+    assert_eq!(session.origin_control.path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
+    for seq in 1..=4 {
+        session.segments.get_mut(&seq).unwrap().status = SegmentCacheStatus::Discovered;
+        drop(session);
+        assert!(!hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await);
+        session = context.session.write().await;
+        session.segments.get_mut(&seq).unwrap().status = ready();
+    }
+    session.segments.get_mut(&0).unwrap().status = missing(StatusCode::FORBIDDEN);
+    drop(session);
+    assert!(!hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await);
+    let mut session = context.session.write().await;
+    session.segments.get_mut(&0).unwrap().status = missing(StatusCode::NOT_FOUND);
+    session.segments.get_mut(&2).unwrap().discontinuity_before = true;
+    drop(session);
+    assert!(!hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await);
+}

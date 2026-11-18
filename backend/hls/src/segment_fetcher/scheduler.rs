@@ -83,6 +83,7 @@ pub(super) struct SegmentFetchSnapshot {
     pub(super) encryption: Option<HlsSegmentEncryption>,
     pub(super) priority: SegmentFetchPriority,
     pub(super) started_at_ms: u64,
+    pub(super) dispatched_at: std::time::Instant,
     pub(super) proxy_file_ext: String,
     pub(super) origin_seq: u64,
     pub(super) complete_object: bool,
@@ -137,6 +138,7 @@ impl fmt::Debug for SegmentFetchSnapshot {
             .field("fetch_ref", &self.fetch_ref)
             .field("priority", &self.priority)
             .field("started_at_ms", &self.started_at_ms)
+            .field("dispatched_at", &self.dispatched_at)
             .field("proxy_file_ext", &self.proxy_file_ext)
             .field("origin_seq", &self.origin_seq)
             .field("complete_object", &self.complete_object)
@@ -429,6 +431,7 @@ impl HlsSegmentWorkerPool {
                 encryption: candidate.encryption,
                 priority,
                 started_at_ms: now_ms,
+                dispatched_at: std::time::Instant::now(),
                 proxy_file_ext: candidate.proxy_file_ext,
                 origin_seq: candidate.origin_key.host_local_sequence,
                 complete_object: candidate.complete_object,

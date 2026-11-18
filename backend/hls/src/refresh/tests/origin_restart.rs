@@ -149,6 +149,91 @@ async fn candidate(
     .await
 }
 
+fn advancing_conflict(origin: &Origin) -> FetchedOriginManifest {
+    let mut fetched = playlist(&origin.base, "0123456789abcdef", 6, "?token=rotated");
+    let first = format!("#EXTINF:4,\n{}/0123456789abcdef/0.ts?token=rotated\n", origin.base);
+    fetched.body = fetched
+        .body
+        .replace("#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-MEDIA-SEQUENCE:1")
+        .replace(&first, "")
+        .replacen("#EXTINF:4,", "#EXTINF:3.960,", 1)
+        .replace("0123456789abcdef/5.ts", "fedcba9876543210/5.ts");
+    fetched
+}
+
+#[tokio::test]
+async fn advancing_readmission_conflict_preserves_previous_media_and_proves_the_new_window() {
+    let origin = Origin::start().await;
+    let mut request = warm(&origin, HlsStartupMode::FirstReady).await;
+    let old = request.session.read().await.startup.as_ref().unwrap().revisions[&1].clone();
+    authorize_reentry(&mut request).await;
+    *origin.state.new_namespace_bytes.write().await = Some(media(2));
+    let before = origin.state.requests.lock().await.len();
+    assert!(candidate(&request, advancing_conflict(&origin)).await.is_ok());
+    assert_eq!(origin.state.requests.lock().await.len() - before, 5, "every candidate body is verified");
+    let session = request.session.read().await;
+    assert_eq!(session.origin_epoch, 1);
+    assert_eq!(session.origin_seq_highwater, Some(5));
+    assert!(session.segments[&5].discontinuity_before);
+    assert!(!session.live_entry_revalidation.required);
+    let current = session.startup.as_ref().unwrap().revisions[&9].clone();
+    drop(session);
+    for (revision, expected) in [(old, media(1)), (current, media(2))] {
+        let path = revision.revision().wait_complete(tokio::time::Instant::now()).await.unwrap().path;
+        assert_eq!(tokio::fs::read(path).await.unwrap(), expected);
+    }
+}
+
+#[tokio::test]
+async fn advancing_readmission_conflict_requires_authorization_and_new_compatible_bytes() {
+    let origin = Origin::start().await;
+    let mut request = warm(&origin, HlsStartupMode::FirstReady).await;
+    *origin.state.new_namespace_bytes.write().await = Some(media(2));
+    assert!(candidate(&request, advancing_conflict(&origin)).await.is_err());
+    authorize_reentry(&mut request).await;
+    for bytes in [media(1), vec![0; 188 * 5]] {
+        *origin.state.new_namespace_bytes.write().await = Some(bytes);
+        assert!(candidate(&request, advancing_conflict(&origin)).await.is_err());
+        let state = request.session.read().await;
+        assert_eq!(state.origin_epoch, 0);
+        assert_eq!(state.origin_seq_highwater, Some(4));
+        assert!(state.live_entry_revalidation.required);
+    }
+}
+
+#[tokio::test]
+async fn soft_return_verifies_changed_media_only_for_new_stale_entry() {
+    for (active, stale, soft, expected) in
+        [(false, true, true, true), (true, true, true, false), (false, false, true, false), (false, true, false, false)]
+    {
+        let origin = Origin::start().await;
+        let mut request = warm(&origin, HlsStartupMode::FirstReady).await;
+        let now = request.hls_proxy.now_ms();
+        {
+            let mut state = request.session.write().await;
+            let age = if soft { state.account_overlap_timing().hard_active_window_ms + 1 } else { 0 };
+            state.mark_authorized_media_access(now.saturating_sub(age));
+        }
+        request.access_lease_id = Some(crate::HlsAccessLeaseId("new-view".into()));
+        request.manifest_commit_requirement = if stale {
+            HlsManifestCommitRequirement::FreshCommitRequired {
+                reason: HlsFreshManifestRequiredReason::StaleEntryWindow,
+            }
+        } else {
+            HlsManifestCommitRequirement::CommittedManifestAllowed
+        };
+        request.attempt = Some(Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+            request.manifest_commit_requirement,
+            active,
+            None,
+        )));
+        *origin.state.new_namespace_bytes.write().await = Some(media(2));
+        let result = candidate(&request, advancing_conflict(&origin)).await;
+        assert_eq!(result.is_ok(), expected, "active={active} stale={stale} soft={soft}");
+        assert_eq!(request.session.read().await.origin_epoch, u64::from(expected));
+    }
+}
+
 #[tokio::test]
 async fn restart_with_new_paths_accepts_lower_and_equal_highwater() {
     for mode in [HlsStartupMode::FirstReady, HlsStartupMode::Progressive, HlsStartupMode::Optimistic] {

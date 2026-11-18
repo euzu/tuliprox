@@ -1138,9 +1138,6 @@ async fn store_acquired_hls_origin_account_io_handle(
     deadline: Option<Instant>,
 ) -> Result<HlsOriginAccountIoLeaseGuard, HlsBoundAccountAcquireErrorKind> {
     let playback_request_id = handle.playback_request_id;
-    // The handle carries the exact provider binding tag it was acquired under, so a
-    // later detach/clear can prove it still targets this binding, not a successor.
-    let provider_binding_tag = handle.binding_tag;
     let mut handle_guard = ManagedHandleGuard::new(handle, cleanup_permit);
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         clear_pending_hls_origin_account_io_lease(session, &pending_guard.lease, deadline).await;
@@ -1185,7 +1182,28 @@ async fn store_acquired_hls_origin_account_io_handle(
             }
         }
 
-        let (handle, permit) = handle_guard.take_resource()?;
+        // A new physical I/O claim can follow the accepted manifest's claim.
+        // Carry only the remaining, already-authorized first-media window onto
+        // this exact handle. A refresh or an expired binding cannot extend it.
+        let current = session_guard.origin_account_binding.as_ref()?;
+        let now_ms = origin_io.ctx.hls_proxy.now_ms();
+        let last_media = session_guard.activity.last_authorized_media_at_ms;
+        let accepted_start = current.startup_protection.filter(|start| {
+            origin_io.playback_kind == PlaybackKind::LiveHls
+                && start.anchored_at_ms >= current.pinned_at_ms
+                && start.reservation_deadline_ms() > now_ms
+                && last_media.is_none_or(|media| media <= start.anchored_at_ms)
+        });
+        let (mut handle, permit) = handle_guard.take_resource()?;
+        if let Some(start) = accepted_start {
+            let remaining = Duration::from_millis(start.reservation_deadline_ms() - now_ms);
+            if let Some(tag) =
+                origin_io.ctx.active_provider.reserve_hls_start(&current.session_owner, &handle, remaining)
+            {
+                handle.binding_tag = Some(tag);
+            }
+        }
+        let provider_binding_tag = handle.binding_tag;
         match lease.provider_handle.lock() {
             Ok(mut guard) => *guard = Some(handle),
             Err(poisoned) => *poisoned.into_inner() = Some(handle),

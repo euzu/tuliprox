@@ -1248,7 +1248,14 @@ fn plan_legacy_rebase(
     let upstream_seq = media_playlist_media_sequence(content).unwrap_or(0);
     let segment_count = media_playlist_segment_count(content);
     let upstream_discontinuity_sequence = media_playlist_discontinuity_sequence(content).unwrap_or(0);
-    if state.pending_member_rebase && segment_count > 0 {
+    if state.pending_member_rebase && segment_count == 0 {
+        return Some(HlsMediaSequenceRebase {
+            media_sequence: state.last_served_sequence.saturating_add(1),
+            insert_discontinuity: false,
+            discontinuity_sequence: state.discontinuity_sequence,
+        });
+    }
+    if state.pending_member_rebase {
         let next_seq = state.last_served_sequence.saturating_add(1);
         let offset = i128::from(next_seq) - i128::from(upstream_seq);
         state.media_sequence_offset = i64::try_from(offset).unwrap_or(if offset > 0 { i64::MAX } else { i64::MIN });
@@ -1526,15 +1533,11 @@ async fn switch_legacy_hls_group_member(
         let Ok((content, response_url, response_headers)) =
             download_legacy_hls_manifest(app_state, &source, req_headers).await
         else {
+            let mut rebase_state = session.legacy_rebase.clone().unwrap_or_default();
+            rebase_state.pending_member_rebase = true;
             app_state
                 .active_users
-                .replace_legacy_failover_state(
-                    &user.username,
-                    session_token,
-                    session.legacy_rebase.clone(),
-                    Some(budget),
-                    false,
-                )
+                .replace_legacy_failover_state(&user.username, session_token, Some(rebase_state), Some(budget), false)
                 .await;
             return LegacySwitchOutcome::GiveUp;
         };
@@ -2627,5 +2630,34 @@ mod legacy_rebase_tests {
             "first segment of non-empty window continues at last_served_sequence + 1"
         );
         assert!(rebase.insert_discontinuity, "insert_discontinuity must be true");
+    }
+
+    #[test]
+    fn empty_media_playlist_with_pending_member_rebase_does_not_change_discontinuity_counter() {
+        let mut state = LegacyHlsRebase::default();
+        plan_legacy_rebase(&mut state, &media_with_disc_seq(10004, 3, 3), HlsPlaylistKind::Media);
+        assert_eq!(state.last_served_sequence, 10006);
+        assert_eq!(state.discontinuity_sequence, 3);
+        assert_eq!(state.upstream_discontinuity_sequence, Some(3));
+
+        state.pending_member_rebase = true;
+        let empty_rebase = plan_legacy_rebase(&mut state, &media_with_disc_seq(50000, 40, 0), HlsPlaylistKind::Media);
+        assert_eq!(
+            empty_rebase,
+            Some(HlsMediaSequenceRebase {
+                media_sequence: 10007,
+                insert_discontinuity: false,
+                discontinuity_sequence: 3,
+            })
+        );
+        assert_eq!(state.discontinuity_sequence, 3);
+        assert_eq!(state.upstream_discontinuity_sequence, Some(3));
+        assert!(state.pending_member_rebase);
+
+        let rebase =
+            plan_legacy_rebase(&mut state, &media_with_disc_seq(50006, 40, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(rebase.media_sequence, 10007);
+        assert!(rebase.insert_discontinuity);
+        assert_eq!(rebase.discontinuity_sequence, 3);
     }
 }

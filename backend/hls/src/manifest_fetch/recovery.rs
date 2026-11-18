@@ -1011,6 +1011,9 @@ async fn fetch_manifest_recovery_burst_candidates(
             let mut probe_context = context.clone();
             crate::scrub_hls_origin_headers(&mut probe_context.headers, None);
             probe_context.origin_entry = probe_context.origin_entry.with_profile_recovery_failover(false);
+            // The slot already owns its logical attempt. A failed probe must not close the shared
+            // attempt, or the bound mirror request below would be refused.
+            probe_context.attempt = None;
             debug!("HLS reduced manifest retry revisits pinned profile endpoint: budget_ms={}", budget.as_millis());
             (probe_context, primary, budget)
         });

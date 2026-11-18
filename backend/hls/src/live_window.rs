@@ -19,7 +19,9 @@ pub enum HlsLiveWindowView {
 pub struct HlsLiveWindowPlan {
     pub visible: Vec<u64>,
     pub hidden_tail: Vec<u64>,
-    /// Active-view sequences after the visible end (`available[end..]`) that are demanded but not renderable yet.
+    /// Active-view sequences after the trimmed ready prefix (`available[ready_end..]`) that are
+    /// demanded but not renderable yet, excluding sequences already in `visible`. This stays
+    /// non-empty when the retained-window fallback publishes a visible end past the ready prefix.
     pub pending_tail: Vec<u64>,
     pub effective_strip_segments: usize,
     pub origin_commits: u64,
@@ -64,6 +66,57 @@ impl HlsLiveWindowPlan {
     }
 
     pub fn is_startup_recovery(&self) -> bool { self.recovered_startup }
+
+    /// A permanent 404 for the immediately preceding segment cannot be repaired
+    /// by waiting for a later origin sequence. Only use the usual entry view
+    /// when the full origin window, including the reserved tail, is complete.
+    pub(crate) fn replaces_expired_origin_head(&self, session: &HlsSession) -> bool {
+        self.follows_expired_origin_head(session)
+            && self.visible.iter().chain(&self.hidden_tail).all(|seq| {
+                session.segments.get(seq).is_some_and(|entry| matches!(entry.status, SegmentCacheStatus::Ready { .. }))
+            })
+    }
+
+    /// Under pressure the single reserved object required for entry admission
+    /// must compete with the render window even while its body is unavailable.
+    pub(crate) fn required_replacement_reserve(&self, session: &HlsSession) -> Option<u64> {
+        let [reserve] = self.hidden_tail.as_slice() else { return None };
+        if session.origin_control.path_condition
+            == crate::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure
+            && self.follows_expired_origin_head(session)
+        {
+            Some(*reserve)
+        } else {
+            None
+        }
+    }
+
+    fn follows_expired_origin_head(&self, session: &HlsSession) -> bool {
+        if self.view != HlsLiveWindowView::Entry || self.visible.len() < crate::renderer::MIN_VISIBLE_SEGMENTS {
+            return false;
+        }
+        let Some(&first) = self.visible.first() else { return false };
+        if self.hidden_tail.is_empty() {
+            return false;
+        }
+        let Some(missing) = first.checked_sub(1).and_then(|id| session.segments.get(&id)) else { return false };
+        if !missing.is_clear_ts_origin_404() || self.origin_sequences.first() != Some(&first) {
+            return false;
+        }
+        let mut previous = missing;
+        for seq in self.visible.iter().chain(&self.hidden_tail) {
+            let Some(next) = session.segments.get(seq) else { return false };
+            if next.discontinuity_before
+                || next.origin_key.origin_epoch != previous.origin_key.origin_epoch
+                || next.origin_key.effective_host_id != previous.origin_key.effective_host_id
+                || previous.origin_key.host_local_sequence.checked_add(1) != Some(next.origin_key.host_local_sequence)
+            {
+                return false;
+            }
+            previous = next;
+        }
+        true
+    }
 
     pub(crate) fn is_ready(&self, session: &HlsSession) -> bool {
         self.visible.iter().all(|seq| {
@@ -181,6 +234,9 @@ impl HlsSession {
                     }
                     end -= 1;
                 }
+                // The ready prefix end stays the demand boundary even when the guard below
+                // retains a published window past it.
+                let ready_end = end;
                 // Truncate only when the ready prefix publishes new media; otherwise the
                 // previous publication stays authoritative (retained window fallback).
                 if !last_published.is_some_and(|last| {
@@ -190,7 +246,7 @@ impl HlsSession {
                 }
                 let mut visible = available[end.saturating_sub(6)..end].to_vec();
                 crate::renderer::retain_published_predecessors_from(self, &mut visible, first_published);
-                pending_tail = available[end..].to_vec();
+                pending_tail = available[ready_end..].iter().copied().filter(|seq| !visible.contains(seq)).collect();
                 (visible, Vec::new(), 0)
             }
         };

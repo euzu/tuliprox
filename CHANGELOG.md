@@ -1602,7 +1602,25 @@
 - **Manifest recovery revisits the pinned primary endpoint of a `restart_from_first` provider.** After a full
   observation burst on a mirror whose timeline did not qualify, the first reduced retry probes the pinned primary
   endpoint once, within the existing retry interval and deadlines. Nested provider failover is disabled for that probe.
-  If the primary fails or times out, the same retry still asks the bound mirror.
+  If the primary fails or times out, even with a permanent status such as HTTP 404, the same retry still asks the
+  bound mirror.
+
+- **New HLS viewers start after an expired origin head.** When the segment before the entry window returned HTTP 404,
+  three complete, contiguous clear transport-stream segments are admitted if the following reserve segment is ready in
+  the same origin window and generation. The missing reserve is fetched at render-window priority. A missing middle
+  segment, a stale revision, a key change or a discontinuity still blocks this start.
+
+- **First segment requests after a physical readmission share the accepted start window.** A new physical handle on a
+  live HLS account carries the remaining accepted startup reservation of the same binding, so overlapping first-media
+  operations are not refused locally. The reservation never outlives the original window.
+
+- **A returning viewer accepts an advancing origin window with changed segment bindings.** On an authorized readmission,
+  or on a new access with a stale entry window during the soft overlap interval, the pinned origin may commit a
+  separate timeline after the new media is fetched, hashed and checked for compatible tracks. Published revisions stay
+  available to existing readers. Ordinary refreshes, replayed payloads and incompatible tracks are still rejected.
+
+- **HLS cache inventory is collected in one blocking scan.** Counting committed revision files no longer issues one
+  asynchronous filesystem call per directory entry, and a cancelled scan discards its partial total.
 
 - **Legacy HLS group failover keeps the client timeline when the backup member answers with a master playlist.**
   After a switch to a member that returns a master playlist, the first child media playlist now continues the client

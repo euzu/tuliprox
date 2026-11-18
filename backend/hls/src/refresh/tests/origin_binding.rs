@@ -1000,6 +1000,8 @@ async fn observed_profile_mirror_rechecks_pinned_endpoint_within_existing_budget
 
 #[tokio::test]
 async fn failed_pinned_profile_probe_falls_back_to_the_bound_mirror() {
+    // A hard probe status (404) must not close the shared attempt: the probe slot still owns its
+    // bound mirror request.
     let primary = spawn_test_origin(Arc::new(|_| (404, Vec::new(), String::new()))).await;
     let mirror = spawn_test_origin(Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(101)))).await;
     let mut mirror_url = Url::parse(&mirror.base_url).unwrap();
@@ -1035,6 +1037,17 @@ async fn failed_pinned_profile_probe_falls_back_to_the_bound_mirror() {
             .unwrap()
             .with_profile_recovery_failover(true);
     request.retry_policy.delays_ms = [0, 1, 250, 1, 1];
+    // Open the shared attempt context with an almost exhausted budget so only the full burst and
+    // the single reduced slot that carries the probe run; later retries cannot add mirror requests.
+    let attempt = Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+        HlsManifestCommitRequirement::CommittedManifestAllowed,
+        true,
+        None,
+    ));
+    for _ in 0..3 {
+        assert!(attempt.begin_logical_attempt(), "the shared attempt budget stays open");
+    }
+    request.attempt = Some(Arc::clone(&attempt));
     let context = manifest_fetch_context(&request, None);
     let binding =
         crate::manifest_origin_binding::HlsManifestOriginBinding::new(mirror_url.join("index.m3u8").unwrap(), Some(1))
@@ -1049,16 +1062,18 @@ async fn failed_pinned_profile_probe_falls_back_to_the_bound_mirror() {
         |fetched, mode| super::super::commit_manifest_recovery_candidate(&request, fetched, mode),
     )
     .await;
-    // The primary 404 is not a hard failure of the chain: the probe slot still asks its bound mirror.
+    // The failed pinned probe is not a hard failure of the chain: the probe slot still asks its bound mirror.
     assert!(
         !matches!(outcome, Err(crate::manifest_fetch::OriginManifestFetchError::PermanentStatus(_))),
         "a failed pinned probe must not abort the recovery chain: {:?}",
         outcome.as_ref().err()
     );
-    assert_eq!(primary.requests.lock().await.len(), 1);
-    // The full burst asks the mirror; the probe slot and the later reduced slots ask it again.
-    assert!(
-        mirror.requests.lock().await.len() > request.manifest_recovery_burst.level.plan().total_candidates(),
+    assert_eq!(primary.requests.lock().await.len(), 1, "the probe slot asks the pinned primary exactly once");
+    // The full burst asks its bound mirror; the probe slot adds exactly its own mirror fallback.
+    let burst_candidates = request.manifest_recovery_burst.level.plan().total_candidates();
+    assert_eq!(
+        mirror.requests.lock().await.len(),
+        burst_candidates + 1,
         "the probe slot falls back to its bound mirror request"
     );
 }

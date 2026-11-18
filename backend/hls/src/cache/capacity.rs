@@ -439,8 +439,7 @@ impl HlsSegmentCache {
             self.capacity_scan_count.fetch_add(1, Ordering::Relaxed);
             #[cfg(test)]
             self.startup_write_checkpoint(super::StartupWritePhase::AfterInventorySnapshot).await?;
-            let (total_bytes, session_bytes, revision_bytes) =
-                scan_cache_usage_excluding(cache_path, &excluded).await?;
+            let (total_bytes, session_bytes, revision_bytes) = scan_cache_usage_excluding(cache_path, excluded).await?;
             if self.cache_path_snapshot().path != cache_path {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "hls cache path changed during usage scan"));
             }
@@ -617,23 +616,45 @@ fn invalidate_capacity_state(capacity: &StdMutex<CacheCapacityState>, changed: &
 
 #[cfg(test)]
 pub(super) async fn scan_committed_cache_usage(cache_path: &Path) -> io::Result<(u64, HashMap<String, u64>, u64)> {
-    scan_cache_usage_excluding(cache_path, &std::collections::HashSet::new()).await
+    scan_cache_usage_excluding(cache_path, std::collections::HashSet::new()).await
 }
 
 async fn scan_cache_usage_excluding(
     cache_path: &Path,
-    excluded: &std::collections::HashSet<PathBuf>,
+    excluded: std::collections::HashSet<PathBuf>,
 ) -> io::Result<(u64, HashMap<String, u64>, u64)> {
+    let root = cache_path.to_owned();
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    let _guard = cancelled.clone().drop_guard();
+    // Directory iteration and stat calls all use the blocking pool. Keep the whole
+    // read-only walk in one task. Publication still validates both inventory revisions.
+    tokio::task::spawn_blocking(move || scan_usage(&root, &excluded, &cancelled)).await?
+}
+
+fn scan_usage(
+    cache_path: &Path,
+    excluded: &std::collections::HashSet<PathBuf>,
+    cancelled: &tokio_util::sync::CancellationToken,
+) -> io::Result<(u64, HashMap<String, u64>, u64)> {
+    let check_cancelled = || {
+        if cancelled.is_cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "hls cache scan cancelled"));
+        }
+        Ok(())
+    };
     let mut total_bytes = 0_u64;
     let mut revision_bytes = 0_u64;
     let mut session_bytes = HashMap::new();
-    let mut root_entries = match fs::read_dir(cache_path).await {
+    check_cancelled()?;
+    let root_entries = match std::fs::read_dir(cache_path) {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok((0, session_bytes, 0)),
         Err(err) => return Err(err),
     };
-    while let Some(root_entry) = root_entries.next_entry().await? {
-        match root_entry.file_type().await {
+    for root_entry in root_entries {
+        check_cancelled()?;
+        let root_entry = root_entry?;
+        match root_entry.file_type() {
             Ok(kind) if kind.is_dir() => {}
             Ok(_) => continue,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -643,13 +664,16 @@ async fn scan_cache_usage_excluding(
         let mut bytes = 0_u64;
         let mut pending_dirs = vec![root_entry.path()];
         while let Some(dir) = pending_dirs.pop() {
-            let mut entries = match fs::read_dir(dir).await {
+            check_cancelled()?;
+            let entries = match std::fs::read_dir(dir) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error),
             };
-            while let Some(entry) = entries.next_entry().await? {
-                let file_type = match entry.file_type().await {
+            for entry in entries {
+                check_cancelled()?;
+                let entry = entry?;
+                let file_type = match entry.file_type() {
                     Ok(kind) => kind,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error),
@@ -659,7 +683,7 @@ async fn scan_cache_usage_excluding(
                 } else if file_type.is_file() {
                     let revision = is_revision_cache_path(&entry.path());
                     if !excluded.contains(&entry.path()) {
-                        let size = match entry.metadata().await {
+                        let size = match entry.metadata() {
                             Ok(metadata) => metadata.len(),
                             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                             Err(error) => return Err(error),
@@ -683,5 +707,37 @@ async fn scan_cache_usage_excluding(
 pub(super) fn update_revision_metrics(capacity: &CacheCapacityState) {
     if let Some(metrics) = capacity.revision_metrics.as_ref().and_then(Weak::upgrade) {
         metrics.record_revision_disk_bytes(capacity.revision_bytes);
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_inventory_returns_interrupted_without_publishing_totals() {
+        let dir = tempfile::tempdir().expect("private cache root");
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let error = scan_usage(dir.path(), &std::collections::HashSet::default(), &token).expect_err("scan cancelled");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inventory_only_counts_committed_regular_files_inside_session_directories() {
+        let dir = tempfile::tempdir().expect("private cache root");
+        let session = dir.path().join("example");
+        std::fs::create_dir(&session).unwrap();
+        std::fs::write(dir.path().join("marker"), b"marker").unwrap();
+        std::fs::write(session.join("ready.ts"), b"ready").unwrap();
+        let spool = session.join("updating.tmp");
+        std::fs::write(&spool, b"reserved").unwrap();
+        std::os::unix::fs::symlink(dir.path(), session.join("alias")).unwrap();
+        let (total, per_session, revisions) =
+            scan_cache_usage_excluding(dir.path(), [spool].into_iter().collect()).await.unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(per_session, HashMap::from([(String::from("example"), 5)]));
+        assert_eq!(revisions, 0);
     }
 }

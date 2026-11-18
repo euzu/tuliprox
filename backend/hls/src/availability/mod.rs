@@ -210,7 +210,7 @@ pub async fn hls_startup_admission_allows_snapshot(
                 .as_ref()
                 .and_then(|publication| publication.window_plan.as_ref())
                 .is_some_and(|window| {
-                    window.plan.is_startup_recovery()
+                    (window.plan.is_startup_recovery() || window.plan.replaces_expired_origin_head(&session))
                         && window.plan.is_current(&session)
                         && window.plan.is_ready(&session)
                 });
