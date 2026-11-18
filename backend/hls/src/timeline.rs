@@ -206,6 +206,21 @@ impl SegmentEntry {
             && self.map_ref.is_none()
             && self.encryption.is_none()
     }
+
+    /// Replaces the concrete fetch target and retires gateway-timeout evidence.
+    ///
+    /// `gateway_timeout` records what one reference answered, so it may only affect that
+    /// reference. A replaced (or dropped) reference clears the flag and keeps the status
+    /// variant, its other fields and the origin-work generation untouched.
+    pub(crate) fn replace_origin_fetch_ref(&mut self, fetch_ref: Option<OriginSegmentFetchRef>) {
+        if self.origin_fetch_ref == fetch_ref {
+            return;
+        }
+        self.origin_fetch_ref = fetch_ref;
+        if let SegmentCacheStatus::Fetching { gateway_timeout, .. } = &mut self.status {
+            *gateway_timeout = false;
+        }
+    }
 }
 
 impl HlsSession {
@@ -616,7 +631,7 @@ impl HlsSession {
         let mut draft = TimelineDraft::from(&*self);
         for (seq, fetch_ref) in updates {
             if let Some(entry) = draft.segments.get_mut(seq) {
-                entry.origin_fetch_ref = Some(fetch_ref.clone());
+                entry.replace_origin_fetch_ref(Some(fetch_ref.clone()));
             }
         }
         draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)?;
@@ -1158,11 +1173,11 @@ impl TimelineDraft {
         if let Some(proxy_seq) = self.origin_to_proxy.get(&current_epoch_key).copied() {
             if let Some(entry) = self.segments.get_mut(&proxy_seq) {
                 // Refresh only the concrete fetch reference. Stable identity remains host- and epoch-local.
-                entry.origin_fetch_ref = Some(OriginSegmentFetchRef {
+                entry.replace_origin_fetch_ref(Some(OriginSegmentFetchRef {
                     resolved_origin_url: parsed.resolved_origin_url.clone(),
                     byte_range: parsed.origin_byte_range,
                     valid_until_ms: None,
-                });
+                }));
                 entry.retained_resource_identity = None;
                 let encryption = map_segment_encryption(parsed)?;
                 // Cached ciphertext and its initialization/key bindings belong together,

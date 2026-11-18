@@ -149,6 +149,14 @@ async fn candidate(
     .await
 }
 
+async fn candidate_with_mode(
+    request: &OriginRefreshRequest,
+    fetched: FetchedOriginManifest,
+    mode: HlsManifestCommitAcceptanceMode,
+) -> Result<super::super::CommittedOriginManifest, HlsManifestCommitError> {
+    super::super::commit_manifest_recovery_candidate(request, fetched, mode).await
+}
+
 fn advancing_conflict(origin: &Origin) -> FetchedOriginManifest {
     let mut fetched = playlist(&origin.base, "0123456789abcdef", 6, "?token=rotated");
     let first = format!("#EXTINF:4,\n{}/0123456789abcdef/0.ts?token=rotated\n", origin.base);
@@ -191,21 +199,53 @@ async fn advancing_readmission_conflict_requires_authorization_and_new_compatibl
     *origin.state.new_namespace_bytes.write().await = Some(media(2));
     assert!(candidate(&request, advancing_conflict(&origin)).await.is_err());
     authorize_reentry(&mut request).await;
-    for bytes in [media(1), vec![0; 188 * 5]] {
-        *origin.state.new_namespace_bytes.write().await = Some(bytes);
-        assert!(candidate(&request, advancing_conflict(&origin)).await.is_err());
+    let candidate_segments = advancing_conflict(&origin).body.matches(".ts").count();
+    // A track-compatible replay verifies every candidate body and then finds no progress.
+    *origin.state.new_namespace_bytes.write().await = Some(media(1));
+    let before = origin.state.requests.lock().await.len();
+    let Err(error) = candidate(&request, advancing_conflict(&origin)).await else { panic!("rejected candidate") };
+    let probed = origin.state.requests.lock().await.len() - before;
+    let HlsManifestCommitError::TimelineRejected { reason } = &error else {
+        panic!("expected a timeline rejection, got {error:?}");
+    };
+    assert_eq!(*reason, HlsManifestRejectLogReason::SwitchResourceUnavailable);
+    assert_eq!(probed, candidate_segments, "a track-compatible replay verifies every candidate body");
+    {
         let state = request.session.read().await;
         assert_eq!(state.origin_epoch, 0);
         assert_eq!(state.origin_seq_highwater, Some(4));
         assert!(state.live_entry_revalidation.required);
     }
+    // Incompatible media fails the compatible-track check of the first probed segment. The error
+    // carries no track-specific reason, so the request count proves the probe reached that check:
+    // the first body was fetched once and no later segment was requested.
+    let incompatible = vec![0; 188 * 5];
+    *origin.state.bytes.write().await = incompatible.clone();
+    *origin.state.new_namespace_bytes.write().await = Some(incompatible);
+    let before = origin.state.requests.lock().await.len();
+    let Err(error) = candidate(&request, advancing_conflict(&origin)).await else { panic!("rejected candidate") };
+    let probed = origin.state.requests.lock().await.len() - before;
+    let HlsManifestCommitError::TimelineRejected { reason } = &error else {
+        panic!("expected a timeline rejection, got {error:?}");
+    };
+    assert_eq!(*reason, HlsManifestRejectLogReason::SwitchResourceUnavailable);
+    assert_eq!(probed, 1, "incompatible tracks reject the first probed segment");
+    let state = request.session.read().await;
+    assert_eq!(state.origin_epoch, 0);
+    assert_eq!(state.origin_seq_highwater, Some(4));
+    assert!(state.live_entry_revalidation.required);
 }
 
 #[tokio::test]
 async fn soft_return_verifies_changed_media_only_for_new_stale_entry() {
-    for (active, stale, soft, expected) in
-        [(false, true, true, true), (true, true, true, false), (false, false, true, false), (false, true, false, false)]
-    {
+    for (active, stale, soft, access_lease, strict, expected) in [
+        (false, true, true, true, true, true),
+        (true, true, true, true, true, false),
+        (false, false, true, true, true, false),
+        (false, true, false, true, true, false),
+        (false, true, true, false, true, false),
+        (false, true, true, true, false, false),
+    ] {
         let origin = Origin::start().await;
         let mut request = warm(&origin, HlsStartupMode::FirstReady).await;
         let now = request.hls_proxy.now_ms();
@@ -214,7 +254,7 @@ async fn soft_return_verifies_changed_media_only_for_new_stale_entry() {
             let age = if soft { state.account_overlap_timing().hard_active_window_ms + 1 } else { 0 };
             state.mark_authorized_media_access(now.saturating_sub(age));
         }
-        request.access_lease_id = Some(crate::HlsAccessLeaseId("new-view".into()));
+        request.access_lease_id = access_lease.then(|| crate::HlsAccessLeaseId("new-view".into()));
         request.manifest_commit_requirement = if stale {
             HlsManifestCommitRequirement::FreshCommitRequired {
                 reason: HlsFreshManifestRequiredReason::StaleEntryWindow,
@@ -228,9 +268,20 @@ async fn soft_return_verifies_changed_media_only_for_new_stale_entry() {
             None,
         )));
         *origin.state.new_namespace_bytes.write().await = Some(media(2));
-        let result = candidate(&request, advancing_conflict(&origin)).await;
-        assert_eq!(result.is_ok(), expected, "active={active} stale={stale} soft={soft}");
-        assert_eq!(request.session.read().await.origin_epoch, u64::from(expected));
+        let context = "active={active} stale={stale} soft={soft} access_lease={access_lease} strict={strict}";
+        let result = if strict {
+            candidate(&request, advancing_conflict(&origin)).await
+        } else {
+            // A non-strict host mode cannot take the soft new-viewer verification path.
+            candidate_with_mode(
+                &request,
+                advancing_conflict(&origin),
+                HlsManifestCommitAcceptanceMode::FreshPinnedRevalidation,
+            )
+            .await
+        };
+        assert_eq!(result.is_ok(), expected, "{context}");
+        assert_eq!(request.session.read().await.origin_epoch, u64::from(expected), "{context}");
     }
 }
 

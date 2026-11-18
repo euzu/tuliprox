@@ -412,5 +412,23 @@ async fn finite_first_media_wave_after_physical_readmission_uses_only_accepted_s
             guard.finish(&session).await;
             drop(work);
         }
+        // The physical slot is released and every work horizon is dropped, so the carrier of an
+        // HLS start reservation can only be the readmitted allocation's provider lease. No media
+        // was confirmed, so an unconfirmed `Starting` lease reserves nothing.
+        let state = session.read().await;
+        let binding = state.origin_account_binding.as_ref().expect("readmitted binding");
+        let usage = manager.provider_lease_usage(&binding.account_name);
+        assert_eq!(usage.starting, 1, "live_window={live_window}: the readmitted allocation keeps its lease");
+        assert_eq!((usage.active, usage.idle), (0, 0), "live_window={live_window}: no media confirmed the lease");
+        assert_eq!(
+            manager.binding_tag_for_owner(&binding.session_owner),
+            binding.provider_binding_tag,
+            "live_window={live_window}: the start reservation is tagged for the readmitted allocation"
+        );
+        assert_eq!(
+            manager.should_reuse_playback_provider(&binding.session_owner, &binding.account_name),
+            live_window,
+            "live_window={live_window}: only the accepted start window reserves the readmitted lease"
+        );
     }
 }

@@ -77,17 +77,18 @@ impl HlsLiveWindowPlan {
             })
     }
 
-    /// Under pressure the single reserved object required for entry admission
-    /// must compete with the render window even while its body is unavailable.
-    pub(crate) fn required_replacement_reserve(&self, session: &HlsSession) -> Option<u64> {
-        let [reserve] = self.hidden_tail.as_slice() else { return None };
+    /// Under pressure every reserved object required for entry admission must
+    /// compete with the render window even while its body is unavailable.
+    /// `replaces_expired_origin_head` needs the complete reserved tail, so a
+    /// qualifying plan requires the whole tail, not only its single-object case.
+    pub(crate) fn required_replacement_reserve(&self, session: &HlsSession) -> &[u64] {
         if session.origin_control.path_condition
             == crate::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure
             && self.follows_expired_origin_head(session)
         {
-            Some(*reserve)
+            &self.hidden_tail
         } else {
-            None
+            &[]
         }
     }
 

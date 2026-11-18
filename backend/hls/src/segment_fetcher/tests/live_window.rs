@@ -735,6 +735,12 @@ async fn active_live_window_keeps_demand_for_successors_when_retained_fallback_h
         let plan = state
             .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(4) })
             .expect("active live window plan");
+        assert_eq!(plan.visible, [9, 10, 11, 12, 13, 14], "{mode:?}: the retained window is the demanded view");
+        assert_eq!(
+            plan.pending_tail,
+            [5, 6, 7, 8],
+            "{mode:?}: successors between the ready prefix and the window stay demanded"
+        );
         for seq in 5..=8 {
             assert!(
                 plan.pending_tail.contains(&seq),
@@ -742,5 +748,115 @@ async fn active_live_window_keeps_demand_for_successors_when_retained_fallback_h
                 plan.pending_tail
             );
         }
+
+        // The scheduler must dispatch the demanded successor next, not the sequence the visible
+        // window starts with: demand carries the whole plan, not only its published head.
+        state.live_window_demands.insert(
+            crate::HlsAccessLeaseId("active".into()),
+            crate::live_window::HlsLiveWindowDemand {
+                issued_at_ms: 0,
+                view: HlsLiveWindowView::Active { first_published: 0, last_published: Some(4) },
+                published: vec![0, 1, 2, 3, 4],
+            },
+        );
+        let expected_queued = plan
+            .visible
+            .iter()
+            .chain(&plan.pending_tail)
+            .filter(|seq| !matches!(state.segments[seq].status, SegmentCacheStatus::Ready { .. }))
+            .count();
+        let report = state.queue_manifest_fetch_candidates(20, false);
+        assert_eq!(
+            report.render_window_queued, expected_queued,
+            "{mode:?}: every demanded unready sequence is required"
+        );
+        drop(state);
+        let next = worker.next_fetch_snapshot(&context, 21, &policy).await.expect("a demanded fetch is dispatched");
+        assert_eq!((next.proxy_seq, next.priority), (5, SegmentFetchPriority::RenderWindow));
     }
+}
+
+fn manifest_with_replaced_segment_url(
+    origin: &str,
+    first: u64,
+    durations: &[u64],
+    replaced: u64,
+) -> tuliprox_parser::hls::origin_manifest::ParsedOriginManifest {
+    let mut body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:7\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+    for (offset, duration) in durations.iter().enumerate() {
+        let seq = first + u64::try_from(offset).unwrap();
+        if seq == replaced {
+            writeln!(body, "#EXTINF:{duration},\n{origin}/{seq}.ts?fixture=2").unwrap();
+        } else {
+            writeln!(body, "#EXTINF:{duration},\n{origin}/{seq}.ts").unwrap();
+        }
+    }
+    normal_manifest(&body)
+}
+
+#[tokio::test]
+async fn manifest_refresh_replacing_fetch_reference_clears_gateway_timeout_prefix_shortcut() {
+    let server = spawn_segment_server(0).await;
+    let directory = tempfile::tempdir().unwrap();
+    let policy = SegmentFetchPolicy::default();
+    let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+    {
+        let mut state = context.session.write().await;
+        *state = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        state.apply_origin_manifest(&manifest(&server.base_url, 0, &[7; 6])).unwrap();
+        state.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    }
+    install_startup(&context, &worker, HlsStartupMode::Optimistic).await;
+    let mut state = context.session.write().await;
+    prepare_selected(&mut state, &[0, 1, 2], HlsStartupMode::Optimistic, true);
+    state.record_live_window_origin_commit(10);
+    for seq in 0..=1 {
+        state.segments.get_mut(&seq).unwrap().status = SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 10 };
+    }
+    state.segments.get_mut(&2).unwrap().status = SegmentCacheStatus::Fetching {
+        priority: SegmentFetchPriority::RenderWindow,
+        started_at_ms: 11,
+        gateway_timeout: true,
+    };
+    // The gateway timeout of the last selected object licenses a two-segment prefix, but only
+    // for the fetch reference that produced it.
+    let prefix = state.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+    assert_eq!(prefix.visible, [0, 1]);
+    assert_eq!(prefix.hidden_tail, [2, 3, 4, 5]);
+    assert!(prefix.is_startup_recovery());
+
+    // A refresh that replaces the concrete fetch reference of that sequence requires a fresh
+    // timeout observation before the shortcut may apply again.
+    let refresh = manifest_with_replaced_segment_url(&server.base_url, 0, &[7; 6], 2);
+    let refreshed_ref = refresh
+        .segments
+        .iter()
+        .find(|segment| segment.origin_seq == 2)
+        .map(|segment| crate::timeline::OriginSegmentFetchRef {
+            resolved_origin_url: segment.resolved_origin_url.clone(),
+            byte_range: segment.origin_byte_range,
+            valid_until_ms: None,
+        })
+        .expect("refreshed fetch reference for sequence 2");
+    let host = state.segments[&2].origin_key.effective_host_id;
+    state.apply_verified_query_manifest(&refresh, host, &[(2, refreshed_ref)]).unwrap();
+    state.record_live_window_origin_commit(20);
+    match &state.segments[&2].status {
+        SegmentCacheStatus::Fetching { priority, started_at_ms, gateway_timeout } => {
+            assert_eq!((*priority, *started_at_ms), (SegmentFetchPriority::RenderWindow, 11));
+            assert!(!gateway_timeout, "gateway timeout recorded for the replaced fetch reference must be cleared");
+        }
+        other => panic!("the refresh must keep the status variant, got {other:?}"),
+    }
+    assert!(
+        state.segments[&2]
+            .origin_fetch_ref
+            .as_ref()
+            .is_some_and(|fetch_ref| fetch_ref.resolved_origin_url.ends_with("2.ts?fixture=2")),
+        "the refresh must have replaced the fetch reference of sequence 2"
+    );
+    let refreshed = state.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+    assert_eq!(refreshed.visible, [0, 1, 2]);
+    assert_eq!(refreshed.hidden_tail, [3, 4, 5]);
+    assert!(!refreshed.is_startup_recovery());
 }

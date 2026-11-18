@@ -268,3 +268,59 @@ async fn rolled_404_head_can_admit_only_the_current_complete_origin_window() {
     drop(session);
     assert!(!hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await);
 }
+
+#[tokio::test]
+async fn rolled_404_head_requires_every_reserved_tail_object_under_readiness_pressure() {
+    use crate::origin_progress::HlsOriginPathCondition;
+    use axum::http::StatusCode;
+
+    let server = spawn_segment_server(0).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (worker, context, _) = fetch_context(&server, &directory, &SegmentFetchPolicy::default()).await;
+    let mode = HlsStartupMode::Optimistic;
+    {
+        let mut session = context.session.write().await;
+        *session = HlsSession::new(HlsSessionKey::new(1, "window"), b"secret", 0);
+        session.apply_origin_manifest(&manifest(&server.base_url, 8000, &[8; 6])).unwrap();
+        session.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 2 };
+    }
+    install_startup(&context, &worker, mode).await;
+    let ready = || SegmentCacheStatus::Ready { content_length: 8, ready_at_ms: 50 };
+    let mut session = context.session.write().await;
+    // The rolled-off first sequence leaves proxy sequences 1..=5 in the origin window.
+    session.apply_origin_manifest(&manifest(&server.base_url, 8001, &[8; 5])).unwrap();
+    session.record_live_window_origin_commit(45);
+    session.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
+    session.segments.get_mut(&0).unwrap().status =
+        SegmentCacheStatus::FailedPermanent { failed_at_ms: 20, status: Some(StatusCode::NOT_FOUND) };
+    prepare_selected(&mut session, &[1, 2, 3, 4, 5], mode, true);
+    for seq in 1..=5 {
+        session.segments.get_mut(&seq).unwrap().status = ready();
+    }
+    let plan = session.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+    assert_eq!(plan.visible, vec![1, 2, 3]);
+    assert_eq!(plan.hidden_tail, vec![4, 5]);
+    assert!(plan.replaces_expired_origin_head(&session));
+
+    // The replacement plan needs the complete reserved tail, so both reserved objects must
+    // compete with the render window instead of waiting at Prefetch priority.
+    for seq in [4, 5] {
+        session.segments.get_mut(&seq).unwrap().status = SegmentCacheStatus::Discovered;
+    }
+    assert_eq!(session.queue_manifest_fetch_candidates(65, false).render_window_queued, 2);
+    assert_eq!(session.segment_prefetch_queue.pop_next(), Some((4, crate::SegmentFetchPriority::RenderWindow)));
+    assert_eq!(session.segment_prefetch_queue.pop_next(), Some((5, crate::SegmentFetchPriority::RenderWindow)));
+    assert!(session.segment_prefetch_queue.is_empty());
+
+    // A non-qualifying plan keeps an ordinary stripped tail at Prefetch priority.
+    session.origin_control.path_condition = HlsOriginPathCondition::ProgressExpected;
+    for seq in [4, 5] {
+        session.segments.get_mut(&seq).unwrap().status = SegmentCacheStatus::Discovered;
+    }
+    let report = session.queue_manifest_fetch_candidates(66, true);
+    assert_eq!(report.render_window_queued, 0);
+    assert_eq!(report.prefetch_queued, 2);
+    assert_eq!(session.segment_prefetch_queue.pop_next(), Some((4, crate::SegmentFetchPriority::Prefetch)));
+    assert_eq!(session.segment_prefetch_queue.pop_next(), Some((5, crate::SegmentFetchPriority::Prefetch)));
+    assert!(session.segment_prefetch_queue.is_empty());
+}

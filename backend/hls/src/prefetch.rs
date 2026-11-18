@@ -210,7 +210,7 @@ impl HlsSession {
                 .iter()
                 .flat_map(|plan| plan.visible.iter().chain(&plan.pending_tail).copied())
                 .collect::<BTreeSet<_>>();
-            required.extend(plans.iter().filter_map(|plan| plan.required_replacement_reserve(self)));
+            required.extend(plans.iter().flat_map(|plan| plan.required_replacement_reserve(self).iter().copied()));
             let obsolete = self
                 .segment_prefetch_queue
                 .proxy_seqs()

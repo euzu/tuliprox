@@ -296,6 +296,16 @@ impl ActiveUserManager {
 
     pub async fn bind_member(&self, username: &str, token: &str, binding: MemberBinding) {
         let mut user_connections = self.write_connections().await;
+        self.apply_member_binding(&mut user_connections, username, token, binding);
+    }
+
+    fn apply_member_binding(
+        &self,
+        user_connections: &mut super::UserConnectionsWriteGuard<'_>,
+        username: &str,
+        token: &str,
+        binding: MemberBinding,
+    ) {
         let member_info = binding.to_stream_member_info();
         let mut matched_stream = false;
         if let Some(connection_data) = user_connections.by_key.get_mut(username) {
@@ -319,6 +329,29 @@ impl ActiveUserManager {
                 .pending_member_bindings
                 .insert(token.to_string(), (Instant::now() + Duration::from_secs(60), binding));
         }
+    }
+
+    /// Rebinds a legacy HLS group session to a new member and provider in one write, and marks a
+    /// pending timeline rebase. A concurrent media playlist request never sees the new binding
+    /// without the marker.
+    pub async fn switch_legacy_group_member_binding(
+        &self,
+        username: &str,
+        token: &str,
+        binding: MemberBinding,
+        provider: Arc<str>,
+        stream_url: Arc<str>,
+    ) {
+        let mut user_connections = self.write_connections().await;
+        Self::apply_session_provider_binding(&mut user_connections, username, token, &provider, &stream_url);
+        if let Some(session) = user_connections
+            .by_key
+            .get_mut(username)
+            .and_then(|connection_data| connection_data.sessions.iter_mut().find(|s| s.token == token))
+        {
+            session.legacy_rebase.get_or_insert_with(LegacyHlsRebase::default).pending_member_rebase = true;
+        }
+        self.apply_member_binding(&mut user_connections, username, token, binding);
     }
 
     /// Replaces the legacy HLS failover state (timeline rebase, incident budget and the
@@ -643,5 +676,74 @@ mod tests {
         );
         let session = manager.get_and_update_user_session(&user.username, &token).await.expect("session");
         assert_eq!(session.legacy_rebase, Some(rebase));
+    }
+
+    #[tokio::test]
+    async fn switch_legacy_group_member_binding_publishes_binding_and_pending_rebase_atomically() {
+        let manager = test_manager();
+        let user = test_user();
+        let addr = "127.0.0.1:8000".parse().unwrap();
+        let token = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-switch",
+                virtual_id: 300,
+                provider: "prov-1",
+                stream_url: "http://example.com/live1.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: None,
+                socket_bound: false,
+            })
+            .await;
+        let member = |member_vid: u32, name: &str| MemberBinding {
+            group_vid: 300,
+            member_vid,
+            member_index: 0,
+            input_name: Arc::from(name),
+            member_title: Arc::from(name),
+            provider: Arc::from(name),
+        };
+        let binding_a = member(301, "input-a");
+        manager.bind_member(&user.username, &token, binding_a.clone()).await;
+        let initial_rebase = LegacyHlsRebase {
+            last_served_sequence: 100,
+            media_sequence_offset: 10,
+            discontinuity_sequence: 1,
+            pending_member_rebase: false,
+            ..LegacyHlsRebase::default()
+        };
+        manager.replace_legacy_failover_state(&user.username, &token, Some(initial_rebase.clone()), None, false).await;
+        let identity = manager.session_identity(&user.username, &token).await.expect("identity");
+        manager.mark_member_failed_on_segment(&user.username, &token, identity, &binding_a).await;
+
+        let binding_b = member(302, "input-b");
+        let new_provider: Arc<str> = "prov-2".intern();
+        let new_url: Arc<str> = "http://example.com/live2.m3u8".intern();
+
+        // Switch to member B
+        manager
+            .switch_legacy_group_member_binding(
+                &user.username,
+                &token,
+                binding_b.clone(),
+                Arc::clone(&new_provider),
+                Arc::clone(&new_url),
+            )
+            .await;
+
+        let session = manager.get_and_update_user_session(&user.username, &token).await.expect("session");
+        assert_eq!(session.member_binding, Some(binding_b.clone()));
+        assert_eq!(session.provider, new_provider);
+        assert_eq!(session.stream_url, new_url);
+        assert!(!session.member_failed_on_segment);
+        let expected_rebase = LegacyHlsRebase {
+            last_served_sequence: 100,
+            media_sequence_offset: 10,
+            discontinuity_sequence: 1,
+            pending_member_rebase: true,
+            ..LegacyHlsRebase::default()
+        };
+        assert_eq!(session.legacy_rebase, Some(expected_rebase));
     }
 }

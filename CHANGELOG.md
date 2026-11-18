@@ -1597,7 +1597,7 @@
 - **New HLS viewers start on two ready segments while the tail segment retries a gateway timeout.** When the third
   segment of the entry window is being retried after an upstream HTTP 504 and the two preceding segments are ready,
   the entry playlist offers the two-segment prefix instead of waiting for the retry. Active viewers keep their full
-  timeline.
+  timeline. A manifest refresh that replaces the segment URL clears the timeout evidence of the old URL.
 
 - **Manifest recovery revisits the pinned primary endpoint of a `restart_from_first` provider.** After a full
   observation burst on a mirror whose timeline did not qualify, the first reduced retry probes the pinned primary
@@ -1607,7 +1607,7 @@
 
 - **New HLS viewers start after an expired origin head.** When the segment before the entry window returned HTTP 404,
   three complete, contiguous clear transport-stream segments are admitted if the following reserve segment is ready in
-  the same origin window and generation. The missing reserve is fetched at render-window priority. A missing middle
+  the same origin window and generation. All missing reserve segments are fetched at render-window priority. A missing middle
   segment, a stale revision, a key change or a discontinuity still blocks this start.
 
 - **First segment requests after a physical readmission share the accepted start window.** A new physical handle on a
@@ -1624,7 +1624,8 @@
 
 - **Legacy HLS group failover keeps the client timeline when the backup member answers with a master playlist.**
   After a switch to a member that returns a master playlist, the first child media playlist now continues the client
-  media sequence after the last served segment and inserts `EXT-X-DISCONTINUITY`. Before, the client saw a jump of
+  media sequence after the last served segment and inserts `EXT-X-DISCONTINUITY`. The member binding and the pending
+  rebase are stored in one update, so a concurrent playlist request cannot serve the new member on the old timeline. Before, the client saw a jump of
   thousands of sequence numbers and skipped the backup stream.
 
 - **Active HLS live window keeps advancing while the origin tail is slow.** The active playlist window no longer

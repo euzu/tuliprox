@@ -1378,28 +1378,20 @@ async fn switch_legacy_hls_group_member(
     let decision = budget.on_trigger(failed_index, group.members.len(), now);
     let exclude = match decision {
         BudgetDecision::GiveUp => {
+            let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+            let rebase = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
             app_state
                 .active_users
-                .replace_legacy_failover_state(
-                    &user.username,
-                    session_token,
-                    session.legacy_rebase.clone(),
-                    Some(budget),
-                    false,
-                )
+                .replace_legacy_failover_state(&user.username, session_token, rebase, Some(budget), false)
                 .await;
             return LegacySwitchOutcome::GiveUp;
         }
         BudgetDecision::RetrySame => {
+            let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+            let rebase = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
             app_state
                 .active_users
-                .replace_legacy_failover_state(
-                    &user.username,
-                    session_token,
-                    session.legacy_rebase.clone(),
-                    Some(budget),
-                    false,
-                )
+                .replace_legacy_failover_state(&user.username, session_token, rebase, Some(budget), false)
                 .await;
             return LegacySwitchOutcome::RetrySame;
         }
@@ -1441,15 +1433,11 @@ async fn switch_legacy_hls_group_member(
     )
     .await
     else {
+        let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+        let rebase = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
         app_state
             .active_users
-            .replace_legacy_failover_state(
-                &user.username,
-                session_token,
-                session.legacy_rebase.clone(),
-                Some(budget),
-                false,
-            )
+            .replace_legacy_failover_state(&user.username, session_token, rebase, Some(budget), false)
             .await;
         return LegacySwitchOutcome::GiveUp;
     };
@@ -1474,15 +1462,11 @@ async fn switch_legacy_hls_group_member(
     };
     let Some(member_url) = member_url else {
         drop(acquired_handle);
+        let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+        let rebase = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
         app_state
             .active_users
-            .replace_legacy_failover_state(
-                &user.username,
-                session_token,
-                session.legacy_rebase.clone(),
-                Some(budget),
-                false,
-            )
+            .replace_legacy_failover_state(&user.username, session_token, rebase, Some(budget), false)
             .await;
         return LegacySwitchOutcome::GiveUp;
     };
@@ -1491,10 +1475,10 @@ async fn switch_legacy_hls_group_member(
         .as_ref()
         .map_or_else(|| Arc::clone(&resolved.member.input_name), |cfg| Arc::clone(&cfg.name));
 
-    // Rebind the user session to the new member.
+    // Rebind the user session to the new member and publish the pending rebase marker together.
     app_state
         .active_users
-        .bind_member(
+        .switch_legacy_group_member_binding(
             &user.username,
             session_token,
             MemberBinding {
@@ -1505,13 +1489,6 @@ async fn switch_legacy_hls_group_member(
                 member_title: Arc::clone(&resolved.member.title),
                 provider: Arc::clone(&provider_name),
             },
-        )
-        .await;
-    app_state
-        .active_users
-        .update_session_provider_binding(
-            &user.username,
-            session_token,
             Arc::clone(&provider_name),
             Arc::from(member_url.as_str()),
         )
@@ -1533,11 +1510,11 @@ async fn switch_legacy_hls_group_member(
         let Ok((content, response_url, response_headers)) =
             download_legacy_hls_manifest(app_state, &source, req_headers).await
         else {
-            let mut rebase_state = session.legacy_rebase.clone().unwrap_or_default();
-            rebase_state.pending_member_rebase = true;
+            let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+            let rebase_state = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
             app_state
                 .active_users
-                .replace_legacy_failover_state(&user.username, session_token, Some(rebase_state), Some(budget), false)
+                .replace_legacy_failover_state(&user.username, session_token, rebase_state, Some(budget), false)
                 .await;
             return LegacySwitchOutcome::GiveUp;
         };
@@ -1546,8 +1523,8 @@ async fn switch_legacy_hls_group_member(
     };
 
     // Bridge the timeline to the new member and serve its manifest with the rebase.
-    let mut rebase_state = session.legacy_rebase.clone().unwrap_or_default();
-    rebase_state.pending_member_rebase = true;
+    let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+    let mut rebase_state = fresh.as_ref().and_then(|session| session.legacy_rebase.clone()).unwrap_or_default();
     let rebase_props = plan_legacy_rebase(&mut rebase_state, &content, playlist_kind);
 
     budget.on_switched(resolved.acquired.index, failed_index, now);

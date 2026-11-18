@@ -1044,9 +1044,10 @@ async fn failed_pinned_profile_probe_falls_back_to_the_bound_mirror() {
         true,
         None,
     ));
-    for _ in 0..3 {
+    for _ in 0..attempt.remaining_attempts().saturating_sub(2) {
         assert!(attempt.begin_logical_attempt(), "the shared attempt budget stays open");
     }
+    assert_eq!(attempt.remaining_attempts(), 2, "only the full burst and the probe slot may consume attempts");
     request.attempt = Some(Arc::clone(&attempt));
     let context = manifest_fetch_context(&request, None);
     let binding =

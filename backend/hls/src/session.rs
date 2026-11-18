@@ -624,7 +624,7 @@ impl HlsSession {
         for segment in self.segments.values_mut() {
             if !matches!(segment.status, SegmentCacheStatus::Ready { .. }) {
                 segment.retained_resource_identity = segment.media_resource_identity();
-                segment.origin_fetch_ref = None;
+                segment.replace_origin_fetch_ref(None);
                 if !matches!(segment.status, SegmentCacheStatus::Fetching { .. }) {
                     segment.status = SegmentCacheStatus::Discovered;
                 }
