@@ -19,7 +19,7 @@ pub enum HlsLiveWindowView {
 pub struct HlsLiveWindowPlan {
     pub visible: Vec<u64>,
     pub hidden_tail: Vec<u64>,
-    /// Active-view sequences after `visible` that are still demanded but not renderable yet.
+    /// Active-view sequences after the visible end (`available[end..]`) that are demanded but not renderable yet.
     pub pending_tail: Vec<u64>,
     pub effective_strip_segments: usize,
     pub origin_commits: u64,
@@ -169,7 +169,6 @@ impl HlsSession {
             }
             HlsLiveWindowView::Active { first_published, last_published } => {
                 let available = origin.iter().copied().filter(|seq| *seq >= first_published).collect::<Vec<_>>();
-                let demanded = &available[available.len().saturating_sub(6)..];
                 // A slow origin tail must not freeze the live window while earlier media is ready.
                 // Trailing unrenderable sequences stay demanded but are not published yet. Never
                 // drop an already published sequence and never skip a hole inside the window.
@@ -191,8 +190,7 @@ impl HlsSession {
                 }
                 let mut visible = available[end.saturating_sub(6)..end].to_vec();
                 crate::renderer::retain_published_predecessors_from(self, &mut visible, first_published);
-                pending_tail =
-                    demanded.iter().copied().filter(|seq| visible.last().is_none_or(|last| seq > last)).collect();
+                pending_tail = available[end..].to_vec();
                 (visible, Vec::new(), 0)
             }
         };

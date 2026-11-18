@@ -1006,15 +1006,15 @@ async fn fetch_manifest_recovery_burst_candidates(
     let candidates = burst_plan.total_candidates();
     let mut pinned = pinned_profile_followup(context, plan).await;
     for candidate_index in 0..candidates {
-        let mut context = context.clone();
-        let (binding, probe_budget) = if let Some((primary, budget)) = pinned.take() {
-            crate::scrub_hls_origin_headers(&mut context.headers, None);
-            context.origin_entry = context.origin_entry.with_profile_recovery_failover(false);
+        let context = context.clone();
+        let probe = pinned.take().map(|(primary, budget)| {
+            let mut probe_context = context.clone();
+            crate::scrub_hls_origin_headers(&mut probe_context.headers, None);
+            probe_context.origin_entry = probe_context.origin_entry.with_profile_recovery_failover(false);
             debug!("HLS reduced manifest retry revisits pinned profile endpoint: budget_ms={}", budget.as_millis());
-            (primary, Some(budget))
-        } else {
-            (plan.binding.clone(), None)
-        };
+            (probe_context, primary, budget)
+        });
+        let binding = plan.binding.clone();
         let reject_reason = plan.reject_reason.cloned();
         let attempt_index = plan.attempt_index;
         let attempts = plan.attempts;
@@ -1028,20 +1028,9 @@ async fn fetch_manifest_recovery_burst_candidates(
             if context.attempt.as_ref().is_some_and(|attempt| attempt.is_closed()) {
                 return (candidate_index, 0, Err(OriginManifestFetchError::RetryExhausted));
             }
-            let request = HlsOriginManifestFetchRequest::recovery_direct_target(
-                &context,
-                &binding,
-                reject_reason.as_ref(),
-                ManifestRecoveryAttemptLogContext { attempt_index, attempts, candidate_index, candidates },
-            );
+            let log = ManifestRecoveryAttemptLogContext { attempt_index, attempts, candidate_index, candidates };
             let fetch_started = Instant::now();
-            let fetch = fetch_hls_origin_manifest_request(request);
-            let result = match probe_budget {
-                Some(budget) => {
-                    tokio::time::timeout(budget, fetch).await.unwrap_or(Err(OriginManifestFetchError::Timeout))
-                }
-                None => fetch.await,
-            };
+            let result = fetch_probed_recovery_candidate(&context, probe, &binding, reject_reason.as_ref(), log).await;
             let fetch_elapsed_ms = u64::try_from(fetch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             (candidate_index, fetch_elapsed_ms, result)
         });
@@ -1099,6 +1088,26 @@ async fn fetch_manifest_recovery_burst_candidates(
         last_fetch_error,
         last_reject_reason,
     }
+}
+
+/// A failed pinned primary probe must not cost the slot its bound mirror request.
+async fn fetch_probed_recovery_candidate(
+    context: &HlsOriginManifestFetchContext,
+    probe: Option<(HlsOriginManifestFetchContext, HlsManifestOriginBinding, Duration)>,
+    binding: &HlsManifestOriginBinding,
+    reject_reason: Option<&HlsManifestRejectLogReason>,
+    log: ManifestRecoveryAttemptLogContext,
+) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
+    if let Some((probe_context, primary, budget)) = probe {
+        let request =
+            HlsOriginManifestFetchRequest::recovery_direct_target(&probe_context, &primary, reject_reason, log);
+        if let Ok(Ok(fetched)) = tokio::time::timeout(budget, fetch_hls_origin_manifest_request(request)).await {
+            return Ok(fetched);
+        }
+        debug!("HLS pinned profile endpoint probe failed; the slot asks its bound mirror");
+    }
+    let request = HlsOriginManifestFetchRequest::recovery_direct_target(context, binding, reject_reason, log);
+    fetch_hls_origin_manifest_request(request).await
 }
 
 fn recovery_burst_plan(

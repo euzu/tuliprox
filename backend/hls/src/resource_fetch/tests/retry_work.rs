@@ -332,7 +332,7 @@ async fn assert_four_overlapping_operations(max_connections: u16) {
     assert_eq!(session.read().await.activity.active_origin_work_count.load(Ordering::Acquire), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn lapsed_sibling_right_is_renewed_on_the_same_binding() {
     let (session, io) = bound_session_with_limit("lapsed-sibling", 1).await;
     let manager = &io.ctx.active_provider;
@@ -344,8 +344,30 @@ async fn lapsed_sibling_right_is_renewed_on_the_same_binding() {
     let sibling = HlsOriginRetryWork::begin(&session, Some(manager), now + Duration::from_secs(10)).await.unwrap();
     sibling.protect(manager, &session, generation, true).await.unwrap();
     // The sibling right ends with the first operation's horizon; its own deadline is later.
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::advance(Duration::from_millis(250)).await;
     drop(first);
     assert!(sibling.protect(manager, &session, generation, true).await.is_ok(), "lapsed sibling right is renewed");
+    guard.finish(&session).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn lapsed_sibling_right_is_not_renewed_after_the_lease_expires() {
+    let (session, io) = bound_session_with_limit("lapsed-expired", 1).await;
+    let manager = &io.ctx.active_provider;
+    let generation = session.read().await.activity.origin_work_generation;
+    let now = tokio::time::Instant::now();
+    let first = HlsOriginRetryWork::begin(&session, Some(manager), now + Duration::from_millis(150)).await.unwrap();
+    let guard = prepare_media_origin_attempt(Some(&io), &session, generation, Duration::from_secs(1)).await.unwrap();
+    first.protect(manager, &session, generation, true).await.unwrap();
+    let sibling = HlsOriginRetryWork::begin(&session, Some(manager), now + Duration::from_secs(10)).await.unwrap();
+    sibling.protect(manager, &session, generation, true).await.unwrap();
+    tokio::time::advance(Duration::from_millis(250)).await;
+    drop(first);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let res = sibling.protect(manager, &session, generation, true).await;
+    assert!(
+        matches!(res, Err(Error::ProviderUnavailable(crate::HlsBoundAccountAcquireErrorKind::StoreRace))),
+        "an expired lease cannot be revived by a lapsed sibling right"
+    );
     guard.finish(&session).await;
 }

@@ -649,3 +649,52 @@ async fn active_live_window_drops_trailing_unready_origin_tail_without_skipping_
         state.segments.get_mut(&4).unwrap().status = status_4;
     }
 }
+
+#[tokio::test]
+async fn active_live_window_preserves_demand_for_gap_sequences_beyond_demanded_tail() {
+    let server = spawn_segment_server(0).await;
+    for mode in MODES {
+        let directory = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy::default();
+        let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+        {
+            let mut state = context.session.write().await;
+            *state = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+            state.apply_origin_manifest(&manifest(&server.base_url, 0, &[7; 8])).unwrap();
+            state.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 5 };
+            for seq in 0..=2 {
+                state.segments.get_mut(&seq).unwrap().status =
+                    SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 10 };
+            }
+        }
+        install_startup(&context, &worker, mode).await;
+        let mut state = context.session.write().await;
+        prepare_selected(&mut state, &[0, 1, 2], mode, true);
+        // Baseline is published with 8 origin sequences (0..=7), 0..=2 ready.
+        let published = state.render_and_store_manifest(10).expect("baseline is published");
+        assert_eq!(published.segment_proxy_seqs, [0, 1, 2]);
+        assert_eq!(state.last_rendered_manifest.as_ref().map(|m| m.last_proxy_seq), Some(2));
+
+        // Origin updates to 15 sequences (0..=14).
+        state.apply_origin_manifest(&manifest(&server.base_url, 0, &[7; 15])).unwrap();
+
+        // Advance ready prefix with 3..=4, leaving 5..=14 (10 unready sequences > 6) unready.
+        prepare_selected(&mut state, &[3, 4], mode, true);
+        for seq in 3..=4 {
+            state.segments.get_mut(&seq).unwrap().status =
+                SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 20 };
+        }
+
+        let plan = state
+            .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(2) })
+            .expect("active live window plan");
+        let visible_last = *plan.visible.last().expect("visible window has segments");
+        assert!(visible_last > 2, "{mode:?}: ready prefix advances past last_published");
+        let next_seq = visible_last + 1;
+        assert!(
+            plan.pending_tail.contains(&next_seq),
+            "{mode:?}: pending_tail must demand the sequence right after visible.last() ({next_seq}), got {:?}",
+            plan.pending_tail
+        );
+    }
+}

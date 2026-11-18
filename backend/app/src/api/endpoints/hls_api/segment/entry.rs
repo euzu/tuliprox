@@ -1248,7 +1248,7 @@ fn plan_legacy_rebase(
     let upstream_seq = media_playlist_media_sequence(content).unwrap_or(0);
     let segment_count = media_playlist_segment_count(content);
     let upstream_discontinuity_sequence = media_playlist_discontinuity_sequence(content).unwrap_or(0);
-    if state.pending_member_rebase {
+    if state.pending_member_rebase && segment_count > 0 {
         let next_seq = state.last_served_sequence.saturating_add(1);
         let offset = i128::from(next_seq) - i128::from(upstream_seq);
         state.media_sequence_offset = i64::try_from(offset).unwrap_or(if offset > 0 { i64::MAX } else { i64::MIN });
@@ -2608,5 +2608,24 @@ mod legacy_rebase_tests {
         assert!(!next.insert_discontinuity);
         assert_eq!(next.discontinuity_sequence, 1);
         assert!(!state.pending_member_rebase);
+    }
+
+    #[test]
+    fn empty_media_playlist_does_not_consume_pending_member_rebase() {
+        let mut state = LegacyHlsRebase::default();
+        plan_legacy_rebase(&mut state, &media(10004, 3), HlsPlaylistKind::Media);
+        assert_eq!(state.last_served_sequence, 10006);
+
+        // Member switch flag set, then an empty media playlist
+        state.pending_member_rebase = true;
+        plan_legacy_rebase(&mut state, &media(50000, 0), HlsPlaylistKind::Media);
+
+        // Then a non-empty one with a higher upstream sequence
+        let rebase = plan_legacy_rebase(&mut state, &media(50006, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(
+            rebase.media_sequence, 10007,
+            "first segment of non-empty window continues at last_served_sequence + 1"
+        );
+        assert!(rebase.insert_discontinuity, "insert_discontinuity must be true");
     }
 }

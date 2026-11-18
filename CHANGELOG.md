@@ -1587,10 +1587,12 @@
 - **Overlapping HLS segment fetches on an admitted account are no longer refused.** When the provider lease of an
   admitted live HLS binding was not yet in its HLS start or confirmed state (for example right after a group member
   switch), only the first segment operation got a work right. Its siblings failed at once with
-  `ProviderUnavailable(Unavailable)` and the viewer saw an unavailable slate or a 503. Sibling operations on the same
-  admitted allocation now share the outstanding work horizon. They cannot extend it, so they hold no additional
-  capacity on limited accounts. Foreign owners, stale binding tags and expired horizons are still refused. A refusal
-  after admission now logs whether the binding tag was missing or the work right was denied.
+  `ProviderUnavailable(Unavailable)` and the viewer saw an unavailable slate or a 503. In that lease state, sibling
+  operations on the same admitted allocation now share the outstanding work horizon and cannot extend it, so they
+  hold no additional capacity on limited accounts. When no work right is outstanding, the next operation starts a new
+  horizon, and a sibling right that lapses during a fetch is renewed on the same binding. Foreign owners, stale binding
+  tags, expired normal reservations and deadlines in the past are still refused. A refusal after admission now logs
+  whether the binding tag was missing or the work right was denied.
 
 - **New HLS viewers start on two ready segments while the tail segment retries a gateway timeout.** When the third
   segment of the entry window is being retried after an upstream HTTP 504 and the two preceding segments are ready,
@@ -1600,6 +1602,7 @@
 - **Manifest recovery revisits the pinned primary endpoint of a `restart_from_first` provider.** After a full
   observation burst on a mirror whose timeline did not qualify, the first reduced retry probes the pinned primary
   endpoint once, within the existing retry interval and deadlines. Nested provider failover is disabled for that probe.
+  If the primary fails or times out, the same retry still asks the bound mirror.
 
 - **Legacy HLS group failover keeps the client timeline when the backup member answers with a master playlist.**
   After a switch to a member that returns a master playlist, the first child media playlist now continues the client
@@ -1607,9 +1610,10 @@
   thousands of sequence numbers and skipped the backup stream.
 
 - **Active HLS live window keeps advancing while the origin tail is slow.** The active playlist window no longer
-  requires the newest, not yet fetched origin segments. Trailing unfetched segments are left out until they are ready,
-  so segments that already arrived are published. Before, a slow origin froze the playlist until its validity expired
-  and the player received HTTP 503 before a group failover could deliver the backup member.
+  requires the newest, not yet fetched origin segments. Trailing segments that cannot be rendered yet are left out and
+  stay requested until they can be rendered, so segments that already arrived are published. Before, a slow origin
+  froze the playlist until its validity expired and the player received HTTP 503 before a group failover could deliver
+  the backup member.
 
 - **Catchup resource retry preparation retains bounded work ownership.** Catchup preparation now acquires bounded
   retry work across attempts without provider reservation, preventing idle lifecycle handling from detaching the

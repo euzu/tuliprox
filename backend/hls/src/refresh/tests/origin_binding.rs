@@ -997,3 +997,68 @@ async fn observed_profile_mirror_rechecks_pinned_endpoint_within_existing_budget
     assert_eq!(mirror.requests.lock().await.len(), request.manifest_recovery_burst.level.plan().total_candidates());
     assert_eq!(session.read().await.origin_seq_highwater, Some(103));
 }
+
+#[tokio::test]
+async fn failed_pinned_profile_probe_falls_back_to_the_bound_mirror() {
+    let primary = spawn_test_origin(Arc::new(|_| (404, Vec::new(), String::new()))).await;
+    let mirror = spawn_test_origin(Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(101)))).await;
+    let mut mirror_url = Url::parse(&mirror.base_url).unwrap();
+    mirror_url.set_host(Some("localhost")).unwrap();
+    let primary_url = Url::parse(&primary.base_url).unwrap();
+    let pinned = primary_url.host_str().unwrap();
+    let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+        name: "Provider".into(),
+        urls: vec![primary.base_url.as_str().into(), mirror_url.as_str().into()],
+        provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+        dns: None,
+    }));
+    let session = test_session();
+    let base = three_segment_manifest_body(100);
+    let base_url = primary_url.join("index.m3u8").unwrap();
+    let tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(parsed) =
+        tuliprox_parser::hls::origin_manifest::parse_origin_media_manifest(&base, base_url.as_str())
+    else {
+        panic!("expected live timeline")
+    };
+    {
+        let mut state = session.write().await;
+        state.apply_origin_manifest_for_host(&parsed, crate::timeline::effective_origin_host_id(pinned)).unwrap();
+        state.origin_control.pinned_host = Some(pinned.to_owned());
+        state.last_effective_manifest_host = Some(pinned.to_owned());
+        state.origin_control.origin_epoch = state.origin_epoch;
+    }
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(HlsSegmentCache::with_cache_path(cache_dir.path()));
+    let mut request = switch_test_request(session.clone(), cache, &primary.base_url);
+    request.origin_entry =
+        LiveHlsOriginEntry::parse_with_url_failover_provider("provider://Provider/index.m3u8", Some(provider))
+            .unwrap()
+            .with_profile_recovery_failover(true);
+    request.retry_policy.delays_ms = [0, 1, 250, 1, 1];
+    let context = manifest_fetch_context(&request, None);
+    let binding =
+        crate::manifest_origin_binding::HlsManifestOriginBinding::new(mirror_url.join("index.m3u8").unwrap(), Some(1))
+            .unwrap();
+    let outcome = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
+        &context,
+        binding,
+        None,
+        None,
+        HlsManifestAcceptanceTrigger::Observe,
+        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+        |fetched, mode| super::super::commit_manifest_recovery_candidate(&request, fetched, mode),
+    )
+    .await;
+    // The primary 404 is not a hard failure of the chain: the probe slot still asks its bound mirror.
+    assert!(
+        !matches!(outcome, Err(crate::manifest_fetch::OriginManifestFetchError::PermanentStatus(_))),
+        "a failed pinned probe must not abort the recovery chain: {:?}",
+        outcome.as_ref().err()
+    );
+    assert_eq!(primary.requests.lock().await.len(), 1);
+    // The full burst asks the mirror; the probe slot and the later reduced slots ask it again.
+    assert!(
+        mirror.requests.lock().await.len() > request.manifest_recovery_burst.level.plan().total_candidates(),
+        "the probe slot falls back to its bound mirror request"
+    );
+}

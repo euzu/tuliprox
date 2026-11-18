@@ -124,11 +124,7 @@ impl HlsOriginRetryWork {
         }
         let lapsed = match provider.as_ref() {
             Some(right) if right.is_current() => return Ok(()),
-            Some(_) => {
-                // A sibling right ends with the shared horizon; renew it on the same binding.
-                provider.take();
-                true
-            }
+            Some(_) => true,
             None => false,
         };
         let lapsed_error =
@@ -136,11 +132,12 @@ impl HlsOriginRetryWork {
         let Some(binding) = state.origin_account_binding.as_ref() else {
             return if lapsed { lapsed_error } else { Ok(()) };
         };
-        if let Some(tag) = binding.provider_binding_tag {
-            *provider =
-                manager.reserve_hls_origin_work(&binding.session_owner, &binding.account_name, tag, self.deadline);
-        }
-        if lapsed && provider.is_none() {
+        let renewed = binding.provider_binding_tag.and_then(|tag| {
+            manager.reserve_hls_origin_work(&binding.session_owner, &binding.account_name, tag, self.deadline)
+        });
+        if let Some(right) = renewed {
+            *provider = Some(right);
+        } else if lapsed {
             return lapsed_error;
         }
         if require_allocation && provider.is_none() {
