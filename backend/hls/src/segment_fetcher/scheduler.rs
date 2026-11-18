@@ -405,7 +405,7 @@ impl HlsSegmentWorkerPool {
                 SegmentKeyDependencySelection::Unavailable => continue,
             };
             if let Some(entry) = session.segments.get_mut(&proxy_seq) {
-                entry.status = SegmentCacheStatus::Fetching { priority, started_at_ms: now_ms };
+                entry.status = SegmentCacheStatus::Fetching { priority, started_at_ms: now_ms, gateway_timeout: false };
             } else {
                 continue;
             }

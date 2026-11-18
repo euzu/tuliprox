@@ -8,13 +8,19 @@ use tuliprox_core::model::StripConfig;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HlsLiveWindowView {
     Entry,
-    Active { first_published: u64 },
+    /// `last_published` is the last sequence this viewer received; `None` disables tail truncation.
+    Active {
+        first_published: u64,
+        last_published: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlsLiveWindowPlan {
     pub visible: Vec<u64>,
     pub hidden_tail: Vec<u64>,
+    /// Active-view sequences after `visible` that are still demanded but not renderable yet.
+    pub pending_tail: Vec<u64>,
     pub effective_strip_segments: usize,
     pub origin_commits: u64,
     pub origin_work_generation: u64,
@@ -42,7 +48,10 @@ impl HlsLiveWindowView {
     pub fn for_lease(lease: &HlsAccessLease) -> Self {
         if lease.state == HlsAccessLeaseState::Activated && !lease.uses_entry_view() {
             if let Some(snapshot) = &lease.last_manifest_snapshot {
-                return Self::Active { first_published: snapshot.first_proxy_seq };
+                return Self::Active {
+                    first_published: snapshot.first_proxy_seq,
+                    last_published: Some(snapshot.last_proxy_seq),
+                };
             }
         }
         Self::Entry
@@ -114,6 +123,7 @@ impl HlsSession {
         }
         let origin = self.live_origin_sequences();
         let mut recovered_startup = false;
+        let mut pending_tail = Vec::new();
         let (visible, hidden_tail, effective_strip_segments) = match view {
             HlsLiveWindowView::Entry => {
                 let strip = crate::initial_strip::initial_hls_strip_segments_for_durations(
@@ -122,7 +132,22 @@ impl HlsSession {
                 );
                 let end = origin.len().saturating_sub(strip);
                 let start = end.saturating_sub(crate::renderer::MIN_VISIBLE_SEGMENTS);
-                if origin[start..end].iter().any(|seq| self.live_startup_segment_failed(*seq)) {
+                let selected = &origin[start..end];
+                // The retry still owns the tail. A new viewer can start on the complete
+                // contiguous prefix while the same object is retried for existing viewers.
+                if selected.len() == crate::renderer::MIN_VISIBLE_SEGMENTS
+                    && selected.last().and_then(|seq| self.segments.get(seq)).is_some_and(|entry| {
+                        matches!(entry.status, SegmentCacheStatus::Fetching { gateway_timeout: true, .. })
+                    })
+                    && selected[..selected.len() - 1].iter().all(|seq| {
+                        self.segments
+                            .get(seq)
+                            .is_some_and(|entry| matches!(entry.status, SegmentCacheStatus::Ready { .. }))
+                    })
+                {
+                    recovered_startup = true;
+                    (origin[start..end - 1].to_vec(), origin[end - 1..].to_vec(), strip + 1)
+                } else if selected.iter().any(|seq| self.live_startup_segment_failed(*seq)) {
                     recovered_startup = true;
                     let runs = origin[start..].split(|seq| self.live_startup_segment_failed(*seq));
                     let mut selected = &origin[0..0];
@@ -142,10 +167,32 @@ impl HlsSession {
                     (origin[start..end].to_vec(), origin[end..].to_vec(), strip)
                 }
             }
-            HlsLiveWindowView::Active { first_published } => {
+            HlsLiveWindowView::Active { first_published, last_published } => {
                 let available = origin.iter().copied().filter(|seq| *seq >= first_published).collect::<Vec<_>>();
-                let mut visible = available[available.len().saturating_sub(6)..].to_vec();
+                let demanded = &available[available.len().saturating_sub(6)..];
+                // A slow origin tail must not freeze the live window while earlier media is ready.
+                // Trailing unrenderable sequences stay demanded but are not published yet. Never
+                // drop an already published sequence and never skip a hole inside the window.
+                let mut end = available.len();
+                while let Some(&seq) = end.checked_sub(1).and_then(|index| available.get(index)) {
+                    if last_published.is_some_and(|last| seq <= last)
+                        || self.segments.get(&seq).is_some_and(|entry| crate::renderer::is_renderable(entry, self))
+                    {
+                        break;
+                    }
+                    end -= 1;
+                }
+                // Truncate only when the ready prefix publishes new media; otherwise the
+                // previous publication stays authoritative (retained window fallback).
+                if !last_published.is_some_and(|last| {
+                    end.checked_sub(1).and_then(|index| available.get(index)).is_some_and(|seq| *seq > last)
+                }) {
+                    end = available.len();
+                }
+                let mut visible = available[end.saturating_sub(6)..end].to_vec();
                 crate::renderer::retain_published_predecessors_from(self, &mut visible, first_published);
+                pending_tail =
+                    demanded.iter().copied().filter(|seq| visible.last().is_none_or(|last| seq > last)).collect();
                 (visible, Vec::new(), 0)
             }
         };
@@ -155,6 +202,7 @@ impl HlsSession {
         Some(HlsLiveWindowPlan {
             visible,
             hidden_tail,
+            pending_tail,
             effective_strip_segments,
             origin_commits: self.origin_manifest_commits(),
             origin_work_generation: self.activity.origin_work_generation,

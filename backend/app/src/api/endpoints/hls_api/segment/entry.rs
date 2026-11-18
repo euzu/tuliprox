@@ -1248,6 +1248,13 @@ fn plan_legacy_rebase(
     let upstream_seq = media_playlist_media_sequence(content).unwrap_or(0);
     let segment_count = media_playlist_segment_count(content);
     let upstream_discontinuity_sequence = media_playlist_discontinuity_sequence(content).unwrap_or(0);
+    if state.pending_member_rebase {
+        let next_seq = state.last_served_sequence.saturating_add(1);
+        let offset = i128::from(next_seq) - i128::from(upstream_seq);
+        state.media_sequence_offset = i64::try_from(offset).unwrap_or(if offset > 0 { i64::MAX } else { i64::MIN });
+        begin_legacy_discontinuity(state);
+        state.pending_member_rebase = false;
+    }
     let mut served_seq = upstream_seq.saturating_add_signed(state.media_sequence_offset);
     // An upstream restart moves the whole window behind what the client already played. Rebase it
     // after the last served segment with a discontinuity, as after a member switch.
@@ -1537,17 +1544,8 @@ async fn switch_legacy_hls_group_member(
 
     // Bridge the timeline to the new member and serve its manifest with the rebase.
     let mut rebase_state = session.legacy_rebase.clone().unwrap_or_default();
-    let rebase_props = if playlist_kind == HlsPlaylistKind::Media {
-        let new_upstream = media_playlist_media_sequence(&content).unwrap_or(0);
-        let next_seq = rebase_state.last_served_sequence.saturating_add(1);
-        let offset = i128::from(next_seq) - i128::from(new_upstream);
-        rebase_state.media_sequence_offset =
-            i64::try_from(offset).unwrap_or(if offset > 0 { i64::MAX } else { i64::MIN });
-        begin_legacy_discontinuity(&mut rebase_state);
-        plan_legacy_rebase(&mut rebase_state, &content, playlist_kind)
-    } else {
-        None
-    };
+    rebase_state.pending_member_rebase = true;
+    let rebase_props = plan_legacy_rebase(&mut rebase_state, &content, playlist_kind);
 
     budget.on_switched(resolved.acquired.index, failed_index, now);
     app_state
@@ -2535,5 +2533,80 @@ mod legacy_rebase_tests {
         plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media);
         assert!(plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media).is_none());
         assert_eq!(state.media_sequence_offset, 0);
+    }
+
+    #[test]
+    fn master_switch_preserves_client_timeline_on_subsequent_media_serve() {
+        let mut state = LegacyHlsRebase::default();
+        // Serve A media at seq 10004 with 3 segments (10004, 10005, 10006).
+        assert!(plan_legacy_rebase(&mut state, &media(10004, 3), HlsPlaylistKind::Media).is_none());
+        assert_eq!(state.last_served_sequence, 10006);
+
+        // Simulate master switch: set pending flag as the switch does.
+        state.pending_member_rebase = true;
+        assert!(plan_legacy_rebase(
+            &mut state,
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant.m3u8\n",
+            HlsPlaylistKind::Master,
+        )
+        .is_none());
+        assert!(state.pending_member_rebase);
+
+        // Serve B media at seq 50006 with 3 segments.
+        let rebase = plan_legacy_rebase(&mut state, &media(50006, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(rebase.media_sequence, 10007, "served media_sequence == previous last_served + 1");
+        assert!(rebase.insert_discontinuity, "insert_discontinuity true");
+        assert_eq!(rebase.discontinuity_sequence, 0);
+        assert!(!state.pending_member_rebase, "flag cleared after media serve");
+
+        // Same window served again: boundary stays in window.
+        let same = plan_legacy_rebase(&mut state, &media(50006, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(same.media_sequence, 10007);
+        assert!(same.insert_discontinuity);
+
+        // Window advances so boundary segment (10007) leaves: discontinuity sequence increments.
+        let advanced = plan_legacy_rebase(&mut state, &media(50007, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(advanced.media_sequence, 10008);
+        assert!(!advanced.insert_discontinuity);
+        assert_eq!(advanced.discontinuity_sequence, 1, "discontinuity sequence increments once boundary leaves window");
+    }
+
+    #[test]
+    fn consecutive_master_switches_before_media_serve_perform_single_rebase() {
+        let mut state = LegacyHlsRebase::default();
+        plan_legacy_rebase(&mut state, &media(10004, 3), HlsPlaylistKind::Media);
+        assert_eq!(state.last_served_sequence, 10006);
+
+        // Master switch 1
+        state.pending_member_rebase = true;
+        assert!(plan_legacy_rebase(
+            &mut state,
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant1.m3u8\n",
+            HlsPlaylistKind::Master,
+        )
+        .is_none());
+
+        // Master switch 2 before any child media serve
+        state.pending_member_rebase = true;
+        assert!(plan_legacy_rebase(
+            &mut state,
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant2.m3u8\n",
+            HlsPlaylistKind::Master,
+        )
+        .is_none());
+        assert!(state.pending_member_rebase);
+
+        // Child media serve from final member
+        let rebase = plan_legacy_rebase(&mut state, &media(50006, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(rebase.media_sequence, 10007);
+        assert!(rebase.insert_discontinuity);
+        assert!(!state.pending_member_rebase, "flag cleared after rebase");
+
+        // Subsequent media serve without member switch retains offset and does not rebase again
+        let next = plan_legacy_rebase(&mut state, &media(50007, 3), HlsPlaylistKind::Media).expect("rebase");
+        assert_eq!(next.media_sequence, 10008);
+        assert!(!next.insert_discontinuity);
+        assert_eq!(next.discontinuity_sequence, 1);
+        assert!(!state.pending_member_rebase);
     }
 }

@@ -279,3 +279,73 @@ async fn catchup_resource_work_is_bounded_and_protected_before_account_preparati
     drop(work);
     assert_eq!(session.read().await.activity.active_origin_work_count.load(Ordering::Acquire), 0);
 }
+
+#[tokio::test]
+async fn unlimited_media_start_admits_four_overlapping_origin_operations() {
+    assert_four_overlapping_operations(0).await;
+}
+
+#[tokio::test]
+async fn limited_media_start_admits_four_overlapping_origin_operations() {
+    assert_four_overlapping_operations(1).await;
+}
+
+async fn bound_session_with_limit(
+    name: &str,
+    max_connections: u16,
+) -> (Arc<tokio::sync::RwLock<HlsSession>>, crate::origin::HlsOriginIoContext) {
+    let session = Arc::new(tokio::sync::RwLock::new(HlsSession::new(HlsSessionKey::new(1, name), b"fixture", 0)));
+    let (io, _) = crate::origin_attempt::tests::bound_origin_io(&session).await;
+    let mut sources = io.ctx.app_config.sources.load_full();
+    let inputs = &mut Arc::make_mut(&mut sources).inputs;
+    Arc::make_mut(&mut inputs[0]).max_connections = max_connections;
+    io.ctx.app_config.sources.store(sources);
+    io.ctx.active_provider.update_config(&io.ctx.app_config);
+    (session, io)
+}
+
+async fn assert_four_overlapping_operations(max_connections: u16) {
+    let (session, io) = bound_session_with_limit("parallel-media", max_connections).await;
+    let manager = &io.ctx.active_provider;
+    let generation = session.read().await.activity.origin_work_generation;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut operations = Vec::new();
+    for _ in 0..4 {
+        let work = HlsOriginRetryWork::begin(&session, Some(manager), deadline).await.unwrap();
+        let guard =
+            prepare_media_origin_attempt(Some(&io), &session, generation, Duration::from_secs(1)).await.unwrap();
+        let result = work.protect(manager, &session, generation, true).await;
+        operations.push((guard, work, result));
+    }
+    let admitted = operations.iter().filter(|(_, _, result)| result.is_ok()).count();
+    let denied = operations
+        .iter()
+        .filter(|(_, _, result)| {
+            matches!(result, Err(Error::ProviderUnavailable(crate::HlsBoundAccountAcquireErrorKind::Unavailable)))
+        })
+        .count();
+    assert_eq!((admitted, denied), (4, 0), "first segment wave after physical admission, limit {max_connections}");
+    for (guard, work, _) in operations {
+        guard.finish(&session).await;
+        drop(work);
+    }
+    assert_eq!(session.read().await.activity.active_origin_work_count.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn lapsed_sibling_right_is_renewed_on_the_same_binding() {
+    let (session, io) = bound_session_with_limit("lapsed-sibling", 1).await;
+    let manager = &io.ctx.active_provider;
+    let generation = session.read().await.activity.origin_work_generation;
+    let now = tokio::time::Instant::now();
+    let first = HlsOriginRetryWork::begin(&session, Some(manager), now + Duration::from_millis(150)).await.unwrap();
+    let guard = prepare_media_origin_attempt(Some(&io), &session, generation, Duration::from_secs(1)).await.unwrap();
+    first.protect(manager, &session, generation, true).await.unwrap();
+    let sibling = HlsOriginRetryWork::begin(&session, Some(manager), now + Duration::from_secs(10)).await.unwrap();
+    sibling.protect(manager, &session, generation, true).await.unwrap();
+    // The sibling right ends with the first operation's horizon; its own deadline is later.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    drop(first);
+    assert!(sibling.protect(manager, &session, generation, true).await.is_ok(), "lapsed sibling right is renewed");
+    guard.finish(&session).await;
+}

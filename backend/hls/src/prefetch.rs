@@ -206,7 +206,10 @@ impl HlsSession {
         }
         if self.uses_fast_start_live_window() {
             let plans = self.required_live_windows();
-            let required = plans.iter().flat_map(|plan| plan.visible.iter().copied()).collect::<BTreeSet<_>>();
+            let required = plans
+                .iter()
+                .flat_map(|plan| plan.visible.iter().chain(&plan.pending_tail).copied())
+                .collect::<BTreeSet<_>>();
             let obsolete = self
                 .segment_prefetch_queue
                 .proxy_seqs()

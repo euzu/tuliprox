@@ -75,7 +75,8 @@ async fn startup_recovery_uses_contiguous_successors_and_relaxes_strip_before_sh
                 state.record_live_window_publication(&crate::HlsAccessLeaseId("second-entry".into()), 10, &snapshot);
                 assert_eq!(state.last_warned_short_startup_window, Some(expected.clone()));
             }
-            let active = state.plan_live_window(HlsLiveWindowView::Active { first_published: 0 }).unwrap();
+            let active =
+                state.plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: None }).unwrap();
             assert_eq!(active.visible.first(), Some(&0));
         }
     }
@@ -110,4 +111,78 @@ async fn startup_recovery_waits_for_successful_media_and_promotes_reserved_fetch
     let mut queued = state.segment_prefetch_queue.proxy_seqs();
     queued.sort_unstable();
     assert_eq!(queued, vec![1, 2, 3]);
+}
+
+#[tokio::test]
+async fn entry_can_render_complete_prefix_during_gateway_retry() {
+    use super::{clear_scheduled_prefetch, spawn_sequence_response_server, SegmentFetchPriority, TestOriginResponse};
+    use std::time::Duration;
+    let server = spawn_sequence_response_server(
+        [504, 504, 200]
+            .into_iter()
+            .map(|status| TestOriginResponse { status, headers: Vec::new(), body: b"media".to_vec() })
+            .collect(),
+    )
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let policy = SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..Default::default() };
+    let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+    {
+        let mut state = context.session.write().await;
+        *state = HlsSession::new(HlsSessionKey::new(1, "gateway"), b"fixture", 0);
+        state.apply_origin_manifest(&manifest(&server.base_url, 5, &[4; 4])).unwrap();
+        state.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 1 };
+    }
+    let mode = HlsStartupMode::Optimistic;
+    install_startup(&context, &worker, mode).await;
+    clear_scheduled_prefetch(&context, &policy).await;
+    super::grant_usable_worker_access_lease_at(
+        &worker,
+        &context.session.read().await.proxy_session_id,
+        tuliprox_core::utils::current_time_millis(),
+    )
+    .await;
+    let first = {
+        let mut state = context.session.write().await;
+        state.startup.as_mut().unwrap().worker = std::sync::Weak::new();
+        prepare_selected(&mut state, &[0, 1, 3], mode, true);
+        for seq in [0, 1, 3] {
+            state.segments.get_mut(&seq).unwrap().status =
+                SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 1 };
+        }
+        state.queue_segment_fetch_candidate(2, SegmentFetchPriority::Demand, 2);
+        state.pause_next_origin_retry_for_test()
+    };
+    let snapshot = worker.next_fetch_snapshot(&context, 3, &policy).await.unwrap();
+    assert_eq!(snapshot.proxy_seq, 2);
+    let task_context = context.clone();
+    let fetch =
+        tokio::spawn(async move { super::super::fetch_segment_into_cache(&task_context, &snapshot, &policy).await });
+    tokio::time::timeout(Duration::from_secs(5), first.retry_ready.notified()).await.unwrap();
+    let second = {
+        let mut state = context.session.write().await;
+        assert_eq!(state.plan_live_window(HlsLiveWindowView::Entry).unwrap().visible, [0, 1, 2]);
+        state.pause_next_origin_retry_for_test()
+    };
+    first.resume_backoff.notify_one();
+    first.resume_prepare.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), second.retry_ready.notified()).await.unwrap();
+    {
+        let state = context.session.read().await;
+        let plan = state.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+        assert_eq!(plan.visible, [0, 1]);
+        assert_eq!(HlsManifestRenderer::render_live_window(&state, &plan, 4).unwrap().segment_proxy_seqs, [0, 1]);
+        assert_eq!(
+            state
+                .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: None })
+                .unwrap()
+                .visible,
+            [0, 1, 2, 3]
+        );
+        assert!(!state.live_startup_segments_exhausted());
+    }
+    second.resume_backoff.notify_one();
+    second.resume_prepare.notify_one();
+    assert!(fetch.await.unwrap().is_ok());
+    assert_eq!(server.requests.lock().await.len(), 3);
 }

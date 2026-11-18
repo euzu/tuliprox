@@ -619,6 +619,7 @@ where
         #[cfg(any(test, feature = "test-support"))]
         let mut retry_barrier: Option<std::sync::Arc<HlsResourceRetryBarrier>> = None;
         let attempts = policy.retry_delays_ms.len();
+        let mut previous_gateway_timeout = false;
         for attempt_index in 0..attempts {
             let delay_ms = policy.retry_delay_ms(attempt_index);
             if delay_ms > 0 {
@@ -632,7 +633,13 @@ where
             }
             let (target_duration, telemetry_input) = session_attempt_context(&clients, telemetry_key.is_some()).await;
             let timeout = policy.timeouts.snapshot(target.kind, target_duration);
-            let attempt = HlsResourceFetchAttempt { attempt_index, attempts, timeout, work: work.clone() };
+            let attempt = HlsResourceFetchAttempt {
+                attempt_index,
+                attempts,
+                timeout,
+                work: work.clone(),
+                previous_gateway_timeout,
+            };
             log_timeout_snapshot(timeout);
             log_hls_resource_attempt_started(identity, target.log_context(), &attempt);
             let attempt_started_at = Instant::now();
@@ -714,6 +721,8 @@ where
                     return Err(err);
                 }
                 Err(err) => {
+                    previous_gateway_timeout =
+                        matches!(err, HlsOriginResourceFetchError::RetryableStatus(StatusCode::GATEWAY_TIMEOUT));
                     if matches!(err, HlsOriginResourceFetchError::Timeout) {
                         log_hls_resource_timeout(
                             identity,
@@ -972,6 +981,7 @@ impl HlsResourceFetchLogStatus {
 
 #[derive(Debug, Clone)]
 pub struct HlsResourceFetchAttempt {
+    pub(crate) previous_gateway_timeout: bool,
     pub attempt_index: usize,
     pub attempts: usize,
     pub timeout: HlsOriginTimeoutSnapshot,
@@ -1242,6 +1252,7 @@ mod tests {
     #[test]
     fn resource_fetch_attempt_display_number_is_one_based_without_changing_raw_index() {
         let first = HlsResourceFetchAttempt {
+            previous_gateway_timeout: false,
             attempt_index: 0,
             attempts: 3,
             timeout: crate::HlsOriginTimeoutPolicy::default().snapshot(HlsResourceFetchKind::Segment, None),

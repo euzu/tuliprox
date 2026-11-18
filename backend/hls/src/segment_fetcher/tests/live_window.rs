@@ -418,7 +418,8 @@ async fn live_window_readiness_preserves_active_failures_and_invalidates_failed_
         assert_eq!(state.publishable_origin_head_proxy_seq, origin_head);
         assert!(!plan.is_current(&state));
         assert_ne!(state.plan_live_window(HlsLiveWindowView::Entry).unwrap().visible, plan.visible);
-        let active = state.plan_live_window(HlsLiveWindowView::Active { first_published: head }).unwrap();
+        let active =
+            state.plan_live_window(HlsLiveWindowView::Active { first_published: head, last_published: None }).unwrap();
         assert_eq!(active.visible.first(), Some(&head));
         state.apply_origin_manifest(&manifest(&server.base_url, 2, &[4; 6])).unwrap();
         assert!(!plan.is_current(&state));
@@ -457,7 +458,7 @@ async fn live_window_active_successors_are_required_with_zero_reserve_and_demand
                 crate::HlsAccessLeaseId("active".into()),
                 crate::live_window::HlsLiveWindowDemand {
                     issued_at_ms: 0,
-                    view: HlsLiveWindowView::Active { first_published: 2 },
+                    view: HlsLiveWindowView::Active { first_published: 2, last_published: None },
                     published: vec![2, 3, 4],
                 },
             );
@@ -547,5 +548,104 @@ async fn live_window_raw_fallback_is_decided_by_the_selected_head_even_with_an_o
                 assert!(state.startup.as_ref().unwrap().policy_fixed);
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn active_live_window_drops_trailing_unready_origin_tail_without_skipping_holes() {
+    let server = spawn_segment_server(0).await;
+    for mode in MODES {
+        let directory = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy::default();
+        let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+        {
+            let mut state = context.session.write().await;
+            *state = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+            state.apply_origin_manifest(&manifest(&server.base_url, 0, &[7; 8])).unwrap();
+            state.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 5 };
+            for seq in 0..=2 {
+                state.segments.get_mut(&seq).unwrap().status =
+                    SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 10 };
+            }
+        }
+        install_startup(&context, &worker, mode).await;
+        let mut state = context.session.write().await;
+        prepare_selected(&mut state, &[0, 1, 2], mode, true);
+        let published = state.render_and_store_manifest(10).expect("baseline is published");
+        assert_eq!(published.segment_proxy_seqs, [0, 1, 2]);
+        assert_eq!(state.last_rendered_manifest.as_ref().map(|m| m.last_proxy_seq), Some(2));
+
+        // 2. Make 3,4,5 ready (bound revisions, Ready status) and leave 6,7 unfetched (Discovered, no revision).
+        prepare_selected(&mut state, &[3, 4, 5], mode, true);
+        for seq in 3..=5 {
+            state.segments.get_mut(&seq).unwrap().status =
+                SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 20 };
+        }
+        assert!(matches!(state.segments[&6].status, SegmentCacheStatus::Discovered));
+        assert!(matches!(state.segments[&7].status, SegmentCacheStatus::Discovered));
+        assert!(!state.startup.as_ref().unwrap().revisions.contains_key(&6));
+        assert!(!state.startup.as_ref().unwrap().revisions.contains_key(&7));
+
+        // The viewer last received 2; ready 3..5 are published, unfetched 6..7 stay demanded.
+        let plan = state
+            .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(2) })
+            .expect("active live window plan");
+        assert_eq!(plan.visible, [0, 1, 2, 3, 4, 5], "{mode:?}: visible window drops unready trailing tail");
+        assert_eq!(plan.pending_tail, [6, 7], "{mode:?}: the unready tail stays demanded");
+
+        // 4. HlsManifestRenderer::render_live_window(&state, &plan, now) is Ok and its segment_proxy_seqs ends with 5 (HEAD: Err(NoRenderableWindow)).
+        let rendered = HlsManifestRenderer::render_live_window(&state, &plan, 30)
+            .expect("manifest renders with ready media prefix");
+        assert_eq!(rendered.segment_proxy_seqs.last(), Some(&5));
+        assert_eq!(rendered.segment_proxy_seqs, [0, 1, 2, 3, 4, 5]);
+
+        // 5. Guard: if a sequence <= last published (e.g. 2) becomes unrenderable, it is not dropped (render fails as before)
+        let revision_2 = state.startup.as_mut().unwrap().revisions.remove(&2).unwrap();
+        let plan_unrenderable_published = state
+            .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(2) })
+            .expect("plan includes sequence <= last published even when unrenderable");
+        assert!(
+            plan_unrenderable_published.visible.contains(&2),
+            "{mode:?}: sequences <= last published are never dropped"
+        );
+        assert!(
+            matches!(
+                HlsManifestRenderer::render_live_window(&state, &plan_unrenderable_published, 30),
+                Err(crate::renderer::RenderError::NoRenderableWindow)
+            ),
+            "{mode:?}: unrenderable published sequence causes render to fail"
+        );
+        state.startup.as_mut().unwrap().revisions.insert(2, revision_2);
+
+        // Guard: a hole (4 not ready, 5 ready) is not skipped: visible ends at 3 at most or render fails - assert the visible never contains 5 without 4.
+        let revision_4 = state.startup.as_mut().unwrap().revisions.remove(&4).unwrap();
+        let status_4 = state.segments.get(&4).unwrap().status.clone();
+        state.segments.get_mut(&4).unwrap().status = SegmentCacheStatus::Discovered;
+
+        let hole_plan = state
+            .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(2) })
+            .expect("plan with hole at 4");
+        assert!(
+            !hole_plan.visible.contains(&5) || hole_plan.visible.contains(&4),
+            "{mode:?}: visible window must never contain 5 without 4"
+        );
+        assert!(
+            hole_plan.visible.last().is_some_and(|seq| *seq <= 3)
+                || matches!(
+                    HlsManifestRenderer::render_live_window(&state, &hole_plan, 30),
+                    Err(crate::renderer::RenderError::NoRenderableWindow)
+                ),
+            "{mode:?}: hole causes window to end before the hole or render to fail"
+        );
+        assert!(
+            matches!(
+                HlsManifestRenderer::render_live_window(&state, &hole_plan, 30),
+                Err(crate::renderer::RenderError::NoRenderableWindow)
+            ),
+            "{mode:?}: hole causes render to fail"
+        );
+
+        state.startup.as_mut().unwrap().revisions.insert(4, revision_4);
+        state.segments.get_mut(&4).unwrap().status = status_4;
     }
 }

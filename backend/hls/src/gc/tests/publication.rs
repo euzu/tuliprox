@@ -589,7 +589,11 @@ fn obsolete_metadata_cleanup_requires_origin_evidence_and_preserves_other_cache_
     session.origin_window_proxy_seqs = Some(Vec::new());
     for (seq, status) in [
         SegmentCacheStatus::Ready { content_length: 12, ready_at_ms: 0 },
-        SegmentCacheStatus::Fetching { priority: SegmentFetchPriority::Demand, started_at_ms: 0 },
+        SegmentCacheStatus::Fetching {
+            priority: SegmentFetchPriority::Demand,
+            started_at_ms: 0,
+            gateway_timeout: false,
+        },
         SegmentCacheStatus::Queued { priority: SegmentFetchPriority::Demand, queued_at_ms: 0 },
         SegmentCacheStatus::CapacityDeferred { priority: SegmentFetchPriority::Demand, deferred_at_ms: 0 },
         SegmentCacheStatus::FailedRetryable { failed_at_ms: 0, retry_after_ms: 0 },

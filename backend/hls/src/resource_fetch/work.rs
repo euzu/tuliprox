@@ -122,19 +122,33 @@ impl HlsOriginRetryWork {
         if !self.protects_provider {
             return Ok(());
         }
-        if let Some(right) = provider.as_ref() {
-            return if right.is_current() {
-                Ok(())
-            } else {
-                Err(HlsOriginResourceFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::StoreRace))
-            };
-        }
-        let Some(binding) = state.origin_account_binding.as_ref() else { return Ok(()) };
+        let lapsed = match provider.as_ref() {
+            Some(right) if right.is_current() => return Ok(()),
+            Some(_) => {
+                // A sibling right ends with the shared horizon; renew it on the same binding.
+                provider.take();
+                true
+            }
+            None => false,
+        };
+        let lapsed_error =
+            Err(HlsOriginResourceFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::StoreRace));
+        let Some(binding) = state.origin_account_binding.as_ref() else {
+            return if lapsed { lapsed_error } else { Ok(()) };
+        };
         if let Some(tag) = binding.provider_binding_tag {
             *provider =
                 manager.reserve_hls_origin_work(&binding.session_owner, &binding.account_name, tag, self.deadline);
         }
+        if lapsed && provider.is_none() {
+            return lapsed_error;
+        }
         if require_allocation && provider.is_none() {
+            log::debug!(
+                "HLS origin work refused after admission: proxy_session={} reason={}",
+                crate::safe_proxy_session_id(&state.proxy_session_id),
+                if binding.provider_binding_tag.is_some() { "work_right_denied" } else { "missing_binding_tag" }
+            );
             return Err(HlsOriginResourceFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::Unavailable));
         }
         Ok(())

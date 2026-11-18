@@ -119,8 +119,9 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
     };
     let expected_generation = snapshot.origin_work_generation;
     let context = context.clone();
-    let snapshot = snapshot.clone();
+    let snapshot = std::sync::Arc::new(snapshot.clone());
     let prepare_context = context.clone();
+    let prepare_snapshot = snapshot.clone();
     let cleanup_context = context.clone();
     run_hls_origin_resource_retry_loop_with_attempt_prepare(
         target,
@@ -129,7 +130,25 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
         &log_identity,
         move |attempt| {
             let context = prepare_context.clone();
-            async move { prepare_segment_origin_attempt(context, attempt, expected_generation).await }.boxed()
+            let retry_snapshot = attempt.previous_gateway_timeout.then(|| prepare_snapshot.clone());
+            async move {
+                if let Some(snapshot) = retry_snapshot {
+                    let mut state = context.session.write().await;
+                    if state.activity.origin_work_generation == expected_generation {
+                        if let Some(entry) = state
+                            .segments
+                            .get_mut(&snapshot.proxy_seq)
+                            .filter(|entry| super::segment_fetch_binding_matches(entry, &snapshot))
+                        {
+                            if let super::SegmentCacheStatus::Fetching { gateway_timeout, .. } = &mut entry.status {
+                                *gateway_timeout = true;
+                            }
+                        }
+                    }
+                }
+                prepare_segment_origin_attempt(context, attempt, expected_generation).await
+            }
+            .boxed()
         },
         move |guard| {
             let context = cleanup_context.clone();

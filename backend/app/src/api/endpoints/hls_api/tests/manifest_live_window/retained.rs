@@ -581,3 +581,20 @@ async fn live_window_retained_deadline_is_rechecked_after_lock_acquisition() {
         Outcome::Rejected(Reject::ManifestGenerationUnavailable),
     );
 }
+
+#[tokio::test]
+async fn live_window_publishes_ready_successors_while_the_origin_tail_is_unfetched() {
+    for mode in MODES {
+        let fixture = Fixture::new(mode).await;
+        fixture.advance().await;
+        // Two successors arrived; the newer origin tail is still unfetched (slow origin).
+        prepare_revisions(&mut *fixture.session.write().await, &[6, 7]);
+        let response = fixture.request(HlsCachedManifestOptions::initial(Duration::ZERO)).await;
+        assert_eq!(response.status(), StatusCode::OK, "{mode}");
+        let body = String::from_utf8(response_body(response).await.to_vec()).unwrap();
+        assert!(body.contains("000007.ts"), "{mode}: ready successors are published: {body}");
+        assert!(!body.contains("000008.ts"), "{mode}: the unfetched tail is not published: {body}");
+        let published = fixture.lease().await.last_manifest_snapshot.unwrap();
+        assert!(published.visible_proxy_seqs().any(|seq| seq == 7), "{mode}");
+    }
+}

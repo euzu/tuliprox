@@ -712,8 +712,9 @@ impl ProviderLeaseTable {
         Some(ProviderBindingTag::new(id, lease.binding_generation))
     }
 
-    /// A new operation cannot borrow an expired normal reservation from other
-    /// operations. A first grant may instead use an admitted live allocation.
+    /// A new operation cannot extend an expired normal reservation. With an
+    /// admitted allocation, the first operation may start a work horizon; siblings
+    /// share it and cannot extend it.
     pub(super) fn grant_work_right(
         &mut self,
         owner: &str,
@@ -730,13 +731,26 @@ impl ProviderLeaseTable {
             || lease.kind != PlaybackKind::LiveHls
             || lease.provider_name != *provider
             || tag != ProviderBindingTag::new(id, lease.binding_generation)
-            || (!((lease.state.is_confirmed() || matches!(lease.state, ProviderLeaseState::HlsStarting { .. }))
-                && lease.idle_ttl_secs > 0
-                && lease.state.expires_at() > now)
-                && !(owns_allocation && lease.work_rights.values().all(|deadline| *deadline <= now)))
         {
             return false;
         }
+        let normal_right = (lease.state.is_confirmed()
+            || matches!(lease.state, ProviderLeaseState::HlsStarting { .. }))
+            && lease.idle_ttl_secs > 0
+            && lease.state.expires_at() > now;
+        let deadline = if normal_right {
+            deadline
+        } else {
+            if !owns_allocation {
+                return false;
+            }
+            match lease.work_rights.values().copied().max().filter(|end| *end > now) {
+                None => deadline,
+                // Parallel requests on one admitted binding share the outstanding horizon.
+                // A sibling can complete independently, but cannot extend that horizon.
+                Some(end) => deadline.min(end),
+            }
+        };
         self.expirations.remove(&(lease.effective_expiry(), id));
         lease.work_rights.entry(work_id).or_insert(deadline);
         self.expirations.insert((lease.effective_expiry(), id));

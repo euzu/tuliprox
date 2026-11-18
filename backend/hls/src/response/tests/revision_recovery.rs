@@ -445,6 +445,7 @@ async fn failed_optimistic_revision(
     session.segments.get_mut(&fixture.segment_file.proxy_seq).expect("entry").status = SegmentCacheStatus::Fetching {
         priority: crate::SegmentFetchPriority::Demand,
         started_at_ms: current_time_millis(),
+        gateway_timeout: false,
     };
     Ok(revision)
 }

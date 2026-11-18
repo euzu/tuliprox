@@ -64,7 +64,7 @@ pub(super) fn segment_fetch_attempt_matches(entry: &SegmentEntry, snapshot: &Seg
         && entry.cache_key == snapshot.cache_key
         && matches!(
             entry.status,
-            SegmentCacheStatus::Fetching { priority, started_at_ms }
+            SegmentCacheStatus::Fetching { priority, started_at_ms, .. }
                 if priority == snapshot.priority && started_at_ms == snapshot.started_at_ms
         )
 }

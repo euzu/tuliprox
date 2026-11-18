@@ -1,6 +1,7 @@
 use super::{
-    acquire_live_hls_from_lineup, alias_pool, create_test_app_config_with_dual_provider_pool,
-    create_test_app_config_with_pool, ActiveProviderManager, ConnectionKind, PlaybackLeaseRef,
+    super::leases::ProviderWorkReservation, acquire_live_hls_from_lineup, alias_pool,
+    create_test_app_config_with_dual_provider_pool, create_test_app_config_with_pool, ActiveProviderManager,
+    ConnectionKind, PlaybackLeaseRef,
 };
 use crate::EventManager;
 use shared::{defaults::default_user_priority, utils::Internable};
@@ -139,4 +140,43 @@ async fn live_hls_old_token_cleanup_cannot_mutate_rebound_retry() -> Result<(), 
     assert_eq!(manager.provider_lease_usage(&input).total(), 0);
     assert_eq!(manager.provider_lease_usage(&alias).idle, 1);
     Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn admitted_parallel_origin_work_respects_account_capacity_and_deadline() {
+    for limit in [1, 0] {
+        let config = super::build_test_app_config(None, limit);
+        let manager = Arc::new(ActiveProviderManager::new(&config, &Arc::new(EventManager::new())));
+        let input = "provider_1".intern();
+        let owner = "media-owner";
+        let handle = acquire_live_hls_from_lineup(&manager, &input, owner, 40100).unwrap();
+        let tag = handle.binding_tag.unwrap();
+        let now = tokio::time::Instant::now();
+        let first_end = now + Duration::from_secs(4);
+        let later = now + Duration::from_secs(20);
+        let earlier = now + Duration::from_secs(2);
+        let first = manager.reserve_hls_origin_work(owner, &input, tag, first_end).unwrap();
+        let siblings: Vec<_> =
+            (0..3).filter_map(|_| manager.reserve_hls_origin_work(owner, &input, tag, later)).collect();
+        assert_eq!(siblings.len(), 3, "configured limit {limit}");
+        let earlier_sibling = manager.reserve_hls_origin_work(owner, &input, tag, earlier).unwrap();
+        assert!(manager.reserve_hls_origin_work("another-owner", &input, tag, later).is_none());
+        manager.release_handle(&handle);
+        assert!(manager.reserve_hls_origin_work(owner, &input, tag, later).is_none());
+        drop(first);
+        assert!(earlier_sibling.is_current());
+        assert!(siblings.iter().all(ProviderWorkReservation::is_current));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(!earlier_sibling.is_current(), "sibling with earlier deadline keeps its earlier deadline");
+        assert!(siblings.iter().all(ProviderWorkReservation::is_current));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(siblings.iter().all(|right| !right.is_current()), "siblings cannot extend the horizon");
+        let successor = acquire_live_hls_from_lineup(&manager, &input, owner, 40101).unwrap();
+        assert_ne!(successor.binding_tag, Some(tag));
+        assert!(manager.reserve_hls_origin_work(owner, &input, tag, later).is_none());
+        drop(earlier_sibling);
+        drop(siblings);
+        assert!(manager.reserve_hls_origin_work(owner, &input, successor.binding_tag.unwrap(), later).is_some());
+        manager.release_handle(&successor);
+    }
 }

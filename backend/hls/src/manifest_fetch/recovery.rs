@@ -948,6 +948,55 @@ pub(super) fn selected_manifest_candidate(plan: HlsManifestCommitPlan) -> Option
     }
 }
 
+// The first reduced observation can revisit the trusted profile endpoint that
+// supplied the published timeline. Never reuse an earlier account's signed URL.
+async fn pinned_profile_followup(
+    context: &HlsOriginManifestFetchContext,
+    plan: &HlsManifestRecoveryAttemptPlan<'_>,
+) -> Option<(HlsManifestOriginBinding, Duration)> {
+    let HlsManifestRequalificationWindow::CurrentEpisode(deadline) = &plan.requalification_window else {
+        return None;
+    };
+    let entry = &context.origin_entry;
+    if plan.trigger != HlsManifestAcceptanceTrigger::Observe
+        || plan.current_burst_is_full_plan
+        || plan.attempt_index != 1
+        || !entry.profile_recovery_failover()
+        || entry.url().scheme() != "provider"
+    {
+        return None;
+    }
+    let profile = entry.url_failover_provider()?;
+    if profile.provider_url_selection_policy() != shared::model::ProviderUrlSelectionPolicy::RestartFromFirst
+        || plan.binding.provider_url_index()? == 0
+    {
+        return None;
+    }
+    let input = entry.to_input_source();
+    let resolve = |index| super::http::resolved_hls_manifest_request_url_from_input(&input, Some(index), entry.url());
+    if &resolve(plan.binding.provider_url_index()?) != plan.binding.request_url() {
+        return None;
+    }
+    let primary = resolve(0);
+    let state = context.session.read().await;
+    let pinned = state.origin_control.pinned_host.as_deref()?;
+    if !state.origin_control.acceptance_episode.as_ref()?.full_burst_completed
+        || primary.host_str() != Some(pinned)
+        || plan.binding.request_url().host_str() == Some(pinned)
+        || primary.scheme() != plan.binding.request_url().scheme()
+    {
+        return None;
+    }
+    // The probe consumes an existing slot and at most one retry interval.
+    let interval = context.retry_policy.delay_for_attempt_ms(plan.attempt_index + 1, 0)?;
+    let remaining = deadline.as_millis_since_epoch().saturating_sub(current_time_millis());
+    let budget = interval.min(remaining).min(context.origin_manifest_timeout_ms);
+    if budget == 0 {
+        return None;
+    }
+    Some((HlsManifestOriginBinding::new(primary, Some(0)).ok()?, Duration::from_millis(budget)))
+}
+
 async fn fetch_manifest_recovery_burst_candidates(
     context: &HlsOriginManifestFetchContext,
     plan: &HlsManifestRecoveryAttemptPlan<'_>,
@@ -955,9 +1004,17 @@ async fn fetch_manifest_recovery_burst_candidates(
 ) -> HlsManifestRecoveryBurstCollection {
     let mut tasks = JoinSet::new();
     let candidates = burst_plan.total_candidates();
+    let mut pinned = pinned_profile_followup(context, plan).await;
     for candidate_index in 0..candidates {
-        let context = context.clone();
-        let binding = plan.binding.clone();
+        let mut context = context.clone();
+        let (binding, probe_budget) = if let Some((primary, budget)) = pinned.take() {
+            crate::scrub_hls_origin_headers(&mut context.headers, None);
+            context.origin_entry = context.origin_entry.with_profile_recovery_failover(false);
+            debug!("HLS reduced manifest retry revisits pinned profile endpoint: budget_ms={}", budget.as_millis());
+            (primary, Some(budget))
+        } else {
+            (plan.binding.clone(), None)
+        };
         let reject_reason = plan.reject_reason.cloned();
         let attempt_index = plan.attempt_index;
         let attempts = plan.attempts;
@@ -978,7 +1035,13 @@ async fn fetch_manifest_recovery_burst_candidates(
                 ManifestRecoveryAttemptLogContext { attempt_index, attempts, candidate_index, candidates },
             );
             let fetch_started = Instant::now();
-            let result = fetch_hls_origin_manifest_request(request).await;
+            let fetch = fetch_hls_origin_manifest_request(request);
+            let result = match probe_budget {
+                Some(budget) => {
+                    tokio::time::timeout(budget, fetch).await.unwrap_or(Err(OriginManifestFetchError::Timeout))
+                }
+                None => fetch.await,
+            };
             let fetch_elapsed_ms = u64::try_from(fetch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             (candidate_index, fetch_elapsed_ms, result)
         });

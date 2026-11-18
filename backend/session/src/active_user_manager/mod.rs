@@ -152,6 +152,8 @@ pub struct LegacyHlsRebase {
     pub discontinuity_boundary_seq: Option<u64>,
     /// Insert an `EXT-X-DISCONTINUITY` before the first segment of the next manifest serve.
     pub insert_discontinuity: bool,
+    /// The member changed; the next media serve starts after `last_served_sequence` with a discontinuity.
+    pub pending_member_rebase: bool,
 }
 
 #[derive(Clone, Debug)]

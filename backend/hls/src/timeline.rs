@@ -102,7 +102,7 @@ impl fmt::Debug for OriginSegmentFetchRef {
 pub enum SegmentCacheStatus {
     Discovered,
     Queued { priority: SegmentFetchPriority, queued_at_ms: u64 },
-    Fetching { priority: SegmentFetchPriority, started_at_ms: u64 },
+    Fetching { priority: SegmentFetchPriority, started_at_ms: u64, gateway_timeout: bool },
     Ready { content_length: u64, ready_at_ms: u64 },
     CapacityDeferred { priority: SegmentFetchPriority, deferred_at_ms: u64 },
     FailedRetryable { failed_at_ms: u64, retry_after_ms: u64 },

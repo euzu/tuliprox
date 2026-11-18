@@ -414,7 +414,11 @@ async fn latest_successful_ready_commit_advances_before_another_client_request()
     discover_438(&request, &origin).await;
     for status in [
         SegmentCacheStatus::Discovered,
-        SegmentCacheStatus::Fetching { priority: crate::SegmentFetchPriority::Demand, started_at_ms: request.now_ms },
+        SegmentCacheStatus::Fetching {
+            priority: crate::SegmentFetchPriority::Demand,
+            started_at_ms: request.now_ms,
+            gateway_timeout: false,
+        },
         SegmentCacheStatus::FailedRetryable { failed_at_ms: request.now_ms, retry_after_ms: request.now_ms + 1 },
     ] {
         let mut state = request.session.write().await;
