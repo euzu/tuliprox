@@ -498,10 +498,10 @@ where
     .await
 }
 
-/// Runs the shared retry policy and reports every classified attempt failure to
+/// Runs the shared retry policy and reports every retrying attempt failure to
 /// `classify_attempt` before the next backoff sleep, so a caller can publish per-attempt
-/// evidence while the retry is still pending. A terminal failure is reported too: its
-/// evidence must not outlive the attempt that recorded it.
+/// evidence while the retry is still pending. Terminal failures return immediately without
+/// waiting for classification; the caller clears in-flight evidence when committing the terminal status.
 #[expect(
     clippy::too_many_arguments,
     reason = "The retry policy, its callbacks and the per-attempt classifier stay explicit at the call sites."
@@ -748,9 +748,6 @@ where
                     return Ok(output);
                 }
                 Err(err) => {
-                    // Report the classified outcome before any backoff sleep or terminal return, so
-                    // evidence describes this attempt and never outlives it.
-                    classify_attempt(&attempt, &err).await;
                     if matches!(err, HlsOriginResourceFetchError::Timeout) {
                         log_hls_resource_timeout(
                             identity,
@@ -764,6 +761,9 @@ where
                         log_hls_resource_fetch_failed(identity, target.log_context(), &attempt, err.log_status());
                         return Err(err);
                     }
+                    // Report the classified outcome before backoff sleep, so evidence
+                    // describes this attempt while the retry is pending.
+                    classify_attempt(&attempt, &err).await;
                     log_hls_resource_retry_scheduled(
                         identity,
                         target.log_context(),
@@ -1202,10 +1202,11 @@ mod tests {
     mod retry_work;
     use super::{
         build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
-        fetch_hls_origin_resource_response, run_hls_origin_resource_retry_loop_with_attempt_prepare,
-        HlsCacheCommitFailure, HlsContentCodingFailure, HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline,
-        HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchAttempt,
-        HlsResourceFetchKind, HlsResourceFetchLogStatus, HlsResourceFetchSource,
+        fetch_hls_origin_resource_response, run_hls_origin_resource_retry_loop_with_attempt_classification,
+        run_hls_origin_resource_retry_loop_with_attempt_prepare, HlsCacheCommitFailure, HlsContentCodingFailure,
+        HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
+        HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchAttempt, HlsResourceFetchKind,
+        HlsResourceFetchLogStatus, HlsResourceFetchSource,
     };
     use crate::{HlsBoundAccountAcquireErrorKind, HlsLogIdentity, SegmentFetchPolicy};
     use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -1678,6 +1679,99 @@ mod tests {
         server.abort();
         assert!(matches!(result, Err(HlsOriginResourceFetchError::LocalCacheCapacity { .. })));
         assert_eq!(request_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_attempt_returns_without_classification_while_retrying_attempt_classifies() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local server");
+        let address = listener.local_addr().expect("local address");
+        let attempt_count = Arc::new(AtomicUsize::new(0));
+        let server_attempt_count = Arc::clone(&attempt_count);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                read_request(&mut stream).await;
+                let current = server_attempt_count.fetch_add(1, Ordering::Relaxed);
+                let response = if current == 0 {
+                    // First attempt: retryable 500
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    // Second attempt: terminal 404
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                stream.write_all(response.as_bytes()).await.expect("write response");
+            }
+        });
+
+        let policy = SegmentFetchPolicy {
+            retry_delays_ms: [0, 0, 0, 0, 0],
+            retry_jitter_max_ms: 0,
+            ..SegmentFetchPolicy::default()
+        };
+        let identity = test_log_identity();
+        let retrying_classified = Arc::new(AtomicUsize::new(0));
+        let retrying_classified_cb = Arc::clone(&retrying_classified);
+
+        // Run with attempt 0 (retryable 500) then attempt 1 (terminal 404)
+        let result = run_hls_origin_resource_retry_loop_with_attempt_classification(
+            fetch_target(format!("http://{address}/segment.ts")),
+            fetch_clients(false),
+            &policy,
+            &identity,
+            move |_attempt, _err| {
+                let retrying_classified = Arc::clone(&retrying_classified_cb);
+                async move {
+                    retrying_classified.fetch_add(1, Ordering::Relaxed);
+                }
+                .boxed()
+            },
+            |_| async { Ok(()) }.boxed(),
+            |()| async {}.boxed(),
+            |_response, _attempt, _deadline, ()| async { Ok(()) }.boxed(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(HlsOriginResourceFetchError::PermanentStatus(StatusCode::NOT_FOUND))));
+        // 2 requests hit the server (attempt 0 and attempt 1)
+        assert_eq!(attempt_count.load(Ordering::Relaxed), 2);
+        // Only the retrying attempt (attempt 0) is classified; the terminal attempt (attempt 1) is NOT classified!
+        assert_eq!(
+            retrying_classified.load(Ordering::Relaxed),
+            1,
+            "only retrying attempts are classified before backoff; terminal attempts return without classification"
+        );
+
+        // Also test an immediately terminal attempt (404 on first attempt)
+        let terminal_classified = Arc::new(AtomicUsize::new(0));
+        let terminal_classified_cb = Arc::clone(&terminal_classified);
+        let result_terminal = run_hls_origin_resource_retry_loop_with_attempt_classification(
+            fetch_target(format!("http://{address}/segment.ts")),
+            fetch_clients(false),
+            &policy,
+            &identity,
+            move |_attempt, _err| {
+                let terminal_classified = Arc::clone(&terminal_classified_cb);
+                async move {
+                    terminal_classified.fetch_add(1, Ordering::Relaxed);
+                }
+                .boxed()
+            },
+            |_| async { Ok(()) }.boxed(),
+            |()| async {}.boxed(),
+            |_response, _attempt, _deadline, ()| async { Ok(()) }.boxed(),
+        )
+        .await;
+
+        assert!(matches!(result_terminal, Err(HlsOriginResourceFetchError::PermanentStatus(StatusCode::NOT_FOUND))));
+        assert_eq!(
+            terminal_classified.load(Ordering::Relaxed),
+            0,
+            "terminal attempt must return without waiting for classification"
+        );
+
+        server.abort();
     }
 
     #[tokio::test]

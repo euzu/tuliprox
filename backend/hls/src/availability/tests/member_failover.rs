@@ -762,3 +762,109 @@ async fn reevaluation_wakes_at_the_reserve_trigger_and_not_at_exhaustion() {
     assert_eq!(deadline.latest_safe_terminal_commit_at_ms, NOW_MS + reserve_ms);
     assert!(fixture.runtime.reasons().is_empty(), "no switch is requested before the window");
 }
+
+#[tokio::test]
+async fn member_failover_latches_reserve_crossing_across_recovery_rounds_until_idle_bound() {
+    let fixture = member_failover_fixture("member-failover-latched", VISIBLE_SEGMENTS).await;
+    // 18 s elapsed: 14 s reserve remaining, which is above the 12 s startup window.
+    fixture.start_playback(4 * TARGET_DURATION_MS + 2_000).await;
+    assert_eq!(fixture.reserve(NOW_MS).await.guaranteed_reserve_ms, 14_000);
+    // Initial sample above target.
+    fixture.player_poll(NOW_MS).await;
+
+    // Two recovery-pressure rounds with reserve below the target before the worker evaluates.
+    let round1_ms = NOW_MS + TARGET_DURATION_MS;
+    assert_eq!(fixture.reserve(round1_ms).await.guaranteed_reserve_ms, 10_000);
+    fixture.player_poll(round1_ms).await;
+
+    let round2_ms = NOW_MS + 2 * TARGET_DURATION_MS;
+    assert_eq!(fixture.reserve(round2_ms).await.guaranteed_reserve_ms, 6_000);
+    fixture.player_poll(round2_ms).await;
+
+    // The worker evaluates: because the crossing was latched, it still requests ReservePressure.
+    let owner_key = fixture
+        .ctx
+        .hls_proxy
+        .availability_reevaluation_owner_key(&fixture.session, &fixture.proxy_session_id)
+        .await
+        .expect("owner key");
+    let ownership = crate::availability_reevaluation::HlsAvailabilityReevaluationOwnership::for_test(
+        fixture.ctx.hls_proxy.availability_reevaluations(),
+        fixture.proxy_session_id.clone(),
+    );
+    let mut cycle = HlsAvailabilityReevaluationCycle::new(round2_ms);
+
+    let decision = evaluate_post_refresh_terminal_attempt(
+        &fixture.ctx,
+        &fixture.session,
+        &owner_key,
+        &ownership,
+        HlsAvailabilityReevaluationMode::TerminalReserve,
+        &mut cycle,
+        round2_ms,
+    )
+    .await;
+
+    assert_eq!(decision, HlsTerminalReevaluationDecision::Continue { terminal_evaluation_pending: true });
+    assert_eq!(fixture.runtime.reasons(), vec![HlsMemberUnhealthyReason::ReservePressure]);
+    assert_eq!(cycle.handoff_defer_until_ms, Some(round2_ms + HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS));
+
+    // A latched sample older than the idle bound no longer triggers.
+    let expired_fixture = member_failover_fixture("member-failover-latched-expired", VISIBLE_SEGMENTS).await;
+    expired_fixture.start_playback(4 * TARGET_DURATION_MS + 2_000).await;
+    expired_fixture.player_poll(NOW_MS).await;
+    expired_fixture.player_poll(round1_ms).await;
+    expired_fixture.player_poll(round2_ms).await;
+
+    // Player continues active requests so the lease itself is not paused.
+    let idle_bound_ms = TARGET_DURATION_MS * HLS_MEMBER_FAILOVER_IDLE_TARGET_DURATIONS;
+    let expired_ms = NOW_MS + idle_bound_ms + 1;
+    let identity = expired_fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&expired_fixture.lease_id, &expired_fixture.proxy_session_id, expired_ms)
+        .await
+        .and_then(|lease| lease.media_identity())
+        .expect("live member failover lease identity");
+    assert!(expired_fixture
+        .ctx
+        .hls_proxy
+        .record_access_lease_segment_request_started_if_identity_matches(
+            &expired_fixture.lease_id,
+            &expired_fixture.proxy_session_id,
+            identity,
+            1,
+            expired_ms,
+        )
+        .await
+        .is_some());
+
+    let expired_owner_key = expired_fixture
+        .ctx
+        .hls_proxy
+        .availability_reevaluation_owner_key(&expired_fixture.session, &expired_fixture.proxy_session_id)
+        .await
+        .expect("owner key");
+    let expired_ownership = crate::availability_reevaluation::HlsAvailabilityReevaluationOwnership::for_test(
+        expired_fixture.ctx.hls_proxy.availability_reevaluations(),
+        expired_fixture.proxy_session_id.clone(),
+    );
+    let mut expired_cycle = HlsAvailabilityReevaluationCycle::new(expired_ms);
+
+    let _ = evaluate_post_refresh_terminal_attempt(
+        &expired_fixture.ctx,
+        &expired_fixture.session,
+        &expired_owner_key,
+        &expired_ownership,
+        HlsAvailabilityReevaluationMode::TerminalReserve,
+        &mut expired_cycle,
+        expired_ms,
+    )
+    .await;
+
+    assert!(
+        expired_fixture.runtime.reasons().is_empty(),
+        "a latched sample older than the idle bound must not trigger failover"
+    );
+    assert_eq!(expired_fixture.worker_wake(expired_ms).await, None);
+}

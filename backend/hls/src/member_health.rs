@@ -132,8 +132,12 @@ impl HlsMemberReserveSample {
 /// inside `HlsProxyManager::with_critical_handoff_state` - that is, under the lease-store lock and
 /// the session write lock, with no `await` between reading the previous sample and replacing it.
 /// Read-only reserve evaluations compare against the stored sample and never replace it, so the
-/// "previous evaluation" of a lease is unambiguous. [`HlsMemberHealth::reset_for_handoff`] drops
-/// every sample, so evidence never outlives the member that produced it.
+/// "previous evaluation" of a lease is unambiguous. When a lease's previous reserve sample is
+/// above the target startup window and the new reserve drops to or below it, that crossing sample
+/// is latched (kept instead of replaced) so intermediate recovery-pressure rounds do not lose
+/// steady-fall member failover evidence before the worker evaluates. The idle bound in
+/// `member_failover_required` expires a latched sample naturally. [`HlsMemberHealth::reset_for_handoff`]
+/// drops every sample, so evidence never outlives the member that produced it.
 #[derive(Debug, Default)]
 pub(crate) struct HlsMemberReserveHistory {
     samples: Vec<(HlsAccessLeaseId, HlsMemberReserveSample)>,
@@ -149,14 +153,30 @@ impl HlsMemberReserveHistory {
 
     /// Replaces the samples of the next evaluation round. Leases absent from `round` lose their
     /// sample, so the history stays bounded by the active leases of the session.
+    ///
+    /// When a lease's previous sample of the same playback was above the startup target and the new
+    /// reserve is at or below it, the crossing sample is latched (kept instead of replaced) so that
+    /// intermediate recovery-pressure rounds do not lose the steady-fall crossing before the worker
+    /// evaluates.
     fn replace_round<'a>(
         &mut self,
-        round: impl IntoIterator<Item = (&'a HlsAccessLease, HlsLeaseReserveSnapshot)>,
+        round: impl IntoIterator<Item = (&'a HlsAccessLease, HlsLeaseReserveSnapshot, u64)>,
         now_ms: u64,
     ) {
+        let previous = Self { samples: std::mem::take(&mut self.samples) };
         self.samples = round
             .into_iter()
-            .map(|(lease, reserve)| (lease.lease_id.clone(), HlsMemberReserveSample::of(lease, reserve, now_ms)))
+            .map(|(lease, reserve, target_ms)| {
+                let sample = match previous.previous(lease) {
+                    Some(previous)
+                        if previous.guaranteed_reserve_ms > target_ms && reserve.guaranteed_reserve_ms <= target_ms =>
+                    {
+                        previous
+                    }
+                    _ => HlsMemberReserveSample::of(lease, reserve, now_ms),
+                };
+                (lease.lease_id.clone(), sample)
+            })
             .collect();
     }
 }
@@ -187,7 +207,7 @@ impl HlsMemberHealth {
     /// Records the reserve of every active lease of this evaluation round.
     pub(crate) fn observe_member_reserves<'a>(
         &mut self,
-        round: impl IntoIterator<Item = (&'a HlsAccessLease, HlsLeaseReserveSnapshot)>,
+        round: impl IntoIterator<Item = (&'a HlsAccessLease, HlsLeaseReserveSnapshot, u64)>,
         now_ms: u64,
     ) {
         self.reserve.replace_round(round, now_ms);

@@ -587,6 +587,43 @@ async fn rolled_404_head_skips_replacement_promotion_for_terminal_reserve_failur
     assert!(session.segment_prefetch_queue.is_empty());
 }
 
+#[tokio::test]
+async fn reserve_promotion_counts_subsequent_ready_segments_and_ignores_terminal_tail_after_target() {
+    use crate::origin_progress::HlsOriginPathCondition;
+    use axum::http::StatusCode;
+
+    let server = spawn_segment_server(0).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (worker, context, _) = fetch_context(&server, &directory, &SegmentFetchPolicy::default()).await;
+    let mode = HlsStartupMode::Optimistic;
+    {
+        let mut session = context.session.write().await;
+        *session = HlsSession::new(HlsSessionKey::new(1, "window"), b"secret", 0);
+        session.apply_origin_manifest(&manifest(&server.base_url, 8000, &[6; 6])).unwrap();
+        session.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    }
+    install_startup(&context, &worker, mode).await;
+    let mut session = context.session.write().await;
+    session.record_live_window_origin_commit(45);
+    session.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
+    prepare_selected(&mut session, &[0, 1, 2, 3, 4, 5], mode, true);
+    for seq in 0..=2 {
+        session.segments.get_mut(&seq).unwrap().status =
+            SegmentCacheStatus::Ready { content_length: 8, ready_at_ms: 50 };
+    }
+    session.segments.get_mut(&3).unwrap().status = SegmentCacheStatus::Discovered;
+    session.segments.get_mut(&4).unwrap().status = SegmentCacheStatus::Ready { content_length: 8, ready_at_ms: 50 };
+    session.segments.get_mut(&5).unwrap().status =
+        SegmentCacheStatus::FailedPermanent { failed_at_ms: 20, status: Some(StatusCode::NOT_FOUND) };
+
+    let plan = session.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+    assert_eq!(plan.visible, vec![0, 1, 2]);
+    assert_eq!(plan.hidden_tail, vec![3, 4, 5]);
+
+    session.origin_control.target_duration_snapshot_ms = Some(10_000);
+    assert_eq!(plan.reserve_promotion_tail(&session, 65), [3, 4]);
+}
+
 /// A permanent clear-TS 404 removes the failed object from the render queue. The scheduler wake
 /// only replans while work is still queued, so the commit replans in place: the window selected
 /// after the failure must be dispatched without waiting for the next origin commit.

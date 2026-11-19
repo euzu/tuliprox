@@ -44,13 +44,14 @@ impl ActiveUserManager {
             legacy_rebase: None,
             legacy_failover_budget: None,
             member_failed_on_segment: false,
+            member_failure_generation: 0,
             legacy_switch_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn create_user_session(&self, request: CreateUserSessionParams<'_>) -> String {
         // Without a fence no refresh is ever rejected; the session token is returned either way.
-        self.create_user_session_inner(request, None).await.unwrap_or_else(|token| token)
+        self.create_user_session_inner(request, None).await.map_or_else(|token| token, |(token, _)| token)
     }
 
     /// Creates a session, or refreshes the existing one with `session_token`, and returns its token.
@@ -66,7 +67,7 @@ impl ActiveUserManager {
         &self,
         request: CreateUserSessionParams<'_>,
         fence: Option<(SessionIdentity, Option<&MemberBinding>)>,
-    ) -> Option<String> {
+    ) -> Option<(String, SessionIdentity)> {
         self.create_user_session_inner(request, fence).await.ok()
     }
 
@@ -80,7 +81,7 @@ impl ActiveUserManager {
         &self,
         request: CreateUserSessionParams<'_>,
         fence: Option<(SessionIdentity, Option<&MemberBinding>)>,
-    ) -> Result<String, String> {
+    ) -> Result<(String, SessionIdentity), String> {
         let CreateUserSessionParams {
             user,
             session_token,
@@ -167,7 +168,7 @@ impl ActiveUserManager {
                 }
                 Self::update_session_admission(session, connection_permission, connection_kind);
                 debug_if_enabled!("Using session for user {} with url: {}", user.username, stream_log_value());
-                return Ok(session.token.clone());
+                return Ok((session.token.clone(), session.identity()));
             }
         }
         if let Some(token) = rejected_token {
@@ -213,11 +214,12 @@ impl ActiveUserManager {
             socket_bound,
         });
         let token = session.token.clone();
+        let identity = session.identity();
         connection_data.add_session(session);
         let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
         drop(user_connections);
         self.log_divergence_snapshot(divergence_snapshot).await;
-        Ok(token)
+        Ok((token, identity))
     }
 
     pub async fn touch_socket_activity(&self, addr: &SocketAddr) {
@@ -508,12 +510,17 @@ impl ActiveUserManager {
     /// plan serves the window, clears `member_failed_on_segment` in the same write. A served window
     /// proves the bound member works again, so the next manifest poll must not switch away from it.
     /// Returns `None` when the session is gone or the fence fails; nothing is written then.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The fence, the failure generation and the plan belong to one write."
+    )]
     pub async fn commit_legacy_media_serve_if_bound<R>(
         &self,
         username: &str,
         token: &str,
         identity: SessionIdentity,
         expected_binding: &MemberBinding,
+        captured_failure_generation: u64,
         update: impl FnOnce(&mut LegacyHlsRebase, &mut Option<FailoverBudget>) -> R,
         serves: impl FnOnce(&R) -> bool,
     ) -> Option<R> {
@@ -521,7 +528,7 @@ impl ActiveUserManager {
         Self::update_fenced_session(&mut user_connections, username, token, identity, expected_binding, |session| {
             let rebase = session.legacy_rebase.get_or_insert_with(LegacyHlsRebase::default);
             let result = update(rebase, &mut session.legacy_failover_budget);
-            if serves(&result) {
+            if serves(&result) && session.member_failure_generation == captured_failure_generation {
                 session.member_failed_on_segment = false;
             }
             result
@@ -543,6 +550,7 @@ impl ActiveUserManager {
             if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
                 if session.identity() == identity && session.member_binding.as_ref() == Some(expected_binding) {
                     session.member_failed_on_segment = true;
+                    session.member_failure_generation = session.member_failure_generation.wrapping_add(1);
                     return true;
                 }
             }
@@ -656,6 +664,88 @@ mod tests {
                 connections.by_key.get(&user.username).unwrap().sessions.iter().find(|s| s.token == token).unwrap();
             assert!(!session.member_failed_on_segment, "switch path must clear segment failure flag");
         }
+    }
+
+    #[tokio::test]
+    async fn failure_generation_prevents_in_flight_serve_from_clearing_newer_segment_failure() {
+        let manager = test_manager();
+        let user = test_user();
+        let addr = "127.0.0.1:8000".parse().unwrap();
+        let token = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-fail-gen",
+                virtual_id: 100,
+                provider: "prov-1",
+                stream_url: "http://example.com/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: None,
+                socket_bound: false,
+            })
+            .await;
+
+        let binding = MemberBinding {
+            group_vid: 10,
+            member_vid: 101,
+            member_index: 0,
+            input_name: Arc::from("input-1"),
+            member_title: Arc::from("title-1"),
+            provider: Arc::from("prov-1"),
+        };
+        manager.bind_member(&user.username, &token, binding.clone()).await;
+        let identity = manager.session_identity(&user.username, &token).await.unwrap();
+
+        // 1. Poll starts: capture failure generation when member has not failed
+        let poll_failure_generation =
+            manager.get_and_update_user_session(&user.username, &token).await.unwrap().member_failure_generation;
+
+        // 2. While poll is in flight, a segment request on the same member fails hard
+        assert!(manager.mark_member_failed_on_segment(&user.username, &token, identity, &binding).await);
+        let session = manager.get_and_update_user_session(&user.username, &token).await.unwrap();
+        assert!(session.member_failed_on_segment);
+        assert_eq!(session.member_failure_generation, poll_failure_generation.wrapping_add(1));
+
+        // 3. The in-flight poll finishes and commits a media serve with the captured generation.
+        // Because a segment failure occurred in between, the failure generation bumped and the serve
+        // must NOT clear member_failed_on_segment!
+        manager
+            .commit_legacy_media_serve_if_bound(
+                &user.username,
+                &token,
+                identity,
+                &binding,
+                poll_failure_generation,
+                |_rebase, _budget| true,
+                |_served| true,
+            )
+            .await;
+
+        let session_after = manager.get_and_update_user_session(&user.username, &token).await.unwrap();
+        assert!(
+            session_after.member_failed_on_segment,
+            "an in-flight poll from an older failure generation must not clear a newer segment failure"
+        );
+
+        // 4. A subsequent poll captures the current failure generation. When it serves, it clears the failure.
+        let fresh_poll_failure_generation = session_after.member_failure_generation;
+        manager
+            .commit_legacy_media_serve_if_bound(
+                &user.username,
+                &token,
+                identity,
+                &binding,
+                fresh_poll_failure_generation,
+                |_rebase, _budget| true,
+                |_served| true,
+            )
+            .await;
+
+        let session_final = manager.get_and_update_user_session(&user.username, &token).await.unwrap();
+        assert!(
+            !session_final.member_failed_on_segment,
+            "a poll started after the failure clears member_failed_on_segment on successful serve"
+        );
     }
 
     #[tokio::test]
@@ -1104,9 +1194,11 @@ mod tests {
                 Some((current, Some(&binding_b))),
             )
             .await;
-        assert_eq!(outcome, Some(token.clone()), "a matching fence must apply the refresh");
+        let (out_token, out_identity) = outcome.expect("a matching fence must apply the refresh");
+        assert_eq!(out_token, token);
         let session = manager.get_and_update_user_session(&user.username, &token).await.expect("session");
         assert_eq!(session.provider, "prov-c".intern());
+        assert_eq!(out_identity, session.identity());
 
         let outcome = manager
             .create_user_session_checked(

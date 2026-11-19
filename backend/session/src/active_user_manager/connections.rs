@@ -131,6 +131,7 @@ impl UserSession {
     pub(super) fn set_member_binding(&mut self, binding: MemberBinding) {
         if self.member_binding.as_ref() != Some(&binding) {
             self.binding_generation = self.binding_generation.wrapping_add(1);
+            self.change_signal.signal();
         }
         self.member_binding = Some(binding);
         self.member_failed_on_segment = false;

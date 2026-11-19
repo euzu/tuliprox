@@ -99,9 +99,14 @@ impl HlsLiveWindowPlan {
             target_duration_ms,
             admission_transition_margin_ms(&timeline, visible_tail_ms, target_duration_ms),
         );
-        let mut reserve_ms = crate::media_reserve::contiguous_ready_reserve_ms(&timeline, first_visible);
+        let ready_span = crate::media_reserve::contiguous_ready_span(&timeline, first_visible);
+        let measured_ready_end = ready_span.last_proxy_seq;
+        let mut reserve_ms = ready_span.ready_duration_ms();
         let mut needed = 0_usize;
         for (index, seq) in self.hidden_tail.iter().enumerate() {
+            if measured_ready_end.is_some_and(|end| *seq <= end) {
+                continue;
+            }
             if reserve_ms > boundary_ms {
                 break;
             }
@@ -109,11 +114,8 @@ impl HlsLiveWindowPlan {
                 return &[];
             }
             let Some(entry) = session.segments.get(seq) else { return &[] };
-            // READY objects are already part of the contiguous READY span measured above.
-            if !matches!(entry.status, SegmentCacheStatus::Ready { .. }) {
-                reserve_ms = reserve_ms.saturating_add(entry.duration_ms);
-                needed = index.saturating_add(1);
-            }
+            reserve_ms = reserve_ms.saturating_add(entry.duration_ms);
+            needed = index.saturating_add(1);
         }
         &self.hidden_tail[..needed]
     }

@@ -91,6 +91,7 @@ impl Default for UserSession {
             legacy_rebase: None,
             legacy_failover_budget: None,
             member_failed_on_segment: false,
+            member_failure_generation: 0,
             legacy_switch_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }

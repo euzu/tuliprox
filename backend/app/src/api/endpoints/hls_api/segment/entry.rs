@@ -435,7 +435,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
         pinned_stalker_stream,
         probed_manifest,
         precomputed_user_agent_stream_index,
-    ): (String, _, _, _, _, _, _, _) = if let Some(session) = user_session {
+        established_identity,
+    ): (String, _, _, _, _, _, _, _, _) = if let Some(session) = user_session {
         let bound_inp_opt = session.member_binding.as_ref().and_then(|binding| {
             app_state.app_config.get_input_by_name(&binding.input_name).map(|inp| (binding.member_vid, inp))
         });
@@ -622,7 +623,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 Some((session.identity(), session.member_binding.as_ref())),
             )
             .await;
-        let Some(session_token) = session_refresh else {
+        let Some((session_token, post_refresh_identity)) = session_refresh else {
             debug_if_enabled!(
                 "HLS session {} changed while resolving pinned provider {}; retrying",
                 sanitize_sensitive_info(&session.token),
@@ -647,6 +648,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             pinned_stalker_stream,
             None,
             None,
+            Some(post_refresh_identity),
         )
     } else if let Some(group) = entry_group {
         let user_session_token = hls_entry_user_session_token(
@@ -810,6 +812,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             pinned_stalker_stream,
             probed_manifest,
             precomputed_user_agent_stream_index,
+            None,
         )
     } else {
         // Append/shift catchup must keep an m3u-catchup session token even when shared HLS
@@ -878,14 +881,18 @@ pub(in crate::api) async fn handle_hls_stream_request(
             None,
             None,
             None,
+            None,
         )
     };
 
     // The session as created or reserved above; manifest response cookies may only enter this
     // binding, not one an account switch installed while the playlist downloaded.
-    let mut session_identity = match session_token.as_deref() {
-        Some(token) => app_state.active_users.session_identity(&user.username, token).await,
-        None => None,
+    let mut session_identity = match established_identity {
+        Some(identity) => Some(identity),
+        None => match session_token.as_deref() {
+            Some(token) => app_state.active_users.session_identity(&user.username, token).await,
+            None => None,
+        },
     };
     let provider_request_id = provider_handle.as_ref().and_then(|handle| handle.playback_request_id);
     let selected_provider_name = selected_provider_config.as_ref().map(|cfg| Arc::clone(&cfg.name));
@@ -1083,6 +1090,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     // snapshot's offset travels with its generation: a restart commit rewrites the
                     // offset, so a window rank only makes sense against the offset it was fetched for.
                     let observed_rebase = user_session.and_then(|session| session.legacy_rebase.as_ref());
+                    let observed_failure_generation =
+                        user_session.map_or(0, |session| session.member_failure_generation);
                     let mut committed = false;
                     // A legacy group session is always bound to a member; the update is fenced on
                     // that binding and on the identity read for this request.
@@ -1091,6 +1100,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         // not run while the global `ActiveUserManager` lock is held.
                         let window = LegacyMediaWindow::parse(&content, playlist_kind);
                         let playback = group_playback_settings(app_state, target);
+                        let has_segments = window.segment_count > 0;
                         let update = app_state
                             .active_users
                             .commit_legacy_media_serve_if_bound(
@@ -1098,12 +1108,13 @@ pub(in crate::api) async fn handle_hls_stream_request(
                                 session_token,
                                 identity,
                                 expected_binding,
+                                observed_failure_generation,
                                 |state, budget_slot| {
                                     let plan = plan_legacy_rebase(state, window, playlist_kind, observed_rebase);
                                     if playback.failover.enabled {
-                                        // Only a window that is served counts as playback for the
-                                        // failover budget; a stale one is retried instead.
-                                        if matches!(plan, LegacyRebasePlan::Serve(_)) {
+                                        // Only a window that is served and contains segments counts
+                                        // as playback for the failover budget; an empty one is not data.
+                                        if matches!(plan, LegacyRebasePlan::Serve(_)) && has_segments {
                                             budget_slot
                                                 .get_or_insert_with(|| FailoverBudget::new(&playback.failover))
                                                 .on_data(std::time::Instant::now());
@@ -1113,7 +1124,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                                     }
                                     plan
                                 },
-                                |plan| matches!(plan, LegacyRebasePlan::Serve(_)),
+                                |plan| matches!(plan, LegacyRebasePlan::Serve(_)) && has_segments,
                             )
                             .await;
                         if let Some(LegacyRebasePlan::Serve(props)) = update {
@@ -1362,7 +1373,11 @@ fn plan_legacy_rebase_window(
     // client keeps the timeline of the last served window, exactly like after a member switch.
     if segment_count == 0 {
         return LegacyRebasePlan::Serve(Some(HlsMediaSequenceRebase {
-            media_sequence: state.last_served_sequence.saturating_add(1),
+            media_sequence: if state.pending_member_rebase {
+                state.last_served_sequence.saturating_add(1)
+            } else {
+                state.last_served_start
+            },
             insert_discontinuity: false,
             discontinuity_sequence: state.discontinuity_sequence,
         }));
@@ -2805,6 +2820,18 @@ mod legacy_rebase_tests {
     }
 
     #[test]
+    fn empty_media_playlist_without_pending_switch_keeps_last_advertised_window_start() {
+        let mut state = LegacyHlsRebase::default();
+        plan_media(&mut state, &media(100, 5));
+        assert_eq!(state.last_served_start, 100);
+        assert_eq!(state.last_served_sequence, 104);
+
+        let empty = plan_media(&mut state, &media(500, 0)).expect("rebase");
+        assert_eq!(empty.media_sequence, 100, "must keep last advertised window start");
+        assert!(!empty.insert_discontinuity);
+    }
+
+    #[test]
     fn empty_media_playlist_does_not_clobber_the_upstream_discontinuity_sequence() {
         let mut state = LegacyHlsRebase::default();
         assert!(plan_media(&mut state, &media_with_disc_seq(100, 3, 3)).is_none());
@@ -2817,7 +2844,7 @@ mod legacy_rebase_tests {
         assert_eq!(
             empty,
             Some(HlsMediaSequenceRebase {
-                media_sequence: 103,
+                media_sequence: 100,
                 insert_discontinuity: false,
                 discontinuity_sequence: 3,
             }),

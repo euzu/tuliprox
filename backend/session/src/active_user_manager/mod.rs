@@ -202,6 +202,9 @@ pub struct UserSession {
     /// A legacy segment request of the bound member failed hard (404/410/5xx); the next manifest
     /// refresh switches the member instead of serving it again.
     pub member_failed_on_segment: bool,
+    /// Monotonic failure counter for legacy HLS group members; bumped on every segment failure so an
+    /// in-flight poll that finishes after the failure cannot clear it.
+    pub member_failure_generation: u64,
     /// Single-flight guard for the legacy runtime member switch; one switch per session at a time.
     pub legacy_switch_in_flight: Arc<AtomicBool>,
 }

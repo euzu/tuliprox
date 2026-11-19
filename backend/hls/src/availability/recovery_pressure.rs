@@ -10,7 +10,10 @@ use crate::{
     hls_ctx::HlsCtx,
     lease::HlsAccessLeaseStore,
     manager::HlsProxyManager,
-    media_reserve::{evaluate_lease_reserve, HlsLeasePlaybackCursor, HlsLeaseReserveInput, HlsLeaseReserveSnapshot},
+    media_reserve::{
+        evaluate_lease_reserve, minimum_hls_startup_window_ms, HlsLeasePlaybackCursor, HlsLeaseReserveInput,
+        HlsLeaseReserveSnapshot,
+    },
     member_health::HlsMemberReserveSample,
     observability::{HlsRecoveryAvailabilityLogEvidence, HlsRecoveryTriggerDiagnostic, HlsRecoveryTriggerSource},
     origin_progress::{
@@ -278,7 +281,8 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
             recovery_committed: false,
         });
         retained_gap_pressure |= retained_gap && (reserve.recovery_required || reserve.cutover_required);
-        reserve_round.push((lease, reserve));
+        let target_ms = minimum_hls_startup_window_ms(manifest.target_duration_ms, manifest.playlist_duration_ms);
+        reserve_round.push((lease, reserve, target_ms));
         let recovery_boundary_ms =
             recovery_trigger_budget.as_millis().saturating_add(reserve.transition_margin.as_millis());
         let cutover_timing =

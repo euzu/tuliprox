@@ -24,6 +24,17 @@ use tuliprox_repository::{
 };
 use tuliprox_session::{failover_group::CircuitView, MemberBinding};
 
+fn korath_ts_fixture() -> Vec<u8> {
+    let mut data = vec![0u8; 188 * 4];
+    for i in 0..4 {
+        data[i * 188] = 0x47;
+        data[i * 188 + 1] = 0x1f;
+        data[i * 188 + 2] = 0xff;
+        data[i * 188 + 3] = 0x10;
+    }
+    data
+}
+
 /// Extracts the proxy session id from the canonical media playlist URI of a single-variant master.
 fn proxy_session_id_from_master(master: &str) -> String {
     const MARKER: &str = "/hls/shared/live/";
@@ -863,8 +874,13 @@ async fn reserve_pressure_hands_the_group_session_over_and_keeps_the_published_w
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let served = served.expect("the playlist is served again after the member switch");
-    assert!(!manifest_segments(&served).is_empty(), "the playlist lists segments");
-    assert!(origin_segment_hits(&env, "korath") > 0, "the served segments come from the new member");
+    let segments = manifest_segments(&served);
+    assert!(!segments.is_empty(), "the playlist lists segments");
+    let (segment_uri, _) = &segments[0];
+    let segment = env.get(segment_uri).await;
+    assert_eq!(segment.status(), StatusCode::OK, "segment request must succeed");
+    let bytes = axum::body::to_bytes(segment.into_body(), 1024 * 1024).await.expect("segment body");
+    assert_eq!(bytes, korath_ts_fixture(), "the served segment must match the Korath origin content");
 }
 
 #[tokio::test]
@@ -2251,6 +2267,100 @@ async fn legacy_retry_same_serve_clears_segment_failure_so_next_poll_does_not_sw
     assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
     assert_eq!(env.bound_member_input("viewer").await, binding.input_name.as_ref(), "a serving member stays bound");
     assert_eq!(env.origin_hits("korath"), korath_hits, "the follow-up poll must not probe another member");
+}
+
+async fn spawn_mock_empty_window_origin(
+) -> (SocketAddr, tokio::task::JoinHandle<()>, Arc<std::sync::atomic::AtomicBool>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("address");
+    let serve_empty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let serve_empty_clone = Arc::clone(&serve_empty);
+    let task = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut socket, _)) = listener.accept().await else { break };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let mut buf = [0u8; 1024];
+                let Ok(n) = socket.read(&mut buf).await else { break };
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
+            let is_empty = serve_empty_clone.load(std::sync::atomic::Ordering::Acquire);
+            let body = if is_empty {
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:1\n".to_string()
+            } else {
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:10.0,\nseg1.ts\n#EXTINF:10.0,\nseg2.ts\n".to_string()
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (addr, task, serve_empty)
+}
+
+#[tokio::test]
+async fn empty_media_window_serve_does_not_clear_segment_failure_so_next_poll_switches() {
+    let (addr, _task, serve_empty) = spawn_mock_empty_window_origin().await;
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().m3u("solis").m3u("korath").build().await;
+
+    let target_path =
+        crate::repository::get_target_storage_path(&env.app_state.app_config.config.load(), &env.target.name)
+            .expect("target storage path");
+    let mut group = (*env.group_record).clone();
+    group.members[0].url = Arc::from(format!("http://{addr}/playlist.m3u8"));
+    tuliprox_repository::FailoverGroupStore::write(&target_path, &[group], &[], None)
+        .expect("write group with mock url");
+    env.app_state.playlists.bump_failover_group_generation(&env.target.name);
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    let token = session_token_from_variant(&env, &variant_uri);
+
+    let session = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.expect("session");
+    let binding = session.member_binding.clone().expect("bound member");
+    assert_eq!(env.bound_member_input("viewer").await, "solis");
+
+    // The member has a same-member retry allowance
+    let failover = FailoverGroupRuntimeConfig { same_source_retries: 1, stable_after_secs: 30, ..Default::default() };
+    let mut budget = tuliprox_session::failover_group::FailoverBudget::new(&failover);
+    budget.on_data(
+        std::time::Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(std::time::Instant::now),
+    );
+    let seeded = env
+        .app_state
+        .active_users
+        .update_legacy_failover_state_if_bound("viewer", &token, session.identity(), &binding, |_, slot| {
+            *slot = Some(budget);
+        })
+        .await;
+    assert_eq!(seeded, Some(()));
+
+    // Segment fails
+    assert!(
+        env.app_state.active_users.mark_member_failed_on_segment("viewer", &token, session.identity(), &binding).await
+    );
+
+    // Origin now returns an empty media window (0 segments).
+    serve_empty.store(true, std::sync::atomic::Ordering::Release);
+
+    // First poll after failure: retries same member (solis) which serves an empty media window (0 segments).
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK, "empty window is served");
+
+    let after_empty = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.expect("session");
+    assert!(after_empty.member_failed_on_segment, "empty media window must not clear member_failed_on_segment");
+
+    // Follow-up poll: because member_failed_on_segment was NOT cleared, it must switch to korath!
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    assert_eq!(env.bound_member_input("viewer").await, "korath", "must switch away from failed member");
 }
 
 #[tokio::test]

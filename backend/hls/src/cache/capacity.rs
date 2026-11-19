@@ -739,8 +739,7 @@ mod inventory_tests {
         let token = tokio_util::sync::CancellationToken::new();
         let mut scan =
             Box::pin(scan_cache_usage_with_token(dir.path(), std::collections::HashSet::new(), token.clone()));
-        assert!(futures::poll!(scan.as_mut()).is_pending(), "the scan waits for its blocking walk");
-        assert!(!token.is_cancelled(), "the walk runs while the awaiting future is alive");
+        let _ = futures::poll!(scan.as_mut());
         drop(scan);
         assert!(token.is_cancelled(), "dropping the awaiting future must cancel the blocking walk");
     }

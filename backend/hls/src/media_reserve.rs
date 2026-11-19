@@ -446,16 +446,17 @@ pub fn evaluate_lease_reserve(input: HlsLeaseReserveInput<'_>) -> HlsLeaseReserv
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HlsGuaranteedReadySpan {
-    start_ms: u64,
-    horizon_ms: u64,
-    first_unit_index: Option<usize>,
-    end_unit_index: usize,
-    key_readiness_valid_until_ms: Option<u64>,
+pub(crate) struct HlsGuaranteedReadySpan {
+    pub(crate) start_ms: u64,
+    pub(crate) horizon_ms: u64,
+    pub(crate) first_unit_index: Option<usize>,
+    pub(crate) end_unit_index: usize,
+    pub(crate) key_readiness_valid_until_ms: Option<u64>,
+    pub(crate) last_proxy_seq: Option<u64>,
 }
 
 impl HlsGuaranteedReadySpan {
-    const fn ready_duration_ms(self) -> u64 { self.horizon_ms.saturating_sub(self.start_ms) }
+    pub(crate) const fn ready_duration_ms(self) -> u64 { self.horizon_ms.saturating_sub(self.start_ms) }
 }
 
 /// Duration of contiguous READY media from `first_proxy_seq` forward: what a viewer that starts
@@ -463,11 +464,15 @@ impl HlsGuaranteedReadySpan {
 ///
 /// The span also covers the objects after a published window, so a plan that starts at that
 /// sequence and an admission snapshot derived from the same window measure the same reserve.
+#[allow(dead_code)]
 pub fn contiguous_ready_reserve_ms(timeline: &HlsReadyTimelineSnapshot, first_proxy_seq: u64) -> u64 {
     contiguous_ready_span(timeline, first_proxy_seq).ready_duration_ms()
 }
 
-fn contiguous_ready_span(timeline: &HlsReadyTimelineSnapshot, first_proxy_seq: u64) -> HlsGuaranteedReadySpan {
+pub(crate) fn contiguous_ready_span(
+    timeline: &HlsReadyTimelineSnapshot,
+    first_proxy_seq: u64,
+) -> HlsGuaranteedReadySpan {
     let Some(start_index) = timeline.units.iter().position(|unit| unit.proxy_seq == first_proxy_seq) else {
         return HlsGuaranteedReadySpan {
             start_ms: 0,
@@ -475,6 +480,7 @@ fn contiguous_ready_span(timeline: &HlsReadyTimelineSnapshot, first_proxy_seq: u
             first_unit_index: None,
             end_unit_index: 0,
             key_readiness_valid_until_ms: None,
+            last_proxy_seq: None,
         };
     };
     let first_unit = timeline.units[start_index];
@@ -486,6 +492,7 @@ fn contiguous_ready_span(timeline: &HlsReadyTimelineSnapshot, first_proxy_seq: u
             first_unit_index: None,
             end_unit_index: start_index,
             key_readiness_valid_until_ms: None,
+            last_proxy_seq: None,
         };
     }
 
@@ -493,6 +500,7 @@ fn contiguous_ready_span(timeline: &HlsReadyTimelineSnapshot, first_proxy_seq: u
     let mut expected_start_ms = first_unit.start_ms;
     let mut horizon_ms = first_unit.start_ms;
     let mut end_unit_index = start_index;
+    let mut last_proxy_seq = None;
     let mut key_readiness_valid_until_ms = None;
     for (unit_index, unit) in timeline.units.iter().enumerate().skip(start_index) {
         if unit.proxy_seq != expected_seq
@@ -509,6 +517,7 @@ fn contiguous_ready_span(timeline: &HlsReadyTimelineSnapshot, first_proxy_seq: u
         }
         horizon_ms = unit.start_ms.saturating_add(unit.duration_ms);
         end_unit_index = unit_index.saturating_add(1);
+        last_proxy_seq = Some(unit.proxy_seq);
         let Some(next) = expected_seq.checked_add(1) else {
             break;
         };
@@ -522,6 +531,7 @@ fn contiguous_ready_span(timeline: &HlsReadyTimelineSnapshot, first_proxy_seq: u
         first_unit_index: Some(start_index),
         end_unit_index,
         key_readiness_valid_until_ms,
+        last_proxy_seq,
     }
 }
 

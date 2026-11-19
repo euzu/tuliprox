@@ -1521,6 +1521,79 @@ async fn pinned_profile_probe_commit_keeps_the_shared_attempt_open_when_the_mirr
 }
 
 #[tokio::test]
+async fn probe_slot_commits_primary_when_mirror_fails_with_zero_retry_delays() {
+    // When the mirror request finishes first with an error (e.g. 502), the slot must wait for the
+    // in-flight probe until it completes rather than dropping it after probe_grace. With zero retry
+    // delays, probe_grace is 0 ms, but the slot must still wait for the primary probe answering
+    // after 50 ms and commit it.
+    let burst_candidates = HlsManifestRecoveryBurstLevel::Friendly.plan().total_candidates();
+    let mirror_requests = Arc::new(AtomicUsize::new(0));
+    let mirror_requests_for_handler = Arc::clone(&mirror_requests);
+    let primary_requests = Arc::new(AtomicUsize::new(0));
+    let primary_requests_for_handler = Arc::clone(&primary_requests);
+    let primary_gate = Arc::new(super::support::TestOriginResponseGate {
+        request_number: 1,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut fixture = pinned_probe_fixture(
+        Arc::new(move |_| {
+            if primary_requests_for_handler.fetch_add(1, Ordering::SeqCst) == 0 {
+                (200, Vec::new(), three_segment_manifest_body(101))
+            } else {
+                (502, Vec::new(), "failover also failed".to_string())
+            }
+        }),
+        Some(Arc::clone(&primary_gate)),
+        Arc::new(move |_| {
+            if mirror_requests_for_handler.fetch_add(1, Ordering::SeqCst) < burst_candidates {
+                (200, Vec::new(), three_segment_manifest_body(101))
+            } else {
+                (502, Vec::new(), "bad gateway".to_string())
+            }
+        }),
+        2_000,
+        true,
+    )
+    .await;
+    fixture.request.retry_policy = no_delay_policy();
+    let context = manifest_fetch_context(&fixture.request, None);
+    let recovery = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
+        &context,
+        fixture.binding.clone(),
+        None,
+        None,
+        HlsManifestAcceptanceTrigger::Observe,
+        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+        |fetched, mode| super::super::commit_manifest_recovery_candidate(&fixture.request, fetched, mode),
+    );
+    let release_primary = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), primary_gate.entered.notified())
+            .await
+            .expect("the pinned probe reaches the primary");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while fixture.mirror.requests.lock().await.len() < burst_candidates + 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the probe slot's bound mirror request reaches the mirror");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        primary_gate.release.notify_one();
+    };
+    let (outcome, ()) = tokio::join!(recovery, release_primary);
+    assert!(outcome.is_ok(), "the slot commits the primary: {:?}", outcome.as_ref().err());
+    assert_eq!(fixture.session.read().await.origin_seq_highwater, Some(103));
+    assert_eq!(
+        mirror_requests.load(Ordering::SeqCst),
+        // The full burst, the probe slot's bound mirror request, and that request's own profile-URL
+        // failover attempt after the 502.
+        burst_candidates + 2,
+        "the probe slot asks its bound mirror and receives 502"
+    );
+}
+
+#[tokio::test]
 async fn probe_slot_classifies_its_chosen_mirror_error_on_the_shared_attempt() {
     // The probe fails and the slot's own mirror request answers a hard 400, so the mirror error is
     // the slot result. Unlike a discarded mirror error, it must close and fail the shared attempt.
