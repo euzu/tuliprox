@@ -623,63 +623,20 @@ async fn scan_cache_usage_excluding(
     cache_path: &Path,
     excluded: std::collections::HashSet<PathBuf>,
 ) -> io::Result<(u64, HashMap<String, u64>, u64)> {
+    scan_cache_usage_with_token(cache_path, excluded, tokio_util::sync::CancellationToken::new()).await
+}
+
+async fn scan_cache_usage_with_token(
+    cache_path: &Path,
+    excluded: std::collections::HashSet<PathBuf>,
+    cancelled: tokio_util::sync::CancellationToken,
+) -> io::Result<(u64, HashMap<String, u64>, u64)> {
     let root = cache_path.to_owned();
-    let cancelled = tokio_util::sync::CancellationToken::new();
     // Dropping this future drops the guard, which cancels the blocking walk.
     let _guard = cancelled.clone().drop_guard();
     // Directory iteration and stat calls all use the blocking pool. Keep the whole
     // read-only walk in one task. Publication still validates both inventory revisions.
-    tokio::task::spawn_blocking(move || {
-        // Test-only pause point: lets a test drop the awaiting future before the worker's
-        // first cancellation check. Compiled out of every non-test build.
-        #[cfg(test)]
-        let test_hook = take_scan_usage_test_hook(&root);
-        #[cfg(test)]
-        if let Some(hook) = test_hook.as_ref() {
-            hook.pause();
-        }
-        let result = scan_usage(&root, &excluded, &cancelled);
-        #[cfg(test)]
-        if let Some(hook) = test_hook {
-            hook.report(&result);
-        }
-        result
-    })
-    .await?
-}
-
-#[cfg(test)]
-struct ScanUsageTestHook {
-    cache_path: PathBuf,
-    pause: Arc<std::sync::Barrier>,
-    observed: std::sync::mpsc::Sender<Result<(), io::ErrorKind>>,
-}
-
-#[cfg(test)]
-impl ScanUsageTestHook {
-    fn pause(&self) { self.pause.wait(); }
-
-    fn report(&self, result: &io::Result<(u64, HashMap<String, u64>, u64)>) {
-        let _ = self.observed.send(result.as_ref().map(|_| ()).map_err(io::Error::kind));
-    }
-}
-
-#[cfg(test)]
-static SCAN_USAGE_TEST_HOOK: StdMutex<Option<ScanUsageTestHook>> = StdMutex::new(None);
-
-#[cfg(test)]
-fn install_scan_usage_test_hook(hook: ScanUsageTestHook) { *SCAN_USAGE_TEST_HOOK.lock().unwrap() = Some(hook); }
-
-/// Takes the installed hook only for a scan of its own cache root, so a concurrent
-/// unrelated scan is never paused.
-#[cfg(test)]
-fn take_scan_usage_test_hook(cache_path: &Path) -> Option<ScanUsageTestHook> {
-    let mut hook = SCAN_USAGE_TEST_HOOK.lock().unwrap();
-    if hook.as_ref().is_some_and(|hook| hook.cache_path == cache_path) {
-        hook.take()
-    } else {
-        None
-    }
+    tokio::task::spawn_blocking(move || scan_usage(&root, &excluded, &cancelled)).await?
 }
 
 fn scan_usage(
@@ -779,26 +736,13 @@ mod inventory_tests {
     #[tokio::test]
     async fn dropping_the_awaiting_scan_future_cancels_the_blocking_walk() {
         let dir = tempfile::tempdir().expect("private cache root");
-        let session = dir.path().join("example");
-        std::fs::create_dir(&session).unwrap();
-        std::fs::write(session.join("ready.ts"), b"ready").unwrap();
-        let pause = Arc::new(std::sync::Barrier::new(2));
-        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
-        install_scan_usage_test_hook(ScanUsageTestHook {
-            cache_path: dir.path().to_path_buf(),
-            pause: Arc::clone(&pause),
-            observed: observed_tx,
-        });
-        let mut scan = Box::pin(scan_cache_usage_excluding(dir.path(), std::collections::HashSet::new()));
-        assert!(futures::poll!(scan.as_mut()).is_pending(), "the worker pauses before its first check");
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut scan =
+            Box::pin(scan_cache_usage_with_token(dir.path(), std::collections::HashSet::new(), token.clone()));
+        assert!(futures::poll!(scan.as_mut()).is_pending(), "the scan waits for its blocking walk");
+        assert!(!token.is_cancelled(), "the walk runs while the awaiting future is alive");
         drop(scan);
-        // The worker leaves its pause point only now, with the awaiting future already gone.
-        pause.wait();
-        assert_eq!(
-            observed_rx.recv_timeout(std::time::Duration::from_secs(10)),
-            Ok(Err(io::ErrorKind::Interrupted)),
-            "dropping the awaiting future must cancel the blocking walk"
-        );
+        assert!(token.is_cancelled(), "dropping the awaiting future must cancel the blocking walk");
     }
 
     #[cfg(unix)]

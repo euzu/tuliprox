@@ -14,8 +14,9 @@ pub enum HlsMemberUnhealthyReason {
     SegmentFailure,
     Stall,
     SlowDelivery,
-    /// Availability reevaluation is about to commit terminal on a failover-enabled session.
-    TerminalPending,
+    /// The guaranteed playback reserve of the controlling lease reached the startup window on a
+    /// failover-enabled session: switch member before the player runs out of ready media.
+    ReservePressure,
 }
 
 impl HlsMemberUnhealthyReason {
@@ -23,7 +24,7 @@ impl HlsMemberUnhealthyReason {
     /// triggers are stream-level signals, not account or capacity errors.
     pub const fn failure_class(self) -> FailureClass {
         match self {
-            Self::ManifestFailure | Self::SegmentFailure | Self::Stall | Self::SlowDelivery | Self::TerminalPending => {
+            Self::ManifestFailure | Self::SegmentFailure | Self::Stall | Self::SlowDelivery | Self::ReservePressure => {
                 FailureClass::Stream
             }
         }

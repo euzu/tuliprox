@@ -18,10 +18,14 @@ pub enum HlsLiveWindowView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlsLiveWindowPlan {
     pub visible: Vec<u64>,
+    /// Entry-view sequences behind the strip reserve that are prefetched, not rendered, and that
+    /// the reserve promotion raises to render-window priority while the origin path is degraded.
+    /// Empty for an Active view, which never reserves a hidden tail.
     pub hidden_tail: Vec<u64>,
     /// Active-view sequences after the trimmed ready prefix (`available[ready_end..]`) that are
     /// demanded but not renderable yet, excluding sequences already in `visible`. This stays
-    /// non-empty when the retained-window fallback publishes a visible end past the ready prefix.
+    /// non-empty while successors of a republished ready prefix are still unrenderable.
+    /// Empty for an Entry view: `hidden_tail` and `pending_tail` are mutually exclusive.
     pub pending_tail: Vec<u64>,
     pub effective_strip_segments: usize,
     pub origin_commits: u64,
@@ -67,56 +71,61 @@ impl HlsLiveWindowPlan {
 
     pub fn is_startup_recovery(&self) -> bool { self.recovered_startup }
 
-    /// A permanent 404 for the immediately preceding segment cannot be repaired
-    /// by waiting for a later origin sequence. Only use the usual entry view
-    /// when the full origin window, including the reserved tail, is complete.
-    pub(crate) fn replaces_expired_origin_head(&self, session: &HlsSession) -> bool {
-        self.follows_expired_origin_head(session)
-            && self.visible.iter().chain(&self.hidden_tail).all(|seq| {
-                session.segments.get(seq).is_some_and(|entry| matches!(entry.status, SegmentCacheStatus::Ready { .. }))
-            })
-    }
-
-    /// Under pressure every reserved object required for entry admission must
-    /// compete with the render window even while its body is unavailable.
-    /// `replaces_expired_origin_head` needs the complete reserved tail, so a
-    /// qualifying plan requires the whole tail, not only its single-object case.
-    pub(crate) fn required_replacement_reserve(&self, session: &HlsSession) -> &[u64] {
-        if session.origin_control.path_condition
-            == crate::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure
-            && self.follows_expired_origin_head(session)
+    /// Reserved objects of an Entry plan that must compete with the render window.
+    ///
+    /// A degraded origin path admits a new lease only when the contiguous READY span from the
+    /// window start exceeds the recovery trigger budget plus the transition margin. When the
+    /// visible window is ready but that reserve is still short, the hidden tail fills the gap:
+    /// the objects needed to reach the reserve, in order, leave `Prefetch` priority. A needed
+    /// object whose failure is final ends the promotion, because the reserve can never complete.
+    pub(crate) fn reserve_promotion_tail(&self, session: &HlsSession, now_ms: u64) -> &[u64] {
+        if self.view != HlsLiveWindowView::Entry
+            || !session.origin_control.path_condition.is_degraded()
+            || !self.is_ready(session)
         {
-            &self.hidden_tail
-        } else {
-            &[]
+            return &[];
         }
+        if self.hidden_tail.is_empty() {
+            return &[];
+        }
+        let Some(&first_visible) = self.visible.first() else { return &[] };
+        let timeline = session.ready_timeline_snapshot(first_visible, now_ms);
+        let Some(visible_tail_ms) = self.visible_tail_ms(&timeline) else { return &[] };
+        let target_duration_ms = degraded_admission_target_duration_ms(session);
+        // The promotion must reach the boundary the admission measures, so it uses the same
+        // transition margin: the first object behind the visible window only while it is READY,
+        // otherwise the target duration.
+        let boundary_ms = degraded_admission_boundary_ms(
+            target_duration_ms,
+            admission_transition_margin_ms(&timeline, visible_tail_ms, target_duration_ms),
+        );
+        let mut reserve_ms = crate::media_reserve::contiguous_ready_reserve_ms(&timeline, first_visible);
+        let mut needed = 0_usize;
+        for (index, seq) in self.hidden_tail.iter().enumerate() {
+            if reserve_ms > boundary_ms {
+                break;
+            }
+            if reserve_segment_terminal(session, *seq) {
+                return &[];
+            }
+            let Some(entry) = session.segments.get(seq) else { return &[] };
+            // READY objects are already part of the contiguous READY span measured above.
+            if !matches!(entry.status, SegmentCacheStatus::Ready { .. }) {
+                reserve_ms = reserve_ms.saturating_add(entry.duration_ms);
+                needed = index.saturating_add(1);
+            }
+        }
+        &self.hidden_tail[..needed]
     }
 
-    fn follows_expired_origin_head(&self, session: &HlsSession) -> bool {
-        if self.view != HlsLiveWindowView::Entry || self.visible.len() < crate::renderer::MIN_VISIBLE_SEGMENTS {
-            return false;
-        }
-        let Some(&first) = self.visible.first() else { return false };
-        if self.hidden_tail.is_empty() {
-            return false;
-        }
-        let Some(missing) = first.checked_sub(1).and_then(|id| session.segments.get(&id)) else { return false };
-        if !missing.is_clear_ts_origin_404() || self.origin_sequences.first() != Some(&first) {
-            return false;
-        }
-        let mut previous = missing;
-        for seq in self.visible.iter().chain(&self.hidden_tail) {
-            let Some(next) = session.segments.get(seq) else { return false };
-            if next.discontinuity_before
-                || next.origin_key.origin_epoch != previous.origin_key.origin_epoch
-                || next.origin_key.effective_host_id != previous.origin_key.effective_host_id
-                || previous.origin_key.host_local_sequence.checked_add(1) != Some(next.origin_key.host_local_sequence)
-            {
-                return false;
-            }
-            previous = next;
-        }
-        true
+    /// End of the visible window, the position the admission measures its transition margin from.
+    fn visible_tail_ms(&self, timeline: &crate::media_reserve::HlsReadyTimelineSnapshot) -> Option<u64> {
+        let last = *self.visible.last()?;
+        timeline
+            .units
+            .iter()
+            .find(|unit| unit.proxy_seq == last)
+            .map(|unit| unit.start_ms.saturating_add(unit.duration_ms))
     }
 
     pub(crate) fn is_ready(&self, session: &HlsSession) -> bool {
@@ -124,6 +133,54 @@ impl HlsLiveWindowPlan {
             session.segments.get(seq).is_some_and(|entry| matches!(entry.status, SegmentCacheStatus::Ready { .. }))
         })
     }
+}
+
+/// The reserve an Entry window must reach before a degraded origin path admits a new lease: the
+/// recovery trigger budget plus the transition margin. `recovery_budget_ceiling_ms` bounds every
+/// trigger budget from above, and the session does not own the recovery policy, so the promotion
+/// uses that bound. It promotes at least the objects the admission needs, never fewer.
+fn degraded_admission_boundary_ms(target_duration_ms: u64, transition_margin_ms: u64) -> u64 {
+    crate::recovery_timing::recovery_budget_ceiling_ms(target_duration_ms).saturating_add(transition_margin_ms)
+}
+
+fn degraded_admission_target_duration_ms(session: &HlsSession) -> u64 {
+    session
+        .origin_control
+        .target_duration_snapshot_ms
+        .or_else(|| session.target_duration.map(|seconds| u64::from(seconds).saturating_mul(1_000)))
+        .unwrap_or_default()
+}
+
+/// The transition margin of `evaluate_startup_admission`: the duration of the first object after
+/// the played position inside the contiguous READY span, and the target duration when that span
+/// ends at the visible window because the first reserved object is not READY.
+fn admission_transition_margin_ms(
+    timeline: &crate::media_reserve::HlsReadyTimelineSnapshot,
+    visible_tail_ms: u64,
+    target_duration_ms: u64,
+) -> u64 {
+    timeline
+        .units
+        .iter()
+        .take_while(|unit| {
+            unit.state == crate::media_reserve::HlsReadyMediaState::Ready
+                && unit.required_map_ready
+                && unit.required_key_ready
+        })
+        .find(|unit| unit.start_ms.saturating_add(unit.duration_ms) > visible_tail_ms)
+        .map_or(target_duration_ms, |unit| unit.duration_ms)
+}
+
+/// A reserve object whose failure is final for this origin epoch: it can never become
+/// renderable, so waiting for it cannot complete the reserve the admission requires.
+///
+/// `live_startup_segment_failed` is deliberately not reused: it also treats
+/// `FailedRetryable` and a missing entry as failed, and those must keep their reserve
+/// promotion (a retry can still deliver the object, and absence is not terminal).
+fn reserve_segment_terminal(session: &HlsSession, seq: u64) -> bool {
+    session.segments.get(&seq).is_some_and(|entry| {
+        matches!(entry.status, SegmentCacheStatus::FailedPermanent { .. } | SegmentCacheStatus::Expired)
+    })
 }
 
 impl HlsSession {
@@ -235,14 +292,17 @@ impl HlsSession {
                     }
                     end -= 1;
                 }
-                // The ready prefix end stays the demand boundary even when the guard below
-                // retains a published window past it.
+                // The trimmed ready prefix is both the published window and the demand
+                // boundary. A prefix that publishes nothing new beyond `last_published`
+                // republishes the same renderable window with a fresh validity instead of
+                // switching to the newest origin sequences, which the trim just classified
+                // as not renderable. Successors stay demanded in origin order through
+                // `pending_tail`, so the window advances as soon as they render.
                 let ready_end = end;
-                // Truncate only when the ready prefix publishes new media; otherwise the
-                // previous publication stays authoritative (retained window fallback).
-                if !last_published.is_some_and(|last| {
-                    end.checked_sub(1).and_then(|index| available.get(index)).is_some_and(|seq| *seq > last)
-                }) {
+                // An empty ready prefix has no window to republish: no sequence in the origin
+                // window is renderable yet. Keep the previous publication authoritative through
+                // the existing no-renderable-window path and demand the whole origin window.
+                if ready_end == 0 {
                     end = available.len();
                 }
                 let mut visible = available[end.saturating_sub(6)..end].to_vec();

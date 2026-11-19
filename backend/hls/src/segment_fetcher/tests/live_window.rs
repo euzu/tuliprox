@@ -617,7 +617,7 @@ async fn active_live_window_drops_trailing_unready_origin_tail_without_skipping_
         );
         state.startup.as_mut().unwrap().revisions.insert(2, revision_2);
 
-        // Guard: a hole (4 not ready, 5 ready) is not skipped: visible ends at 3 at most or render fails - assert the visible never contains 5 without 4.
+        // Guard: a hole (4 unrenderable, 5 ready) is never published as if 4 had been published.
         let revision_4 = state.startup.as_mut().unwrap().revisions.remove(&4).unwrap();
         let status_4 = state.segments.get(&4).unwrap().status.clone();
         state.segments.get_mut(&4).unwrap().status = SegmentCacheStatus::Discovered;
@@ -625,24 +625,28 @@ async fn active_live_window_drops_trailing_unready_origin_tail_without_skipping_
         let hole_plan = state
             .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(2) })
             .expect("plan with hole at 4");
-        assert!(
-            !hole_plan.visible.contains(&5) || hole_plan.visible.contains(&4),
-            "{mode:?}: visible window must never contain 5 without 4"
+        // The trim keeps the ready prefix as the published window, so the window still contains
+        // the unrenderable 4 and ends on the last ready sequence.
+        assert_eq!(hole_plan.visible, [0, 1, 2, 3, 4, 5], "{mode:?}: the ready prefix is the window");
+        // The window never skips the hole: the renderer refuses the whole window instead of
+        // serving 5 without 4.
+        let available = state.live_origin_sequences().to_vec();
+        let first_visible = hole_plan
+            .visible
+            .first()
+            .and_then(|seq| available.iter().position(|candidate| candidate == seq))
+            .expect("the visible window starts on an available sequence");
+        assert_eq!(
+            hole_plan.visible.as_slice(),
+            available
+                .get(first_visible..first_visible + hole_plan.visible.len())
+                .expect("the visible window fits the available sequences"),
+            "{mode:?}: the visible window is a contiguous run of the available sequences"
         );
-        assert!(
-            hole_plan.visible.last().is_some_and(|seq| *seq <= 3)
-                || matches!(
-                    HlsManifestRenderer::render_live_window(&state, &hole_plan, 30),
-                    Err(crate::renderer::RenderError::NoRenderableWindow)
-                ),
-            "{mode:?}: hole causes window to end before the hole or render to fail"
-        );
-        assert!(
-            matches!(
-                HlsManifestRenderer::render_live_window(&state, &hole_plan, 30),
-                Err(crate::renderer::RenderError::NoRenderableWindow)
-            ),
-            "{mode:?}: hole causes render to fail"
+        assert_eq!(
+            HlsManifestRenderer::render_live_window(&state, &hole_plan, 30),
+            Err(crate::renderer::RenderError::NoRenderableWindow),
+            "{mode:?}: a window that contains the unrenderable 4 fails to render"
         );
 
         state.startup.as_mut().unwrap().revisions.insert(4, revision_4);
@@ -698,7 +702,7 @@ async fn active_live_window_preserves_demand_for_gap_sequences_beyond_demanded_t
 }
 
 #[tokio::test]
-async fn active_live_window_keeps_demand_for_successors_when_retained_fallback_holds_visible() {
+async fn active_live_window_republishes_the_ready_prefix_and_keeps_successors_demanded() {
     let server = spawn_segment_server(0).await;
     for mode in MODES {
         let directory = tempfile::tempdir().unwrap();
@@ -720,34 +724,35 @@ async fn active_live_window_keeps_demand_for_successors_when_retained_fallback_h
         // Baseline is published with 8 origin sequences (0..=7), 0..=2 ready.
         let published = state.render_and_store_manifest(10).expect("baseline is published");
         assert_eq!(published.segment_proxy_seqs, [0, 1, 2]);
+        assert_eq!(state.last_rendered_manifest.as_ref().map(|m| m.last_proxy_seq), Some(2));
 
-        // Origin updates to 15 sequences (0..=14).
+        // Origin updates to 15 sequences (0..=14) and 3..=4 become renderable. Publish them, so
+        // the active view below plans with the last sequence this session actually delivered.
         state.apply_origin_manifest(&manifest(&server.base_url, 0, &[7; 15])).unwrap();
         prepare_selected(&mut state, &[3, 4], mode, true);
         for seq in 3..=4 {
             state.segments.get_mut(&seq).unwrap().status =
                 SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 20 };
         }
+        let advanced = state.render_and_store_manifest(20).expect("the ready successors are published");
+        assert_eq!(advanced.segment_proxy_seqs, [0, 1, 2, 3, 4]);
+        assert_eq!(state.last_rendered_manifest.as_ref().map(|m| m.last_proxy_seq), Some(4));
 
-        // The ready prefix ends exactly at the last published sequence (4): the retained-window
-        // fallback keeps the previous visible end, but 5..=8 must stay demanded so the window
-        // can still advance once they become renderable.
+        // The ready prefix ends exactly at the last published sequence (4). The plan republishes
+        // that renderable window with a fresh validity and keeps 5..=14 demanded in origin order;
+        // it must never fall back to the newest origin sequences the trim classified as unready.
         let plan = state
             .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(4) })
             .expect("active live window plan");
-        assert_eq!(plan.visible, [9, 10, 11, 12, 13, 14], "{mode:?}: the retained window is the demanded view");
+        assert_eq!(plan.visible, [0, 1, 2, 3, 4], "{mode:?}: the ready prefix is the visible window");
         assert_eq!(
             plan.pending_tail,
-            [5, 6, 7, 8],
-            "{mode:?}: successors between the ready prefix and the window stay demanded"
+            (5..=14).collect::<Vec<_>>(),
+            "{mode:?}: every successor past the ready prefix stays demanded"
         );
-        for seq in 5..=8 {
-            assert!(
-                plan.pending_tail.contains(&seq),
-                "{mode:?}: retained-window fallback must keep demanding sequence {seq}, got pending_tail {:?}",
-                plan.pending_tail
-            );
-        }
+        let rendered =
+            HlsManifestRenderer::render_live_window(&state, &plan, 30).expect("the republished ready prefix renders");
+        assert_eq!(rendered.segment_proxy_seqs, [0, 1, 2, 3, 4]);
 
         // The scheduler must dispatch the demanded successor next, not the sequence the visible
         // window starts with: demand carries the whole plan, not only its published head.
@@ -759,20 +764,103 @@ async fn active_live_window_keeps_demand_for_successors_when_retained_fallback_h
                 published: vec![0, 1, 2, 3, 4],
             },
         );
-        let expected_queued = plan
-            .visible
+        let depth = state.segment_prefetch_queue.max_prefetch_depth();
+        let unready_tail = plan
+            .pending_tail
             .iter()
-            .chain(&plan.pending_tail)
             .filter(|seq| !matches!(state.segments[seq].status, SegmentCacheStatus::Ready { .. }))
             .count();
-        let report = state.queue_manifest_fetch_candidates(20, false);
+        let report = state.queue_manifest_fetch_candidates(20, true);
         assert_eq!(
-            report.render_window_queued, expected_queued,
-            "{mode:?}: every demanded unready sequence is required"
+            report.render_window_queued, depth,
+            "{mode:?}: only the head of the unready tail is promoted to the render window"
+        );
+        assert_eq!(
+            report.prefetch_queued,
+            unready_tail - depth,
+            "{mode:?}: the rest of the unready tail stays prefetch"
         );
         drop(state);
         let next = worker.next_fetch_snapshot(&context, 21, &policy).await.expect("a demanded fetch is dispatched");
         assert_eq!((next.proxy_seq, next.priority), (5, SegmentFetchPriority::RenderWindow));
+    }
+}
+
+#[tokio::test]
+async fn active_live_window_promotes_only_the_head_of_a_stalled_tail() {
+    let server = spawn_segment_server(0).await;
+    for mode in MODES {
+        let directory = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy::default();
+        let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+        {
+            let mut state = context.session.write().await;
+            *state = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+            state.apply_origin_manifest(&manifest(&server.base_url, 0, &[7; 8])).unwrap();
+            state.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 5 };
+            for seq in 0..=2 {
+                state.segments.get_mut(&seq).unwrap().status =
+                    SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 10 };
+            }
+        }
+        install_startup(&context, &worker, mode).await;
+        let mut state = context.session.write().await;
+        prepare_selected(&mut state, &[0, 1, 2], mode, true);
+        let published = state.render_and_store_manifest(10).expect("baseline is published");
+        assert_eq!(published.segment_proxy_seqs, [0, 1, 2]);
+
+        // The origin extends to 20 sequences while only 0..=4 become renderable: 15 sequences
+        // stall behind the ready prefix for the whole window.
+        state.apply_origin_manifest(&manifest(&server.base_url, 0, &[7; 20])).unwrap();
+        prepare_selected(&mut state, &[3, 4], mode, true);
+        for seq in 3..=4 {
+            state.segments.get_mut(&seq).unwrap().status =
+                SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 20 };
+        }
+        state.live_window_demands.insert(
+            crate::HlsAccessLeaseId("active".into()),
+            crate::live_window::HlsLiveWindowDemand {
+                issued_at_ms: 0,
+                view: HlsLiveWindowView::Active { first_published: 0, last_published: Some(2) },
+                published: vec![0, 1, 2],
+            },
+        );
+        let plan = state
+            .plan_live_window(HlsLiveWindowView::Active { first_published: 0, last_published: Some(2) })
+            .expect("active live window plan");
+        assert_eq!(plan.visible, [0, 1, 2, 3, 4], "{mode:?}: the ready prefix is the window");
+        assert_eq!(plan.pending_tail, (5..=19).collect::<Vec<_>>(), "{mode:?}: the whole stalled tail stays demanded");
+
+        let depth = state.segment_prefetch_queue.max_prefetch_depth();
+        let report = state.queue_manifest_fetch_candidates(20, true);
+        assert_eq!(report.render_window_queued, depth, "{mode:?}: the promoted tail is bounded by the prefetch depth");
+        assert_eq!(
+            report.prefetch_queued, depth,
+            "{mode:?}: the rest of the stalled tail is prefetch behind its own depth"
+        );
+
+        // The promoted head is the render window; the rest of the tail waits behind it as
+        // prefetch, so the next publication has its successor without the whole tail competing
+        // for the shared origin permits at render-window priority.
+        let mut render_window = Vec::new();
+        let mut prefetch = Vec::new();
+        while let Some((seq, priority)) = state.segment_prefetch_queue.pop_next() {
+            match priority {
+                SegmentFetchPriority::RenderWindow => render_window.push(seq),
+                SegmentFetchPriority::Prefetch => prefetch.push(seq),
+                SegmentFetchPriority::Demand => panic!("{mode:?}: the window queues no demand"),
+            }
+        }
+        assert_eq!(
+            render_window,
+            plan.pending_tail.iter().copied().take(depth).collect::<Vec<_>>(),
+            "{mode:?}: the render window is the head of the stalled tail"
+        );
+        assert_eq!(
+            prefetch,
+            plan.pending_tail.iter().copied().skip(depth).take(depth).collect::<Vec<_>>(),
+            "{mode:?}: the rest of the tail is queued as prefetch"
+        );
     }
 }
 

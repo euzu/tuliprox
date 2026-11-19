@@ -54,6 +54,11 @@ const HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS: u64 = 2_000;
 /// A member handoff is itself bounded by the failover budget; this cap only guarantees that
 /// the terminal commit happens even if a handoff hangs.
 pub(crate) const HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS: u64 = 15_000;
+/// Target durations without a playback request after which an active lease counts as paused for the
+/// reserve-driven member failover: its playback clock is frozen, so its reserve says nothing about
+/// what the origin still delivers. A previous reserve sample older than this bound is likewise too
+/// old to prove a steady reserve fall.
+pub(crate) const HLS_MEMBER_FAILOVER_IDLE_TARGET_DURATIONS: u64 = 3;
 const HLS_AVAILABILITY_REEVALUATION_MAX_BACKOFF_MS: u64 = 50;
 const HLS_TERMINAL_PENDING_RETRY_AFTER_MS: u64 = 50;
 const HLS_TERMINAL_ASSET_REVALIDATION_ATTEMPTS: usize = 2;
@@ -200,21 +205,25 @@ pub async fn hls_startup_admission_allows_snapshot(
         {
             return true;
         }
-        // A failed object outside a recovered entry window does not invalidate
-        // that lease's fully downloaded replacement. Other origin failures keep
-        // their normal admission and reserve checks.
-        let recovered_entry = session.origin_control.path_condition
+        // One reserve rule replaces the expired-head rule: the prospective reserve of the
+        // advertised window counts the contiguous READY span from its first sequence, so a
+        // complete renderable window is admitted no matter why the origin no longer advertises
+        // the object before it. A recovered startup window is different: its objects are
+        // published from startup revisions before their bodies are READY, so the READY-timeline
+        // reserve cannot describe it. Every other origin failure keeps its normal admission and
+        // reserve checks.
+        let recovered_startup = session.origin_control.path_condition
             == crate::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure
             && snapshot
                 .startup_revisions
                 .as_ref()
                 .and_then(|publication| publication.window_plan.as_ref())
                 .is_some_and(|window| {
-                    (window.plan.is_startup_recovery() || window.plan.replaces_expired_origin_head(&session))
+                    window.plan.is_startup_recovery()
                         && window.plan.is_current(&session)
                         && window.plan.is_ready(&session)
                 });
-        let degraded = session.origin_control.path_condition.is_degraded() && !recovered_entry;
+        let degraded = session.origin_control.path_condition.is_degraded() && !recovered_startup;
         (
             session.ready_timeline_snapshot(snapshot.first_proxy_seq, now_ms),
             if degraded { HlsStartupAdmissionOriginState::Degraded } else { HlsStartupAdmissionOriginState::Healthy },

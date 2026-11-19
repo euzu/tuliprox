@@ -372,63 +372,114 @@ async fn lapsed_sibling_right_is_not_renewed_after_the_lease_expires() {
     guard.finish(&session).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn finite_first_media_wave_after_physical_readmission_uses_only_accepted_start_window() {
-    for live_window in [true, false] {
+    // Each case is (label, anchor offset from the case start, wave start offset, and the reuse
+    // expectation after each advance). The accepted window of a 6 s target duration is 19 s.
+    for (label, anchor_offset_ms, wave_start_ms, checks, starting_after_deadline) in [
+        ("live", 0_i64, 0_u64, &[(0_u64, true), (10_001, true), (9_000, false)][..], 0),
+        ("expired", -60_000, 0, &[(0, false), (1_000, false)][..], 1),
+        ("late-in-window", 0, 18_500, &[(0, true), (501, false)][..], 0),
+    ] {
         let session = Arc::new(tokio::sync::RwLock::new(HlsSession::new(
             HlsSessionKey::new(1, "readmitted-wave"),
             b"fixture",
             0,
         )));
         let (io, _) = crate::origin_attempt::tests::bound_origin_io(&session).await;
-        let now = tuliprox_core::utils::current_time_millis();
-        {
+        // The accepted window is expressed in wall-clock milliseconds while the provider lease
+        // runs on tokio time. Anchor the scheduling clock to the paused tokio clock before
+        // reading it, so one `advance` moves both and the two clocks cannot drift apart.
+        let start_ms = io.ctx.hls_proxy.now_ms();
+        io.ctx.hls_proxy.follow_tokio_clock_for_test(start_ms);
+        assert_eq!(io.ctx.hls_proxy.now_ms(), start_ms, "{label}: the scheduling clock follows tokio");
+        let anchor = start_ms.saturating_add_signed(anchor_offset_ms);
+        let reservation_deadline_ms = {
             let mut state = session.write().await;
             state.target_duration = Some(6);
             let timing = state.account_overlap_timing();
+            let protection = crate::origin::HlsOriginStartProtection { anchored_at_ms: anchor, timing };
             let binding = state.origin_account_binding.as_mut().unwrap();
-            let anchor = if live_window { now } else { now - 60_000 };
-            binding.pinned_at_ms = anchor - 1_370;
-            binding.startup_protection =
-                Some(crate::origin::HlsOriginStartProtection { anchored_at_ms: anchor, timing });
+            binding.pinned_at_ms = anchor.saturating_sub(1_370);
+            binding.startup_protection = Some(protection);
+            protection.reservation_deadline_ms()
+        };
+        if wave_start_ms > 0 {
+            tokio::time::advance(Duration::from_millis(wave_start_ms)).await;
         }
         let manager = &io.ctx.active_provider;
         let generation = session.read().await.activity.origin_work_generation;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let work_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut operations = Vec::new();
         for _ in 0..4 {
-            let work = HlsOriginRetryWork::begin(&session, Some(manager), deadline).await.unwrap();
+            let work = HlsOriginRetryWork::begin(&session, Some(manager), work_deadline).await.unwrap();
             let guard =
                 prepare_media_origin_attempt(Some(&io), &session, generation, Duration::from_secs(1)).await.unwrap();
             let admitted = work.protect(manager, &session, generation, true).await.is_ok();
             operations.push((guard, work, admitted));
         }
         let admitted_count = operations.iter().filter(|(_, _, admitted)| *admitted).count();
-        // Inside the accepted window the readmitted handle carries a start reservation. Outside it,
-        // siblings on the admitted allocation still share the first operation's work horizon.
-        assert_eq!(admitted_count, 4, "live_window={live_window}");
-        assert_eq!(manager.get_provider_connections_count(), 1, "four segment reads share one physical slot");
+        // Inside the accepted window the readmitted handle carries a start reservation. Outside
+        // it, siblings on the admitted allocation still share the first operation's work horizon.
+        assert_eq!(admitted_count, 4, "{label}");
+        assert_eq!(manager.get_provider_connections_count(), 1, "{label}: four segment reads share one physical slot");
         for (guard, work, _) in operations {
             guard.finish(&session).await;
             drop(work);
         }
-        // The physical slot is released and every work horizon is dropped, so the carrier of an
-        // HLS start reservation can only be the readmitted allocation's provider lease. No media
-        // was confirmed, so an unconfirmed `Starting` lease reserves nothing.
+        // The physical slot and every work right are released by cleanup, so the only remaining
+        // carrier of a capacity reservation can be the readmitted allocation's provider lease.
+        // No media was confirmed, so a plain `Starting` lease reserves nothing.
+        assert_eq!(manager.get_provider_connections_count(), 0, "{label}: every physical slot is released");
+        assert_eq!(
+            session.read().await.activity.active_origin_work_count.load(Ordering::Acquire),
+            0,
+            "{label}: every work object is gone"
+        );
         let state = session.read().await;
         let binding = state.origin_account_binding.as_ref().expect("readmitted binding");
         let usage = manager.provider_lease_usage(&binding.account_name);
-        assert_eq!(usage.starting, 1, "live_window={live_window}: the readmitted allocation keeps its lease");
-        assert_eq!((usage.active, usage.idle), (0, 0), "live_window={live_window}: no media confirmed the lease");
+        assert_eq!(usage.starting, 1, "{label}: the readmitted allocation keeps its lease");
+        assert_eq!((usage.active, usage.idle), (0, 0), "{label}: no media confirmed the lease");
+        assert!(binding.provider_binding_tag.is_some(), "{label}: the readmitted allocation carries a start tag");
         assert_eq!(
             manager.binding_tag_for_owner(&binding.session_owner),
             binding.provider_binding_tag,
-            "live_window={live_window}: the start reservation is tagged for the readmitted allocation"
+            "{label}: the start reservation is tagged for the readmitted allocation"
         );
+        let owner = binding.session_owner.clone();
+        let account = Arc::clone(&binding.account_name);
+        drop(state);
+        for (advance_ms, expected_reuse) in checks {
+            if *advance_ms > 0 {
+                tokio::time::advance(Duration::from_millis(*advance_ms)).await;
+            }
+            let now_ms = io.ctx.hls_proxy.now_ms();
+            assert_eq!(
+                manager.should_reuse_playback_provider(&owner, &account),
+                *expected_reuse,
+                "{label}: reuse {} ms after the anchor, deadline {} ms",
+                now_ms.saturating_sub(anchor),
+                reservation_deadline_ms.saturating_sub(anchor)
+            );
+        }
+        // The start reservation keeps its original deadline: a fresh full window (or a leaked
+        // work right on the unexpired horizon) would still reserve capacity here.
+        let now_ms = io.ctx.hls_proxy.now_ms();
+        assert!(
+            now_ms > reservation_deadline_ms,
+            "{label}: the final check runs past the original accepted-window deadline"
+        );
+        // A start reservation ends with its own deadline. An expired anchor keeps only the plain
+        // `Starting` lease of the allocation, which reserves no capacity.
         assert_eq!(
-            manager.should_reuse_playback_provider(&binding.session_owner, &binding.account_name),
-            live_window,
-            "live_window={live_window}: only the accepted start window reserves the readmitted lease"
+            manager.provider_lease_usage(&account).starting,
+            starting_after_deadline,
+            "{label}: the start reservation ends at the original deadline"
+        );
+        assert!(
+            !manager.should_reuse_playback_provider(&owner, &account),
+            "{label}: the original deadline is kept, not restarted"
         );
     }
 }

@@ -1601,14 +1601,16 @@
 
 - **Manifest recovery revisits the pinned primary endpoint of a `restart_from_first` provider.** After a full
   observation burst on a mirror whose timeline did not qualify, the first reduced retry probes the pinned primary
-  endpoint once, within the existing retry interval and deadlines. Nested provider failover is disabled for that probe.
-  If the primary fails or times out, even with a permanent status such as HTTP 404, the same retry still asks the
-  bound mirror.
+  endpoint once, within the existing deadlines. Nested provider failover is disabled for that probe. The probe and the
+  bound mirror request run concurrently: a slow or hung primary delays the mirror result by at most one retry
+  interval, and a discarded mirror error no longer ends the start attempt. If the primary fails or times out, even
+  with a permanent status such as HTTP 404, the same retry still uses the bound mirror result.
 
-- **New HLS viewers start after an expired origin head.** When the segment before the entry window returned HTTP 404,
-  three complete, contiguous clear transport-stream segments are admitted if the following reserve segment is ready in
-  the same origin window and generation. All missing reserve segments are fetched at render-window priority. A missing middle
-  segment, a stale revision, a key change or a discontinuity still blocks this start.
+- **New HLS viewers start after an expired origin head.** While the origin path is degraded, an entry window is admitted
+  when its contiguous ready media (the visible window plus the ready reserve segments behind it) exceeds the recovery
+  budget, for any origin window length and independent of why the previous segment is missing. The reserve segments
+  still missing for that budget are fetched at render-window priority, unless one of them failed permanently. A missing
+  middle segment, a stale revision or a key change still blocks this start.
 
 - **First segment requests after a physical readmission share the accepted start window.** A new physical handle on a
   live HLS account carries the remaining accepted startup reservation of the same binding, so overlapping first-media
@@ -1624,9 +1626,19 @@
 
 - **Legacy HLS group failover keeps the client timeline when the backup member answers with a master playlist.**
   After a switch to a member that returns a master playlist, the first child media playlist now continues the client
-  media sequence after the last served segment and inserts `EXT-X-DISCONTINUITY`. The member binding and the pending
-  rebase are stored in one update, so a concurrent playlist request cannot serve the new member on the old timeline. Before, the client saw a jump of
-  thousands of sequence numbers and skipped the backup stream.
+  media sequence after the last served segment and inserts `EXT-X-DISCONTINUITY`. Before, the client saw a jump of
+  thousands of sequence numbers and skipped the backup stream. Concurrent playlist requests of one legacy group session
+  no longer overwrite each other: the timeline is planned and stored in one locked step, a member switch publishes its
+  binding, timeline marker and switch accounting together, and a response from an older session snapshot is answered
+  with a retry instead of being served with a rewound or re-tagged media sequence.
+
+- **Group sessions switch member on the guaranteed playback reserve, not only on member health.** A cached HLS group
+  session now hands its bound member over when the guaranteed reserve of the controlling active viewer drops through
+  the startup window (three target durations, or the whole playlist if it is shorter), while the origin path is
+  degraded or after the reserve fell although the player kept playing. A viewer without a playback position, or without
+  a media request for three target durations, does not drive the switch, and no switch is requested while a member
+  handoff is running. The switch is requested before the player sees a previous-window 503. A local cache or capacity
+  bottleneck does not switch on its own. Sessions waiting for this instant hold no reevaluation task slot.
 
 - **Active HLS live window keeps advancing while the origin tail is slow.** The active playlist window no longer
   requires the newest, not yet fetched origin segments. Trailing segments that cannot be rendered yet are left out and

@@ -53,7 +53,7 @@ use tuliprox_repository::{
 };
 use tuliprox_session::{
     failover_group::{BudgetDecision, FailoverBudget, FailureClass, HalfOpenGuard, SelectionMode},
-    LegacyHlsRebase, MemberBinding,
+    ConnectionManager, LegacyHlsRebase, ManagedProviderHandle, MemberBinding,
 };
 
 pub(in crate::api::endpoints::hls_api) struct HlsCacheManifestOrigin<'a> {
@@ -602,20 +602,34 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 append_user_session_provider_headers(&mut headers, &session_headers);
             }
         }
-        let session_token = app_state
+        // The refresh may only land on the session this request resolved provider and URL for: a
+        // switch that published another provider or member while the request ran must not be
+        // overwritten by this request's older view. The fence is checked in the session write lock.
+        let session_refresh = app_state
             .active_users
-            .create_user_session(crate::api::model::CreateUserSessionParams {
-                user,
-                session_token: &session.token,
-                virtual_id,
-                provider: &selected_provider_config.name,
-                stream_url: &stream_url,
-                addr: &fingerprint.addr,
-                connection_permission,
-                connection_kind: session.connection_kind.or(connection_kind),
-                socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
-            })
+            .create_user_session_checked(
+                crate::api::model::CreateUserSessionParams {
+                    user,
+                    session_token: &session.token,
+                    virtual_id,
+                    provider: &selected_provider_config.name,
+                    stream_url: &stream_url,
+                    addr: &fingerprint.addr,
+                    connection_permission,
+                    connection_kind: session.connection_kind.or(connection_kind),
+                    socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
+                },
+                Some((session.identity(), session.member_binding.as_ref())),
+            )
             .await;
+        let Some(session_token) = session_refresh else {
+            debug_if_enabled!(
+                "HLS session {} changed while resolving pinned provider {}; retrying",
+                sanitize_sensitive_info(&session.token),
+                sanitize_sensitive_info(&pinned_provider)
+            );
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
         let session_ttl_secs = get_hls_playback_ttl_secs(app_state, pinned_kind);
         app_state.active_provider.refresh_adaptive_playback_lease(
             &selected_provider_config.name,
@@ -933,10 +947,12 @@ pub(in crate::api) async fn handle_hls_stream_request(
     app_state.connection_manager.release_provider_handle(provider_handle);
 
     // A segment failure of the bound member marked it failed; the next manifest poll switches
-    // without retrying the failed member.
+    // without retrying the failed member. If another actor owns the timeline now (the switch
+    // published a new binding or is in flight elsewhere), this request's snapshot still resolves
+    // the failed member, so it answers with a retry instead of downloading that member's URL.
     if is_live_hls && legacy_group_session && user_session.is_some_and(|session| session.member_failed_on_segment) {
         if let (Some(session), Some(session_token)) = (user_session, session_token.as_deref()) {
-            if let LegacySwitchOutcome::Switched(response) = try_switch_legacy_hls_member(
+            match try_switch_legacy_hls_member(
                 app_state,
                 fingerprint,
                 user,
@@ -951,7 +967,16 @@ pub(in crate::api) async fn handle_hls_stream_request(
             )
             .await
             {
-                return response;
+                LegacySwitchOutcome::Switched(response) => return response,
+                // The switch already published the new member binding (lost fence, stale plan, ended
+                // session) or another request holds the single-flight guard: this request's snapshot
+                // still resolves the OLD, failed member, so answer instead of downloading it.
+                LegacySwitchOutcome::SwitchInFlight => {
+                    release_prepared_hls_manifest_session(app_state, &user.username, session_token, &fingerprint.addr)
+                        .await;
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                LegacySwitchOutcome::RetrySame | LegacySwitchOutcome::GiveUp | LegacySwitchOutcome::Disabled => {}
             }
         }
     }
@@ -1053,42 +1078,51 @@ pub(in crate::api) async fn handle_hls_stream_request(
             let mut rebase_props = None;
             if legacy_group_session && is_live_hls && playlist_kind == HlsPlaylistKind::Media {
                 if let Some(session_token) = session_token.as_deref() {
-                    // Re-read the persisted timeline state: a segment-triggered switch attempt
-                    // earlier in this request may already have advanced the incident budget, and
-                    // the request snapshot must not overwrite it.
-                    let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-                    let mut rebase_state =
-                        fresh.as_ref().and_then(|session| session.legacy_rebase.clone()).unwrap_or_default();
-                    rebase_props = plan_legacy_rebase(&mut rebase_state, &content, playlist_kind);
-                    let playback = group_playback_settings(app_state, target);
-                    let budget = if playback.failover.enabled {
-                        let mut b = fresh
-                            .as_ref()
-                            .and_then(|session| session.legacy_failover_budget.clone())
-                            .unwrap_or_else(|| FailoverBudget::new(&playback.failover));
-                        b.on_data(std::time::Instant::now());
-                        Some(b)
-                    } else {
-                        None
-                    };
+                    // Plan and commit the timeline under the session write lock, so a response built
+                    // from this request's snapshot cannot overwrite a commit made in between. The
+                    // snapshot's offset travels with its generation: a restart commit rewrites the
+                    // offset, so a window rank only makes sense against the offset it was fetched for.
+                    let observed_rebase = user_session.and_then(|session| session.legacy_rebase.as_ref());
+                    let mut committed = false;
+                    // A legacy group session is always bound to a member; the update is fenced on
+                    // that binding and on the identity read for this request.
+                    if let (Some(identity), Some(expected_binding)) = (session_identity, expected_binding.as_ref()) {
+                        // The window facts are parsed before the session write lock: the scan must
+                        // not run while the global `ActiveUserManager` lock is held.
+                        let window = LegacyMediaWindow::parse(&content, playlist_kind);
+                        let playback = group_playback_settings(app_state, target);
+                        let update = app_state
+                            .active_users
+                            .commit_legacy_media_serve_if_bound(
+                                &user.username,
+                                session_token,
+                                identity,
+                                expected_binding,
+                                |state, budget_slot| {
+                                    let plan = plan_legacy_rebase(state, window, playlist_kind, observed_rebase);
+                                    if playback.failover.enabled {
+                                        // Only a window that is served counts as playback for the
+                                        // failover budget; a stale one is retried instead.
+                                        if matches!(plan, LegacyRebasePlan::Serve(_)) {
+                                            budget_slot
+                                                .get_or_insert_with(|| FailoverBudget::new(&playback.failover))
+                                                .on_data(std::time::Instant::now());
+                                        }
+                                    } else {
+                                        *budget_slot = None;
+                                    }
+                                    plan
+                                },
+                                |plan| matches!(plan, LegacyRebasePlan::Serve(_)),
+                            )
+                            .await;
+                        if let Some(LegacyRebasePlan::Serve(props)) = update {
+                            rebase_props = props;
+                            committed = true;
+                        }
+                    }
                     // Commit only onto the binding this manifest was fetched for. A concurrent
                     // switch or rebind owns the timeline now; the player retries the playlist.
-                    let committed = match session_identity {
-                        Some(identity) => {
-                            app_state
-                                .active_users
-                                .replace_legacy_failover_state_if_bound(
-                                    &user.username,
-                                    session_token,
-                                    identity,
-                                    expected_binding.as_ref(),
-                                    rebase_state,
-                                    budget,
-                                )
-                                .await
-                        }
-                        None => false,
-                    };
                     if !committed {
                         release_prepared_hls_manifest_session(
                             app_state,
@@ -1183,6 +1217,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         .await
                         {
                             LegacySwitchOutcome::Switched(response) => return response,
+                            // Another actor owns the timeline now, or the budget refuses to reuse the
+                            // same member: this request's snapshot resolves a member it may not
+                            // download, so answer with a retry instead.
                             LegacySwitchOutcome::RetrySame | LegacySwitchOutcome::SwitchInFlight => {
                                 release_prepared_hls_manifest_session(
                                     app_state,
@@ -1236,25 +1273,101 @@ fn is_legacy_manifest_failover_class(class: FailureClass) -> bool {
     matches!(class, FailureClass::Stream | FailureClass::Transport)
 }
 
+/// Upstream facts of one legacy group media playlist window.
+///
+/// Reading them walks the whole playlist (up to the 2 MiB download limit), so callers parse them
+/// before they take the `ActiveUserManager` write lock and the planner then runs under the lock
+/// without scanning the body. A playlist of any other kind carries no media window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LegacyMediaWindow {
+    media_sequence: u64,
+    segment_count: u64,
+    discontinuity_sequence: u64,
+}
+
+impl LegacyMediaWindow {
+    fn parse(content: &str, playlist_kind: HlsPlaylistKind) -> Self {
+        if playlist_kind != HlsPlaylistKind::Media {
+            return Self::default();
+        }
+        Self {
+            media_sequence: media_playlist_media_sequence(content).unwrap_or(0),
+            segment_count: media_playlist_segment_count(content),
+            discontinuity_sequence: media_playlist_discontinuity_sequence(content).unwrap_or(0),
+        }
+    }
+}
+
+/// Outcome of planning one serve for a legacy group media playlist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LegacyRebasePlan {
+    /// Serve the playlist, rewritten with the optional client timeline rebase.
+    Serve(Option<HlsMediaSequenceRebase>),
+    /// The response is older than the timeline another request already committed; it must not be
+    /// served, because re-tagging it would re-tag already served media and could drop a boundary.
+    Stale,
+}
+
 /// Client timeline rebase for one media playlist serve, updating the per-session state in place.
+///
+/// `snapshot` is the session's rebase state as the caller read it before downloading the
+/// playlist (`None` when the session had none). When its `commit_generation` differs, another
+/// request already committed a newer timeline; a window that is older than that commit, or that
+/// was fetched against a mapping since rewritten, must not be remapped as new media.
 fn plan_legacy_rebase(
     state: &mut LegacyHlsRebase,
-    content: &str,
+    window: LegacyMediaWindow,
     playlist_kind: HlsPlaylistKind,
-) -> Option<HlsMediaSequenceRebase> {
+    snapshot: Option<&LegacyHlsRebase>,
+) -> LegacyRebasePlan {
     if playlist_kind != HlsPlaylistKind::Media {
-        return None;
+        return LegacyRebasePlan::Serve(None);
     }
-    let upstream_seq = media_playlist_media_sequence(content).unwrap_or(0);
-    let segment_count = media_playlist_segment_count(content);
-    let upstream_discontinuity_sequence = media_playlist_discontinuity_sequence(content).unwrap_or(0);
-    if state.pending_member_rebase && segment_count == 0 {
-        return Some(HlsMediaSequenceRebase {
+    let generation = state.commit_generation;
+    let (plan, changed) = plan_legacy_rebase_media(state, window, snapshot);
+    // Only a served window advances the committed timeline; a stale response leaves it untouched.
+    if matches!(plan, LegacyRebasePlan::Serve(_)) && changed {
+        state.commit_generation = generation.saturating_add(1);
+    }
+    plan
+}
+
+/// Applies one upstream media window to `state` and reports whether that changed the stored
+/// timeline. A window that leaves the timeline untouched must not advance the commit generation.
+fn plan_legacy_rebase_media(
+    state: &mut LegacyHlsRebase,
+    window: LegacyMediaWindow,
+    snapshot: Option<&LegacyHlsRebase>,
+) -> (LegacyRebasePlan, bool) {
+    let before = *state;
+    let plan = plan_legacy_rebase_window(state, window, snapshot);
+    (plan, *state != before)
+}
+
+/// Applies the media playlist rules of one upstream window to `state` and returns how to answer
+/// it.
+fn plan_legacy_rebase_window(
+    state: &mut LegacyHlsRebase,
+    window: LegacyMediaWindow,
+    snapshot: Option<&LegacyHlsRebase>,
+) -> LegacyRebasePlan {
+    let (observed_generation, observed_media_sequence_offset) =
+        snapshot.map_or((0, 0), |observed| (observed.commit_generation, observed.media_sequence_offset));
+    let upstream_seq = window.media_sequence;
+    let segment_count = window.segment_count;
+    let upstream_discontinuity_sequence = window.discontinuity_sequence;
+    // An empty media playlist carries no window. It must not touch the timeline bookkeeping: in
+    // particular it must not reset `upstream_discontinuity_sequence` to the absent tag's 0, which
+    // would make the next real window add the whole upstream counter to the client counter. The
+    // client keeps the timeline of the last served window, exactly like after a member switch.
+    if segment_count == 0 {
+        return LegacyRebasePlan::Serve(Some(HlsMediaSequenceRebase {
             media_sequence: state.last_served_sequence.saturating_add(1),
             insert_discontinuity: false,
             discontinuity_sequence: state.discontinuity_sequence,
-        });
+        }));
     }
+    let pending_member_rebase = state.pending_member_rebase;
     if state.pending_member_rebase {
         let next_seq = state.last_served_sequence.saturating_add(1);
         let offset = i128::from(next_seq) - i128::from(upstream_seq);
@@ -1263,9 +1376,40 @@ fn plan_legacy_rebase(
         state.pending_member_rebase = false;
     }
     let mut served_seq = upstream_seq.saturating_add_signed(state.media_sequence_offset);
+    // A stale response for an older upstream window must not overwrite the timeline a concurrent
+    // request already committed: serve it through the current mapping, without a new discontinuity.
+    // A genuine restart (generation unchanged) still rebases below.
+    //
+    // A restart commit also rewrites `media_sequence_offset` while a slower request is downloading.
+    // That request's window was fetched from the pre-restart upstream and ranked against the old
+    // offset, so under the new one it maps *ahead* of the committed tail instead of behind it; the
+    // window test alone would serve it and consume the committed discontinuity boundary. Any
+    // changed offset therefore makes a response from an older generation stale.
+    //
+    // A window that starts before the committed window start is older than what the client
+    // already played (its tail can reach the committed tail, as an older window ending there
+    // does), so it is stale. A window whose mapped end is before the committed tail is older for
+    // the same reason: an origin that grows its window in place re-serves the same start with a
+    // shorter tail from an older snapshot, and serving it would re-tag already served media and
+    // move the committed tail back. An identical re-serve of the committed window starts at
+    // `last_served_start`, ends at `last_served_sequence`, and is harmless: it is served, not
+    // rejected.
+    let older_than_commit = served_seq < state.last_served_start;
+    let ends_before_commit = served_seq.saturating_add(segment_count - 1) < state.last_served_sequence;
+    let offset_since_snapshot = observed_media_sequence_offset != state.media_sequence_offset;
+    if !pending_member_rebase
+        && observed_generation != state.commit_generation
+        && (older_than_commit || ends_before_commit || offset_since_snapshot)
+    {
+        // Another request committed a newer timeline while this one was downloading. The window is
+        // older than the committed one, or was mapped by an offset that commit replaced; serving it
+        // would re-tag media the client already saw (and drop the discontinuity a switch inserted);
+        // the caller retries instead.
+        return LegacyRebasePlan::Stale;
+    }
     // An upstream restart moves the whole window behind what the client already played. Rebase it
     // after the last served segment with a discontinuity, as after a member switch.
-    if segment_count > 0 && served_seq.saturating_add(segment_count - 1) < state.last_served_sequence {
+    if served_seq.saturating_add(segment_count - 1) < state.last_served_sequence {
         let next_seq = state.last_served_sequence.saturating_add(1);
         state.media_sequence_offset =
             i64::try_from(next_seq).unwrap_or(i64::MAX).saturating_sub(i64::try_from(upstream_seq).unwrap_or(i64::MAX));
@@ -1295,21 +1439,22 @@ fn plan_legacy_rebase(
         state.insert_discontinuity = false;
     }
     let insert_discontinuity = state.insert_discontinuity;
-    if segment_count > 0 {
-        state.last_served_sequence = served_seq.saturating_add(segment_count - 1);
-    }
-    if insert_discontinuity
-        || state.media_sequence_offset != 0
-        || state.discontinuity_sequence != upstream_discontinuity_sequence
-    {
-        Some(HlsMediaSequenceRebase {
-            media_sequence: served_seq,
-            insert_discontinuity,
-            discontinuity_sequence: state.discontinuity_sequence,
-        })
-    } else {
-        None
-    }
+    state.last_served_start = served_seq;
+    state.last_served_sequence = served_seq.saturating_add(segment_count - 1);
+    LegacyRebasePlan::Serve(
+        if insert_discontinuity
+            || state.media_sequence_offset != 0
+            || state.discontinuity_sequence != upstream_discontinuity_sequence
+        {
+            Some(HlsMediaSequenceRebase {
+                media_sequence: served_seq,
+                insert_discontinuity,
+                discontinuity_sequence: state.discontinuity_sequence,
+            })
+        } else {
+            None
+        },
+    )
 }
 
 /// Starts a new discontinuity boundary for the next serve. A previous boundary still pending has
@@ -1319,6 +1464,33 @@ fn begin_legacy_discontinuity(state: &mut LegacyHlsRebase) {
         state.discontinuity_sequence = state.discontinuity_sequence.saturating_add(1);
     }
     state.insert_discontinuity = true;
+}
+
+/// Owns the provider slot acquired while a legacy member switch resolves its new member.
+///
+/// Every path that ends the switch without handing the slot on releases it through the
+/// connection manager, which also wakes the capacity waiters of that provider. A bare drop would
+/// free the slot silently, so waiters would sleep until their own deadline.
+struct LegacySwitchSlot<'a> {
+    connection_manager: &'a ConnectionManager,
+    handle: Option<ManagedProviderHandle>,
+}
+
+impl<'a> LegacySwitchSlot<'a> {
+    fn new(connection_manager: &'a ConnectionManager, handle: ManagedProviderHandle) -> Self {
+        Self { connection_manager, handle: Some(handle) }
+    }
+
+    fn provider_handle(&self) -> Option<&tuliprox_core::model::ProviderHandle> {
+        self.handle.as_ref().and_then(ManagedProviderHandle::handle)
+    }
+
+    /// Releases the slot now; `Drop` then has nothing left to do.
+    fn release(&mut self) { self.connection_manager.release_managed_provider_handle(self.handle.take()); }
+}
+
+impl Drop for LegacySwitchSlot<'_> {
+    fn drop(&mut self) { self.release(); }
 }
 
 /// Result of an attempted legacy group member switch.
@@ -1374,27 +1546,37 @@ async fn switch_legacy_hls_group_member(
         }
     }
 
-    let mut budget = session.legacy_failover_budget.clone().unwrap_or_else(|| FailoverBudget::new(&playback.failover));
-    let decision = budget.on_trigger(failed_index, group.members.len(), now);
+    // Start the incident on the stored budget under the session write lock. The request snapshot
+    // supplies the fence and the timeline this request was fetched against, so a concurrent media
+    // commit is never overwritten.
+    let observed_rebase = session.legacy_rebase.as_ref();
+    // Only a bound group session reaches the switch; without a binding there is nothing to fail over.
+    let Some(session_binding) = session.member_binding.as_ref() else {
+        return LegacySwitchOutcome::GiveUp;
+    };
+    let Some(decision) = app_state
+        .active_users
+        .update_legacy_failover_state_if_bound(
+            &user.username,
+            session_token,
+            session.identity(),
+            session_binding,
+            |_, budget_slot| {
+                budget_slot.get_or_insert_with(|| FailoverBudget::new(&playback.failover)).on_trigger(
+                    failed_index,
+                    group.members.len(),
+                    now,
+                )
+            },
+        )
+        .await
+    else {
+        // The session ended or another request rebound it; that actor owns the switch now.
+        return LegacySwitchOutcome::SwitchInFlight;
+    };
     let exclude = match decision {
-        BudgetDecision::GiveUp => {
-            let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-            let rebase = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
-            app_state
-                .active_users
-                .replace_legacy_failover_state(&user.username, session_token, rebase, Some(budget), false)
-                .await;
-            return LegacySwitchOutcome::GiveUp;
-        }
-        BudgetDecision::RetrySame => {
-            let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-            let rebase = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
-            app_state
-                .active_users
-                .replace_legacy_failover_state(&user.username, session_token, rebase, Some(budget), false)
-                .await;
-            return LegacySwitchOutcome::RetrySame;
-        }
+        BudgetDecision::GiveUp => return LegacySwitchOutcome::GiveUp,
+        BudgetDecision::RetrySame => return LegacySwitchOutcome::RetrySame,
         BudgetDecision::Next { exclude } => exclude,
     };
 
@@ -1433,66 +1615,62 @@ async fn switch_legacy_hls_group_member(
     )
     .await
     else {
-        let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-        let rebase = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
-        app_state
-            .active_users
-            .replace_legacy_failover_state(&user.username, session_token, rebase, Some(budget), false)
-            .await;
+        return LegacySwitchOutcome::GiveUp;
+    };
+    // `check_active_cache = false` above makes the probe mandatory: `resolve_checked_hls_group_entry`
+    // returns `Ok` only together with the verified manifest. Take it here, before the switch
+    // publishes a binding or takes a slot, so the impossible `None` gives up with no state to unwind.
+    let Some(probed) = probed else {
+        debug_assert!(false, "a mandatory HLS group probe resolved without a manifest");
         return LegacySwitchOutcome::GiveUp;
     };
 
-    let mut acquired_handle = resolved.acquired.handle;
-    let selected_provider_config = acquired_handle.handle().and_then(|handle| handle.allocation.get_provider_config());
-    let allocated = selected_provider_config
-        .as_ref()
-        .map_or_else(|| Arc::clone(&resolved.member.input_name), |cfg| Arc::clone(&cfg.name));
-    let member_url = if let Some(probed) = probed.as_ref() {
-        Some(probed.request_url.clone())
-    } else {
-        super::group_start::build_hls_group_member_origin_url(
-            app_state,
-            target,
-            &resolved.input,
-            &resolved.member,
-            &allocated,
-            selected_provider_config.as_ref(),
-        )
-        .await
-    };
-    let Some(member_url) = member_url else {
-        drop(acquired_handle);
-        let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-        let rebase = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
-        app_state
-            .active_users
-            .replace_legacy_failover_state(&user.username, session_token, rebase, Some(budget), false)
-            .await;
-        return LegacySwitchOutcome::GiveUp;
-    };
+    let mut slot = LegacySwitchSlot::new(&app_state.connection_manager, resolved.acquired.handle);
+    let selected_provider_config = slot.provider_handle().and_then(|handle| handle.allocation.get_provider_config());
+    // The switch publishes the URL the manifest was verified against.
+    let member_url = probed.request_url.clone();
 
     let provider_name = selected_provider_config
         .as_ref()
         .map_or_else(|| Arc::clone(&resolved.member.input_name), |cfg| Arc::clone(&cfg.name));
 
-    // Rebind the user session to the new member and publish the pending rebase marker together.
-    app_state
+    // Rebind the user session to the new member, publish the pending rebase marker and count the
+    // switch in one write under the session lock.
+    let new_binding = MemberBinding {
+        group_vid: group.group_vid.get(),
+        member_vid: resolved.member.member_vid.get(),
+        member_index: resolved.acquired.index,
+        input_name: Arc::clone(&resolved.member.input_name),
+        member_title: Arc::clone(&resolved.member.title),
+        provider: Arc::clone(&provider_name),
+    };
+    let Some(switched_identity) = app_state
         .active_users
         .switch_legacy_group_member_binding(
             &user.username,
             session_token,
-            MemberBinding {
-                group_vid: group.group_vid.get(),
-                member_vid: resolved.member.member_vid.get(),
-                member_index: resolved.acquired.index,
-                input_name: Arc::clone(&resolved.member.input_name),
-                member_title: Arc::clone(&resolved.member.title),
-                provider: Arc::clone(&provider_name),
-            },
-            Arc::clone(&provider_name),
+            session.identity(),
+            session_binding,
+            new_binding.clone(),
             Arc::from(member_url.as_str()),
+            |budget_slot| {
+                // Count the switch in the same write that publishes the binding, so a lost fence on
+                // the plan update below cannot lose the accounting of a switch that happened.
+                budget_slot.get_or_insert_with(|| FailoverBudget::new(&playback.failover)).on_switched(
+                    resolved.acquired.index,
+                    failed_index,
+                    now,
+                );
+            },
         )
-        .await;
+        .await
+    else {
+        // The trigger's session ended or was recreated while the switch resolved its member (its
+        // fence no longer matches), so there is nothing to bridge. Releasing the slot wakes the
+        // capacity waiters of the acquired account.
+        slot.release();
+        return LegacySwitchOutcome::SwitchInFlight;
+    };
     app_state.active_provider.refresh_adaptive_playback_lease(
         &provider_name,
         session_token,
@@ -1500,38 +1678,35 @@ async fn switch_legacy_hls_group_member(
         get_hls_playback_ttl_secs(app_state, PlaybackKind::LiveHls),
     );
 
-    let provider_handle = acquired_handle.take();
-    app_state.connection_manager.release_provider_handle(provider_handle);
+    slot.release();
 
-    let (content, response_url, response_headers, playlist_kind) = if let Some(probed) = probed {
-        (probed.content, probed.response_url, probed.response_headers, probed.playlist_kind)
-    } else {
-        let source = InputSource::for_request_url(&resolved.input, member_url.clone());
-        let Ok((content, response_url, response_headers)) =
-            download_legacy_hls_manifest(app_state, &source, req_headers).await
-        else {
-            let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-            let rebase_state = fresh.as_ref().and_then(|session| session.legacy_rebase.clone());
-            app_state
-                .active_users
-                .replace_legacy_failover_state(&user.username, session_token, rebase_state, Some(budget), false)
-                .await;
-            return LegacySwitchOutcome::GiveUp;
-        };
-        let playlist_kind = classify_hls_playlist(&content);
-        (content, response_url, response_headers, playlist_kind)
-    };
+    let (content, response_url, response_headers, playlist_kind) =
+        (probed.content, probed.response_url, probed.response_headers, probed.playlist_kind);
 
-    // Bridge the timeline to the new member and serve its manifest with the rebase.
-    let fresh = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-    let mut rebase_state = fresh.as_ref().and_then(|session| session.legacy_rebase.clone()).unwrap_or_default();
-    let rebase_props = plan_legacy_rebase(&mut rebase_state, &content, playlist_kind);
-
-    budget.on_switched(resolved.acquired.index, failed_index, now);
-    app_state
+    // The window facts are parsed before the session write lock: the scan must not run while the
+    // global `ActiveUserManager` lock is held.
+    let window = LegacyMediaWindow::parse(&content, playlist_kind);
+    // Bridge the timeline to the new member under the session write lock, fenced on the exact
+    // session identity the switch published. A provider revert bumps the binding generation and
+    // therefore fails this fence; a fresh read here could not detect it. The plan sees the stored
+    // state, so a concurrent media commit on the new member is preserved instead of overwritten.
+    let Some(rebase_plan) = app_state
         .active_users
-        .replace_legacy_failover_state(&user.username, session_token, Some(rebase_state), Some(budget), false)
-        .await;
+        .update_legacy_failover_state_if_bound(
+            &user.username,
+            session_token,
+            switched_identity,
+            &new_binding,
+            |state, _budget_slot| plan_legacy_rebase(state, window, playlist_kind, observed_rebase),
+        )
+        .await
+    else {
+        return LegacySwitchOutcome::SwitchInFlight;
+    };
+    let LegacyRebasePlan::Serve(rebase_props) = rebase_plan else {
+        // A concurrent serve committed a newer window; the caller answers with a retry.
+        return LegacySwitchOutcome::SwitchInFlight;
+    };
 
     let encrypt_secret = app_state.get_encrypt_secret();
     let rewrite_hls_props = RewriteHlsProps {
@@ -1552,18 +1727,16 @@ async fn switch_legacy_hls_group_member(
 
     let session_headers = extract_hls_provider_session_headers(&response_headers);
     if !session_headers.is_empty() {
-        if let Some(identity) = app_state.active_users.session_identity(&user.username, session_token).await {
-            app_state
-                .active_users
-                .update_current_session_provider_response_headers_from(
-                    &user.username,
-                    session_token,
-                    identity,
-                    &session_headers,
-                    &rewrite_hls_props.hls_url,
-                )
-                .await;
-        }
+        app_state
+            .active_users
+            .update_current_session_provider_response_headers_from(
+                &user.username,
+                session_token,
+                switched_identity,
+                &session_headers,
+                &rewrite_hls_props.hls_url,
+            )
+            .await;
     }
     release_prepared_hls_manifest_session(app_state, &user.username, session_token, &fingerprint.addr).await;
 
@@ -2166,26 +2339,30 @@ mod playback_provider_tests {
         };
         let sealed_child_url = format!("http://{korath_origin}/sealed/child.m3u8");
         let empty_headers = HeaderMap::new();
-        let request = |stage| {
-            let session = session.as_ref();
-            handle_hls_stream_request(
-                &fingerprint,
-                &env.app_state,
-                &user,
-                &env.target,
-                session,
-                None,
-                &sealed_child_url,
-                None,
-                stream_source.stream_context.clone(),
-                &korath_input,
-                &empty_headers,
-                shared::model::UserConnectionPermission::Allowed,
-                None,
-                "/iptv/hls/viewer/secret/live/1.m3u8",
-                stage,
-            )
-        };
+        // Expands at the call site so each request borrows the session snapshot it was given.
+        macro_rules! request {
+            ($session:expr, $stage:expr) => {
+                handle_hls_stream_request(
+                    &fingerprint,
+                    &env.app_state,
+                    &user,
+                    &env.target,
+                    $session,
+                    None,
+                    &sealed_child_url,
+                    None,
+                    stream_source.stream_context.clone(),
+                    &korath_input,
+                    &empty_headers,
+                    shared::model::UserConnectionPermission::Allowed,
+                    None,
+                    "/iptv/hls/viewer/secret/live/1.m3u8",
+                    $stage,
+                )
+                .await
+                .into_response()
+            };
+        }
         let sealed_child_hits = || {
             let origin = env.origins.get("korath").expect("korath origin");
             origin
@@ -2198,14 +2375,17 @@ mod playback_provider_tests {
         };
 
         // The child of the bound member is accepted as sealed and fetched as-is.
-        let bound_child = request(child_stage(korath_member_vid)).await.into_response();
+        let bound_child = request!(session.as_ref(), child_stage(korath_member_vid));
         assert_eq!(bound_child.status(), StatusCode::OK);
         assert_eq!(sealed_child_hits(), 1, "the bound member's child URL is fetched as sealed");
 
         // The child of the previous member of the same provider is stale and must re-resolve instead.
         let korath_hits_before = env.origin_hits("korath");
         let solis_hits_before = env.origin_hits("solis");
-        let stale_child = request(child_stage(solis_member_vid)).await.into_response();
+        // A later poll reads the session again, as every HTTP request does. Reusing the snapshot of
+        // the previous poll would make the timeline plan stale (an older commit generation).
+        let session = env.app_state.active_users.get_and_update_user_session(&user.username, token).await;
+        let stale_child = request!(session.as_ref(), child_stage(solis_member_vid));
         assert_eq!(stale_child.status(), StatusCode::OK);
         assert_eq!(sealed_child_hits(), 1, "the stale child URL of the old member must not be fetched");
         assert_eq!(env.origin_hits("korath"), korath_hits_before + 1, "the bound member's own playlist is fetched");
@@ -2402,6 +2582,27 @@ mod playback_provider_tests {
 mod legacy_rebase_tests {
     use super::*;
 
+    /// The upstream window the callers parse from the downloaded playlist before the lock.
+    fn window(content: &str) -> LegacyMediaWindow { LegacyMediaWindow::parse(content, HlsPlaylistKind::Media) }
+
+    fn plan_media(state: &mut LegacyHlsRebase, content: &str) -> Option<HlsMediaSequenceRebase> {
+        // The request snapshot equals the stored state: no other request committed in between.
+        let snapshot = *state;
+        match plan_legacy_rebase(state, window(content), HlsPlaylistKind::Media, Some(&snapshot)) {
+            LegacyRebasePlan::Serve(props) => props,
+            LegacyRebasePlan::Stale => panic!("an observed generation cannot be stale"),
+        }
+    }
+
+    fn plan_master(state: &mut LegacyHlsRebase, content: &str) -> Option<HlsMediaSequenceRebase> {
+        let snapshot = *state;
+        let window = LegacyMediaWindow::parse(content, HlsPlaylistKind::Master);
+        match plan_legacy_rebase(state, window, HlsPlaylistKind::Master, Some(&snapshot)) {
+            LegacyRebasePlan::Serve(props) => props,
+            LegacyRebasePlan::Stale => panic!("a master playlist is never planned as stale"),
+        }
+    }
+
     fn media(sequence: u64, segments: u64) -> String {
         let header = format!("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n");
         (sequence..sequence + segments).fold(header, |body, seq| body + format!("#EXTINF:4,\nseg{seq}.ts\n").as_str())
@@ -2413,19 +2614,31 @@ mod legacy_rebase_tests {
     }
 
     #[test]
+    fn media_window_is_parsed_before_the_lock_and_only_for_media_playlists() {
+        assert_eq!(
+            window(&media_with_disc_seq(104, 7, 3)),
+            LegacyMediaWindow { media_sequence: 104, segment_count: 3, discontinuity_sequence: 7 }
+        );
+        // An empty media playlist has no window; the missing tags read as their RFC defaults.
+        assert_eq!(window(""), LegacyMediaWindow { media_sequence: 0, segment_count: 0, discontinuity_sequence: 0 });
+        // A master playlist carries no media window and is never scanned.
+        assert_eq!(LegacyMediaWindow::parse(&media(5, 4), HlsPlaylistKind::Master), LegacyMediaWindow::default());
+    }
+
+    #[test]
     fn discontinuity_boundary_stays_in_every_response_while_in_window() {
         let mut state = LegacyHlsRebase::default();
-        plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media);
+        plan_media(&mut state, &media(100, 3));
 
-        let rebase1 = plan_legacy_rebase(&mut state, &media(0, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase1 = plan_media(&mut state, &media(0, 3)).expect("rebase");
         assert_eq!(rebase1.media_sequence, 103);
         assert!(rebase1.insert_discontinuity);
 
-        let rebase2 = plan_legacy_rebase(&mut state, &media(0, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase2 = plan_media(&mut state, &media(0, 3)).expect("rebase");
         assert_eq!(rebase2.media_sequence, 103);
         assert!(rebase2.insert_discontinuity, "boundary must stay emitted while in the window");
 
-        let rebase3 = plan_legacy_rebase(&mut state, &media(1, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase3 = plan_media(&mut state, &media(1, 3)).expect("rebase");
         assert_eq!(rebase3.media_sequence, 104);
         assert!(!rebase3.insert_discontinuity);
         assert_eq!(rebase3.discontinuity_sequence, 1, "discontinuity sequence advances when boundary leaves window");
@@ -2434,37 +2647,34 @@ mod legacy_rebase_tests {
     #[test]
     fn discontinuity_sequence_never_decreases_when_the_new_upstream_counts_lower() {
         let mut state = LegacyHlsRebase::default();
-        assert!(plan_legacy_rebase(&mut state, &media_with_disc_seq(100, 50, 3), HlsPlaylistKind::Media).is_none());
+        assert!(plan_media(&mut state, &media_with_disc_seq(100, 50, 3)).is_none());
 
-        let switched =
-            plan_legacy_rebase(&mut state, &media_with_disc_seq(0, 2, 3), HlsPlaylistKind::Media).expect("rebase");
+        let switched = plan_media(&mut state, &media_with_disc_seq(0, 2, 3)).expect("rebase");
         assert_eq!(switched.discontinuity_sequence, 50, "boundary serve keeps the client counter");
         assert!(switched.insert_discontinuity);
 
-        let left =
-            plan_legacy_rebase(&mut state, &media_with_disc_seq(1, 2, 3), HlsPlaylistKind::Media).expect("rebase");
+        let left = plan_media(&mut state, &media_with_disc_seq(1, 2, 3)).expect("rebase");
         assert_eq!(left.discontinuity_sequence, 51);
 
-        let advanced =
-            plan_legacy_rebase(&mut state, &media_with_disc_seq(2, 3, 3), HlsPlaylistKind::Media).expect("rebase");
+        let advanced = plan_media(&mut state, &media_with_disc_seq(2, 3, 3)).expect("rebase");
         assert_eq!(advanced.discontinuity_sequence, 52, "upstream advance carries over");
     }
 
     #[test]
     fn second_restart_while_the_first_boundary_is_in_the_window_keeps_both_discontinuities() {
         let mut state = LegacyHlsRebase::default();
-        plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media);
-        let first = plan_legacy_rebase(&mut state, &media(0, 3), HlsPlaylistKind::Media).expect("rebase");
+        plan_media(&mut state, &media(100, 3));
+        let first = plan_media(&mut state, &media(0, 3)).expect("rebase");
         assert_eq!((first.media_sequence, first.discontinuity_sequence), (103, 0));
         assert!(first.insert_discontinuity);
 
         // The upstream restarts again before the first boundary segment left the window.
-        let second = plan_legacy_rebase(&mut state, &media(0, 2), HlsPlaylistKind::Media).expect("rebase");
+        let second = plan_media(&mut state, &media(0, 2)).expect("rebase");
         assert_eq!(second.media_sequence, 106, "timeline continues after the last served segment");
         assert!(second.insert_discontinuity, "second boundary is emitted");
         assert_eq!(second.discontinuity_sequence, 1, "first boundary left the window");
 
-        let third = plan_legacy_rebase(&mut state, &media(1, 2), HlsPlaylistKind::Media).expect("rebase");
+        let third = plan_media(&mut state, &media(1, 2)).expect("rebase");
         assert_eq!(third.media_sequence, 107);
         assert!(!third.insert_discontinuity);
         assert_eq!(third.discontinuity_sequence, 2);
@@ -2473,36 +2683,33 @@ mod legacy_rebase_tests {
     #[test]
     fn discontinuity_sequence_preserves_upstream_advances_and_synthetic_offset() {
         let mut state = LegacyHlsRebase::default();
-        plan_legacy_rebase(&mut state, &media_with_disc_seq(100, 2, 3), HlsPlaylistKind::Media);
+        plan_media(&mut state, &media_with_disc_seq(100, 2, 3));
 
-        let rebase1 =
-            plan_legacy_rebase(&mut state, &media_with_disc_seq(0, 2, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase1 = plan_media(&mut state, &media_with_disc_seq(0, 2, 3)).expect("rebase");
         assert_eq!(rebase1.discontinuity_sequence, 2);
         assert!(rebase1.insert_discontinuity);
 
-        let rebase2 =
-            plan_legacy_rebase(&mut state, &media_with_disc_seq(1, 2, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase2 = plan_media(&mut state, &media_with_disc_seq(1, 2, 3)).expect("rebase");
         assert_eq!(rebase2.discontinuity_sequence, 3, "upstream 2 + synthetic 1 = 3");
         assert!(!rebase2.insert_discontinuity);
 
-        let rebase3 =
-            plan_legacy_rebase(&mut state, &media_with_disc_seq(2, 3, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase3 = plan_media(&mut state, &media_with_disc_seq(2, 3, 3)).expect("rebase");
         assert_eq!(rebase3.discontinuity_sequence, 4, "upstream 3 + synthetic 1 = 4");
     }
 
     #[test]
     fn upstream_restart_continues_after_the_last_served_segment_with_a_discontinuity() {
         let mut state = LegacyHlsRebase::default();
-        assert!(plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media).is_none());
-        assert!(plan_legacy_rebase(&mut state, &media(101, 3), HlsPlaylistKind::Media).is_none());
+        assert!(plan_media(&mut state, &media(100, 3)).is_none());
+        assert!(plan_media(&mut state, &media(101, 3)).is_none());
         assert_eq!(state.last_served_sequence, 103);
 
-        let rebase = plan_legacy_rebase(&mut state, &media(0, 3), HlsPlaylistKind::Media).expect("restart rebases");
+        let rebase = plan_media(&mut state, &media(0, 3)).expect("restart rebases");
         assert_eq!(rebase.media_sequence, 104);
         assert!(rebase.insert_discontinuity);
         assert_eq!(state.last_served_sequence, 106);
 
-        let next = plan_legacy_rebase(&mut state, &media(1, 3), HlsPlaylistKind::Media).expect("offset stays");
+        let next = plan_media(&mut state, &media(1, 3)).expect("offset stays");
         assert_eq!(next.media_sequence, 105);
         assert!(!next.insert_discontinuity);
     }
@@ -2510,42 +2717,40 @@ mod legacy_rebase_tests {
     #[test]
     fn unchanged_window_is_not_a_restart() {
         let mut state = LegacyHlsRebase::default();
-        plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media);
-        assert!(plan_legacy_rebase(&mut state, &media(100, 3), HlsPlaylistKind::Media).is_none());
+        plan_media(&mut state, &media(100, 3));
+        // The first serve committed the timeline; an identical window carries no new media.
+        assert_eq!((state.last_served_sequence, state.commit_generation), (102, 1));
+        assert!(plan_media(&mut state, &media(100, 3)).is_none());
         assert_eq!(state.media_sequence_offset, 0);
+        assert_eq!(state.commit_generation, 1, "a window that changes nothing must not advance the generation");
     }
 
     #[test]
     fn master_switch_preserves_client_timeline_on_subsequent_media_serve() {
         let mut state = LegacyHlsRebase::default();
         // Serve A media at seq 10004 with 3 segments (10004, 10005, 10006).
-        assert!(plan_legacy_rebase(&mut state, &media(10004, 3), HlsPlaylistKind::Media).is_none());
+        assert!(plan_media(&mut state, &media(10004, 3)).is_none());
         assert_eq!(state.last_served_sequence, 10006);
 
         // Simulate master switch: set pending flag as the switch does.
         state.pending_member_rebase = true;
-        assert!(plan_legacy_rebase(
-            &mut state,
-            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant.m3u8\n",
-            HlsPlaylistKind::Master,
-        )
-        .is_none());
+        assert!(plan_master(&mut state, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant.m3u8\n").is_none());
         assert!(state.pending_member_rebase);
 
         // Serve B media at seq 50006 with 3 segments.
-        let rebase = plan_legacy_rebase(&mut state, &media(50006, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase = plan_media(&mut state, &media(50006, 3)).expect("rebase");
         assert_eq!(rebase.media_sequence, 10007, "served media_sequence == previous last_served + 1");
         assert!(rebase.insert_discontinuity, "insert_discontinuity true");
         assert_eq!(rebase.discontinuity_sequence, 0);
         assert!(!state.pending_member_rebase, "flag cleared after media serve");
 
         // Same window served again: boundary stays in window.
-        let same = plan_legacy_rebase(&mut state, &media(50006, 3), HlsPlaylistKind::Media).expect("rebase");
+        let same = plan_media(&mut state, &media(50006, 3)).expect("rebase");
         assert_eq!(same.media_sequence, 10007);
         assert!(same.insert_discontinuity);
 
         // Window advances so boundary segment (10007) leaves: discontinuity sequence increments.
-        let advanced = plan_legacy_rebase(&mut state, &media(50007, 3), HlsPlaylistKind::Media).expect("rebase");
+        let advanced = plan_media(&mut state, &media(50007, 3)).expect("rebase");
         assert_eq!(advanced.media_sequence, 10008);
         assert!(!advanced.insert_discontinuity);
         assert_eq!(advanced.discontinuity_sequence, 1, "discontinuity sequence increments once boundary leaves window");
@@ -2554,36 +2759,26 @@ mod legacy_rebase_tests {
     #[test]
     fn consecutive_master_switches_before_media_serve_perform_single_rebase() {
         let mut state = LegacyHlsRebase::default();
-        plan_legacy_rebase(&mut state, &media(10004, 3), HlsPlaylistKind::Media);
+        plan_media(&mut state, &media(10004, 3));
         assert_eq!(state.last_served_sequence, 10006);
 
         // Master switch 1
         state.pending_member_rebase = true;
-        assert!(plan_legacy_rebase(
-            &mut state,
-            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant1.m3u8\n",
-            HlsPlaylistKind::Master,
-        )
-        .is_none());
+        assert!(plan_master(&mut state, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant1.m3u8\n").is_none());
 
         // Master switch 2 before any child media serve
         state.pending_member_rebase = true;
-        assert!(plan_legacy_rebase(
-            &mut state,
-            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant2.m3u8\n",
-            HlsPlaylistKind::Master,
-        )
-        .is_none());
+        assert!(plan_master(&mut state, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant2.m3u8\n").is_none());
         assert!(state.pending_member_rebase);
 
         // Child media serve from final member
-        let rebase = plan_legacy_rebase(&mut state, &media(50006, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase = plan_media(&mut state, &media(50006, 3)).expect("rebase");
         assert_eq!(rebase.media_sequence, 10007);
         assert!(rebase.insert_discontinuity);
         assert!(!state.pending_member_rebase, "flag cleared after rebase");
 
         // Subsequent media serve without member switch retains offset and does not rebase again
-        let next = plan_legacy_rebase(&mut state, &media(50007, 3), HlsPlaylistKind::Media).expect("rebase");
+        let next = plan_media(&mut state, &media(50007, 3)).expect("rebase");
         assert_eq!(next.media_sequence, 10008);
         assert!(!next.insert_discontinuity);
         assert_eq!(next.discontinuity_sequence, 1);
@@ -2593,15 +2788,15 @@ mod legacy_rebase_tests {
     #[test]
     fn empty_media_playlist_does_not_consume_pending_member_rebase() {
         let mut state = LegacyHlsRebase::default();
-        plan_legacy_rebase(&mut state, &media(10004, 3), HlsPlaylistKind::Media);
+        plan_media(&mut state, &media(10004, 3));
         assert_eq!(state.last_served_sequence, 10006);
 
         // Member switch flag set, then an empty media playlist
         state.pending_member_rebase = true;
-        plan_legacy_rebase(&mut state, &media(50000, 0), HlsPlaylistKind::Media);
+        plan_media(&mut state, &media(50000, 0));
 
         // Then a non-empty one with a higher upstream sequence
-        let rebase = plan_legacy_rebase(&mut state, &media(50006, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase = plan_media(&mut state, &media(50006, 3)).expect("rebase");
         assert_eq!(
             rebase.media_sequence, 10007,
             "first segment of non-empty window continues at last_served_sequence + 1"
@@ -2610,15 +2805,48 @@ mod legacy_rebase_tests {
     }
 
     #[test]
+    fn empty_media_playlist_does_not_clobber_the_upstream_discontinuity_sequence() {
+        let mut state = LegacyHlsRebase::default();
+        assert!(plan_media(&mut state, &media_with_disc_seq(100, 3, 3)).is_none());
+        assert_eq!(state.upstream_discontinuity_sequence, Some(3));
+        assert_eq!(state.discontinuity_sequence, 3);
+        assert_eq!(state.last_served_sequence, 102);
+
+        // A momentarily empty live window carries no EXT-X-DISCONTINUITY-SEQUENCE tag at all.
+        let empty = plan_media(&mut state, &media(500, 0));
+        assert_eq!(
+            empty,
+            Some(HlsMediaSequenceRebase {
+                media_sequence: 103,
+                insert_discontinuity: false,
+                discontinuity_sequence: 3,
+            }),
+            "an empty window keeps the client timeline of the last served window"
+        );
+        assert_eq!(
+            state.upstream_discontinuity_sequence,
+            Some(3),
+            "an empty window must not reset the upstream discontinuity counter"
+        );
+        assert_eq!(state.discontinuity_sequence, 3);
+
+        // The next real window advances the upstream counter 3 -> 4: the client counter follows by
+        // one, not by the whole upstream value.
+        let next = plan_media(&mut state, &media_with_disc_seq(103, 4, 3));
+        assert_eq!(state.discontinuity_sequence, 4, "only the upstream advance is added");
+        assert!(next.is_none(), "a plain advance within the same upstream needs no rebase");
+    }
+
+    #[test]
     fn empty_media_playlist_with_pending_member_rebase_does_not_change_discontinuity_counter() {
         let mut state = LegacyHlsRebase::default();
-        plan_legacy_rebase(&mut state, &media_with_disc_seq(10004, 3, 3), HlsPlaylistKind::Media);
+        plan_media(&mut state, &media_with_disc_seq(10004, 3, 3));
         assert_eq!(state.last_served_sequence, 10006);
         assert_eq!(state.discontinuity_sequence, 3);
         assert_eq!(state.upstream_discontinuity_sequence, Some(3));
 
         state.pending_member_rebase = true;
-        let empty_rebase = plan_legacy_rebase(&mut state, &media_with_disc_seq(50000, 40, 0), HlsPlaylistKind::Media);
+        let empty_rebase = plan_media(&mut state, &media_with_disc_seq(50000, 40, 0));
         assert_eq!(
             empty_rebase,
             Some(HlsMediaSequenceRebase {
@@ -2631,10 +2859,207 @@ mod legacy_rebase_tests {
         assert_eq!(state.upstream_discontinuity_sequence, Some(3));
         assert!(state.pending_member_rebase);
 
-        let rebase =
-            plan_legacy_rebase(&mut state, &media_with_disc_seq(50006, 40, 3), HlsPlaylistKind::Media).expect("rebase");
+        let rebase = plan_media(&mut state, &media_with_disc_seq(50006, 40, 3)).expect("rebase");
         assert_eq!(rebase.media_sequence, 10007);
         assert!(rebase.insert_discontinuity);
         assert_eq!(rebase.discontinuity_sequence, 3);
+    }
+
+    #[test]
+    fn stale_generation_keeps_the_committed_timeline_but_a_real_restart_rebases() {
+        let mut state = LegacyHlsRebase::default();
+        // Commit the base window (100..102) as generation 1.
+        assert!(plan_media(&mut state, &media(100, 3)).is_none());
+        assert_eq!(state.last_served_sequence, 102);
+        assert_eq!(state.commit_generation, 1);
+        let pre_restart = state;
+
+        // A genuine upstream restart commits 103..105 as generation 2.
+        let restart = plan_media(&mut state, &media(0, 3)).expect("restart rebases");
+        assert_eq!(restart.media_sequence, 103);
+        assert!(restart.insert_discontinuity);
+        assert_eq!(state.last_served_sequence, 105);
+        assert_eq!(state.commit_generation, 2);
+        let committed = state;
+
+        // A request that read generation 1 with offset 0 before downloading now answers with its
+        // older 0..1 window. Serving it would re-tag media the client already played and drop the
+        // restart boundary, so the plan is stale and the committed timeline stays untouched.
+        assert_eq!(
+            plan_legacy_rebase(&mut state, window(&media(0, 2)), HlsPlaylistKind::Media, Some(&pre_restart)),
+            LegacyRebasePlan::Stale
+        );
+        assert_eq!(state, committed, "a stale response must not change the committed timeline");
+
+        // A pre-restart snapshot stays stale even when its window reaches the committed tail: the
+        // restart commit replaced the offset that window was fetched and ranked against.
+        assert_eq!(
+            plan_legacy_rebase(&mut state, window(&media(0, 3)), HlsPlaylistKind::Media, Some(&pre_restart)),
+            LegacyRebasePlan::Stale
+        );
+        assert_eq!(state, committed);
+
+        // The same older window with the observed generation unchanged is a genuine restart.
+        let observed = state;
+        let rebase = plan_legacy_rebase(&mut state, window(&media(0, 2)), HlsPlaylistKind::Media, Some(&observed));
+        assert_eq!(
+            rebase,
+            LegacyRebasePlan::Serve(Some(HlsMediaSequenceRebase {
+                media_sequence: 106,
+                insert_discontinuity: true,
+                discontinuity_sequence: 1,
+            }))
+        );
+        assert_eq!(state.last_served_sequence, 107);
+        assert_eq!(state.commit_generation, 3);
+    }
+
+    #[test]
+    fn stale_generation_with_an_unchanged_mapping_serves_a_window_reaching_the_committed_tail() {
+        let mut state = LegacyHlsRebase::default();
+        // Commit 100..102 as generation 1.
+        assert!(plan_media(&mut state, &media(100, 3)).is_none());
+        let first = state;
+        // A plain window advance commits generation 2 without touching the offset.
+        assert!(plan_media(&mut state, &media(103, 3)).is_none(), "a plain window advance needs no rebase");
+        assert_eq!((state.media_sequence_offset, state.last_served_sequence, state.commit_generation), (0, 105, 2));
+
+        // A stale snapshot (generation 1, the offset this request was mapped with) answers with a
+        // window that carries media past the committed tail: it is new media, so it is served.
+        let plan = plan_legacy_rebase(&mut state, window(&media(104, 3)), HlsPlaylistKind::Media, Some(&first));
+        assert_eq!(plan, LegacyRebasePlan::Serve(None));
+        assert_eq!(state.last_served_sequence, 106);
+        assert_eq!(state.commit_generation, 3);
+    }
+
+    #[test]
+    fn pre_restart_window_from_a_stale_snapshot_is_stale_even_ahead_of_the_committed_tail() {
+        let mut state = LegacyHlsRebase::default();
+        // Base serve: offset 0, 100..102 committed as generation 1.
+        assert!(plan_media(&mut state, &media(100, 3)).is_none());
+        assert_eq!((state.media_sequence_offset, state.last_served_sequence, state.commit_generation), (0, 102, 1));
+
+        // R1 and R2 snap the same session state before downloading.
+        let snapshot = state;
+
+        // R1 downloads the restarted window 0..2 and commits offset 103, last served 105.
+        let restart = plan_legacy_rebase(&mut state, window(&media(0, 3)), HlsPlaylistKind::Media, Some(&snapshot));
+        assert_eq!(
+            restart,
+            LegacyRebasePlan::Serve(Some(HlsMediaSequenceRebase {
+                media_sequence: 103,
+                insert_discontinuity: true,
+                discontinuity_sequence: 0,
+            }))
+        );
+        assert_eq!((state.media_sequence_offset, state.last_served_sequence, state.commit_generation), (103, 105, 2));
+        let committed = state;
+
+        // R2 answers with its pre-restart window 100..102. Ranked with the committed offset it maps
+        // to 203..205, ahead of the committed tail, so the window bound alone would serve it and
+        // consume the restart boundary. The offset recorded with the snapshot marks it stale.
+        let mapped_ahead = 100_u64.saturating_add_signed(committed.media_sequence_offset);
+        assert_eq!(mapped_ahead, 203);
+        assert!(mapped_ahead + 2 > committed.last_served_sequence, "the window bound alone would look current");
+        assert_eq!(
+            plan_legacy_rebase(&mut state, window(&media(100, 3)), HlsPlaylistKind::Media, Some(&snapshot)),
+            LegacyRebasePlan::Stale
+        );
+        assert_eq!(state, committed, "a stale pre-restart window must not consume the boundary");
+
+        // The next live poll of the committed window is served with the boundary intact and does
+        // not restart again.
+        let live_snapshot = state;
+        let live = plan_legacy_rebase(&mut state, window(&media(0, 3)), HlsPlaylistKind::Media, Some(&live_snapshot));
+        assert_eq!(
+            live,
+            LegacyRebasePlan::Serve(Some(HlsMediaSequenceRebase {
+                media_sequence: 103,
+                insert_discontinuity: true,
+                discontinuity_sequence: 0,
+            }))
+        );
+        assert_eq!(state, committed, "a live poll of the committed window is not a restart");
+    }
+
+    #[test]
+    fn stale_snapshot_serves_an_identical_reserve_of_the_committed_window() {
+        let mut state = LegacyHlsRebase::default();
+        // Commit 100..102 as generation 1.
+        assert!(plan_media(&mut state, &media(100, 3)).is_none());
+        let snapshot = state;
+
+        // R1 commits the next window 103..105 as generation 2; the mapping did not change.
+        assert!(plan_media(&mut state, &media(103, 3)).is_none(), "a plain window advance needs no rebase");
+        assert_eq!(
+            (state.media_sequence_offset, state.last_served_start, state.last_served_sequence, state.commit_generation),
+            (0, 103, 105, 2)
+        );
+
+        // R2 fetched the same 103..105 from the older snapshot. Serving it re-tags the committed
+        // window identically, so it is the harmless duplicate re-serve, not a stale response.
+        let plan = plan_legacy_rebase(&mut state, window(&media(103, 3)), HlsPlaylistKind::Media, Some(&snapshot));
+        assert_eq!(plan, LegacyRebasePlan::Serve(None));
+        assert_eq!(
+            (state.last_served_start, state.last_served_sequence, state.commit_generation),
+            (103, 105, 2),
+            "a duplicate serve changes no timeline"
+        );
+    }
+
+    #[test]
+    fn stale_generation_window_ending_at_the_committed_tail_is_stale() {
+        let mut state = LegacyHlsRebase::default();
+        // Commit 100..102 as generation 1 without a rebase (offset 0).
+        assert!(plan_media(&mut state, &media(100, 3)).is_none());
+        assert_eq!((state.media_sequence_offset, state.last_served_sequence, state.commit_generation), (0, 102, 1));
+
+        // R1 and R2 snapshot that state before downloading.
+        let snapshot = state;
+
+        // R1 commits the next window 103..105 as generation 2; the mapping did not change.
+        assert!(plan_media(&mut state, &media(103, 3)).is_none(), "a plain window advance needs no rebase");
+        assert_eq!((state.media_sequence_offset, state.last_served_sequence, state.commit_generation), (0, 105, 2));
+        let committed = state;
+
+        // R2 answers from the old snapshot with 98..105: its tail is exactly the committed tail, so
+        // it carries no new media and would serve a smaller media sequence than the client already
+        // saw. The window bound alone (`<`) accepts it; it must be stale.
+        assert_eq!(
+            plan_legacy_rebase(&mut state, window(&media(98, 8)), HlsPlaylistKind::Media, Some(&snapshot)),
+            LegacyRebasePlan::Stale
+        );
+        assert_eq!(state, committed, "a stale response must not rewind the committed timeline");
+    }
+
+    #[test]
+    fn stale_generation_window_with_the_same_start_but_a_shorter_tail_is_stale() {
+        let mut state = LegacyHlsRebase::default();
+        // Commit 100..104 as generation 1; R2 snapshots that state before downloading.
+        assert!(plan_media(&mut state, &media(100, 5)).is_none());
+        assert_eq!((state.last_served_start, state.last_served_sequence, state.commit_generation), (100, 104, 1));
+        let snapshot = state;
+
+        // R1 commits the origin's grown window 100..109 as generation 2: same start, longer tail.
+        assert!(plan_media(&mut state, &media(100, 10)).is_none(), "an in-place window growth needs no rebase");
+        assert_eq!((state.last_served_start, state.last_served_sequence, state.commit_generation), (100, 109, 2));
+        let committed = state;
+
+        // R2 answers from its older snapshot with 100..104: same start, shorter tail. Its mapped end
+        // is before the committed tail, so it carries no new media; serving it would re-tag already
+        // served media and move the committed tail back to 104.
+        assert_eq!(
+            plan_legacy_rebase(&mut state, window(&media(100, 5)), HlsPlaylistKind::Media, Some(&snapshot)),
+            LegacyRebasePlan::Stale
+        );
+        assert_eq!(state, committed, "a stale shorter window must not move the committed tail");
+
+        // The identical re-serve of the committed window from the same older snapshot is served and
+        // changes nothing: its mapped end equals the committed tail.
+        assert_eq!(
+            plan_legacy_rebase(&mut state, window(&media(100, 10)), HlsPlaylistKind::Media, Some(&snapshot)),
+            LegacyRebasePlan::Serve(None)
+        );
+        assert_eq!(state, committed, "an identical re-serve changes no timeline");
     }
 }

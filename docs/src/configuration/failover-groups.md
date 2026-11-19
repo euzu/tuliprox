@@ -184,6 +184,12 @@ Live HLS group streams fail over at start and while playing:
   - Stall: no new segment for `failover.no_data_timeout_secs` or two target durations, whichever is longer.
   - Slow delivery (shared cache only): segments arrive at less than `failover.slow_source_pct` of real time, measured
     over `failover.slow_source_secs` with at least three segments.
+  - Playback reserve (shared cache only): the guaranteed reserve of the controlling active viewer (the media time that
+    is ready ahead of the slowest playing viewer) drops through the startup window of three target durations (or the
+    whole playlist, if it is shorter) while the origin path is degraded, or while the reserve fell although the player
+    kept playing. A viewer without a measured playback position, or without a media request for three target
+    durations, does not drive the switch, and no switch is requested while a member handoff is already running. The
+    switch is requested while the published window is still valid, so the player does not see a temporary `503`.
   - Last resort (shared cache only): before the shared cache ends a playback that still has active players, it
     requests one switch to the next member. The playback ends only when no member can take over.
 

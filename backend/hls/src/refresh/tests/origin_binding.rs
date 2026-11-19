@@ -943,7 +943,20 @@ async fn forward_content_anchor_rejects_already_pinned_changed_reference() {
 
 #[tokio::test]
 async fn observed_profile_mirror_rechecks_pinned_endpoint_within_existing_budget() {
-    let primary = spawn_test_origin(Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(101)))).await;
+    // The probe slot issues the bound mirror request and the pinned probe concurrently. A probe
+    // that answers first drops the in-flight mirror future, which may or may not have reached the
+    // mirror yet. The primary therefore answers only after the mirror received that request, so
+    // the request count is deterministic.
+    let primary_gate = Arc::new(super::support::TestOriginResponseGate {
+        request_number: 1,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let primary = super::support::spawn_test_origin_with_response_gate(
+        Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(101))),
+        Some(Arc::clone(&primary_gate)),
+    )
+    .await;
     let mirror = spawn_test_origin(Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(5000)))).await;
     let mut mirror_url = Url::parse(&mirror.base_url).unwrap();
     mirror_url.set_host(Some("localhost")).unwrap();
@@ -982,7 +995,8 @@ async fn observed_profile_mirror_rechecks_pinned_endpoint_within_existing_budget
     let binding =
         crate::manifest_origin_binding::HlsManifestOriginBinding::new(mirror_url.join("index.m3u8").unwrap(), Some(1))
             .unwrap();
-    let outcome = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
+    let burst_candidates = request.manifest_recovery_burst.level.plan().total_candidates();
+    let recovery = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
         &context,
         binding,
         None,
@@ -990,11 +1004,119 @@ async fn observed_profile_mirror_rechecks_pinned_endpoint_within_existing_budget
         HlsManifestAcceptanceTrigger::Observe,
         crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
         |fetched, mode| super::super::commit_manifest_recovery_candidate(&request, fetched, mode),
-    )
-    .await;
+    );
+    let release_primary = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), primary_gate.entered.notified())
+            .await
+            .expect("the pinned probe reaches the primary");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while mirror.requests.lock().await.len() < burst_candidates + 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the probe slot's bound mirror request reaches the mirror");
+        primary_gate.release.notify_one();
+    };
+    let (outcome, ()) = tokio::join!(recovery, release_primary);
     assert!(outcome.is_ok(), "expected a verified commit from the pinned endpoint");
     assert_eq!(primary.requests.lock().await.len(), 1);
-    assert_eq!(mirror.requests.lock().await.len(), request.manifest_recovery_burst.level.plan().total_candidates());
+    assert_eq!(
+        mirror.requests.lock().await.len(),
+        burst_candidates + 1,
+        "the probe slot also asks its bound mirror while the probe is in flight"
+    );
+    assert_eq!(session.read().await.origin_seq_highwater, Some(103));
+}
+
+#[tokio::test]
+async fn slow_pinned_profile_probe_within_manifest_timeout_commits_the_primary() {
+    // The bound mirror answers at once, so the probe gets one retry interval more
+    // (`retry_policy.delays_ms[2]`). A primary that answers slower than the first retry interval
+    // but inside that probe grace must still commit the primary.
+    let gate = Arc::new(super::support::TestOriginResponseGate {
+        request_number: 1,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let primary = super::support::spawn_test_origin_with_response_gate(
+        Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(101))),
+        Some(Arc::clone(&gate)),
+    )
+    .await;
+    let mirror = spawn_test_origin(Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(5000)))).await;
+    let mut mirror_url = Url::parse(&mirror.base_url).unwrap();
+    mirror_url.set_host(Some("localhost")).unwrap();
+    let primary_url = Url::parse(&primary.base_url).unwrap();
+    let pinned = primary_url.host_str().unwrap();
+    let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+        name: "Provider".into(),
+        urls: vec![primary.base_url.as_str().into(), mirror_url.as_str().into()],
+        provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+        dns: None,
+    }));
+    let session = test_session();
+    let base = three_segment_manifest_body(100);
+    let base_url = primary_url.join("index.m3u8").unwrap();
+    let tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(parsed) =
+        tuliprox_parser::hls::origin_manifest::parse_origin_media_manifest(&base, base_url.as_str())
+    else {
+        panic!("expected live timeline")
+    };
+    {
+        let mut state = session.write().await;
+        state.apply_origin_manifest_for_host(&parsed, crate::timeline::effective_origin_host_id(pinned)).unwrap();
+        state.origin_control.pinned_host = Some(pinned.to_owned());
+        state.last_effective_manifest_host = Some(pinned.to_owned());
+        state.origin_control.origin_epoch = state.origin_epoch;
+    }
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(HlsSegmentCache::with_cache_path(cache_dir.path()));
+    let mut request = switch_test_request(session.clone(), cache, &primary.base_url);
+    request.origin_entry =
+        LiveHlsOriginEntry::parse_with_url_failover_provider("provider://Provider/index.m3u8", Some(provider))
+            .unwrap()
+            .with_profile_recovery_failover(true);
+    request.retry_policy.delays_ms = [0, 1, 250, 1, 1];
+    let context = manifest_fetch_context(&request, None);
+    let binding =
+        crate::manifest_origin_binding::HlsManifestOriginBinding::new(mirror_url.join("index.m3u8").unwrap(), Some(1))
+            .unwrap();
+    let recovery = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
+        &context,
+        binding,
+        None,
+        None,
+        HlsManifestAcceptanceTrigger::Observe,
+        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+        |fetched, mode| super::super::commit_manifest_recovery_candidate(&request, fetched, mode),
+    );
+    let burst_candidates = request.manifest_recovery_burst.level.plan().total_candidates();
+    let release = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
+            .await
+            .expect("the pinned probe reaches the primary");
+        // The committing probe drops the in-flight mirror future, so the primary must not answer
+        // before the mirror received the probe slot's request.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while mirror.requests.lock().await.len() < burst_candidates + 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the probe slot's bound mirror request reaches the mirror");
+        // Above `retry_policy.delays_ms[1]`, below the probe grace `retry_policy.delays_ms[2]`.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        gate.release.notify_one();
+    };
+    let (outcome, ()) = tokio::join!(recovery, release);
+    assert!(
+        outcome.is_ok(),
+        "a primary answering within the manifest timeout must commit: {:?}",
+        outcome.as_ref().err()
+    );
+    assert_eq!(primary.requests.lock().await.len(), 1);
+    assert_eq!(mirror.requests.lock().await.len(), burst_candidates + 1);
     assert_eq!(session.read().await.origin_seq_highwater, Some(103));
 }
 
@@ -1063,10 +1185,12 @@ async fn failed_pinned_profile_probe_falls_back_to_the_bound_mirror() {
         |fetched, mode| super::super::commit_manifest_recovery_candidate(&request, fetched, mode),
     )
     .await;
-    // The failed pinned probe is not a hard failure of the chain: the probe slot still asks its bound mirror.
+    // The failed pinned probe is not a hard failure of the chain: the probe slot still asks its
+    // bound mirror. That mirror lives on another host, so StrictPinnedHost cannot commit it and
+    // the reduced slot is exhausted.
     assert!(
-        !matches!(outcome, Err(crate::manifest_fetch::OriginManifestFetchError::PermanentStatus(_))),
-        "a failed pinned probe must not abort the recovery chain: {:?}",
+        matches!(&outcome, Err(crate::manifest_fetch::OriginManifestFetchError::RetryExhausted)),
+        "a cross-host mirror cannot commit under StrictPinnedHost: {:?}",
         outcome.as_ref().err()
     );
     assert_eq!(primary.requests.lock().await.len(), 1, "the probe slot asks the pinned primary exactly once");
@@ -1077,4 +1201,454 @@ async fn failed_pinned_profile_probe_falls_back_to_the_bound_mirror() {
         burst_candidates + 1,
         "the probe slot falls back to its bound mirror request"
     );
+}
+
+#[tokio::test]
+async fn probe_slot_reports_probe_and_mirror_origin_requests_in_recovery_diagnostics() {
+    // The probe slot issues two origin requests. Recovery diagnostics must report both instead of
+    // counting the slot once.
+    let primary = spawn_test_origin(Arc::new(|_| (404, Vec::new(), String::new()))).await;
+    let mirror = spawn_test_origin(Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(101)))).await;
+    let mut mirror_url = Url::parse(&mirror.base_url).unwrap();
+    mirror_url.set_host(Some("localhost")).unwrap();
+    let primary_url = Url::parse(&primary.base_url).unwrap();
+    let pinned = primary_url.host_str().unwrap();
+    let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+        name: "Provider".into(),
+        urls: vec![primary.base_url.as_str().into(), mirror_url.as_str().into()],
+        provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+        dns: None,
+    }));
+    let session = test_session();
+    let base = three_segment_manifest_body(100);
+    let base_url = primary_url.join("index.m3u8").unwrap();
+    let tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(parsed) =
+        tuliprox_parser::hls::origin_manifest::parse_origin_media_manifest(&base, base_url.as_str())
+    else {
+        panic!("expected live timeline")
+    };
+    {
+        let mut state = session.write().await;
+        state.apply_origin_manifest_for_host(&parsed, crate::timeline::effective_origin_host_id(pinned)).unwrap();
+        state.origin_control.pinned_host = Some(pinned.to_owned());
+        state.last_effective_manifest_host = Some(pinned.to_owned());
+        state.origin_control.origin_epoch = state.origin_epoch;
+    }
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(HlsSegmentCache::with_cache_path(cache_dir.path()));
+    let mut request = switch_test_request(session.clone(), cache, &primary.base_url);
+    request.origin_entry =
+        LiveHlsOriginEntry::parse_with_url_failover_provider("provider://Provider/index.m3u8", Some(provider))
+            .unwrap()
+            .with_profile_recovery_failover(true);
+    request.retry_policy.delays_ms = [0, 1, 250, 1, 1];
+    let attempt = Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+        HlsManifestCommitRequirement::CommittedManifestAllowed,
+        true,
+        None,
+    ));
+    for _ in 0..attempt.remaining_attempts().saturating_sub(2) {
+        assert!(attempt.begin_logical_attempt(), "the shared attempt budget stays open");
+    }
+    assert_eq!(attempt.remaining_attempts(), 2, "only the full burst and the probe slot may consume attempts");
+    request.attempt = Some(Arc::clone(&attempt));
+    let context = manifest_fetch_context(&request, None);
+    let binding =
+        crate::manifest_origin_binding::HlsManifestOriginBinding::new(mirror_url.join("index.m3u8").unwrap(), Some(1))
+            .unwrap();
+    let mut diagnostics = crate::manifest_fetch::HlsManifestRecoveryDiagnostics::default();
+    let outcome = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain_with_diagnostics(
+        &context,
+        binding,
+        None,
+        None,
+        HlsManifestAcceptanceTrigger::Observe,
+        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+        |fetched, mode| super::super::commit_manifest_recovery_candidate(&request, fetched, mode),
+        &mut diagnostics,
+    )
+    .await;
+    assert!(
+        matches!(&outcome, Err(crate::manifest_fetch::OriginManifestFetchError::RetryExhausted)),
+        "the cross-host mirror cannot commit: {:?}",
+        outcome.as_ref().err()
+    );
+    assert_eq!(primary.requests.lock().await.len(), 1);
+    let burst_candidates = request.manifest_recovery_burst.level.plan().total_candidates();
+    assert_eq!(mirror.requests.lock().await.len(), burst_candidates + 1);
+    // Full burst candidates and the probe slot's probe plus mirror request.
+    assert_eq!(diagnostics.candidate_requests(), burst_candidates + 2);
+}
+
+#[tokio::test]
+async fn closed_shared_attempt_reports_no_origin_requests_in_recovery_diagnostics() {
+    // A closed shared attempt refuses every request of the chain before any HTTP call, so the
+    // telemetry must not credit the refused requests.
+    let session = test_session();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(HlsSegmentCache::with_cache_path(cache_dir.path()));
+    let mut request = switch_test_request(session.clone(), cache, "http://origin.invalid/");
+    request.origin_entry = LiveHlsOriginEntry::parse("http://origin.invalid/index.m3u8").unwrap();
+    let attempt = Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+        HlsManifestCommitRequirement::CommittedManifestAllowed,
+        true,
+        None,
+    ));
+    assert!(attempt.begin_logical_attempt(), "the shared attempt is open before it closes");
+    attempt.finish(true);
+    request.attempt = Some(Arc::clone(&attempt));
+    let context = manifest_fetch_context(&request, None);
+    let binding = crate::manifest_origin_binding::HlsManifestOriginBinding::new(
+        Url::parse("http://origin.invalid/index.m3u8").unwrap(),
+        Some(0),
+    )
+    .unwrap();
+    let mut diagnostics = crate::manifest_fetch::HlsManifestRecoveryDiagnostics::default();
+    let outcome = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain_with_diagnostics(
+        &context,
+        binding,
+        None,
+        None,
+        HlsManifestAcceptanceTrigger::Observe,
+        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+        |fetched, mode| super::super::commit_manifest_recovery_candidate(&request, fetched, mode),
+        &mut diagnostics,
+    )
+    .await;
+    assert!(
+        matches!(&outcome, Err(OriginManifestFetchError::RetryExhausted)),
+        "a closed shared attempt ends the chain: {:?}",
+        outcome.err()
+    );
+    assert_eq!(diagnostics.candidate_requests(), 0);
+}
+
+/// Retry policy shared by the pinned-probe fixtures. The probe slot is attempt 1, so the
+/// grace it keeps after the bound mirror answers is `PINNED_PROBE_RETRY_DELAYS_MS[2]`.
+const PINNED_PROBE_RETRY_DELAYS_MS: [u64; 5] = [0, 1, 250, 1, 1];
+
+/// Two-URL `provider://` fixture for a reduced retry with a pinned profile probe: the primary
+/// holds the pinned host, the bound mirror is the profile's second URL. The shared attempt
+/// budget leaves exactly the full burst and the probe slot, so the chain ends after that slot.
+struct PinnedProbeFixture {
+    session: Arc<RwLock<HlsSession>>,
+    request: OriginRefreshRequest,
+    primary: super::support::TestOriginServer,
+    mirror: super::support::TestOriginServer,
+    binding: crate::manifest_origin_binding::HlsManifestOriginBinding,
+    attempt: Arc<crate::manifest_fetch::HlsManifestAttemptContext>,
+    burst_candidates: usize,
+    _cache_dir: tempfile::TempDir,
+}
+
+async fn pinned_probe_fixture(
+    primary_handler: super::support::TestOriginHandler,
+    gate: Option<Arc<super::support::TestOriginResponseGate>>,
+    mirror_handler: super::support::TestOriginHandler,
+    origin_manifest_timeout_ms: u64,
+    active_live_playback: bool,
+) -> PinnedProbeFixture {
+    let primary = super::support::spawn_test_origin_with_response_gate(primary_handler, gate).await;
+    let mirror = spawn_test_origin(mirror_handler).await;
+    let mut mirror_url = Url::parse(&mirror.base_url).unwrap();
+    mirror_url.set_host(Some("localhost")).unwrap();
+    let primary_url = Url::parse(&primary.base_url).unwrap();
+    let pinned = primary_url.host_str().unwrap();
+    let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+        name: "Provider".into(),
+        urls: vec![primary.base_url.as_str().into(), mirror_url.as_str().into()],
+        provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+        dns: None,
+    }));
+    let session = test_session();
+    let base = three_segment_manifest_body(100);
+    let base_url = primary_url.join("index.m3u8").unwrap();
+    let tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(parsed) =
+        tuliprox_parser::hls::origin_manifest::parse_origin_media_manifest(&base, base_url.as_str())
+    else {
+        panic!("expected live timeline")
+    };
+    {
+        let mut state = session.write().await;
+        state.apply_origin_manifest_for_host(&parsed, crate::timeline::effective_origin_host_id(pinned)).unwrap();
+        state.origin_control.pinned_host = Some(pinned.to_owned());
+        state.last_effective_manifest_host = Some(pinned.to_owned());
+        state.origin_control.origin_epoch = state.origin_epoch;
+    }
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(HlsSegmentCache::with_cache_path(cache_dir.path()));
+    let mut request = switch_test_request(session.clone(), cache, &primary.base_url);
+    request.origin_entry =
+        LiveHlsOriginEntry::parse_with_url_failover_provider("provider://Provider/index.m3u8", Some(provider))
+            .unwrap()
+            .with_profile_recovery_failover(true);
+    request.retry_policy.delays_ms = PINNED_PROBE_RETRY_DELAYS_MS;
+    request.origin_manifest_timeout_ms = origin_manifest_timeout_ms;
+    let attempt = Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+        HlsManifestCommitRequirement::CommittedManifestAllowed,
+        active_live_playback,
+        None,
+    ));
+    for _ in 0..attempt.remaining_attempts().saturating_sub(2) {
+        assert!(attempt.begin_logical_attempt(), "the shared attempt budget stays open");
+    }
+    assert_eq!(attempt.remaining_attempts(), 2, "only the full burst and the probe slot may consume attempts");
+    request.attempt = Some(Arc::clone(&attempt));
+    let burst_candidates = request.manifest_recovery_burst.level.plan().total_candidates();
+    let binding =
+        crate::manifest_origin_binding::HlsManifestOriginBinding::new(mirror_url.join("index.m3u8").unwrap(), Some(1))
+            .unwrap();
+    PinnedProbeFixture { session, request, primary, mirror, binding, attempt, burst_candidates, _cache_dir: cache_dir }
+}
+
+#[tokio::test]
+async fn hung_pinned_profile_probe_returns_the_bound_mirror_within_the_grace() {
+    // The pinned primary never answers inside the test. The probe slot must publish its already
+    // successful mirror result one retry interval after the mirror answered, not after the
+    // manifest timeout.
+    let gate = Arc::new(super::support::TestOriginResponseGate {
+        request_number: 1,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let fixture = pinned_probe_fixture(
+        Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(101))),
+        Some(Arc::clone(&gate)),
+        Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(101))),
+        10_000,
+        true,
+    )
+    .await;
+    let grace_ms = PINNED_PROBE_RETRY_DELAYS_MS[2];
+    let started = std::time::Instant::now();
+    let outcome = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
+        &manifest_fetch_context(&fixture.request, None),
+        fixture.binding.clone(),
+        None,
+        None,
+        HlsManifestAcceptanceTrigger::Observe,
+        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+        |fetched, mode| super::super::commit_manifest_recovery_candidate(&fixture.request, fetched, mode),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    // The cross-host mirror cannot commit under StrictPinnedHost, so the slot result is rejected.
+    assert!(
+        matches!(&outcome, Err(OriginManifestFetchError::RetryExhausted)),
+        "a cross-host mirror cannot commit under StrictPinnedHost: {:?}",
+        outcome.as_ref().err()
+    );
+    assert_eq!(fixture.primary.requests.lock().await.len(), 1, "the probe slot asks the pinned primary exactly once");
+    assert_eq!(
+        fixture.mirror.requests.lock().await.len(),
+        fixture.burst_candidates + 1,
+        "the probe slot publishes its bound mirror result"
+    );
+    // One retry interval plus the burst and retry delays; never the 10 s manifest timeout.
+    assert!(
+        elapsed < std::time::Duration::from_millis(grace_ms + 1_000),
+        "the hung probe must not hold the slot for the manifest timeout: elapsed={elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn pinned_profile_probe_commit_keeps_the_shared_attempt_open_when_the_mirror_fails() {
+    // The primary commits while the slot's bound mirror answers a hard 400. The discarded mirror
+    // error must not close or fail the shared attempt. The full burst asks the bound mirror first
+    // and succeeds; only the probe slot's mirror request is hard. 400 is the hard status that does
+    // not start the profile URL failover of the mirror request; 404 would ask the profile's first
+    // URL (the primary) instead of returning the error.
+    let burst_candidates = HlsManifestRecoveryBurstLevel::Friendly.plan().total_candidates();
+    let mirror_requests = Arc::new(AtomicUsize::new(0));
+    let mirror_requests_for_handler = Arc::clone(&mirror_requests);
+    // The committing probe drops the in-flight mirror future, so the test decides when the
+    // primary answers: only after the mirror received the probe slot's request.
+    let primary_gate = Arc::new(super::support::TestOriginResponseGate {
+        request_number: 1,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let fixture = pinned_probe_fixture(
+        Arc::new(|_| (200, Vec::new(), three_segment_manifest_body(101))),
+        Some(Arc::clone(&primary_gate)),
+        Arc::new(move |_| {
+            if mirror_requests_for_handler.fetch_add(1, Ordering::SeqCst) < burst_candidates {
+                (200, Vec::new(), three_segment_manifest_body(101))
+            } else {
+                (400, Vec::new(), String::new())
+            }
+        }),
+        2_000,
+        true,
+    )
+    .await;
+    assert_eq!(fixture.burst_candidates, burst_candidates, "the fixture runs the plan's full burst");
+    let attempt = Arc::clone(&fixture.attempt);
+    let context = manifest_fetch_context(&fixture.request, None);
+    let recovery = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
+        &context,
+        fixture.binding.clone(),
+        None,
+        None,
+        HlsManifestAcceptanceTrigger::Observe,
+        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+        |fetched, mode| super::super::commit_manifest_recovery_candidate(&fixture.request, fetched, mode),
+    );
+    let release_primary = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), primary_gate.entered.notified())
+            .await
+            .expect("the pinned probe reaches the primary");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while fixture.mirror.requests.lock().await.len() < burst_candidates + 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the probe slot's bound mirror request reaches the mirror");
+        primary_gate.release.notify_one();
+    };
+    let (outcome, ()) = tokio::join!(recovery, release_primary);
+    assert!(outcome.is_ok(), "the pinned primary commits: {:?}", outcome.as_ref().err());
+    assert_eq!(fixture.session.read().await.origin_seq_highwater, Some(103));
+    assert_eq!(fixture.primary.requests.lock().await.len(), 1, "the probe slot asks the pinned primary exactly once");
+    assert_eq!(
+        mirror_requests.load(Ordering::SeqCst),
+        burst_candidates + 1,
+        "the probe slot asks its bound mirror and receives the hard answer"
+    );
+    assert!(!attempt.is_closed(), "a discarded mirror error must not close the shared attempt");
+    assert!(!attempt.failed(), "a discarded mirror error must not fail the shared attempt");
+}
+
+#[tokio::test]
+async fn probe_slot_classifies_its_chosen_mirror_error_on_the_shared_attempt() {
+    // The probe fails and the slot's own mirror request answers a hard 400, so the mirror error is
+    // the slot result. Unlike a discarded mirror error, it must close and fail the shared attempt.
+    let burst_candidates = HlsManifestRecoveryBurstLevel::Friendly.plan().total_candidates();
+    let mirror_requests = Arc::new(AtomicUsize::new(0));
+    let mirror_requests_for_handler = Arc::clone(&mirror_requests);
+    let fixture = pinned_probe_fixture(
+        Arc::new(|_| (404, Vec::new(), String::new())),
+        None,
+        Arc::new(move |_| {
+            if mirror_requests_for_handler.fetch_add(1, Ordering::SeqCst) < burst_candidates {
+                (200, Vec::new(), three_segment_manifest_body(101))
+            } else {
+                (400, Vec::new(), String::new())
+            }
+        }),
+        2_000,
+        true,
+    )
+    .await;
+    assert_eq!(fixture.burst_candidates, burst_candidates, "the fixture runs the plan's full burst");
+    let attempt = Arc::clone(&fixture.attempt);
+    let outcome = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
+        &manifest_fetch_context(&fixture.request, None),
+        fixture.binding.clone(),
+        None,
+        None,
+        HlsManifestAcceptanceTrigger::Observe,
+        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+        |fetched, mode| super::super::commit_manifest_recovery_candidate(&fixture.request, fetched, mode),
+    )
+    .await;
+    assert!(
+        matches!(
+            &outcome,
+            Err(OriginManifestFetchError::PermanentStatus(status))
+                if *status == axum::http::StatusCode::BAD_REQUEST
+        ),
+        "the chosen hard mirror error reaches the chain: {:?}",
+        outcome.as_ref().err()
+    );
+    assert_eq!(fixture.primary.requests.lock().await.len(), 1, "the probe slot asks the pinned primary exactly once");
+    assert_eq!(
+        mirror_requests.load(Ordering::SeqCst),
+        burst_candidates + 1,
+        "the hard mirror answer belongs to the probe slot's mirror request"
+    );
+    assert!(attempt.is_closed(), "the chosen hard mirror error closes the shared attempt");
+    assert!(attempt.failed(), "the chosen hard mirror error fails the shared attempt");
+}
+
+#[tokio::test]
+async fn probe_slot_keeps_the_shared_attempt_407_policy_for_both_requests() {
+    // The probe and the slot's bound mirror report to detached attempts that carry the shared
+    // attempt's playback policy. A 407 must therefore follow the shared attempt exactly: without
+    // an active live playback it is not retried, with one it starts the profile URL failover.
+    let burst_candidates = HlsManifestRecoveryBurstLevel::Friendly.plan().total_candidates();
+    for (permits_407, expected_primary_requests, expected_failover_mirror_requests) in
+        [(false, 1_usize, 0_usize), (true, 2_usize, 1_usize)]
+    {
+        let mirror_requests = Arc::new(AtomicUsize::new(0));
+        let mirror_requests_for_handler = Arc::clone(&mirror_requests);
+        let fixture = pinned_probe_fixture(
+            Arc::new(|_| (404, Vec::new(), String::new())),
+            None,
+            Arc::new(move |_| {
+                if mirror_requests_for_handler.fetch_add(1, Ordering::SeqCst) < burst_candidates {
+                    (200, Vec::new(), three_segment_manifest_body(101))
+                } else {
+                    (407, Vec::new(), "retry".to_string())
+                }
+            }),
+            2_000,
+            permits_407,
+        )
+        .await;
+        assert_eq!(fixture.burst_candidates, burst_candidates, "the fixture runs the plan's full burst");
+        let attempt = Arc::clone(&fixture.attempt);
+        assert_eq!(attempt.permits_407_retry(), permits_407, "the shared attempt sets the 407 policy");
+        let outcome = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
+            &manifest_fetch_context(&fixture.request, None),
+            fixture.binding.clone(),
+            None,
+            None,
+            HlsManifestAcceptanceTrigger::Observe,
+            crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+            |fetched, mode| super::super::commit_manifest_recovery_candidate(&fixture.request, fetched, mode),
+        )
+        .await;
+        if permits_407 {
+            // Permitted: the 407 stays retryable and the profile failover asks the primary again.
+            assert!(
+                matches!(
+                    &outcome,
+                    Err(OriginManifestFetchError::RetryableStatus(status, None))
+                        if *status == axum::http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                ),
+                "a 407 the shared attempt permits stays retryable: {:?}",
+                outcome.as_ref().err()
+            );
+            assert!(!attempt.is_closed(), "a retryable 407 does not close the shared attempt");
+        } else {
+            // Forbidden: the 407 becomes non-retryable and no profile failover runs.
+            assert!(
+                matches!(
+                    &outcome,
+                    Err(OriginManifestFetchError::NonRetryableStatus(status))
+                        if *status == axum::http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                ),
+                "a 407 the shared attempt does not permit is not retried: {:?}",
+                outcome.as_ref().err()
+            );
+            assert!(attempt.is_closed(), "the chosen non-retryable 407 closes the shared attempt");
+            assert!(attempt.failed(), "the chosen non-retryable 407 fails the shared attempt");
+        }
+        // The probe is the first primary request. Only a permitted 407 failover adds the request
+        // that the profile's first URL sends to the primary.
+        assert_eq!(
+            fixture.primary.requests.lock().await.len(),
+            expected_primary_requests,
+            "permits_407={permits_407}: the slot's 407 policy matches the shared attempt"
+        );
+        // The burst asks the mirror `burst_candidates` times, the slot's mirror request once. Only
+        // a permitted 407 failover asks the mirror again through the profile's second URL.
+        assert_eq!(
+            mirror_requests.load(Ordering::SeqCst),
+            burst_candidates + 1 + expected_failover_mirror_requests,
+            "permits_407={permits_407}: the slot's mirror request and its optional failover"
+        );
+    }
 }

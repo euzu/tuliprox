@@ -67,6 +67,80 @@ fn media(marker: u8) -> Vec<u8> {
     bytes
 }
 
+/// A valid, readable MPEG-TS program whose track signature differs from the
+/// `channel_unavailable` fixture: one H.264 stream on its own PID and no AAC stream,
+/// so a compatibility check must reject it on the signature, not on unreadable media.
+fn foreign_track_media() -> Vec<u8> {
+    const VIDEO_PID: u16 = 0x0200;
+    const PMT_PID: u16 = 0x0100;
+
+    fn packet(pid: u16, pusi: bool, payload: &[u8]) -> Vec<u8> {
+        let pid = pid.to_be_bytes();
+        let mut packet = vec![0x47, (if pusi { 0x40 } else { 0 }) | (pid[0] & 0x1F), pid[1], 0x10];
+        packet.extend_from_slice(payload);
+        packet.resize(188, 0xFF);
+        packet
+    }
+
+    fn section(mut body: Vec<u8>) -> Vec<u8> {
+        let length = u8::try_from(body.len() - 3 + 4).expect("section length");
+        body[1] = 0xB0;
+        body[2] = length;
+        let crc = tuliprox_mpegts::packet::mpeg2_crc32(&body);
+        body.extend_from_slice(&crc.to_be_bytes());
+        let mut payload = vec![0x00];
+        payload.extend(body);
+        payload
+    }
+
+    let video_pid = VIDEO_PID.to_be_bytes();
+    let pmt_pid = PMT_PID.to_be_bytes();
+    let pat = section(vec![0x00, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xE0 | pmt_pid[0], pmt_pid[1]]);
+    let pmt = section(vec![
+        0x02,
+        0,
+        0,
+        0x00,
+        0x01,
+        0xC1,
+        0x00,
+        0x00,
+        0xE0 | video_pid[0],
+        video_pid[1],
+        0xF0,
+        0x00,
+        0x1B,
+        0xE0 | video_pid[0],
+        video_pid[1],
+        0xF0,
+        0x00,
+    ]);
+    let keyframe = [
+        0x00, 0x00, 0x01, 0xE0, 0x00, 0x00, 0x80, 0x80, 0x05, 0x21, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x65,
+    ];
+    let mut ts = packet(0, true, &pat);
+    ts.extend(packet(PMT_PID, true, &pmt));
+    ts.extend(packet(VIDEO_PID, true, &keyframe));
+    for _ in 0..3 {
+        ts.extend(packet(VIDEO_PID, false, &[0x11; 184]));
+    }
+    ts
+}
+
+fn track_signature(bytes: &[u8]) -> crate::HlsTsTrackSignature {
+    match tuliprox_mpegts::ts_inspector::inspect_mpeg_ts(
+        std::io::Cursor::new(bytes),
+        tuliprox_mpegts::ts_inspector::HlsTsProbeProtection::Clear,
+        tuliprox_mpegts::ts_inspector::HlsTsProbeBudget::default(),
+    )
+    .expect("MPEG-TS inspection succeeds")
+    {
+        tuliprox_mpegts::ts_inspector::HlsTsProbeOutcome::Found(signature) => signature,
+        outcome => panic!("fixture has no readable MPEG-TS tracks: {outcome:?}"),
+    }
+}
+
 fn playlist(base: &str, namespace: &str, count: u64, query: &str) -> FetchedOriginManifest {
     let mut body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n".to_owned();
     for seq in 0..count {
@@ -199,27 +273,46 @@ async fn advancing_readmission_conflict_requires_authorization_and_new_compatibl
     *origin.state.new_namespace_bytes.write().await = Some(media(2));
     assert!(candidate(&request, advancing_conflict(&origin)).await.is_err());
     authorize_reentry(&mut request).await;
-    let candidate_segments = advancing_conflict(&origin).body.matches(".ts").count();
     // A track-compatible replay verifies every candidate body and then finds no progress.
     *origin.state.new_namespace_bytes.write().await = Some(media(1));
+    let candidate_manifest = advancing_conflict(&origin);
+    let expected_probes = candidate_manifest
+        .body
+        .lines()
+        .filter(|line| line.starts_with("http"))
+        .map(|url| url.trim_start_matches(&origin.base).to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        expected_probes.iter().any(|uri| uri.starts_with("/fedcba9876543210/")),
+        "the candidate replays its last slot in the new origin namespace: {expected_probes:?}"
+    );
     let before = origin.state.requests.lock().await.len();
-    let Err(error) = candidate(&request, advancing_conflict(&origin)).await else { panic!("rejected candidate") };
-    let probed = origin.state.requests.lock().await.len() - before;
+    let Err(error) = candidate(&request, candidate_manifest).await else { panic!("rejected candidate") };
+    let probed = origin.state.requests.lock().await[before..].to_vec();
     let HlsManifestCommitError::TimelineRejected { reason } = &error else {
         panic!("expected a timeline rejection, got {error:?}");
     };
     assert_eq!(*reason, HlsManifestRejectLogReason::SwitchResourceUnavailable);
-    assert_eq!(probed, candidate_segments, "a track-compatible replay verifies every candidate body");
+    assert_eq!(
+        probed, expected_probes,
+        "a track-compatible replay verifies every candidate body in manifest order, including slot 5's new namespace"
+    );
     {
         let state = request.session.read().await;
         assert_eq!(state.origin_epoch, 0);
         assert_eq!(state.origin_seq_highwater, Some(4));
         assert!(state.live_entry_revalidation.required);
     }
-    // Incompatible media fails the compatible-track check of the first probed segment. The error
-    // carries no track-specific reason, so the request count proves the probe reached that check:
-    // the first body was fetched once and no later segment was requested.
-    let incompatible = vec![0; 188 * 5];
+    // Media with a readable but incompatible track signature fails the compatible-track check of
+    // the first probed segment. The error carries no track-specific reason, so the request count
+    // proves the probe reached that check: the first body was fetched once and no later segment
+    // was requested.
+    let incompatible = foreign_track_media();
+    assert_ne!(
+        track_signature(&incompatible),
+        track_signature(&media(1)),
+        "the foreign body is readable and its track signature differs from the cached one"
+    );
     *origin.state.bytes.write().await = incompatible.clone();
     *origin.state.new_namespace_bytes.write().await = Some(incompatible);
     let before = origin.state.requests.lock().await.len();
@@ -268,7 +361,7 @@ async fn soft_return_verifies_changed_media_only_for_new_stale_entry() {
             None,
         )));
         *origin.state.new_namespace_bytes.write().await = Some(media(2));
-        let context = "active={active} stale={stale} soft={soft} access_lease={access_lease} strict={strict}";
+        let context = format!("active={active} stale={stale} soft={soft} access_lease={access_lease} strict={strict}");
         let result = if strict {
             candidate(&request, advancing_conflict(&origin)).await
         } else {
@@ -281,6 +374,54 @@ async fn soft_return_verifies_changed_media_only_for_new_stale_entry() {
             .await
         };
         assert_eq!(result.is_ok(), expected, "{context}");
+        assert_eq!(request.session.read().await.origin_epoch, u64::from(expected), "{context}");
+    }
+}
+
+/// The soft new-viewer verification path is keyed on the stale-entry reason: an acceptance
+/// episode authorizes a restart either way, so the accepting and the rejecting case differ
+/// only in the fresh-manifest reason. Without that reason check an advancing readmission
+/// would be verified as a new stale entry.
+#[tokio::test]
+async fn soft_new_viewer_verification_requires_the_stale_entry_reason() {
+    for (reason, expected) in [
+        (HlsFreshManifestRequiredReason::StaleEntryWindow, true),
+        (HlsFreshManifestRequiredReason::OriginReserveExhausted, false),
+    ] {
+        let origin = Origin::start().await;
+        let mut request = warm(&origin, HlsStartupMode::FirstReady).await;
+        let now = request.hls_proxy.now_ms();
+        {
+            let mut state = request.session.write().await;
+            let age = state.account_overlap_timing().hard_active_window_ms + 1;
+            state.mark_authorized_media_access(now.saturating_sub(age));
+            let plan = HlsManifestRecoveryBurstLevel::Friendly.plan();
+            state.origin_control.begin_acceptance_episode(
+                now,
+                plan,
+                HlsManifestAcceptanceTrigger::RecoveryRequired,
+                &test_acceptance_episode_timing(now, plan),
+            );
+            state.origin_control.acceptance_episode.as_mut().unwrap().record_full_burst();
+        }
+        request.access_lease_id = Some(crate::HlsAccessLeaseId("new-view".into()));
+        request.manifest_commit_requirement = HlsManifestCommitRequirement::FreshCommitRequired { reason };
+        request.attempt = Some(Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+            request.manifest_commit_requirement,
+            false,
+            None,
+        )));
+        *origin.state.new_namespace_bytes.write().await = Some(media(2));
+        let context = format!("reason={reason:?}");
+        // The host mode is pinned to the accepting mode for both reasons so the fresh-manifest
+        // reason is the only differing input.
+        let result = candidate_with_mode(
+            &request,
+            advancing_conflict(&origin),
+            HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+        )
+        .await;
+        assert_eq!(result.is_ok(), expected, "{context}: {:?}", result.err());
         assert_eq!(request.session.read().await.origin_epoch, u64::from(expected), "{context}");
     }
 }

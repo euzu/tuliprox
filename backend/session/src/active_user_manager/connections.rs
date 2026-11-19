@@ -124,6 +124,18 @@ impl UserSession {
         self.clear_provider_session_cookies();
     }
 
+    /// Publishes the member binding and advances the binding generation whenever it actually
+    /// changes. Every identity fence therefore rejects a snapshot taken before the change, even
+    /// when a later switch returns to the same member and provider (ABA). Rewriting the binding a
+    /// session already holds is not a change and keeps the identity valid.
+    pub(super) fn set_member_binding(&mut self, binding: MemberBinding) {
+        if self.member_binding.as_ref() != Some(&binding) {
+            self.binding_generation = self.binding_generation.wrapping_add(1);
+        }
+        self.member_binding = Some(binding);
+        self.member_failed_on_segment = false;
+    }
+
     pub(super) fn expire(&mut self) {
         self.lifecycle = PlaybackLifecycle::Expired;
         self.change_signal.signal();

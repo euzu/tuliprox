@@ -9,8 +9,9 @@
 //! failover disabled) never produce a notice.
 
 use crate::{
+    media_reserve::{HlsLeaseReserveSnapshot, HlsPlaybackClockAnchor},
     origin_account_runtime::{HlsMemberHealthPolicy, HlsMemberUnhealthyReason, HlsOriginAccountRuntime},
-    HlsSession, HlsSessionHandle,
+    HlsAccessLease, HlsAccessLeaseId, HlsSession, HlsSessionHandle,
 };
 use std::{collections::VecDeque, sync::Arc};
 
@@ -86,6 +87,80 @@ impl HlsSlowDeliveryMeter {
     fn clear(&mut self) { self.samples.clear(); }
 }
 
+/// One observed guaranteed playback reserve of an active lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HlsMemberReserveSample {
+    lease_issued_at_ms: u64,
+    anchor: HlsPlaybackClockAnchor,
+    pub(crate) playback_position_ms: u64,
+    pub(crate) guaranteed_reserve_ms: u64,
+    pub(crate) sampled_at_ms: u64,
+}
+
+impl HlsMemberReserveSample {
+    fn of(lease: &HlsAccessLease, reserve: HlsLeaseReserveSnapshot, now_ms: u64) -> Self {
+        Self {
+            lease_issued_at_ms: lease.issued_at_ms,
+            anchor: lease.playback_cursor.clock_anchor(),
+            playback_position_ms: reserve.conservative_playback_position_ms,
+            guaranteed_reserve_ms: reserve.guaranteed_reserve_ms,
+            sampled_at_ms: now_ms,
+        }
+    }
+
+    /// The sample describes this lease incarnation and this uninterrupted playback.
+    fn observes_playback_of(&self, lease: &HlsAccessLease) -> bool {
+        self.lease_issued_at_ms == lease.issued_at_ms && self.anchor == lease.playback_cursor.clock_anchor()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(playback_position_ms: u64, guaranteed_reserve_ms: u64, sampled_at_ms: u64) -> Self {
+        Self {
+            lease_issued_at_ms: 0,
+            anchor: crate::media_reserve::HlsLeasePlaybackCursor::default().clock_anchor(),
+            playback_position_ms,
+            guaranteed_reserve_ms,
+            sampled_at_ms,
+        }
+    }
+}
+
+/// Previous reserve sample of every active lease, for the reserve-driven member failover.
+///
+/// One writer only: [`HlsMemberHealth::observe_member_reserves`], called from
+/// `availability::recovery_pressure::evaluate_and_commit_session_recovery_pressure`, which runs
+/// inside `HlsProxyManager::with_critical_handoff_state` - that is, under the lease-store lock and
+/// the session write lock, with no `await` between reading the previous sample and replacing it.
+/// Read-only reserve evaluations compare against the stored sample and never replace it, so the
+/// "previous evaluation" of a lease is unambiguous. [`HlsMemberHealth::reset_for_handoff`] drops
+/// every sample, so evidence never outlives the member that produced it.
+#[derive(Debug, Default)]
+pub(crate) struct HlsMemberReserveHistory {
+    samples: Vec<(HlsAccessLeaseId, HlsMemberReserveSample)>,
+}
+
+impl HlsMemberReserveHistory {
+    /// Sample of the same lease incarnation and playback clock, if a previous evaluation saw it.
+    pub(crate) fn previous(&self, lease: &HlsAccessLease) -> Option<HlsMemberReserveSample> {
+        self.samples.iter().find_map(|(lease_id, sample)| {
+            (*lease_id == lease.lease_id && sample.observes_playback_of(lease)).then_some(*sample)
+        })
+    }
+
+    /// Replaces the samples of the next evaluation round. Leases absent from `round` lose their
+    /// sample, so the history stays bounded by the active leases of the session.
+    fn replace_round<'a>(
+        &mut self,
+        round: impl IntoIterator<Item = (&'a HlsAccessLease, HlsLeaseReserveSnapshot)>,
+        now_ms: u64,
+    ) {
+        self.samples = round
+            .into_iter()
+            .map(|(lease, reserve)| (lease.lease_id.clone(), HlsMemberReserveSample::of(lease, reserve, now_ms)))
+            .collect();
+    }
+}
+
 /// Per-session state behind the member-health triggers. Reset whenever the bound member changes.
 #[derive(Debug, Default)]
 pub(crate) struct HlsMemberHealth {
@@ -96,11 +171,26 @@ pub(crate) struct HlsMemberHealth {
     hard_manifest_failures: u32,
     last_stall_report_ms: Option<u64>,
     slow: HlsSlowDeliveryMeter,
+    pub(crate) reserve: HlsMemberReserveHistory,
 }
 
 impl HlsMemberHealth {
     pub(crate) fn reset_for_handoff(&mut self, now_ms: u64) {
         *self = Self { epoch_start_ms: now_ms, ..Self::default() };
+    }
+
+    /// Previous reserve sample of this lease incarnation and playback clock.
+    pub(crate) fn member_reserve_previous(&self, lease: &HlsAccessLease) -> Option<HlsMemberReserveSample> {
+        self.reserve.previous(lease)
+    }
+
+    /// Records the reserve of every active lease of this evaluation round.
+    pub(crate) fn observe_member_reserves<'a>(
+        &mut self,
+        round: impl IntoIterator<Item = (&'a HlsAccessLease, HlsLeaseReserveSnapshot)>,
+        now_ms: u64,
+    ) {
+        self.reserve.replace_round(round, now_ms);
     }
 
     pub(crate) fn manifest_succeeded(&mut self) {

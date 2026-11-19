@@ -450,6 +450,15 @@ fn is_unpublished_bootstrap_repeat(
         })
 }
 
+/// The pinned stale-entry reason: a `StrictPinnedHost` freshness check for a session
+/// whose entry went stale. Only this context treats an unchanged window as an ordinary
+/// freshness check or admits a soft new-viewer verification.
+fn stale_entry_reason(request: &OriginRefreshRequest, mode: HlsManifestCommitAcceptanceMode) -> bool {
+    mode == HlsManifestCommitAcceptanceMode::StrictPinnedHost
+        && request.manifest_commit_requirement.fresh_reason()
+            == Some(crate::HlsFreshManifestRequiredReason::StaleEntryWindow)
+}
+
 fn ordinary_stale_entry(
     request: &OriginRefreshRequest,
     session: &HlsSession,
@@ -462,9 +471,7 @@ fn ordinary_stale_entry(
         episode.state != crate::manifest_acceptance::HlsManifestAcceptanceState::Completed
             && episode.trigger().recovery_required()
     });
-    mode == HlsManifestCommitAcceptanceMode::StrictPinnedHost
-        && request.manifest_commit_requirement.fresh_reason()
-            == Some(crate::HlsFreshManifestRequiredReason::StaleEntryWindow)
+    stale_entry_reason(request, mode)
         && !request.acceptance_directive.trigger.recovery_required()
         && !active_recovery
         && session.origin_account_manifest_pending.is_none()
@@ -503,6 +510,12 @@ fn identical_live_window(
                         ))
             })
         })
+}
+
+/// True when the window's last origin sequence advanced past the pinned highwater.
+/// `Option` ordering keeps a missing highwater (`None`) below every sequence.
+fn window_advanced_past_highwater(session: &HlsSession, last_origin_seq: Option<u64>) -> bool {
+    last_origin_seq > session.origin_seq_highwater
 }
 
 fn same_media_timing(session: &HlsSession, entry: &SegmentEntry, parsed: &ParsedOriginSegment) -> bool {
@@ -586,10 +599,8 @@ fn capture_probe_inputs(
     // is still retained after earlier playback. Only the soft overlap period
     // admits this evidence path. A currently playing or background refresh
     // continues to use the normal binding and timeline rules.
-    let soft_entry = mode == HlsManifestCommitAcceptanceMode::StrictPinnedHost
+    let soft_entry = stale_entry_reason(request, mode)
         && request.access_lease_id.is_some()
-        && request.manifest_commit_requirement.fresh_reason()
-            == Some(crate::HlsFreshManifestRequiredReason::StaleEntryWindow)
         && request.attempt.as_ref().is_some_and(|attempt| !attempt.active_live_playback)
         && matches!(
             crate::classify_account_binding_protection(
@@ -599,7 +610,7 @@ fn capture_probe_inputs(
             ),
             crate::HlsAccountBindingProtection::SoftActive { .. }
         );
-    let advancing_conflict = last > session.origin_seq_highwater
+    let advancing_conflict = window_advanced_past_highwater(session, last)
         && query_changed
         && (session.live_entry_revalidation.required
             || session.origin_account_manifest_pending.is_some()
@@ -626,10 +637,7 @@ fn capture_probe_inputs(
         return Err(unavailable());
     }
     if advancing_conflict {
-        log::debug!("HLS origin media verification: decision=probe-advancing-readmission");
-        if soft_entry {
-            log::debug!("HLS origin media verification: decision=probe-new-soft-entry");
-        }
+        log::debug!("HLS origin media verification: decision=probe-advancing-readmission soft_entry={soft_entry}");
     }
     materialize_normal_key_resources(
         manifest,
@@ -744,7 +752,7 @@ async fn prepare(
     if !changed {
         // Replayed HTTP 200 windows must consume the remaining existing budget.
         let session = request.session.read().await;
-        if manifest.segments.last().map(|last| last.origin_seq) > session.origin_seq_highwater
+        if window_advanced_past_highwater(&session, manifest.segments.last().map(|last| last.origin_seq))
             || session.live_entry_revalidation.required
             || session
                 .origin_control

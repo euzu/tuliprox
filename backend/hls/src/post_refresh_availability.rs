@@ -4,15 +4,15 @@ use super::{
         HlsDetailedTerminalResolution, HlsTerminalDecisionPurpose, HlsTerminalFailedClosedReason,
         HlsTerminalResolution,
     },
-    availability_reevaluation::{HlsAvailabilityReevaluationOwnership, HlsAvailabilityReevaluationRegistration},
+    availability_reevaluation::{
+        HlsAvailabilityOwnerWait, HlsAvailabilityReevaluationOwnership, HlsAvailabilityReevaluationRegistration,
+    },
     hls_ctx::HlsCtx,
     media_reserve::HlsLeaseReserveSnapshot,
     recovery_timing::HlsLeaseCutoverTiming,
     refresh::HlsPostRefreshAvailabilityAction,
     HlsAccessLeaseId, HlsSessionHandle, ProxySessionId,
 };
-use std::time::Duration;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct HlsLiveReserveDeadline {
     pub(super) next_reevaluation_at_ms: u64,
@@ -37,13 +37,6 @@ pub(super) enum HlsPostRefreshOwnerResolution {
     RetryAfter { at_ms: u64, reason: HlsTerminalFailedClosedReason },
     WaitUntil(HlsLiveReserveDeadline),
     WaitForEvidence { reason: HlsTerminalFailedClosedReason },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum HlsPostRefreshOwnerWaitOutcome {
-    Cancelled,
-    Woken,
-    DeadlineReached,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,21 +126,38 @@ impl HlsPostRefreshFallbackOutcome {
     }
 }
 
+/// The next wake instant of one live lease.
+///
+/// `member_failover_target_ms` is the reserve at which the member switch must be requested, and
+/// only a session that can hand its member over passes a target. While the reserve is still above
+/// that target, the switch is one wake instant of its own: playback consumes the reserve above the
+/// startup window in exactly that much wall-clock time when the origin does not refill it. At or
+/// below the target the trigger is already due, so the evaluation requests the switch itself and
+/// the owner waits for exhaustion instead of polling a trigger that cannot ripen any further.
+/// A session without a member watch keeps the exhaustion wake: its member trigger has no consumer.
 pub(super) fn live_reserve_deadline(
     now_ms: u64,
     reserve: HlsLeaseReserveSnapshot,
     cutover_timing: HlsLeaseCutoverTiming,
+    member_failover_target_ms: Option<u64>,
 ) -> Option<HlsLiveReserveDeadline> {
     if !reserve.playback_position_known || reserve.guaranteed_reserve_ms == 0 {
         return None;
     }
     let exhaustion_at_ms = cutover_timing.lease_exhaustion_at.as_millis_since_epoch();
+    let member_failover_at_ms = member_failover_target_ms
+        .and_then(|target_ms| reserve.guaranteed_reserve_ms.checked_sub(target_ms))
+        // Only a trigger still ahead shortens the wake; at the target it is already due.
+        .filter(|ahead_ms| *ahead_ms > 0)
+        .map(|ahead_ms| now_ms.saturating_add(ahead_ms));
     Some(HlsLiveReserveDeadline {
-        next_reevaluation_at_ms: exhaustion_at_ms.max(now_ms.saturating_add(1)),
+        // The reserve is non-zero here, so exhaustion is at least one millisecond ahead.
+        next_reevaluation_at_ms: member_failover_at_ms.map_or(exhaustion_at_ms, |at_ms| at_ms.min(exhaustion_at_ms)),
         latest_safe_terminal_commit_at_ms: exhaustion_at_ms,
     })
 }
 
+/// Re-evaluates the terminal decision of every active lease.
 pub(super) async fn evaluate_active_terminal_leases_for_reevaluation(
     ctx: &HlsCtx,
     session: &HlsSessionHandle,
@@ -274,11 +284,13 @@ pub(super) async fn evaluate_owner_failure_fallback(
     aggregate
 }
 
+/// Waits for the retained owner's next resolution. The wait parks outside the bounded task permit
+/// when the instant is a long one, so a retained reserve-only owner holds no coordinator capacity.
 pub(super) async fn wait_for_owner_resolution(
     ownership: &HlsAvailabilityReevaluationOwnership,
     resolution: HlsPostRefreshOwnerResolution,
     now_ms: u64,
-) -> HlsPostRefreshOwnerWaitOutcome {
+) -> HlsAvailabilityOwnerWait {
     let wake_at_ms = match resolution {
         HlsPostRefreshOwnerResolution::RetryAt { at_ms } | HlsPostRefreshOwnerResolution::RetryAfter { at_ms, .. } => {
             Some(at_ms)
@@ -286,23 +298,7 @@ pub(super) async fn wait_for_owner_resolution(
         HlsPostRefreshOwnerResolution::WaitUntil(deadline) => Some(deadline.next_reevaluation_at_ms),
         HlsPostRefreshOwnerResolution::WaitForEvidence { .. } => None,
     };
-    match wake_at_ms {
-        Some(wake_at_ms) => {
-            tokio::select! {
-                () = ownership.cancelled() => HlsPostRefreshOwnerWaitOutcome::Cancelled,
-                () = ownership.wake_requested() => HlsPostRefreshOwnerWaitOutcome::Woken,
-                () = tokio::time::sleep(Duration::from_millis(
-                    wake_at_ms.saturating_sub(now_ms)
-                )) => HlsPostRefreshOwnerWaitOutcome::DeadlineReached,
-            }
-        }
-        None => {
-            tokio::select! {
-                () = ownership.cancelled() => HlsPostRefreshOwnerWaitOutcome::Cancelled,
-                () = ownership.wake_requested() => HlsPostRefreshOwnerWaitOutcome::Woken,
-            }
-        }
-    }
+    ownership.wait_for_wake(wake_at_ms, now_ms).await
 }
 
 pub async fn commit_post_refresh_terminal_fallback(

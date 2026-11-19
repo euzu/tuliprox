@@ -2,11 +2,15 @@ use super::{
     lease::HlsAvailabilityEvidenceGeneration, refresh::HlsPostRefreshAvailabilityReason,
     session_store::HlsSessionIncarnation, ProxySessionId,
 };
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 use tokio::sync::{watch, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 const HLS_AVAILABILITY_REEVALUATION_CAPACITY: usize = 256;
+/// Longest wait an Availability owner may spend inside its bounded task permit. A longer wait, in
+/// particular the reserve-derived wake instant of a group session, releases the permit and
+/// re-acquires it before the next evaluation, so parked owners cannot exhaust the coordinator.
+const HLS_AVAILABILITY_PARK_WAIT_MS: u64 = 2_000;
 
 /// Identity of one immutable session state whose recovery pressure could not
 /// be evaluated synchronously.
@@ -248,9 +252,9 @@ impl HlsAvailabilityReevaluationCoordinator {
             owner_token,
             cancellation,
             wake,
+            task_permit: HlsAvailabilityTaskPermit::acquire(Arc::clone(&self.task_capacity), task_permit),
         };
-        let completion =
-            HlsAvailabilityReevaluationCompletion { ownership: ownership.clone(), _task_permit: task_permit };
+        let completion = HlsAvailabilityReevaluationCompletion { ownership: ownership.clone() };
         drop(runtime.spawn(async move {
             work(ownership).await;
             drop(completion);
@@ -415,6 +419,64 @@ impl HlsAvailabilityReevaluationObserver {
     }
 }
 
+/// Why an owner wait ended. Only [`Self::Cancelled`] stops the owner; the other two continue the
+/// same owner, so single-flight and its accumulated evidence survive the wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HlsAvailabilityOwnerWait {
+    Cancelled,
+    Woken,
+    DeadlineReached,
+}
+
+/// Bounded task permit of one Availability owner.
+///
+/// The owner holds it while it evaluates. A worker that waits for an instant beyond the evaluation
+/// horizon releases it first: a group session parked until its reserve-derived wake instant must
+/// not consume coordinator capacity that other sessions need for their own reevaluations. Before
+/// its next evaluation the worker re-acquires a permit, so at most `task_capacity` owners evaluate
+/// at the same time. The permit is dropped with its owner, including on panic or task abort.
+pub struct HlsAvailabilityTaskPermit {
+    semaphore: Arc<Semaphore>,
+    permit: std::sync::Mutex<Option<OwnedSemaphorePermit>>,
+}
+
+impl HlsAvailabilityTaskPermit {
+    fn acquire(semaphore: Arc<Semaphore>, permit: OwnedSemaphorePermit) -> Arc<Self> {
+        Arc::new(Self { semaphore, permit: std::sync::Mutex::new(Some(permit)) })
+    }
+
+    fn is_held(&self) -> bool { self.lock().is_some() }
+
+    /// Gives the permit back while this owner waits. Idempotent.
+    fn release(&self) { drop(self.lock().take()); }
+
+    /// Blocks until this owner may evaluate again; `false` when it was cancelled first. Waiting for
+    /// capacity is safe: no permit holder ever waits for another owner's permit.
+    async fn reacquire(&self, cancellation: &CancellationToken) -> bool {
+        if self.is_held() {
+            return true;
+        }
+        let acquired = tokio::select! {
+            () = cancellation.cancelled() => return false,
+            permit = Arc::clone(&self.semaphore).acquire_owned() => permit,
+        };
+        let Ok(permit) = acquired else { return false };
+        *self.lock() = Some(permit);
+        true
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<OwnedSemaphorePermit>> {
+        self.permit.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    fn for_test() -> Arc<Self> {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&semaphore).try_acquire_owned().expect("test permit is available");
+        Self::acquire(semaphore, permit)
+    }
+}
+
 /// Cancellation and ownership proof passed only to the registered task.
 #[derive(Clone)]
 pub struct HlsAvailabilityReevaluationOwnership {
@@ -423,6 +485,7 @@ pub struct HlsAvailabilityReevaluationOwnership {
     owner_token: u64,
     cancellation: CancellationToken,
     wake: Arc<Notify>,
+    task_permit: Arc<HlsAvailabilityTaskPermit>,
 }
 
 impl HlsAvailabilityReevaluationOwnership {
@@ -431,6 +494,42 @@ impl HlsAvailabilityReevaluationOwnership {
     }
 
     pub async fn cancelled(&self) { self.cancellation.cancelled().await }
+
+    /// Waits for `wake_at_ms`; `None` waits until evidence changes or the owner is cancelled.
+    ///
+    /// A wait up to [`HLS_AVAILABILITY_PARK_WAIT_MS`] keeps the bounded task permit. A longer wait
+    /// releases it first and re-acquires a permit before returning: a group session sleeping until
+    /// its reserve-derived wake instant must not block the reevaluations of other sessions. A wake
+    /// request, the deadline and a cancellation all release the wait; only the last one stops the
+    /// owner, so single-flight, the owner identity and its accumulated evidence survive the wait.
+    pub async fn wait_for_wake(&self, wake_at_ms: Option<u64>, now_ms: u64) -> HlsAvailabilityOwnerWait {
+        let parks = wake_at_ms.is_none_or(|at_ms| at_ms.saturating_sub(now_ms) > HLS_AVAILABILITY_PARK_WAIT_MS);
+        if parks {
+            self.task_permit.release();
+        }
+        let outcome = if let Some(wake_at_ms) = wake_at_ms {
+            tokio::select! {
+                () = self.cancelled() => HlsAvailabilityOwnerWait::Cancelled,
+                () = self.wake_requested() => HlsAvailabilityOwnerWait::Woken,
+                () = tokio::time::sleep(Duration::from_millis(wake_at_ms.saturating_sub(now_ms))) => {
+                    HlsAvailabilityOwnerWait::DeadlineReached
+                }
+            }
+        } else {
+            tokio::select! {
+                () = self.cancelled() => HlsAvailabilityOwnerWait::Cancelled,
+                () = self.wake_requested() => HlsAvailabilityOwnerWait::Woken,
+            }
+        };
+        if !parks || outcome == HlsAvailabilityOwnerWait::Cancelled {
+            return outcome;
+        }
+        if self.task_permit.reacquire(&self.cancellation).await {
+            outcome
+        } else {
+            HlsAvailabilityOwnerWait::Cancelled
+        }
+    }
 
     pub fn current_mode(
         &self,
@@ -480,6 +579,7 @@ impl HlsAvailabilityReevaluationOwnership {
             owner_token: 1,
             cancellation: tokio_util::sync::CancellationToken::new(),
             wake: Arc::new(tokio::sync::Notify::new()),
+            task_permit: HlsAvailabilityTaskPermit::for_test(),
         }
     }
 }
@@ -504,8 +604,9 @@ pub enum HlsAvailabilityReevaluationFinishDecision {
 }
 
 struct HlsAvailabilityReevaluationCompletion {
+    /// Keeps the owner alive for the whole task; its drop discards the owner slot and releases the
+    /// task permit, whether the task completed normally, panicked or was aborted.
     ownership: HlsAvailabilityReevaluationOwnership,
-    _task_permit: OwnedSemaphorePermit,
 }
 
 impl Drop for HlsAvailabilityReevaluationCompletion {
@@ -532,6 +633,143 @@ mod tests {
             media_readiness_generation: readiness,
             availability_evidence_generation: HlsAvailabilityEvidenceGeneration::for_test(1),
         }
+    }
+
+    fn session_key(proxy_session_id: &str, progress: u64, readiness: u64) -> HlsAvailabilityReevaluationOwnerKey {
+        HlsAvailabilityReevaluationOwnerKey {
+            session_incarnation: HlsSessionIncarnation::for_test(1),
+            proxy_session_id: ProxySessionId(proxy_session_id.to_string()),
+            origin_progress_generation: progress,
+            media_readiness_generation: readiness,
+            availability_evidence_generation: HlsAvailabilityEvidenceGeneration::for_test(1),
+        }
+    }
+
+    /// A group session waiting for its reserve-derived wake instant must not hold a task permit:
+    /// with capacity 1, two parked sessions leave the single permit to a third reevaluation and
+    /// still evaluate at their own deadlines.
+    #[tokio::test(start_paused = true)]
+    async fn parked_reserve_wait_releases_the_task_permit_and_still_evaluates_at_its_deadline() {
+        let coordinator = Arc::new(HlsAvailabilityReevaluationCoordinator::with_capacity(1));
+        let start = tokio::time::Instant::now();
+        let evaluated_at_ms: Arc<std::sync::Mutex<Vec<(String, u128)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let register_parked = |proxy_session_id: &'static str, deadline_ms: u64| {
+            let evaluated_at_ms = Arc::clone(&evaluated_at_ms);
+            let owner_key = session_key(proxy_session_id, 1, 1);
+            let task_owner_key = owner_key.clone();
+            coordinator.register(
+                owner_key,
+                HlsAvailabilityReevaluationMode::TerminalReserve,
+                move |ownership| async move {
+                    assert!(
+                        ownership.wait_for_wake(Some(deadline_ms), 0).await
+                            == HlsAvailabilityOwnerWait::DeadlineReached,
+                        "{proxy_session_id}: the parked owner is not cancelled"
+                    );
+                    let evaluated_at = tokio::time::Instant::now().duration_since(start).as_millis();
+                    if let Ok(mut evaluations) = evaluated_at_ms.lock() {
+                        evaluations.push((proxy_session_id.to_string(), evaluated_at));
+                    }
+                    let _ = ownership.finish_cycle(&task_owner_key, HlsAvailabilityReevaluationFinishReason::Evaluated);
+                },
+            )
+        };
+
+        assert_eq!(register_parked("session-a", 5_000), HlsAvailabilityReevaluationRegistration::Scheduled);
+        // Session A reaches its reserve wait before session B registers.
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            register_parked("session-b", 8_000),
+            HlsAvailabilityReevaluationRegistration::Scheduled,
+            "a parked owner must not hold the only task permit"
+        );
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        let evaluations = || evaluated_at_ms.lock().map(|evaluations| evaluations.clone()).unwrap_or_default();
+        assert_eq!(coordinator.owner_count(), 2, "one owner per session");
+        assert_eq!(coordinator.available_task_permits_for_test(), 1, "a parked owner holds no permit");
+        assert_eq!(evaluations(), Vec::<(String, u128)>::new(), "nothing evaluated yet");
+
+        let third_evaluated = Arc::new(AtomicBool::new(false));
+        let third_owner_key = session_key("session-c", 1, 1);
+        let third_task_key = third_owner_key.clone();
+        let third_flag = Arc::clone(&third_evaluated);
+        assert_eq!(
+            coordinator.register(
+                third_owner_key,
+                HlsAvailabilityReevaluationMode::RecoveryPressure,
+                move |ownership| async move {
+                    third_flag.store(true, Ordering::Release);
+                    let _ = ownership.finish_cycle(&third_task_key, HlsAvailabilityReevaluationFinishReason::Evaluated);
+                },
+            ),
+            HlsAvailabilityReevaluationRegistration::Scheduled,
+            "a third reevaluation is not blocked by the parked sessions"
+        );
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert!(third_evaluated.load(Ordering::Acquire), "the third reevaluation ran while both sessions parked");
+        assert_eq!(
+            evaluations(),
+            Vec::<(String, u128)>::new(),
+            "the parked sessions still wait for their own deadlines"
+        );
+
+        tokio::time::advance(Duration::from_millis(5_000)).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(evaluations(), vec![("session-a".to_string(), 5_000)]);
+
+        tokio::time::advance(Duration::from_millis(3_000)).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            evaluations(),
+            vec![("session-a".to_string(), 5_000), ("session-b".to_string(), 8_000)],
+            "each parked owner evaluates at its own deadline"
+        );
+        assert_eq!(coordinator.owner_count(), 0);
+        assert_eq!(coordinator.available_task_permits_for_test(), 1);
+    }
+
+    /// Cancelling a parked owner releases it without an evaluation and without leaking its permit.
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_parked_owner_stops_it_without_evaluating() {
+        let coordinator = Arc::new(HlsAvailabilityReevaluationCoordinator::with_capacity(1));
+        let evaluated = Arc::new(AtomicBool::new(false));
+        let owner_key = session_key("session-parked", 1, 1);
+        let task_evaluated = Arc::clone(&evaluated);
+        assert_eq!(
+            coordinator.register(
+                owner_key.clone(),
+                HlsAvailabilityReevaluationMode::TerminalReserve,
+                move |ownership| async move {
+                    let wait = ownership.wait_for_wake(Some(30_000), 0).await;
+                    assert_eq!(wait, HlsAvailabilityOwnerWait::Cancelled, "a cancelled owner does not resume");
+                    task_evaluated.store(true, Ordering::Release);
+                },
+            ),
+            HlsAvailabilityReevaluationRegistration::Scheduled
+        );
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(coordinator.available_task_permits_for_test(), 1, "the parked owner holds no permit");
+
+        coordinator.cancel_session(&owner_key.proxy_session_id);
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert!(evaluated.load(Ordering::Acquire), "the cancelled owner observed the cancellation");
+        assert_eq!(coordinator.owner_count(), 0);
+        assert_eq!(coordinator.available_task_permits_for_test(), 1);
     }
 
     #[tokio::test]

@@ -122,29 +122,30 @@ impl HlsOriginRetryWork {
         if !self.protects_provider {
             return Ok(());
         }
-        let lapsed = match provider.as_ref() {
-            Some(right) if right.is_current() => return Ok(()),
-            Some(_) => true,
-            None => false,
-        };
-        let lapsed_error =
-            Err(HlsOriginResourceFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::StoreRace));
-        let Some(binding) = state.origin_account_binding.as_ref() else {
-            return if lapsed { lapsed_error } else { Ok(()) };
-        };
-        let renewed = binding.provider_binding_tag.and_then(|tag| {
-            manager.reserve_hls_origin_work(&binding.session_owner, &binding.account_name, tag, self.deadline)
+        // Renew the right first: a lapsed sibling's right ends with the operation that
+        // granted it, so only a refused renewal turns that lapse into a failure.
+        let lapsed = provider.as_ref().is_some_and(|right| !right.is_current());
+        let binding = state.origin_account_binding.as_ref();
+        let renewed = binding.and_then(|binding| {
+            binding.provider_binding_tag.and_then(|tag| {
+                manager.reserve_hls_origin_work(&binding.session_owner, &binding.account_name, tag, self.deadline)
+            })
         });
         if let Some(right) = renewed {
             *provider = Some(right);
         } else if lapsed {
-            return lapsed_error;
+            return Err(HlsOriginResourceFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::StoreRace));
         }
-        if require_allocation && provider.is_none() {
+        // A missing binding keeps the per-attempt allocation contract.
+        if binding.is_some() && require_allocation && provider.is_none() {
             log::debug!(
                 "HLS origin work refused after admission: proxy_session={} reason={}",
                 crate::safe_proxy_session_id(&state.proxy_session_id),
-                if binding.provider_binding_tag.is_some() { "work_right_denied" } else { "missing_binding_tag" }
+                if binding.is_some_and(|binding| binding.provider_binding_tag.is_some()) {
+                    "work_right_denied"
+                } else {
+                    "missing_binding_tag"
+                }
             );
             return Err(HlsOriginResourceFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::Unavailable));
         }

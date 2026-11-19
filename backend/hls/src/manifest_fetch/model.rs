@@ -308,7 +308,7 @@ pub(crate) struct HlsManifestRecoveryDiagnostics {
 }
 
 impl HlsManifestRecoveryDiagnostics {
-    pub(super) const fn candidate_requests(&self) -> usize { self.candidate_requests }
+    pub(crate) const fn candidate_requests(&self) -> usize { self.candidate_requests }
 
     pub(super) fn record_attempt(&mut self, attempts: usize, candidate_requests: usize, burst: bool) {
         self.attempts = attempts;
@@ -417,6 +417,13 @@ impl HlsOriginManifestFetchContext {
             Some(attempt) => attempt.classify_error(error),
             None => error,
         }
+    }
+    pub(crate) async fn ensure_dispatch_allowed(&self) -> Result<(), OriginManifestFetchError> {
+        self.ensure_current_origin().await?;
+        if self.attempt.as_ref().is_some_and(|attempt| attempt.is_closed()) {
+            return Err(OriginManifestFetchError::RetryExhausted);
+        }
+        Ok(())
     }
     pub(crate) async fn ensure_current_origin(&self) -> Result<(), OriginManifestFetchError> {
         if let Some(snapshot) = self.origin_account_snapshot.as_ref() {

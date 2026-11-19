@@ -137,6 +137,9 @@ impl HlsSegmentWorkerPool {
                         SegmentFetchOriginFailure::Permanent
                     ) {
                         member_unhealthy = session.member_unhealthy_after_media_failure(&err);
+                        // The failed object is gone from the render queue, and the scheduler wake
+                        // only replans while work is queued. Replan here so the window that the 404
+                        // changed is dispatched immediately instead of waiting for the next commit.
                         if session.segments.get(&snapshot.proxy_seq).is_some_and(SegmentEntry::is_clear_ts_origin_404)
                             && session.uses_fast_start_live_window()
                         {

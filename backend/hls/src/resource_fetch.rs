@@ -485,6 +485,50 @@ where
         G,
     ) -> BoxFuture<'static, Result<T, HlsOriginResourceFetchError>>,
 {
+    run_hls_origin_resource_retry_loop_with_attempt_classification(
+        target,
+        clients,
+        policy,
+        identity,
+        |_, _| async {}.boxed(),
+        prepare_attempt,
+        cleanup_attempt,
+        commit,
+    )
+    .await
+}
+
+/// Runs the shared retry policy and reports every classified attempt failure to
+/// `classify_attempt` before the next backoff sleep, so a caller can publish per-attempt
+/// evidence while the retry is still pending. A terminal failure is reported too: its
+/// evidence must not outlive the attempt that recorded it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The retry policy, its callbacks and the per-attempt classifier stay explicit at the call sites."
+)]
+pub async fn run_hls_origin_resource_retry_loop_with_attempt_classification<T, G, P, C, F, A>(
+    target: HlsOriginResourceFetchTarget,
+    clients: HlsOriginResourceClients,
+    policy: &SegmentFetchPolicy,
+    identity: &HlsLogIdentity,
+    classify_attempt: A,
+    prepare_attempt: P,
+    cleanup_attempt: C,
+    commit: F,
+) -> Result<T, HlsOriginResourceFetchError>
+where
+    T: Send + 'static,
+    G: Send + 'static,
+    P: FnMut(HlsResourceFetchAttempt) -> BoxFuture<'static, Result<G, HlsOriginResourceFetchError>>,
+    C: FnMut(G) -> BoxFuture<'static, ()>,
+    F: FnMut(
+        DecodedHttpResponse,
+        HlsResourceFetchAttempt,
+        HlsOriginResourceBodyDeadline,
+        G,
+    ) -> BoxFuture<'static, Result<T, HlsOriginResourceFetchError>>,
+    A: FnMut(&HlsResourceFetchAttempt, &HlsOriginResourceFetchError) -> BoxFuture<'static, ()>,
+{
     let coding_object_kind = match target.kind {
         HlsResourceFetchKind::Segment => HlsOriginContentCodingObjectKind::Segment,
         HlsResourceFetchKind::Map => HlsOriginContentCodingObjectKind::Map,
@@ -495,6 +539,7 @@ where
     let range_requested = target.headers.contains_key(header::RANGE);
     run_hls_origin_resource_raw_retry_core(
         HlsOriginResourceRetryRun { target, clients, policy, identity },
+        classify_attempt,
         prepare_attempt,
         cleanup_attempt,
         |response, deadline| {
@@ -570,8 +615,9 @@ fn telemetry_object_key(
     clippy::too_many_lines,
     reason = "Keep one operation deadline around preparation, retries and commit, including test barriers."
 )]
-async fn run_hls_origin_resource_raw_retry_core<T, G, R, P, C, D, F>(
+async fn run_hls_origin_resource_raw_retry_core<T, G, R, P, C, D, F, A>(
     run: HlsOriginResourceRetryRun<'_>,
+    mut classify_attempt: A,
     mut prepare_attempt: P,
     mut cleanup_attempt: C,
     mut prepare_response: D,
@@ -590,6 +636,7 @@ where
         HlsOriginResourceBodyDeadline,
         G,
     ) -> BoxFuture<'static, Result<T, HlsOriginResourceFetchError>>,
+    A: FnMut(&HlsResourceFetchAttempt, &HlsOriginResourceFetchError) -> BoxFuture<'static, ()>,
 {
     let HlsOriginResourceRetryRun { target, clients, policy, identity } = run;
     let cancellation = if let Some(session) = clients.session.as_ref() {
@@ -619,7 +666,6 @@ where
         #[cfg(any(test, feature = "test-support"))]
         let mut retry_barrier: Option<std::sync::Arc<HlsResourceRetryBarrier>> = None;
         let attempts = policy.retry_delays_ms.len();
-        let mut previous_gateway_timeout = false;
         for attempt_index in 0..attempts {
             let delay_ms = policy.retry_delay_ms(attempt_index);
             if delay_ms > 0 {
@@ -633,13 +679,7 @@ where
             }
             let (target_duration, telemetry_input) = session_attempt_context(&clients, telemetry_key.is_some()).await;
             let timeout = policy.timeouts.snapshot(target.kind, target_duration);
-            let attempt = HlsResourceFetchAttempt {
-                attempt_index,
-                attempts,
-                timeout,
-                work: work.clone(),
-                previous_gateway_timeout,
-            };
+            let attempt = HlsResourceFetchAttempt { attempt_index, attempts, timeout, work: work.clone() };
             log_timeout_snapshot(timeout);
             log_hls_resource_attempt_started(identity, target.log_context(), &attempt);
             let attempt_started_at = Instant::now();
@@ -707,7 +747,10 @@ where
                     log_hls_resource_attempt_succeeded(identity, target.log_context(), attempt_started_at.elapsed());
                     return Ok(output);
                 }
-                Err(err) if err.aborts_without_retry() || attempt_index + 1 == attempts => {
+                Err(err) => {
+                    // Report the classified outcome before any backoff sleep or terminal return, so
+                    // evidence describes this attempt and never outlives it.
+                    classify_attempt(&attempt, &err).await;
                     if matches!(err, HlsOriginResourceFetchError::Timeout) {
                         log_hls_resource_timeout(
                             identity,
@@ -717,20 +760,9 @@ where
                             timeout_phase,
                         );
                     }
-                    log_hls_resource_fetch_failed(identity, target.log_context(), &attempt, err.log_status());
-                    return Err(err);
-                }
-                Err(err) => {
-                    previous_gateway_timeout =
-                        matches!(err, HlsOriginResourceFetchError::RetryableStatus(StatusCode::GATEWAY_TIMEOUT));
-                    if matches!(err, HlsOriginResourceFetchError::Timeout) {
-                        log_hls_resource_timeout(
-                            identity,
-                            target.log_context(),
-                            &attempt,
-                            u128::from(timeout.effective_ms),
-                            timeout_phase,
-                        );
+                    if err.aborts_without_retry() || attempt_index + 1 == attempts {
+                        log_hls_resource_fetch_failed(identity, target.log_context(), &attempt, err.log_status());
+                        return Err(err);
                     }
                     log_hls_resource_retry_scheduled(
                         identity,
@@ -981,7 +1013,6 @@ impl HlsResourceFetchLogStatus {
 
 #[derive(Debug, Clone)]
 pub struct HlsResourceFetchAttempt {
-    pub(crate) previous_gateway_timeout: bool,
     pub attempt_index: usize,
     pub attempts: usize,
     pub timeout: HlsOriginTimeoutSnapshot,
@@ -1252,7 +1283,6 @@ mod tests {
     #[test]
     fn resource_fetch_attempt_display_number_is_one_based_without_changing_raw_index() {
         let first = HlsResourceFetchAttempt {
-            previous_gateway_timeout: false,
             attempt_index: 0,
             attempts: 3,
             timeout: crate::HlsOriginTimeoutPolicy::default().snapshot(HlsResourceFetchKind::Segment, None),

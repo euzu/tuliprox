@@ -1,13 +1,16 @@
 use super::{
     build_hls_origin_resource_headers, commit_startup_response, ensure_segment_key_dependency_ready,
-    hls_object_body_deadline, reliable_decoded_content_length, run_hls_origin_resource_retry_loop_with_attempt_prepare,
-    CachedSegmentMetadata, HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
-    HlsOriginResourceFetchTarget, HlsRepairRenderedObjectId, HlsResourceFetchKind, HlsResourceFetchSource,
-    HlsSegmentRepairObjectContext, HlsSegmentRepairSource, SegmentFetchCommit, SegmentFetchContext, SegmentFetchError,
-    SegmentFetchPolicy, SegmentFetchSnapshot, SegmentOriginWorkFinish,
+    hls_object_body_deadline, reliable_decoded_content_length, CachedSegmentMetadata, HlsOriginByteRangeExpectation,
+    HlsOriginResourceBodyDeadline, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget,
+    HlsRepairRenderedObjectId, HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentRepairObjectContext,
+    HlsSegmentRepairSource, SegmentFetchCommit, SegmentFetchContext, SegmentFetchError, SegmentFetchPolicy,
+    SegmentFetchSnapshot, SegmentOriginWorkFinish,
 };
-use crate::origin_attempt::{prepare_media_origin_attempt, HlsMediaOriginAttemptGuard as SegmentOriginAttemptGuard};
-use axum::http::HeaderMap;
+use crate::{
+    origin_attempt::{prepare_media_origin_attempt, HlsMediaOriginAttemptGuard as SegmentOriginAttemptGuard},
+    resource_fetch::run_hls_origin_resource_retry_loop_with_attempt_classification,
+};
+use axum::http::{HeaderMap, StatusCode};
 use futures::FutureExt;
 use tuliprox_core::utils::content_coding::DecodedHttpResponse;
 use tuliprox_parser::hls::origin_manifest::ParsedByteRange;
@@ -137,35 +140,41 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
     let expected_generation = snapshot.origin_work_generation;
     let context = context.clone();
     let snapshot = std::sync::Arc::new(snapshot.clone());
+    let classify_context = context.clone();
+    let classify_snapshot = snapshot.clone();
     let prepare_context = context.clone();
-    let prepare_snapshot = snapshot.clone();
     let cleanup_context = context.clone();
-    run_hls_origin_resource_retry_loop_with_attempt_prepare(
+    run_hls_origin_resource_retry_loop_with_attempt_classification(
         target,
         clients,
         policy,
         &log_identity,
-        move |attempt| {
-            let context = prepare_context.clone();
-            let retry_snapshot = attempt.previous_gateway_timeout.then(|| prepare_snapshot.clone());
+        move |_attempt, error| {
+            let context = classify_context.clone();
+            let snapshot = classify_snapshot.clone();
+            // Evidence describes one attempt of one fetch reference. A later attempt overwrites it
+            // with its own outcome, so only a 504 leaves the flag set.
+            let gateway_timeout = attempt_is_gateway_timeout(error);
             async move {
-                if let Some(snapshot) = retry_snapshot {
-                    let mut state = context.session.write().await;
-                    if state.activity.origin_work_generation == expected_generation {
-                        if let Some(entry) = state
-                            .segments
-                            .get_mut(&snapshot.proxy_seq)
-                            .filter(|entry| super::segment_fetch_binding_matches(entry, &snapshot))
-                        {
-                            if let super::SegmentCacheStatus::Fetching { gateway_timeout, .. } = &mut entry.status {
-                                *gateway_timeout = true;
-                            }
-                        }
+                let mut state = context.session.write().await;
+                if state.activity.origin_work_generation != expected_generation {
+                    return;
+                }
+                if let Some(entry) = state
+                    .segments
+                    .get_mut(&snapshot.proxy_seq)
+                    .filter(|entry| super::segment_fetch_binding_matches(entry, &snapshot))
+                {
+                    if let super::SegmentCacheStatus::Fetching { gateway_timeout: recorded, .. } = &mut entry.status {
+                        *recorded = gateway_timeout;
                     }
                 }
-                prepare_segment_origin_attempt(context, attempt, expected_generation).await
             }
             .boxed()
+        },
+        move |attempt| {
+            let context = prepare_context.clone();
+            async move { prepare_segment_origin_attempt(context, attempt, expected_generation).await }.boxed()
         },
         move |guard| {
             let context = cleanup_context.clone();
@@ -193,6 +202,10 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
         },
     )
     .await
+}
+
+fn attempt_is_gateway_timeout(error: &HlsOriginResourceFetchError) -> bool {
+    matches!(error, HlsOriginResourceFetchError::RetryableStatus(StatusCode::GATEWAY_TIMEOUT))
 }
 
 async fn commit_segment_response_into_cache(

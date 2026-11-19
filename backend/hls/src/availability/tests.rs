@@ -215,6 +215,7 @@ mod policy;
 mod publication;
 
 mod late_custom_response;
+mod member_failover;
 mod recovery;
 
 mod storage;
