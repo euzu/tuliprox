@@ -1584,6 +1584,70 @@
 
 ## 🐛 Fixes
 
+- **Overlapping HLS segment fetches on an admitted account are no longer refused.** When the provider lease of an
+  admitted live HLS binding was not yet in its HLS start or confirmed state (for example right after a group member
+  switch), only the first segment operation got a work right. Its siblings failed at once with
+  `ProviderUnavailable(Unavailable)` and the viewer saw an unavailable slate or a 503. In that lease state, sibling
+  operations on the same admitted allocation now share the outstanding work horizon and cannot extend it, so they
+  hold no additional capacity on limited accounts. When no work right is outstanding, the next operation starts a new
+  horizon, and a sibling right that lapses during a fetch is renewed on the same binding. Foreign owners, stale binding
+  tags, expired normal reservations and deadlines in the past are still refused. A refusal after admission now logs
+  whether the binding tag was missing or the work right was denied.
+
+- **New HLS viewers start on two ready segments while the tail segment retries a gateway timeout.** When the third
+  segment of the entry window is being retried after an upstream HTTP 504 and the two preceding segments are ready,
+  the entry playlist offers the two-segment prefix instead of waiting for the retry. Active viewers keep their full
+  timeline. A manifest refresh that replaces the segment URL clears the timeout evidence of the old URL.
+
+- **Manifest recovery revisits the pinned primary endpoint of a `restart_from_first` provider.** After a full
+  observation burst on a mirror whose timeline did not qualify, the first reduced retry probes the pinned primary
+  endpoint once, within the existing deadlines. Nested provider failover is disabled for that probe. The probe and the
+  bound mirror request run concurrently: a slow or hung primary delays the mirror result by at most one retry
+  interval, and a discarded mirror error no longer ends the start attempt. If the primary fails or times out, even
+  with a permanent status such as HTTP 404, the same retry still uses the bound mirror result.
+
+- **New HLS viewers start after an expired origin head.** While the origin path is degraded, an entry window is admitted
+  when its contiguous ready media (the visible window plus the ready reserve segments behind it) exceeds the recovery
+  budget, for any origin window length and independent of why the previous segment is missing; startup admission
+  measures the degraded reserve from the start sequence the lease's first request uses and from the playback position of
+  a lease that resumes its playback. The reserve segments still missing for that budget are fetched at render-window
+  priority, unless one of them failed permanently. A missing middle segment, a stale revision or a key change still blocks
+  this start.
+
+- **First segment requests after a physical readmission share the accepted start window.** A new physical handle on a
+  live HLS account carries the remaining accepted startup reservation of the same binding, so overlapping first-media
+  operations are not refused locally. The reservation never outlives the original window.
+
+- **A returning viewer accepts an advancing origin window with changed segment bindings.** On an authorized readmission,
+  or on a new access with a stale entry window during the soft overlap interval, the pinned origin may commit a
+  separate timeline after the new media is fetched, hashed and checked for compatible tracks. Published revisions stay
+  available to existing readers. Ordinary refreshes, replayed payloads and incompatible tracks are still rejected.
+
+- **HLS cache inventory is collected in one blocking scan.** Counting committed revision files no longer issues one
+  asynchronous filesystem call per directory entry, and a cancelled scan discards its partial total.
+
+- **Legacy HLS group failover keeps the client timeline when the backup member answers with a master playlist.**
+  After a switch to a member that returns a master playlist, the first child media playlist now continues the client
+  media sequence after the last served segment and inserts `EXT-X-DISCONTINUITY`. Before, the client saw a jump of
+  thousands of sequence numbers and skipped the backup stream. Concurrent playlist requests of one legacy group session
+  no longer overwrite each other: the timeline is planned and stored in one locked step, a member switch publishes its
+  binding, timeline marker and switch accounting together, and a response from an older session snapshot is answered
+  with a retry instead of being served with a rewound or re-tagged media sequence.
+
+- **Group sessions switch member on the guaranteed playback reserve, not only on member health.** A cached HLS group
+  session now hands its bound member over when the guaranteed reserve of the controlling active viewer drops through
+  the startup window (three target durations, or the whole playlist if it is shorter), while the origin path is
+  degraded or after the reserve fell although the player kept playing. A viewer without a playback position, or without
+  a media request for three target durations, does not drive the switch, and no switch is requested while a member
+  handoff is running. The switch is requested before the player sees a previous-window 503. A local cache or capacity
+  bottleneck does not switch on its own. Sessions waiting for this instant hold no reevaluation task slot.
+
+- **Active HLS live window keeps advancing while the origin tail is slow.** The active playlist window no longer
+  requires the newest, not yet fetched origin segments. Trailing segments that cannot be rendered yet are left out and
+  stay requested until they can be rendered, so segments that already arrived are published. Before, a slow origin
+  froze the playlist until its validity expired and the player received HTTP 503 before a group failover could deliver
+  the backup member.
+
 - **Catchup resource retry preparation retains bounded work ownership.** Catchup preparation now acquires bounded
   retry work across attempts without provider reservation, preventing idle lifecycle handling from detaching the
   session between attempts.

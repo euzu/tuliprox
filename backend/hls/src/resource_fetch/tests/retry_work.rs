@@ -279,3 +279,207 @@ async fn catchup_resource_work_is_bounded_and_protected_before_account_preparati
     drop(work);
     assert_eq!(session.read().await.activity.active_origin_work_count.load(Ordering::Acquire), 0);
 }
+
+#[tokio::test]
+async fn unlimited_media_start_admits_four_overlapping_origin_operations() {
+    assert_four_overlapping_operations(0).await;
+}
+
+#[tokio::test]
+async fn limited_media_start_admits_four_overlapping_origin_operations() {
+    assert_four_overlapping_operations(1).await;
+}
+
+async fn bound_session_with_limit(
+    name: &str,
+    max_connections: u16,
+) -> (Arc<tokio::sync::RwLock<HlsSession>>, crate::origin::HlsOriginIoContext) {
+    let session = Arc::new(tokio::sync::RwLock::new(HlsSession::new(HlsSessionKey::new(1, name), b"fixture", 0)));
+    let (io, _) = crate::origin_attempt::tests::bound_origin_io(&session).await;
+    let mut sources = io.ctx.app_config.sources.load_full();
+    let inputs = &mut Arc::make_mut(&mut sources).inputs;
+    Arc::make_mut(&mut inputs[0]).max_connections = max_connections;
+    io.ctx.app_config.sources.store(sources);
+    io.ctx.active_provider.update_config(&io.ctx.app_config);
+    (session, io)
+}
+
+async fn assert_four_overlapping_operations(max_connections: u16) {
+    let (session, io) = bound_session_with_limit("parallel-media", max_connections).await;
+    let manager = &io.ctx.active_provider;
+    let generation = session.read().await.activity.origin_work_generation;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut operations = Vec::new();
+    for _ in 0..4 {
+        let work = HlsOriginRetryWork::begin(&session, Some(manager), deadline).await.unwrap();
+        let guard =
+            prepare_media_origin_attempt(Some(&io), &session, generation, Duration::from_secs(1)).await.unwrap();
+        let result = work.protect(manager, &session, generation, true).await;
+        operations.push((guard, work, result));
+    }
+    let admitted = operations.iter().filter(|(_, _, result)| result.is_ok()).count();
+    let denied = operations
+        .iter()
+        .filter(|(_, _, result)| {
+            matches!(result, Err(Error::ProviderUnavailable(crate::HlsBoundAccountAcquireErrorKind::Unavailable)))
+        })
+        .count();
+    assert_eq!((admitted, denied), (4, 0), "first segment wave after physical admission, limit {max_connections}");
+    for (guard, work, _) in operations {
+        guard.finish(&session).await;
+        drop(work);
+    }
+    assert_eq!(session.read().await.activity.active_origin_work_count.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn lapsed_sibling_right_is_renewed_on_the_same_binding() {
+    let (session, io) = bound_session_with_limit("lapsed-sibling", 1).await;
+    let manager = &io.ctx.active_provider;
+    let generation = session.read().await.activity.origin_work_generation;
+    let now = tokio::time::Instant::now();
+    let first = HlsOriginRetryWork::begin(&session, Some(manager), now + Duration::from_millis(150)).await.unwrap();
+    let guard = prepare_media_origin_attempt(Some(&io), &session, generation, Duration::from_secs(1)).await.unwrap();
+    first.protect(manager, &session, generation, true).await.unwrap();
+    let sibling = HlsOriginRetryWork::begin(&session, Some(manager), now + Duration::from_secs(10)).await.unwrap();
+    sibling.protect(manager, &session, generation, true).await.unwrap();
+    // The sibling right ends with the first operation's horizon; its own deadline is later.
+    tokio::time::advance(Duration::from_millis(250)).await;
+    drop(first);
+    assert!(sibling.protect(manager, &session, generation, true).await.is_ok(), "lapsed sibling right is renewed");
+    guard.finish(&session).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn lapsed_sibling_right_is_not_renewed_after_the_lease_expires() {
+    let (session, io) = bound_session_with_limit("lapsed-expired", 1).await;
+    let manager = &io.ctx.active_provider;
+    let generation = session.read().await.activity.origin_work_generation;
+    let now = tokio::time::Instant::now();
+    let first = HlsOriginRetryWork::begin(&session, Some(manager), now + Duration::from_millis(150)).await.unwrap();
+    let guard = prepare_media_origin_attempt(Some(&io), &session, generation, Duration::from_secs(1)).await.unwrap();
+    first.protect(manager, &session, generation, true).await.unwrap();
+    let sibling = HlsOriginRetryWork::begin(&session, Some(manager), now + Duration::from_secs(10)).await.unwrap();
+    sibling.protect(manager, &session, generation, true).await.unwrap();
+    tokio::time::advance(Duration::from_millis(250)).await;
+    drop(first);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let res = sibling.protect(manager, &session, generation, true).await;
+    assert!(
+        matches!(res, Err(Error::ProviderUnavailable(crate::HlsBoundAccountAcquireErrorKind::StoreRace))),
+        "an expired lease cannot be revived by a lapsed sibling right"
+    );
+    guard.finish(&session).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn finite_first_media_wave_after_physical_readmission_uses_only_accepted_start_window() {
+    // Each case is (label, anchor offset from the case start, wave start offset, and the reuse
+    // expectation after each advance). The accepted window of a 6 s target duration is 19 s.
+    for (label, anchor_offset_ms, wave_start_ms, checks, starting_after_deadline) in [
+        ("live", 0_i64, 0_u64, &[(0_u64, true), (10_001, true), (9_000, false)][..], 0),
+        ("expired", -60_000, 0, &[(0, false), (1_000, false)][..], 1),
+        ("late-in-window", 0, 18_500, &[(0, true), (501, false)][..], 0),
+    ] {
+        let session = Arc::new(tokio::sync::RwLock::new(HlsSession::new(
+            HlsSessionKey::new(1, "readmitted-wave"),
+            b"fixture",
+            0,
+        )));
+        let (io, _) = crate::origin_attempt::tests::bound_origin_io(&session).await;
+        // The accepted window is expressed in wall-clock milliseconds while the provider lease
+        // runs on tokio time. Anchor the scheduling clock to the paused tokio clock before
+        // reading it, so one `advance` moves both and the two clocks cannot drift apart.
+        let start_ms = io.ctx.hls_proxy.now_ms();
+        io.ctx.hls_proxy.follow_tokio_clock_for_test(start_ms);
+        assert_eq!(io.ctx.hls_proxy.now_ms(), start_ms, "{label}: the scheduling clock follows tokio");
+        let anchor = start_ms.saturating_add_signed(anchor_offset_ms);
+        let reservation_deadline_ms = {
+            let mut state = session.write().await;
+            state.target_duration = Some(6);
+            let timing = state.account_overlap_timing();
+            let protection = crate::origin::HlsOriginStartProtection { anchored_at_ms: anchor, timing };
+            let binding = state.origin_account_binding.as_mut().unwrap();
+            binding.pinned_at_ms = anchor.saturating_sub(1_370);
+            binding.startup_protection = Some(protection);
+            protection.reservation_deadline_ms()
+        };
+        if wave_start_ms > 0 {
+            tokio::time::advance(Duration::from_millis(wave_start_ms)).await;
+        }
+        let manager = &io.ctx.active_provider;
+        let generation = session.read().await.activity.origin_work_generation;
+        let work_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut operations = Vec::new();
+        for _ in 0..4 {
+            let work = HlsOriginRetryWork::begin(&session, Some(manager), work_deadline).await.unwrap();
+            let guard =
+                prepare_media_origin_attempt(Some(&io), &session, generation, Duration::from_secs(1)).await.unwrap();
+            let admitted = work.protect(manager, &session, generation, true).await.is_ok();
+            operations.push((guard, work, admitted));
+        }
+        let admitted_count = operations.iter().filter(|(_, _, admitted)| *admitted).count();
+        // Inside the accepted window the readmitted handle carries a start reservation. Outside
+        // it, siblings on the admitted allocation still share the first operation's work horizon.
+        assert_eq!(admitted_count, 4, "{label}");
+        assert_eq!(manager.get_provider_connections_count(), 1, "{label}: four segment reads share one physical slot");
+        for (guard, work, _) in operations {
+            guard.finish(&session).await;
+            drop(work);
+        }
+        // The physical slot and every work right are released by cleanup, so the only remaining
+        // carrier of a capacity reservation can be the readmitted allocation's provider lease.
+        // No media was confirmed, so a plain `Starting` lease reserves nothing.
+        assert_eq!(manager.get_provider_connections_count(), 0, "{label}: every physical slot is released");
+        assert_eq!(
+            session.read().await.activity.active_origin_work_count.load(Ordering::Acquire),
+            0,
+            "{label}: every work object is gone"
+        );
+        let state = session.read().await;
+        let binding = state.origin_account_binding.as_ref().expect("readmitted binding");
+        let usage = manager.provider_lease_usage(&binding.account_name);
+        assert_eq!(usage.starting, 1, "{label}: the readmitted allocation keeps its lease");
+        assert_eq!((usage.active, usage.idle), (0, 0), "{label}: no media confirmed the lease");
+        assert!(binding.provider_binding_tag.is_some(), "{label}: the readmitted allocation carries a start tag");
+        assert_eq!(
+            manager.binding_tag_for_owner(&binding.session_owner),
+            binding.provider_binding_tag,
+            "{label}: the start reservation is tagged for the readmitted allocation"
+        );
+        let owner = binding.session_owner.clone();
+        let account = Arc::clone(&binding.account_name);
+        drop(state);
+        for (advance_ms, expected_reuse) in checks {
+            if *advance_ms > 0 {
+                tokio::time::advance(Duration::from_millis(*advance_ms)).await;
+            }
+            let now_ms = io.ctx.hls_proxy.now_ms();
+            assert_eq!(
+                manager.should_reuse_playback_provider(&owner, &account),
+                *expected_reuse,
+                "{label}: reuse {} ms after the anchor, deadline {} ms",
+                now_ms.saturating_sub(anchor),
+                reservation_deadline_ms.saturating_sub(anchor)
+            );
+        }
+        // The start reservation keeps its original deadline: a fresh full window (or a leaked
+        // work right on the unexpired horizon) would still reserve capacity here.
+        let now_ms = io.ctx.hls_proxy.now_ms();
+        assert!(
+            now_ms > reservation_deadline_ms,
+            "{label}: the final check runs past the original accepted-window deadline"
+        );
+        // A start reservation ends with its own deadline. An expired anchor keeps only the plain
+        // `Starting` lease of the allocation, which reserves no capacity.
+        assert_eq!(
+            manager.provider_lease_usage(&account).starting,
+            starting_after_deadline,
+            "{label}: the start reservation ends at the original deadline"
+        );
+        assert!(
+            !manager.should_reuse_playback_provider(&owner, &account),
+            "{label}: the original deadline is kept, not restarted"
+        );
+    }
+}

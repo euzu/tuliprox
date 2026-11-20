@@ -850,8 +850,14 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
             };
             if let Some((materialized, snapshot, published_resource_ids, delivered_at_ms)) = prepared {
                 if lease.uses_entry_view()
-                    && !hls_startup_admission_allows_snapshot(&app_state.hls_ctx(), session, &snapshot, delivered_at_ms)
-                        .await
+                    && !hls_startup_admission_allows_snapshot(
+                        &app_state.hls_ctx(),
+                        session,
+                        &snapshot,
+                        &lease.playback_cursor,
+                        delivered_at_ms,
+                    )
+                    .await
                 {
                     log_hls_manifest_wait_transition(
                         &mut last_wait_reason,

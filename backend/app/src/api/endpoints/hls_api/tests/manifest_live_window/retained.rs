@@ -581,3 +581,50 @@ async fn live_window_retained_deadline_is_rechecked_after_lock_acquisition() {
         Outcome::Rejected(Reject::ManifestGenerationUnavailable),
     );
 }
+
+#[tokio::test]
+async fn live_window_republishes_a_renderable_window_instead_of_an_expiring_retained_snapshot() {
+    for mode in MODES {
+        let fixture = Fixture::new(mode).await;
+        // The origin slides by three sequences: 3..=5 stay advertised and stay renderable,
+        // 6..=8 are new and unfetched.
+        fixture.session.write().await.apply_origin_manifest(&origin(3, 6, &[4])).unwrap();
+        // The retained publication is past its own deadline, so the fallback cannot serve it.
+        let mut lease = fixture.lease().await;
+        let previous = lease.last_manifest_snapshot.as_mut().unwrap();
+        previous.delivered_at_ms = current_time_millis() - previous.playlist_duration_ms - 1;
+        let expired = previous.clone();
+        fixture.manager.prepare_access_lease(lease).await;
+        let response = fixture.request(HlsCachedManifestOptions::initial(Duration::ZERO)).await;
+        assert_eq!(response.status(), StatusCode::OK, "{mode}: the renderable window is republished");
+        assert_eq!(response_body(response).await, fixture.body, "{mode}");
+        let published = fixture.lease().await.last_manifest_snapshot.unwrap();
+        assert_eq!(
+            published.visible_proxy_seqs().collect::<Vec<_>>(),
+            vec![3, 4, 5],
+            "{mode}: the unready successors are not published"
+        );
+        assert!(published.delivered_at_ms > expired.delivered_at_ms, "{mode}: the window has a fresh validity");
+        assert!(
+            current_time_millis() <= published.delivered_at_ms.saturating_add(published.playlist_duration_ms),
+            "{mode}: the republished window is still valid"
+        );
+    }
+}
+
+#[tokio::test]
+async fn live_window_publishes_ready_successors_while_the_origin_tail_is_unfetched() {
+    for mode in MODES {
+        let fixture = Fixture::new(mode).await;
+        fixture.advance().await;
+        // Two successors arrived; the newer origin tail is still unfetched (slow origin).
+        prepare_revisions(&mut *fixture.session.write().await, &[6, 7]);
+        let response = fixture.request(HlsCachedManifestOptions::initial(Duration::ZERO)).await;
+        assert_eq!(response.status(), StatusCode::OK, "{mode}");
+        let body = String::from_utf8(response_body(response).await.to_vec()).unwrap();
+        assert!(body.contains("000007.ts"), "{mode}: ready successors are published: {body}");
+        assert!(!body.contains("000008.ts"), "{mode}: the unfetched tail is not published: {body}");
+        let published = fixture.lease().await.last_manifest_snapshot.unwrap();
+        assert!(published.visible_proxy_seqs().any(|seq| seq == 7), "{mode}");
+    }
+}

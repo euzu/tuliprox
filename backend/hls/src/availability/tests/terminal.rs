@@ -39,7 +39,7 @@ fn autonomous_terminal_live_allowed_means_no_cutover_is_required() {
 }
 
 #[test]
-fn live_reserve_wake_is_at_exhaustion_without_an_immediate_margin_loop() {
+fn live_reserve_wake_is_the_earlier_of_the_member_failover_window_and_exhaustion() {
     let now_ms = 1_000;
     let mut reserve = terminal_pending_commit_reserve();
     reserve.guaranteed_reserve_ms = reserve.guaranteed_reserve_ms.saturating_add(5_000);
@@ -47,9 +47,26 @@ fn live_reserve_wake_is_at_exhaustion_without_an_immediate_margin_loop() {
     let cutover_timing =
         HlsLeaseCutoverTiming::from_reserve(now_ms, reserve.guaranteed_reserve_ms, reserve.transition_margin, None);
 
-    let deadline = live_reserve_deadline(now_ms, reserve, cutover_timing).expect("future acquisition wake");
+    // The member switch is requested when the reserve reaches the startup window, two seconds of
+    // ready media before the lease is exhausted.
+    let member_failover_target_ms = reserve.guaranteed_reserve_ms.saturating_sub(2_000);
+    let deadline = live_reserve_deadline(now_ms, reserve, cutover_timing, Some(member_failover_target_ms))
+        .expect("future acquisition wake");
+    assert_eq!(deadline.next_reevaluation_at_ms, now_ms.saturating_add(2_000));
+    assert_eq!(deadline.latest_safe_terminal_commit_at_ms, now_ms.saturating_add(5_000));
+
+    // A reserve at or below the target has already crossed the member trigger. The evaluation
+    // requests the switch itself, so the owner waits for exhaustion instead of polling the due
+    // trigger: never a wake instant of its own for a trigger that cannot ripen again.
+    let deadline = live_reserve_deadline(now_ms, reserve, cutover_timing, Some(reserve.guaranteed_reserve_ms))
+        .expect("future acquisition wake");
     assert_eq!(deadline.next_reevaluation_at_ms, now_ms.saturating_add(5_000));
     assert_eq!(deadline.next_reevaluation_at_ms, deadline.latest_safe_terminal_commit_at_ms);
+
+    // A session without a member watch keeps the exhaustion wake at every reserve: its member
+    // trigger has no consumer, so it must not shorten the deadline at all.
+    let deadline = live_reserve_deadline(now_ms, reserve, cutover_timing, None).expect("future acquisition wake");
+    assert_eq!(deadline.next_reevaluation_at_ms, now_ms.saturating_add(5_000));
 }
 
 #[tokio::test]
@@ -620,12 +637,34 @@ async fn post_refresh_terminal_commits_without_runtime() {
 }
 
 #[tokio::test]
-async fn post_refresh_terminal_defers_and_notifies_terminal_pending_when_policy_present() {
+async fn post_refresh_terminal_defers_and_notifies_reserve_pressure_when_policy_present() {
     let fixture = post_refresh_terminal_fixture("post-refresh-defer-terminal-pending", true).await;
     let runtime = crate::member_health::test_support::RecordingMemberRuntime::new(Some(
         crate::member_health::test_support::RecordingMemberRuntime::default_policy(),
     ));
     fixture.session.write().await.origin_account_runtime = Some(runtime.clone());
+    // The fixture backdates the playback clock by the whole consumed window. A live player keeps
+    // requesting media while it consumes, so record one current request on the same playback clock:
+    // this lease is in reserve pressure, not paused.
+    let identity = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, fixture.now_ms)
+        .await
+        .and_then(|lease| lease.media_identity())
+        .expect("live fixture lease identity");
+    assert!(fixture
+        .ctx
+        .hls_proxy
+        .record_access_lease_segment_request_started_if_identity_matches(
+            &fixture.lease_id,
+            &fixture.proxy_session_id,
+            identity,
+            1,
+            fixture.now_ms,
+        )
+        .await
+        .is_some());
 
     let owner_key = fixture
         .ctx
@@ -639,7 +678,8 @@ async fn post_refresh_terminal_defers_and_notifies_terminal_pending_when_policy_
     );
     let mut cycle = HlsAvailabilityReevaluationCycle::new(fixture.now_ms);
 
-    // 1. Initial evaluation: policy present, no pending handoff -> records TerminalPending notice and defers
+    // 1. Initial evaluation: policy present, no pending handoff, reserve exhausted -> records the
+    // ReservePressure notice and defers the terminal commit
     let decision = evaluate_post_refresh_terminal_attempt(
         &fixture.ctx,
         &fixture.session,
@@ -656,7 +696,7 @@ async fn post_refresh_terminal_defers_and_notifies_terminal_pending_when_policy_
     assert_eq!(decision, HlsTerminalReevaluationDecision::Continue { terminal_evaluation_pending: true });
     assert!(cycle.retain_post_refresh_owner);
     assert_eq!(cycle.handoff_defer_until_ms, Some(fixture.now_ms + HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS));
-    assert_eq!(runtime.reasons(), vec![crate::origin_account_runtime::HlsMemberUnhealthyReason::TerminalPending]);
+    assert_eq!(runtime.reasons(), vec![crate::origin_account_runtime::HlsMemberUnhealthyReason::ReservePressure]);
 
     // 2. Next evaluation after runtime reports pending=false (it already does) commits terminal; no second notice
     let past_ms = fixture.now_ms + 1_000;
@@ -674,7 +714,7 @@ async fn post_refresh_terminal_defers_and_notifies_terminal_pending_when_policy_
     .await;
 
     assert_eq!(decision, HlsTerminalReevaluationDecision::Stop);
-    assert_eq!(runtime.reasons(), vec![crate::origin_account_runtime::HlsMemberUnhealthyReason::TerminalPending]);
+    assert_eq!(runtime.reasons(), vec![crate::origin_account_runtime::HlsMemberUnhealthyReason::ReservePressure]);
     let lease = fixture
         .ctx
         .hls_proxy

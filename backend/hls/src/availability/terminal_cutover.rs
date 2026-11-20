@@ -6,7 +6,10 @@
 //! against a configured asset rather than a recorded one.
 
 use super::{
-    recovery_pressure::{hls_recovery_pressure_policy, recovery_trigger_budget},
+    recovery_pressure::{
+        hls_recovery_pressure_policy, lease_paused_for_member_failover, member_failover_required,
+        recovery_trigger_budget,
+    },
     terminal_pending_owner::{
         commit_terminal_unavailable, register_ready_terminal_pending_owner, register_terminal_pending_owner,
         terminal_asset_revision_guard, terminal_resolution_with_failed_closed_fallback,
@@ -18,9 +21,10 @@ use crate::{
     lease::{HlsAccessLease, HlsTerminalTailPreparation},
     manager::{HlsTerminalCommitPayload, HlsTerminalCommitRequest, HlsTerminalTailPreparationRequest},
     media_reserve::{
-        evaluate_lease_reserve, HlsLeaseManifestSnapshot, HlsLeaseReserveInput, HlsLeaseReserveSnapshot,
-        HlsReadyTimelineSnapshot,
+        evaluate_lease_reserve, minimum_hls_startup_window_ms, HlsLeaseManifestSnapshot, HlsLeaseReserveInput,
+        HlsLeaseReserveSnapshot, HlsReadyTimelineSnapshot,
     },
+    member_health::HlsMemberReserveSample,
     origin_progress::{
         evaluate_origin_progress, publication_late_after_ms, HlsOriginPathCondition, HlsOriginProgressDecision,
         HlsOriginProgressPhase, HlsOriginProgressSnapshot,
@@ -63,6 +67,10 @@ struct HlsLeaseCutoverStateSnapshot {
     target_duration_ms: u64,
     session_target_duration: Option<u32>,
     observed_latency: HlsObservedRecoveryLatency,
+    /// Previous reserve sample of this lease, read from the session member-health evidence.
+    previous_member_reserve: Option<HlsMemberReserveSample>,
+    /// The session can hand its bound member over, so a reserve trigger has a consumer.
+    member_failover_watch: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -73,6 +81,10 @@ struct HlsLeaseTerminalCutoverEvaluation {
     safe_deadline: Option<HlsLiveReserveDeadline>,
     commit_window: HlsTerminalCommitWindow,
     progress_decision: HlsOriginProgressDecision,
+    /// R3: the lease has a measured playback position and did not pause.
+    member_failover_eligible: bool,
+    /// R1/R2: this lease requires the member switch now.
+    member_failover_required: bool,
 }
 
 struct HlsLeaseTerminalDecisionContext<'a> {
@@ -133,9 +145,29 @@ fn evaluate_lease_terminal_cutover(
         origin_path_degraded,
         recovery_committed: false,
     });
+    let member_failover_target_ms =
+        minimum_hls_startup_window_ms(manifest.target_duration_ms, manifest.playlist_duration_ms);
+    let member_failover_eligible = reserve.playback_position_known
+        && !lease_paused_for_member_failover(&lease.playback_cursor, manifest.target_duration_ms, now_ms);
+    let member_failover = state.member_failover_watch
+        && member_failover_eligible
+        && member_failover_required(
+            reserve,
+            member_failover_target_ms,
+            origin_path_degraded,
+            state.capacity_recovery_blocks_ready_timeline,
+            state.previous_member_reserve,
+            now_ms,
+            manifest.target_duration_ms,
+        );
     let cutover_timing =
         HlsLeaseCutoverTiming::from_reserve(now_ms, reserve.guaranteed_reserve_ms, reserve.transition_margin, None);
-    let mut safe_deadline = live_reserve_deadline(now_ms, reserve, cutover_timing);
+    let mut safe_deadline = live_reserve_deadline(
+        now_ms,
+        reserve,
+        cutover_timing,
+        state.member_failover_watch.then_some(member_failover_target_ms),
+    );
     if let Some(deadline) = &mut safe_deadline {
         let recovery_delta = reserve
             .guaranteed_reserve_ms
@@ -187,14 +219,59 @@ fn evaluate_lease_terminal_cutover(
         safe_deadline,
         commit_window,
         progress_decision,
+        member_failover_eligible,
+        member_failover_required: member_failover,
     }
+}
+
+/// R3: the eligible active lease with the smallest guaranteed reserve decides the member switch.
+///
+/// `Some` when that controlling lease also requires the switch under the hybrid gate. Read-only: it
+/// commits no terminal decision and records no reserve evidence, so the reevaluation worker can ask
+/// before it decides the terminal outcome of the session.
+pub(super) async fn member_failover_controlling_lease(
+    ctx: &HlsCtx,
+    session: &HlsSessionHandle,
+    proxy_session_id: &ProxySessionId,
+    now_ms: u64,
+) -> Option<HlsAccessLeaseId> {
+    let mut controlling: Option<(u64, HlsAccessLeaseId, bool)> = None;
+    for lease in ctx.hls_proxy.terminal_playback_snapshots_for_session(proxy_session_id, now_ms).await {
+        if lease.playback_mode != crate::terminal_tail::HlsLeasePlaybackMode::Live {
+            continue;
+        }
+        let Some(manifest) = lease.last_manifest_snapshot.as_ref() else { continue };
+        let state = snapshot_lease_cutover_state(session, &lease, manifest, now_ms).await;
+        let evaluation = evaluate_lease_terminal_cutover(ctx, &lease, manifest, &state, now_ms);
+        if !evaluation.member_failover_eligible {
+            continue;
+        }
+        let reserve_ms = evaluation.reserve.guaranteed_reserve_ms;
+        let replaces = controlling.as_ref().is_none_or(|(current_reserve_ms, current_lease_id, _)| {
+            (reserve_ms, lease.lease_id.0.as_str()) < (*current_reserve_ms, current_lease_id.0.as_str())
+        });
+        if replaces {
+            controlling = Some((reserve_ms, lease.lease_id.clone(), evaluation.member_failover_required));
+        }
+    }
+    controlling.and_then(|(_, lease_id, required)| required.then_some(lease_id))
 }
 
 fn resolve_terminal_cutover_before_commit_window(
     context: &HlsLeaseTerminalDecisionContext<'_>,
 ) -> HlsDetailedTerminalResolution {
     if !context.evaluation.origin_path_degraded {
-        return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::LiveAllowed);
+        // Without origin evidence the lease still plays. A group session that can switch member
+        // keeps the reserve deadline: the switch must be requested while the published window is
+        // still valid, and the wake instant is the reserve trigger, not a poll.
+        return if context.state.member_failover_watch {
+            HlsDetailedTerminalResolution::with_deadline(
+                HlsTerminalResolution::LiveAllowed,
+                context.evaluation.safe_deadline,
+            )
+        } else {
+            HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::LiveAllowed)
+        };
     }
     let Some(live_reserve_deadline) = context.evaluation.safe_deadline else {
         return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::LiveAllowed);
@@ -352,6 +429,9 @@ async fn snapshot_lease_cutover_state(
         now_ms,
     );
     let capacity_recovery_blocks_ready_timeline = session.capacity_recovery_blocks_ready_timeline(&ready_timeline);
+    let previous_member_reserve = session.member_health.member_reserve_previous(lease);
+    let member_failover_watch =
+        session.origin_account_runtime.as_ref().is_some_and(|runtime| runtime.member_health_policy(&session).is_some());
     HlsLeaseCutoverStateSnapshot {
         ready_timeline,
         capacity_recovery_blocks_ready_timeline,
@@ -368,6 +448,8 @@ async fn snapshot_lease_cutover_state(
             .unwrap_or(manifest.target_duration_ms),
         session_target_duration: session.target_duration,
         observed_latency: session.origin_control.recovery_samples.latency_snapshot(),
+        previous_member_reserve,
+        member_failover_watch,
     }
 }
 

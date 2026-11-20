@@ -24,6 +24,17 @@ use tuliprox_repository::{
 };
 use tuliprox_session::{failover_group::CircuitView, MemberBinding};
 
+fn korath_ts_fixture() -> Vec<u8> {
+    let mut data = vec![0u8; 188 * 4];
+    for i in 0..4 {
+        data[i * 188] = 0x47;
+        data[i * 188 + 1] = 0x1f;
+        data[i * 188 + 2] = 0xff;
+        data[i * 188 + 3] = 0x10;
+    }
+    data
+}
+
 /// Extracts the proxy session id from the canonical media playlist URI of a single-variant master.
 fn proxy_session_id_from_master(master: &str) -> String {
     const MARKER: &str = "/hls/shared/live/";
@@ -817,6 +828,59 @@ async fn member_handoff_moves_group_session_to_next_member() {
         first_proxy,
         "the client must keep its proxy session id"
     );
+}
+
+/// R1-R4 wiring: a reserve-pressure notice reaches the app-owned member handoff, the session moves
+/// to the next member, and the client keeps being served instead of seeing a temporary failure.
+#[tokio::test]
+async fn reserve_pressure_hands_the_group_session_over_and_keeps_the_published_window() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .with_failover(fast_failover())
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .build()
+        .await;
+
+    let first_master = env.get_hls_manifest_text(env.group_vid).await;
+    let first_proxy = proxy_session_id_from_master(&first_master);
+    let variant_uri = first_segment_url(&first_master);
+    for _ in 0..3 {
+        poll_and_fetch_segments(&env, &variant_uri).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    let runtime = session.read().await.origin_account_runtime.clone().expect("origin runtime");
+
+    runtime.notify_member_unhealthy(&session, HlsMemberUnhealthyReason::ReservePressure);
+    wait_for_bound_member(&session, "korath").await;
+    wait_for_member_handoff_idle(&runtime).await;
+
+    assert_eq!(
+        proxy_session_id_from_master(&env.get_hls_manifest_text(env.group_vid).await),
+        first_proxy,
+        "the client keeps its proxy session id across the switch"
+    );
+    // The client never ends up on the terminal tail: the playlist is served again from the new
+    // member as soon as its window is published.
+    let mut served = None;
+    for _ in 0..40 {
+        if let Some(manifest) = poll_tolerant(&env, &variant_uri).await {
+            served = Some(manifest);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let served = served.expect("the playlist is served again after the member switch");
+    let segments = manifest_segments(&served);
+    assert!(!segments.is_empty(), "the playlist lists segments");
+    let (segment_uri, _) = &segments[0];
+    let segment = env.get(segment_uri).await;
+    assert_eq!(segment.status(), StatusCode::OK, "segment request must succeed");
+    let bytes = axum::body::to_bytes(segment.into_body(), 1024 * 1024).await.expect("segment body");
+    assert_eq!(bytes, korath_ts_fixture(), "the served segment must match the Korath origin content");
 }
 
 #[tokio::test]
@@ -1941,6 +2005,125 @@ async fn manifest_success_with_rebound_session_does_not_commit_stale_failover_st
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "One A->B->A interleaving with its fence assertions.")]
+async fn same_provider_member_switch_away_and_back_rejects_a_pre_switch_manifest_snapshot() {
+    let env = GroupPlaybackEnv::builder(&["solis"]).hls().m3u("solis").build().await;
+    let user = env.app_state.app_config.get_user_credentials("viewer").expect("test user");
+    let solis_input = env.app_state.app_config.get_input_by_name(&"solis".intern()).expect("solis input");
+    let origin = env.origins.get("solis").expect("solis origin").addr;
+    let addr: SocketAddr = "127.0.0.1:12345".parse().expect("addr");
+    let fingerprint = Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+    let token = "same-provider-member-aba";
+
+    env.app_state
+        .active_users
+        .create_user_session(CreateUserSessionParams {
+            user: &user,
+            session_token: token,
+            virtual_id: env.group_vid,
+            provider: &solis_input.name,
+            stream_url: &format!("http://{origin}/live/101"),
+            addr: &addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    // Both members run on the same provider account, so the provider never changes and only the
+    // member binding can separate the two views of the session.
+    let binding_a = MemberBinding {
+        group_vid: env.group_vid,
+        member_vid: env.group_record.members[0].member_vid.get(),
+        member_index: 0,
+        input_name: Arc::clone(&solis_input.name),
+        member_title: "Solis".intern(),
+        provider: Arc::clone(&solis_input.name),
+    };
+    env.app_state.active_users.bind_member(&user.username, token, binding_a.clone()).await;
+    let session_snapshot =
+        env.app_state.active_users.get_and_update_user_session(&user.username, token).await.expect("session");
+
+    let binding_b = MemberBinding { member_vid: 999_999, member_index: 1, ..binding_a.clone() };
+    let after_switch = env
+        .app_state
+        .active_users
+        .switch_legacy_group_member_binding(
+            &user.username,
+            token,
+            session_snapshot.identity(),
+            session_snapshot.member_binding.as_ref().expect("binding"),
+            binding_b.clone(),
+            Arc::from(format!("http://{origin}/live/999")),
+            |_| {},
+        )
+        .await
+        .expect("the switch away publishes the session");
+    env.app_state
+        .active_users
+        .switch_legacy_group_member_binding(
+            &user.username,
+            token,
+            after_switch,
+            &binding_b,
+            binding_a.clone(),
+            Arc::from(format!("http://{origin}/live/101")),
+            |_| {},
+        )
+        .await
+        .expect("the switch back publishes the session");
+    // The stored member binding equals the snapshot's again; only the session identity records the
+    // two switches in between.
+    let stored = env.app_state.active_users.get_and_update_user_session(&user.username, token).await.expect("session");
+    assert_eq!(stored.member_binding, Some(binding_a.clone()));
+
+    let source = super::super::resolve_hls_virtual_source_for_target(&env.app_state, &env.target, env.group_vid)
+        .await
+        .expect("group stream context");
+    let response = super::super::handle_hls_stream_request(
+        &fingerprint,
+        &env.app_state,
+        &user,
+        &env.target,
+        Some(&session_snapshot),
+        None,
+        &session_snapshot.stream_url,
+        None,
+        source.stream_context,
+        &solis_input,
+        &HeaderMap::new(),
+        UserConnectionPermission::Allowed,
+        Some(ConnectionKind::Normal),
+        "/live/viewer/secret/1.m3u8",
+        super::super::HlsRequestStage::LegacyVariant,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a manifest snapshot from before the member switches must answer the retry path"
+    );
+    assert_ne!(
+        stored.identity(),
+        session_snapshot.identity(),
+        "the switches must be visible in the session identity even though the member binding is the same again"
+    );
+    let rebase = env
+        .app_state
+        .active_users
+        .get_and_update_user_session(&user.username, token)
+        .await
+        .expect("session")
+        .legacy_rebase;
+    assert_eq!(
+        rebase.map(|rebase| rebase.pending_member_rebase),
+        Some(true),
+        "the stale manifest must not consume the pending member rebase"
+    );
+}
+
+#[tokio::test]
 async fn legacy_switch_in_flight_loser_does_not_terminate_session() {
     let faults = OriginFaults::default();
     let env = GroupPlaybackEnv::builder(&["solis", "korath"])
@@ -2017,10 +2200,20 @@ async fn legacy_switch_retry_same_bypasses_session_termination() {
     budget.on_data(std::time::Instant::now());
 
     let user_session = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.unwrap();
-    env.app_state
+    let identity = user_session.identity();
+    let binding = user_session.member_binding.clone().expect("the served group member is bound");
+    let rebase = user_session.legacy_rebase;
+    let seeded = env
+        .app_state
         .active_users
-        .replace_legacy_failover_state("viewer", &token, user_session.legacy_rebase.clone(), Some(budget), false)
+        .update_legacy_failover_state_if_bound("viewer", &token, identity, &binding, |state, budget_slot| {
+            if let Some(rebase) = rebase {
+                *state = rebase;
+            }
+            *budget_slot = Some(budget);
+        })
         .await;
+    assert_eq!(seeded, Some(()), "the failover budget seed must commit onto the bound session");
 
     faults.fail_manifests(500);
 
@@ -2029,6 +2222,145 @@ async fn legacy_switch_retry_same_bypasses_session_termination() {
 
     let remaining_vids = env.active_session_vids("viewer").await;
     assert_eq!(remaining_vids.len(), 1, "session must remain active on retry_same");
+}
+
+#[tokio::test]
+async fn legacy_retry_same_serve_clears_segment_failure_so_next_poll_does_not_switch() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().m3u("solis").m3u("korath").build().await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    let token = session_token_from_variant(&env, &variant_uri);
+
+    let session = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.expect("session");
+    let binding = session.member_binding.clone().expect("the served group member is bound");
+    assert_eq!(env.bound_member_input("viewer").await, binding.input_name.as_ref());
+
+    // The member played long enough to deserve one same-member retry before it failed.
+    let failover = FailoverGroupRuntimeConfig { same_source_retries: 1, stable_after_secs: 30, ..Default::default() };
+    let mut budget = tuliprox_session::failover_group::FailoverBudget::new(&failover);
+    budget.on_data(
+        std::time::Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(std::time::Instant::now),
+    );
+    let seeded = env
+        .app_state
+        .active_users
+        .update_legacy_failover_state_if_bound("viewer", &token, session.identity(), &binding, |_, slot| {
+            *slot = Some(budget);
+        })
+        .await;
+    assert_eq!(seeded, Some(()), "the failover budget seed must commit onto the bound session");
+    assert!(
+        env.app_state.active_users.mark_member_failed_on_segment("viewer", &token, session.identity(), &binding).await,
+        "the failed segment marks the bound member"
+    );
+
+    // The poll decides `RetrySame` and serves the same member's media window.
+    let korath_hits = env.origin_hits("korath");
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK, "the retry must serve the same member");
+    let after_retry = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.expect("session");
+    assert!(!after_retry.member_failed_on_segment, "a served window clears the segment failure");
+    assert_eq!(after_retry.member_binding, Some(binding.clone()));
+
+    // The follow-up poll must not switch away from the member that served.
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    assert_eq!(env.bound_member_input("viewer").await, binding.input_name.as_ref(), "a serving member stays bound");
+    assert_eq!(env.origin_hits("korath"), korath_hits, "the follow-up poll must not probe another member");
+}
+
+async fn spawn_mock_empty_window_origin(
+) -> (SocketAddr, tokio::task::JoinHandle<()>, Arc<std::sync::atomic::AtomicBool>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("address");
+    let serve_empty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let serve_empty_clone = Arc::clone(&serve_empty);
+    let task = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut socket, _)) = listener.accept().await else { break };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let mut buf = [0u8; 1024];
+                let Ok(n) = socket.read(&mut buf).await else { break };
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
+            let is_empty = serve_empty_clone.load(std::sync::atomic::Ordering::Acquire);
+            let body = if is_empty {
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:1\n".to_string()
+            } else {
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:10.0,\nseg1.ts\n#EXTINF:10.0,\nseg2.ts\n".to_string()
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (addr, task, serve_empty)
+}
+
+#[tokio::test]
+async fn empty_media_window_serve_does_not_clear_segment_failure_so_next_poll_switches() {
+    let (addr, _task, serve_empty) = spawn_mock_empty_window_origin().await;
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().m3u("solis").m3u("korath").build().await;
+
+    let target_path =
+        crate::repository::get_target_storage_path(&env.app_state.app_config.config.load(), &env.target.name)
+            .expect("target storage path");
+    let mut group = (*env.group_record).clone();
+    group.members[0].url = Arc::from(format!("http://{addr}/playlist.m3u8"));
+    tuliprox_repository::FailoverGroupStore::write(&target_path, &[group], &[], None)
+        .expect("write group with mock url");
+    env.app_state.playlists.bump_failover_group_generation(&env.target.name);
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    let token = session_token_from_variant(&env, &variant_uri);
+
+    let session = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.expect("session");
+    let binding = session.member_binding.clone().expect("bound member");
+    assert_eq!(env.bound_member_input("viewer").await, "solis");
+
+    // The member has a same-member retry allowance
+    let failover = FailoverGroupRuntimeConfig { same_source_retries: 1, stable_after_secs: 30, ..Default::default() };
+    let mut budget = tuliprox_session::failover_group::FailoverBudget::new(&failover);
+    budget.on_data(
+        std::time::Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(std::time::Instant::now),
+    );
+    let seeded = env
+        .app_state
+        .active_users
+        .update_legacy_failover_state_if_bound("viewer", &token, session.identity(), &binding, |_, slot| {
+            *slot = Some(budget);
+        })
+        .await;
+    assert_eq!(seeded, Some(()));
+
+    // Segment fails
+    assert!(
+        env.app_state.active_users.mark_member_failed_on_segment("viewer", &token, session.identity(), &binding).await
+    );
+
+    // Origin now returns an empty media window (0 segments).
+    serve_empty.store(true, std::sync::atomic::Ordering::Release);
+
+    // First poll after failure: retries same member (solis) which serves an empty media window (0 segments).
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK, "empty window is served");
+
+    let after_empty = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.expect("session");
+    assert!(after_empty.member_failed_on_segment, "empty media window must not clear member_failed_on_segment");
+
+    // Follow-up poll: because member_failed_on_segment was NOT cleared, it must switch to korath!
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    assert_eq!(env.bound_member_input("viewer").await, "korath", "must switch away from failed member");
 }
 
 #[tokio::test]
@@ -2072,4 +2404,98 @@ async fn legacy_switch_bypasses_when_failover_disabled() {
         StatusCode::NOT_FOUND,
         "disabled failover must not switch to healthy member; must return 404"
     );
+}
+
+/// Session token sealed into a canonical media playlist URI.
+fn session_token_from_variant(env: &GroupPlaybackEnv, variant_uri: &str) -> String {
+    let token_segment = variant_uri.rsplit('/').next().expect("variant uri segment").trim_end_matches(".m3u8");
+    crate::processing::parser::hls::get_hls_session_token_and_url_from_token(
+        &env.app_state.get_encrypt_secret(),
+        token_segment,
+    )
+    .expect("decode token")
+    .session_token
+    .expect("session token")
+}
+
+/// Segment-failure call site: a poll that finds the bound member marked failed while another
+/// request holds the single-flight switch guard must answer 503 instead of downloading the failed
+/// member's manifest with this request's stale URL.
+#[tokio::test]
+async fn legacy_segment_failure_switch_in_flight_answers_503_without_reloading_the_failed_member() {
+    let faults = OriginFaults::default();
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls()
+        .m3u("solis")
+        .m3u("korath")
+        .origin_mode("solis", faults.mode(0))
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    assert_eq!(env.bound_member_input("viewer").await, "solis");
+    let sessions_before = env.active_session_vids("viewer").await;
+
+    let token = session_token_from_variant(&env, &variant_uri);
+    let snapshot = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.expect("session");
+    let binding = snapshot.member_binding.clone().expect("bound member");
+    assert!(
+        env.app_state.active_users.mark_member_failed_on_segment("viewer", &token, snapshot.identity(), &binding).await,
+        "the failed segment must mark the bound member"
+    );
+    // Another request owns the single-flight switch.
+    snapshot.legacy_switch_in_flight.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let solis_hits = env.origin_hits("solis");
+    let korath_hits = env.origin_hits("korath");
+    let response = env.get(&variant_uri).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "the poll must answer a retry");
+    assert_eq!(env.origin_hits("solis"), solis_hits, "the failed member must not be downloaded again");
+    assert_eq!(env.origin_hits("korath"), korath_hits, "the in-flight switch owns the new member");
+    assert_eq!(env.active_session_vids("viewer").await, sessions_before, "the retry must not terminate the session");
+    assert_eq!(env.bound_member_input("viewer").await, "solis", "the switch owner keeps the binding");
+}
+
+/// Manifest-download-failure call site: when the download of the bound member fails while another
+/// request holds the single-flight switch guard, the poll answers 502 and must not request the
+/// failed member again.
+#[tokio::test]
+async fn legacy_manifest_failure_switch_in_flight_answers_502_without_reloading_the_failed_member() {
+    let faults = OriginFaults::default();
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls()
+        .m3u("solis")
+        .m3u("korath")
+        .origin_mode("solis", faults.mode(0))
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+    assert_eq!(env.bound_member_input("viewer").await, "solis");
+    let sessions_before = env.active_session_vids("viewer").await;
+
+    let token = session_token_from_variant(&env, &variant_uri);
+    let snapshot = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.expect("session");
+    // Another request owns the single-flight switch.
+    snapshot.legacy_switch_in_flight.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // 404 is a stream failure and is not retried by the text-body layer, so the failing download
+    // is exactly one request to the failed member.
+    faults.fail_manifests(404);
+    let solis_hits = env.origin_hits("solis");
+    let korath_hits = env.origin_hits("korath");
+    let response = env.get(&variant_uri).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "the failed download keeps its 502 answer");
+    assert_eq!(env.origin_hits("solis"), solis_hits + 1, "only the failing download may reach the failed member");
+    assert_eq!(env.origin_hits("korath"), korath_hits, "the in-flight switch owns the new member");
+    assert_eq!(env.active_session_vids("viewer").await, sessions_before, "the retry must not terminate the session");
+    assert_eq!(env.bound_member_input("viewer").await, "solis", "the switch owner keeps the binding");
 }

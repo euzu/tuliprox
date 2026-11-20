@@ -29,6 +29,7 @@ impl FirstRequestFixture {
                 entry.status = SegmentCacheStatus::Fetching {
                     priority: crate::SegmentFetchPriority::Demand,
                     started_at_ms: current_time_millis(),
+                    gateway_timeout: false,
                 };
                 session.segments.insert(seq, entry);
                 let revision = store.create(cached.proxy_session_id.clone(), seq, crate::SegmentRevisionKind::Raw)?;

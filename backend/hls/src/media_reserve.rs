@@ -130,6 +130,16 @@ pub struct HlsLeasePlaybackCursor {
 
 const MAX_OUT_OF_ORDER_COMPLETIONS: usize = 64;
 
+/// Playback clock anchor of one cursor: the first segment whose delivery started and the instant
+/// it started. A forward seek replaces the anchor, so reserve evidence recorded for one anchor
+/// never applies to the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HlsPlaybackClockAnchor {
+    started_at_ms: Option<u64>,
+    started_proxy_seq: Option<u64>,
+    media_start_ms: Option<u64>,
+}
+
 /// Identifies a full-segment request within the cursor epoch in which it began.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
@@ -167,11 +177,49 @@ impl HlsLeasePlaybackCursor {
         })
     }
 
+    /// The first sequence the lease's guaranteed reserve is measured from; shared by
+    /// startup admission and [`evaluate_lease_reserve`].
+    pub fn reserve_start_proxy_seq(&self, manifest_first_proxy_seq: u64) -> u64 {
+        if self.first_requested_media_start_ms.is_some() {
+            self.ready_timeline_start_proxy_seq(manifest_first_proxy_seq)
+        } else {
+            manifest_first_proxy_seq
+        }
+    }
+
+    /// Reserve start sequence after the lease requests the entry window at `manifest_first_proxy_seq`.
+    /// A request past the next sequence is a forward seek that resets the cursor
+    /// (`record_request_started`), so the reserve then starts at the window start.
+    pub fn entry_reserve_start_proxy_seq(&self, manifest_first_proxy_seq: u64) -> u64 {
+        if self.is_forward_seek(manifest_first_proxy_seq) {
+            manifest_first_proxy_seq
+        } else {
+            self.reserve_start_proxy_seq(manifest_first_proxy_seq)
+        }
+    }
+
+    /// True when the cursor continues an earlier started playback without a forward seek.
+    pub(crate) fn continues_started_playback(&self, manifest_first_proxy_seq: u64) -> bool {
+        !self.is_forward_seek(manifest_first_proxy_seq) && self.first_segment_started_at_ms.is_some()
+    }
+
+    fn is_forward_seek(&self, proxy_seq: u64) -> bool {
+        self.highest_requested_proxy_seq.is_some_and(|highest| proxy_seq > highest.saturating_add(1))
+    }
+
+    /// Playback clock this cursor currently advances. Equal anchors describe one uninterrupted
+    /// playback, even when the position moved on.
+    pub fn clock_anchor(&self) -> HlsPlaybackClockAnchor {
+        HlsPlaybackClockAnchor {
+            started_at_ms: self.first_segment_started_at_ms,
+            started_proxy_seq: self.first_segment_started_proxy_seq,
+            media_start_ms: self.first_segment_media_start_ms,
+        }
+    }
+
     /// Records a full-segment request; dropping the returned token models an aborted response.
     pub fn record_request_started(&mut self, proxy_seq: u64, requested_at_ms: u64) -> HlsPlaybackRequestToken {
-        let forward_seek =
-            self.highest_requested_proxy_seq.is_some_and(|highest| proxy_seq > highest.saturating_add(1));
-        if forward_seek {
+        if self.is_forward_seek(proxy_seq) {
             self.request_epoch = self.request_epoch.saturating_add(1);
             self.first_requested_proxy_seq = Some(proxy_seq);
             self.first_segment_started_at_ms = None;
@@ -335,6 +383,15 @@ pub struct HlsLeaseReserveSnapshot {
 impl HlsLeaseReserveSnapshot {
     /// Missing playback evidence is not proof that the player consumed its reserve.
     pub fn is_exhausted(self) -> bool { self.playback_position_known && self.guaranteed_reserve_ms == 0 }
+
+    /// True when the guaranteed reserve fell to the startup window a new lease is admitted with
+    /// ([`minimum_hls_startup_window_ms`], clamped to the playable playlist).
+    ///
+    /// The caller decides which playback may act on it: a lease without a measured playback
+    /// position has consumed nothing yet, so admission and the stall timer own that case.
+    pub fn member_failover_required(self, target_ms: u64) -> bool {
+        self.playback_position_known && self.guaranteed_reserve_ms <= target_ms
+    }
 }
 
 /// Typed source of guaranteed reserve evidence.
@@ -371,12 +428,8 @@ pub fn evaluate_lease_reserve(input: HlsLeaseReserveInput<'_>) -> HlsLeaseReserv
             cutover_required: input.origin_path_degraded && !input.recovery_committed,
         };
     }
-    let first_needed_seq = if input.cursor.first_requested_media_start_ms.is_some() {
-        input.cursor.ready_timeline_start_proxy_seq(input.manifest.first_proxy_seq)
-    } else {
-        input.manifest.first_proxy_seq
-    };
-    let guaranteed_ready_span = contiguous_ready_span(input.ready_timeline, input.manifest, first_needed_seq);
+    let first_needed_seq = input.cursor.reserve_start_proxy_seq(input.manifest.first_proxy_seq);
+    let guaranteed_ready_span = contiguous_ready_span(input.ready_timeline, first_needed_seq);
     let visible_tail = aligned_visible_tail_ms(input.ready_timeline, input.manifest);
     // Fully delivered contiguous history survives metadata GC; incomplete bodies do not advance it.
     let guaranteed_media_horizon_ms =
@@ -396,7 +449,7 @@ pub fn evaluate_lease_reserve(input: HlsLeaseReserveInput<'_>) -> HlsLeaseReserv
         guaranteed_transition_margin(input.ready_timeline, guaranteed_ready_span, conservative_playback_position_ms)
             .unwrap_or(input.manifest.target_duration_ms),
     );
-    let recovery_boundary = input.recovery_trigger_budget.as_millis().saturating_add(transition_margin.as_millis());
+    let recovery_boundary = recovery_boundary_ms(input.recovery_trigger_budget, transition_margin);
     let recovery_required = input.origin_path_degraded && guaranteed_reserve_ms <= recovery_boundary;
     let cutover_required = input.origin_path_degraded
         && guaranteed_reserve_ms <= transition_margin.as_millis()
@@ -416,29 +469,47 @@ pub fn evaluate_lease_reserve(input: HlsLeaseReserveInput<'_>) -> HlsLeaseReserv
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HlsGuaranteedReadySpan {
-    start_ms: u64,
-    horizon_ms: u64,
-    first_unit_index: Option<usize>,
-    end_unit_index: usize,
-    key_readiness_valid_until_ms: Option<u64>,
+/// Reserve at or below this bound requires origin recovery before the lease runs dry.
+const fn recovery_boundary_ms(budget: HlsRecoveryTriggerBudgetMs, margin: HlsTransitionMarginMs) -> u64 {
+    budget.as_millis().saturating_add(margin.as_millis())
 }
 
-fn contiguous_ready_span(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HlsGuaranteedReadySpan {
+    pub(crate) start_ms: u64,
+    pub(crate) horizon_ms: u64,
+    pub(crate) first_unit_index: Option<usize>,
+    pub(crate) end_unit_index: usize,
+    pub(crate) key_readiness_valid_until_ms: Option<u64>,
+    pub(crate) last_proxy_seq: Option<u64>,
+}
+
+impl HlsGuaranteedReadySpan {
+    pub(crate) const fn ready_duration_ms(self) -> u64 { self.horizon_ms.saturating_sub(self.start_ms) }
+}
+
+/// Duration of contiguous READY media from `first_proxy_seq` forward: what a viewer that starts
+/// playing at that sequence can consume before the first object that is not renderable.
+///
+/// The span also covers the objects after a published window, so a plan that starts at that
+/// sequence and an admission snapshot derived from the same window measure the same reserve.
+#[allow(dead_code)]
+pub fn contiguous_ready_reserve_ms(timeline: &HlsReadyTimelineSnapshot, first_proxy_seq: u64) -> u64 {
+    contiguous_ready_span(timeline, first_proxy_seq).ready_duration_ms()
+}
+
+pub(crate) fn contiguous_ready_span(
     timeline: &HlsReadyTimelineSnapshot,
-    manifest: &HlsLeaseManifestSnapshot,
     first_proxy_seq: u64,
 ) -> HlsGuaranteedReadySpan {
-    let fallback_start_ms =
-        if first_proxy_seq == manifest.first_proxy_seq { manifest_visible_start_ms(manifest) } else { 0 };
     let Some(start_index) = timeline.units.iter().position(|unit| unit.proxy_seq == first_proxy_seq) else {
         return HlsGuaranteedReadySpan {
-            start_ms: fallback_start_ms,
-            horizon_ms: fallback_start_ms,
+            start_ms: 0,
+            horizon_ms: 0,
             first_unit_index: None,
             end_unit_index: 0,
             key_readiness_valid_until_ms: None,
+            last_proxy_seq: None,
         };
     };
     let first_unit = timeline.units[start_index];
@@ -450,6 +521,7 @@ fn contiguous_ready_span(
             first_unit_index: None,
             end_unit_index: start_index,
             key_readiness_valid_until_ms: None,
+            last_proxy_seq: None,
         };
     }
 
@@ -457,6 +529,7 @@ fn contiguous_ready_span(
     let mut expected_start_ms = first_unit.start_ms;
     let mut horizon_ms = first_unit.start_ms;
     let mut end_unit_index = start_index;
+    let mut last_proxy_seq = None;
     let mut key_readiness_valid_until_ms = None;
     for (unit_index, unit) in timeline.units.iter().enumerate().skip(start_index) {
         if unit.proxy_seq != expected_seq
@@ -473,6 +546,7 @@ fn contiguous_ready_span(
         }
         horizon_ms = unit.start_ms.saturating_add(unit.duration_ms);
         end_unit_index = unit_index.saturating_add(1);
+        last_proxy_seq = Some(unit.proxy_seq);
         let Some(next) = expected_seq.checked_add(1) else {
             break;
         };
@@ -486,15 +560,8 @@ fn contiguous_ready_span(
         first_unit_index: Some(start_index),
         end_unit_index,
         key_readiness_valid_until_ms,
+        last_proxy_seq,
     }
-}
-
-fn manifest_visible_start_ms(manifest: &HlsLeaseManifestSnapshot) -> u64 {
-    let visible_duration_ms = manifest
-        .visible_segments
-        .iter()
-        .fold(0_u64, |duration_ms, segment| duration_ms.saturating_add(segment.duration_ms));
-    manifest.last_visible_media_end_ms.saturating_sub(visible_duration_ms.max(manifest.playlist_duration_ms))
 }
 
 fn aligned_visible_tail_ms(timeline: &HlsReadyTimelineSnapshot, manifest: &HlsLeaseManifestSnapshot) -> u64 {
@@ -546,9 +613,12 @@ pub fn minimum_hls_startup_window_ms(target_duration_ms: u64, visible_playlist_d
 #[derive(Clone, Copy)]
 pub struct HlsStartupAdmissionInput<'a> {
     pub manifest: &'a HlsLeaseManifestSnapshot,
+    pub cursor: &'a HlsLeasePlaybackCursor,
     pub ready_timeline: &'a HlsReadyTimelineSnapshot,
     pub origin_state: HlsStartupAdmissionOriginState,
     pub recovery_trigger_budget: HlsRecoveryTriggerBudgetMs,
+    pub lease_start_proxy_seq: u64,
+    pub now_ms: u64,
 }
 
 /// Reason why the immutable READY evidence cannot admit a new lease.
@@ -600,16 +670,46 @@ pub fn evaluate_startup_admission(input: HlsStartupAdmissionInput<'_>) -> HlsSta
             decision,
         };
     }
-    let guaranteed_ready_span =
-        contiguous_ready_span(input.ready_timeline, input.manifest, input.manifest.first_proxy_seq);
+    let guaranteed_ready_span = contiguous_ready_span(input.ready_timeline, input.manifest.first_proxy_seq);
     let visible_tail_ms = aligned_visible_tail_ms(input.ready_timeline, input.manifest);
     let visible_contiguous_ready_duration_ms =
         guaranteed_ready_span.horizon_ms.min(visible_tail_ms).saturating_sub(guaranteed_ready_span.start_ms);
-    let prospective_lease_reserve_ms = guaranteed_ready_span.horizon_ms.saturating_sub(visible_tail_ms);
-    let transition_margin = HlsTransitionMarginMs::from_millis(
-        guaranteed_transition_margin(input.ready_timeline, guaranteed_ready_span, visible_tail_ms)
-            .unwrap_or(input.manifest.target_duration_ms),
-    );
+    // A lease that resumes a measured playback keeps the position-adjusted reserve its next
+    // request evaluates. Without a measured position the player consumed nothing yet, so the
+    // reserve counts from the start sequence of its first request.
+    let resumed_reserve = input
+        .cursor
+        .continues_started_playback(input.manifest.first_proxy_seq)
+        .then(|| {
+            evaluate_lease_reserve(HlsLeaseReserveInput {
+                manifest: input.manifest,
+                cursor: input.cursor,
+                ready_timeline: input.ready_timeline,
+                now_ms: input.now_ms,
+                recovery_trigger_budget: input.recovery_trigger_budget,
+                origin_path_degraded: input.origin_state == HlsStartupAdmissionOriginState::Degraded,
+                recovery_committed: false,
+            })
+        })
+        .filter(|reserve| reserve.playback_position_known);
+    let (prospective_lease_reserve_ms, transition_margin, degraded_reserve_insufficient) = if let Some(reserve) =
+        resumed_reserve
+    {
+        (reserve.guaranteed_reserve_ms, reserve.transition_margin, reserve.recovery_required)
+    } else {
+        let lease_ready_span = contiguous_ready_span(input.ready_timeline, input.lease_start_proxy_seq);
+        // An admitted lease measures prospective reserve from the start sequence its first request
+        // uses: the contiguous READY span from that sequence through the visible window and any
+        // READY objects behind it. Why the origin no longer advertises any predecessor does not matter.
+        let prospective_lease_reserve_ms = lease_ready_span.ready_duration_ms();
+        let transition_margin = HlsTransitionMarginMs::from_millis(
+            guaranteed_transition_margin(input.ready_timeline, lease_ready_span, visible_tail_ms)
+                .unwrap_or(input.manifest.target_duration_ms),
+        );
+        let degraded_reserve_insufficient = input.origin_state == HlsStartupAdmissionOriginState::Degraded
+            && prospective_lease_reserve_ms <= recovery_boundary_ms(input.recovery_trigger_budget, transition_margin);
+        (prospective_lease_reserve_ms, transition_margin, degraded_reserve_insufficient)
+    };
     let accelerated = input.manifest.startup_revisions.as_ref().is_some_and(|publication| {
         input.origin_state != HlsStartupAdmissionOriginState::Degraded
             && input
@@ -630,10 +730,7 @@ pub fn evaluate_startup_admission(input: HlsStartupAdmissionInput<'_>) -> HlsSta
     });
     let decision = if !accelerated && visible_contiguous_ready_duration_ms < minimum_startup_duration_ms {
         HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientVisibleReadyMedia)
-    } else if input.origin_state == HlsStartupAdmissionOriginState::Degraded
-        && prospective_lease_reserve_ms
-            <= input.recovery_trigger_budget.as_millis().saturating_add(transition_margin.as_millis())
-    {
+    } else if degraded_reserve_insufficient {
         HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientDegradedReserve)
     } else {
         HlsStartupAdmissionDecision::Admit
@@ -747,11 +844,15 @@ mod tests {
         origin_state: HlsStartupAdmissionOriginState,
         recovery_trigger_budget_ms: u64,
     ) -> HlsStartupAdmissionSnapshot {
+        let cursor = HlsLeasePlaybackCursor::default();
         evaluate_startup_admission(HlsStartupAdmissionInput {
             manifest,
+            cursor: &cursor,
             ready_timeline,
             origin_state,
             recovery_trigger_budget: HlsRecoveryTriggerBudgetMs::from_millis(recovery_trigger_budget_ms),
+            lease_start_proxy_seq: manifest.first_proxy_seq,
+            now_ms: 0,
         })
     }
 
@@ -768,7 +869,9 @@ mod tests {
             let admitted = admission(&short, &timeline, HlsStartupAdmissionOriginState::Healthy, 0);
             assert_eq!(admitted.decision, HlsStartupAdmissionDecision::Admit);
             assert_eq!(admitted.visible_contiguous_ready_duration_ms, short.playlist_duration_ms);
-            assert_eq!(admitted.prospective_lease_reserve_ms, 0);
+            // Every READY object of these playlists is visible, so the prospective reserve is the
+            // window itself and no hidden media is claimed.
+            assert_eq!(admitted.prospective_lease_reserve_ms, short.playlist_duration_ms);
             let reserve = reserve(&short, &HlsLeasePlaybackCursor::default(), &timeline, 0);
             assert_eq!(reserve.initial_hidden_ready_duration_ms, 0);
             assert_eq!(reserve.guaranteed_media_horizon_ms, short.playlist_duration_ms);
@@ -1158,7 +1261,7 @@ mod tests {
         let admission = admission(&manifest(), &ready_timeline(), HlsStartupAdmissionOriginState::Healthy, u64::MAX);
 
         assert_eq!(admission.visible_contiguous_ready_duration_ms, 15_000);
-        assert_eq!(admission.prospective_lease_reserve_ms, 12_000);
+        assert_eq!(admission.prospective_lease_reserve_ms, 27_000);
         assert_eq!(admission.transition_margin.as_millis(), 3_000);
         assert_eq!(admission.decision, HlsStartupAdmissionDecision::Admit);
     }
@@ -1192,15 +1295,34 @@ mod tests {
     }
 
     #[test]
-    fn degraded_startup_admission_requires_reserve_strictly_above_budget_and_margin() {
-        let rejected = admission(&manifest(), &ready_timeline(), HlsStartupAdmissionOriginState::Degraded, 9_000);
-        let admitted = admission(&manifest(), &ready_timeline(), HlsStartupAdmissionOriginState::Degraded, 8_999);
+    fn degraded_startup_admission_counts_the_visible_window_and_the_ready_hidden_tail() {
+        let mut timeline = ready_timeline();
+        Arc::make_mut(&mut timeline.units)[4].state = HlsReadyMediaState::NotReady;
 
+        let admission = admission(&manifest(), &timeline, HlsStartupAdmissionOriginState::Degraded, 0);
+
+        // The resume of a new lease runs from the window start: the 15_000 ms visible window plus
+        // the 3_000 ms of hidden tail that is READY before the first unready object stops it.
+        assert_eq!(admission.visible_contiguous_ready_duration_ms, 15_000);
+        assert_eq!(admission.prospective_lease_reserve_ms, 18_000);
+        assert_eq!(admission.transition_margin.as_millis(), 3_000);
+    }
+
+    #[test]
+    fn degraded_startup_admission_rejects_a_reserve_equal_to_budget_plus_margin() {
+        // 27_000 ms are READY from the window start and the transition margin is 3_000 ms.
+        let at_boundary = admission(&manifest(), &ready_timeline(), HlsStartupAdmissionOriginState::Degraded, 24_000);
+        let above_boundary =
+            admission(&manifest(), &ready_timeline(), HlsStartupAdmissionOriginState::Degraded, 23_999);
+
+        assert_eq!(at_boundary.prospective_lease_reserve_ms, 27_000);
+        assert_eq!(at_boundary.transition_margin.as_millis(), 3_000);
         assert_eq!(
-            rejected.decision,
+            at_boundary.decision,
             HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientDegradedReserve)
         );
-        assert_eq!(admitted.decision, HlsStartupAdmissionDecision::Admit);
+        assert_eq!(above_boundary.prospective_lease_reserve_ms, 27_000);
+        assert_eq!(above_boundary.decision, HlsStartupAdmissionDecision::Admit);
     }
 
     #[test]
@@ -1411,5 +1533,160 @@ mod tests {
         let reserve = reserve(&manifest(), &cursor, &session.ready_timeline_snapshot(0, 4_000), 4_000);
         assert_eq!(reserve.conservative_playback_position_ms, 19_000);
         assert_eq!(reserve.guaranteed_reserve_ms, 8_000);
+    }
+
+    #[test]
+    fn degraded_startup_admission_measures_reserve_from_lease_start_proxy_seq() {
+        let mut manifest = manifest();
+        manifest.first_proxy_seq = 1;
+        manifest.last_proxy_seq = 2;
+        manifest.visible_segments = Arc::from([
+            HlsLeaseManifestSegment {
+                proxy_seq: 1,
+                duration_ms: 5_000,
+                uri: "1.ts".into(),
+                discontinuity_before: false,
+                map_ref_ready: true,
+                encryption: None,
+            },
+            HlsLeaseManifestSegment {
+                proxy_seq: 2,
+                duration_ms: 6_000,
+                uri: "2.ts".into(),
+                discontinuity_before: false,
+                map_ref_ready: true,
+                encryption: None,
+            },
+        ]);
+        manifest.playlist_duration_ms = 11_000;
+        manifest.last_visible_media_end_ms = 11_000;
+        manifest.target_duration_ms = 6_000;
+
+        let mut timeline = ready_timeline();
+        Arc::make_mut(&mut timeline.units)[0].state = HlsReadyMediaState::NotReady;
+
+        let budget = HlsRecoveryTriggerBudgetMs::from_millis(10_000);
+
+        let default_cursor = HlsLeasePlaybackCursor::default();
+        let rejected = evaluate_startup_admission(HlsStartupAdmissionInput {
+            manifest: &manifest,
+            cursor: &default_cursor,
+            ready_timeline: &timeline,
+            origin_state: HlsStartupAdmissionOriginState::Degraded,
+            recovery_trigger_budget: budget,
+            lease_start_proxy_seq: 0,
+            now_ms: 0,
+        });
+
+        assert_eq!(
+            rejected.decision,
+            HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientDegradedReserve)
+        );
+        assert_eq!(rejected.prospective_lease_reserve_ms, 0);
+
+        let admitted = evaluate_startup_admission(HlsStartupAdmissionInput {
+            manifest: &manifest,
+            cursor: &default_cursor,
+            ready_timeline: &timeline,
+            origin_state: HlsStartupAdmissionOriginState::Degraded,
+            recovery_trigger_budget: budget,
+            lease_start_proxy_seq: manifest.first_proxy_seq,
+            now_ms: 0,
+        });
+
+        assert_eq!(admitted.decision, HlsStartupAdmissionDecision::Admit);
+        assert_eq!(admitted.prospective_lease_reserve_ms, 23_000);
+
+        let default_cursor = HlsLeasePlaybackCursor::default();
+        assert_eq!(default_cursor.reserve_start_proxy_seq(manifest.first_proxy_seq), 1);
+
+        let mut unbound_cursor = HlsLeasePlaybackCursor::default();
+        let _unbound_token = unbound_cursor.record_request_started(0, 100);
+        assert_eq!(unbound_cursor.reserve_start_proxy_seq(manifest.first_proxy_seq), 1);
+
+        let session = variable_duration_session();
+        let mut bound_cursor = HlsLeasePlaybackCursor::default();
+        let bound_token = bound_cursor.record_request_started(0, 100);
+        let _bound_token = bound_cursor.bind_request_timing(bound_token, &session.segments[&0]);
+        assert_eq!(bound_cursor.reserve_start_proxy_seq(manifest.first_proxy_seq), 0);
+
+        assert_eq!(default_cursor.entry_reserve_start_proxy_seq(manifest.first_proxy_seq), 1);
+        assert_eq!(bound_cursor.entry_reserve_start_proxy_seq(manifest.first_proxy_seq), 0);
+        assert_eq!(bound_cursor.entry_reserve_start_proxy_seq(5), 5);
+    }
+
+    /// Startup admission and lease reserve for a lease that resumes the playback started at 1 s.
+    fn continued_playback_admission(
+        origin_state: HlsStartupAdmissionOriginState,
+        now_ms: u64,
+    ) -> (HlsLeaseReserveSnapshot, HlsStartupAdmissionSnapshot) {
+        let session = variable_duration_session();
+        let mut cursor = HlsLeasePlaybackCursor::default();
+        let token = cursor.record_request_started(0, 1_000);
+        let token = cursor.bind_request_timing(token, &session.segments[&0]);
+        assert!(cursor.record_transfer_started(token, 1_000));
+        let manifest = manifest();
+        let timeline = ready_timeline();
+        let budget = HlsRecoveryTriggerBudgetMs::from_millis(8_000);
+        let reserve = evaluate_lease_reserve(HlsLeaseReserveInput {
+            manifest: &manifest,
+            cursor: &cursor,
+            ready_timeline: &timeline,
+            now_ms,
+            recovery_trigger_budget: budget,
+            origin_path_degraded: origin_state == HlsStartupAdmissionOriginState::Degraded,
+            recovery_committed: false,
+        });
+        let admission = evaluate_startup_admission(HlsStartupAdmissionInput {
+            manifest: &manifest,
+            cursor: &cursor,
+            ready_timeline: &timeline,
+            origin_state,
+            recovery_trigger_budget: budget,
+            lease_start_proxy_seq: cursor.entry_reserve_start_proxy_seq(manifest.first_proxy_seq),
+            now_ms,
+        });
+        (reserve, admission)
+    }
+
+    #[test]
+    fn startup_admission_without_a_measured_position_counts_the_ready_span() {
+        // The transfer started, but neither its media start nor its segment is known, so the
+        // playback position is unknown and the cursor has consumed no reserve.
+        let mut cursor = HlsLeasePlaybackCursor::default();
+        let token = cursor.record_request_started(99, 1_000);
+        assert!(cursor.record_transfer_started(token, 1_000));
+        let manifest = manifest();
+        assert!(cursor.continues_started_playback(manifest.first_proxy_seq));
+        let admission = evaluate_startup_admission(HlsStartupAdmissionInput {
+            manifest: &manifest,
+            cursor: &cursor,
+            ready_timeline: &ready_timeline(),
+            origin_state: HlsStartupAdmissionOriginState::Degraded,
+            recovery_trigger_budget: HlsRecoveryTriggerBudgetMs::from_millis(8_000),
+            lease_start_proxy_seq: cursor.entry_reserve_start_proxy_seq(manifest.first_proxy_seq),
+            now_ms: 18_000,
+        });
+        assert_eq!(admission.prospective_lease_reserve_ms, 27_000);
+        assert_eq!(admission.decision, HlsStartupAdmissionDecision::Admit);
+    }
+
+    #[test]
+    fn startup_admission_measures_a_resumed_playback_from_its_position() {
+        // Boundary: budget 8 s plus a 3 s transition margin. Each case differs from the rejected
+        // one in a single input.
+        let insufficient =
+            HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientDegradedReserve);
+        for (origin_state, now_ms, expected_reserve_ms, expected_decision) in [
+            (HlsStartupAdmissionOriginState::Degraded, 18_000, 10_000, insufficient),
+            (HlsStartupAdmissionOriginState::Healthy, 18_000, 10_000, HlsStartupAdmissionDecision::Admit),
+            (HlsStartupAdmissionOriginState::Degraded, 16_000, 12_000, HlsStartupAdmissionDecision::Admit),
+        ] {
+            let (reserve, admission) = continued_playback_admission(origin_state, now_ms);
+            assert_eq!(reserve.guaranteed_reserve_ms, expected_reserve_ms, "{origin_state:?} at {now_ms}");
+            assert_eq!(reserve.transition_margin.as_millis(), 3_000);
+            assert_eq!(admission.prospective_lease_reserve_ms, expected_reserve_ms, "{origin_state:?} at {now_ms}");
+            assert_eq!(admission.decision, expected_decision, "{origin_state:?} at {now_ms}");
+        }
     }
 }

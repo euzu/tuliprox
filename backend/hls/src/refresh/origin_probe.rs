@@ -450,6 +450,15 @@ fn is_unpublished_bootstrap_repeat(
         })
 }
 
+/// The pinned stale-entry reason: a `StrictPinnedHost` freshness check for a session
+/// whose entry went stale. Only this context treats an unchanged window as an ordinary
+/// freshness check or admits a soft new-viewer verification.
+fn stale_entry_reason(request: &OriginRefreshRequest, mode: HlsManifestCommitAcceptanceMode) -> bool {
+    mode == HlsManifestCommitAcceptanceMode::StrictPinnedHost
+        && request.manifest_commit_requirement.fresh_reason()
+            == Some(crate::HlsFreshManifestRequiredReason::StaleEntryWindow)
+}
+
 fn ordinary_stale_entry(
     request: &OriginRefreshRequest,
     session: &HlsSession,
@@ -462,9 +471,7 @@ fn ordinary_stale_entry(
         episode.state != crate::manifest_acceptance::HlsManifestAcceptanceState::Completed
             && episode.trigger().recovery_required()
     });
-    mode == HlsManifestCommitAcceptanceMode::StrictPinnedHost
-        && request.manifest_commit_requirement.fresh_reason()
-            == Some(crate::HlsFreshManifestRequiredReason::StaleEntryWindow)
+    stale_entry_reason(request, mode)
         && !request.acceptance_directive.trigger.recovery_required()
         && !active_recovery
         && session.origin_account_manifest_pending.is_none()
@@ -505,11 +512,29 @@ fn identical_live_window(
         })
 }
 
+/// True when the window's last origin sequence advanced past the pinned highwater.
+/// `Option` ordering keeps a missing highwater (`None`) below every sequence.
+fn window_advanced_past_highwater(session: &HlsSession, last_origin_seq: Option<u64>) -> bool {
+    last_origin_seq > session.origin_seq_highwater
+}
+
 fn same_media_timing(session: &HlsSession, entry: &SegmentEntry, parsed: &ParsedOriginSegment) -> bool {
     entry.duration_ms == parsed.duration_ms
         && session.origin_discontinuity_before(entry) == parsed.discontinuity_before
         && entry.program_date_time == parsed.program_date_time
         && entry.daterange_tags_before == parsed.daterange_tags_before
+}
+
+fn conflicting_query_binding(
+    session: &HlsSession,
+    entry: &SegmentEntry,
+    parsed: &ParsedOriginSegment,
+    old: HlsMediaResourceIdentity,
+    new: HlsMediaResourceIdentity,
+) -> bool {
+    !old.same_path_and_range(new)
+        || matches!(entry.status, SegmentCacheStatus::FailedPermanent { .. } | SegmentCacheStatus::Expired)
+        || !same_media_timing(session, entry, parsed)
 }
 
 fn latest_clear_ready(session: &HlsSession) -> Option<&SegmentEntry> {
@@ -521,6 +546,7 @@ fn latest_clear_ready(session: &HlsSession) -> Option<&SegmentEntry> {
     })
 }
 
+#[expect(clippy::too_many_lines, reason = "One snapshot captures every probe input under a single session read.")]
 fn capture_probe_inputs(
     request: &OriginRefreshRequest,
     session: &HlsSession,
@@ -565,9 +591,41 @@ fn capture_probe_inputs(
     {
         return Err(unavailable());
     }
+    let last = manifest.segments.last().map(|segment| segment.origin_seq);
+    // A readmitted origin can advance while still revising an overlapping
+    // slot. Such a window cannot reuse the old bindings. Verify fresh media
+    // and stage a separate epoch under the existing restart authorization.
+    // A new viewer can need a fresh pinned window while the physical binding
+    // is still retained after earlier playback. Only the soft overlap period
+    // admits this evidence path. A currently playing or background refresh
+    // continues to use the normal binding and timeline rules.
+    let soft_entry = stale_entry_reason(request, mode)
+        && request.access_lease_id.is_some()
+        && request.attempt.as_ref().is_some_and(|attempt| !attempt.active_live_playback)
+        && matches!(
+            crate::classify_account_binding_protection(
+                session.activity.last_authorized_media_at_ms,
+                request.hls_proxy.now_ms(),
+                &session.account_overlap_timing(),
+            ),
+            crate::HlsAccountBindingProtection::SoftActive { .. }
+        );
+    let advancing_conflict = window_advanced_past_highwater(session, last)
+        && query_changed
+        && (session.live_entry_revalidation.required
+            || session.origin_account_manifest_pending.is_some()
+            || soft_entry)
+        && manifest.segments.iter().zip(&references).any(|(parsed, reference)| {
+            reference.as_ref().is_some_and(|entry| {
+                let new = HlsMediaResourceIdentity::from_url(&parsed.resolved_origin_url, parsed.origin_byte_range);
+                entry
+                    .media_resource_identity()
+                    .is_some_and(|old| !old.matches(new) && conflicting_query_binding(session, entry, parsed, old, new))
+            })
+        });
     let reset = restart_allowed
         && !session.origin_qualification_awaits_publication()
-        && manifest.segments.last().is_some_and(|last| Some(last.origin_seq) <= session.origin_seq_highwater);
+        && (last.is_some_and(|seq| Some(seq) <= session.origin_seq_highwater) || advancing_conflict);
     if !reset {
         return if query_changed {
             bound_query_inputs(request, session, manifest, host, true)
@@ -577,6 +635,9 @@ fn capture_probe_inputs(
     }
     if manifest.segments.len() > PROBE_SEGMENT_LIMIT {
         return Err(unavailable());
+    }
+    if advancing_conflict {
+        log::debug!("HLS origin media verification: decision=probe-advancing-readmission soft_entry={soft_entry}");
     }
     materialize_normal_key_resources(
         manifest,
@@ -691,7 +752,8 @@ async fn prepare(
     if !changed {
         // Replayed HTTP 200 windows must consume the remaining existing budget.
         let session = request.session.read().await;
-        if session.live_entry_revalidation.required
+        if window_advanced_past_highwater(&session, manifest.segments.last().map(|last| last.origin_seq))
+            || session.live_entry_revalidation.required
             || session
                 .origin_control
                 .acceptance_episode
@@ -1005,11 +1067,13 @@ fn bound_query_inputs(
         if old.matches(new) {
             continue;
         }
-        if !old.same_path_and_range(new)
-            || matches!(entry.status, SegmentCacheStatus::FailedPermanent { .. } | SegmentCacheStatus::Expired)
-            || !same_media_timing(session, entry, parsed)
-        {
-            log::debug!("HLS origin media verification: decision=unverified reason=resource-binding");
+        if conflicting_query_binding(session, entry, parsed, old, new) {
+            log::debug!(
+                "HLS origin media verification: decision=unverified reason=resource-binding requirement={:?} new_access={} media_protection={:?}",
+                request.manifest_commit_requirement,
+                request.access_lease_id.is_some() && request.attempt.as_ref().is_some_and(|attempt| !attempt.active_live_playback),
+                crate::classify_account_binding_protection(session.activity.last_authorized_media_at_ms, request.hls_proxy.now_ms(), &session.account_overlap_timing()),
+            );
             return Err(unavailable());
         }
         let verify_cached = matches!(entry.status, SegmentCacheStatus::Ready { .. });

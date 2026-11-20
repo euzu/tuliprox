@@ -5,12 +5,16 @@
 //! timing seed the acceptance episode starts from. Committed back onto the
 //! session under a CAS loop, so a concurrent refresh cannot lose the decision.
 
-use super::hls_recovery_timing_policy;
+use super::{hls_recovery_timing_policy, HLS_MEMBER_FAILOVER_IDLE_TARGET_DURATIONS};
 use crate::{
     hls_ctx::HlsCtx,
     lease::HlsAccessLeaseStore,
     manager::HlsProxyManager,
-    media_reserve::{evaluate_lease_reserve, HlsLeaseReserveInput, HlsLeaseReserveSnapshot},
+    media_reserve::{
+        evaluate_lease_reserve, minimum_hls_startup_window_ms, HlsLeasePlaybackCursor, HlsLeaseReserveInput,
+        HlsLeaseReserveSnapshot,
+    },
+    member_health::HlsMemberReserveSample,
     observability::{HlsRecoveryAvailabilityLogEvidence, HlsRecoveryTriggerDiagnostic, HlsRecoveryTriggerSource},
     origin_progress::{
         evaluate_origin_progress, publication_late_after_ms, HlsOriginPathCondition, HlsOriginProgressDecision,
@@ -46,6 +50,60 @@ pub(super) struct HlsLeaseRecoveryEvidence {
     pub(super) target_duration_ms: u64,
     pub(super) latest_safe_terminal_commit_at: HlsLatestSafeTerminalCommitAtMs,
     pub(super) recovery_boundary_slack_ms: HlsRecoveryBoundarySlackMs,
+}
+
+/// A client that stopped requesting media froze its playback clock, so its reserve no longer
+/// describes what the origin delivers now. A lease without any playback request never counts.
+pub(super) fn lease_paused_for_member_failover(
+    cursor: &HlsLeasePlaybackCursor,
+    target_duration_ms: u64,
+    now_ms: u64,
+) -> bool {
+    let idle_bound_ms = member_failover_idle_bound_ms(target_duration_ms);
+    cursor
+        .last_request_at_ms
+        .is_none_or(|last_request_at_ms| now_ms.saturating_sub(last_request_at_ms) >= idle_bound_ms)
+}
+
+const fn member_failover_idle_bound_ms(target_duration_ms: u64) -> u64 {
+    target_duration_ms.saturating_mul(HLS_MEMBER_FAILOVER_IDLE_TARGET_DURATIONS)
+}
+
+/// R2 hybrid gate for the reserve trigger.
+///
+/// The lease reserve must have reached `target_ms` (R1) and the switch needs origin evidence: the
+/// origin path is degraded, or the reserve dropped through the startup window since the previous
+/// evaluation of the same playback while the position advanced. The drop is what proves that the
+/// origin no longer refills what playback consumes; a reserve that merely sits below the window
+/// (a short playlist, a viewer admitted under pressure) does not request a switch on its own. A
+/// local cache or capacity bottleneck only lowers the timeline the repair already owns, so it does
+/// not switch either.
+pub(super) fn member_failover_required(
+    reserve: HlsLeaseReserveSnapshot,
+    target_ms: u64,
+    origin_path_degraded: bool,
+    local_capacity_recovery: bool,
+    previous: Option<HlsMemberReserveSample>,
+    now_ms: u64,
+    target_duration_ms: u64,
+) -> bool {
+    if !reserve.member_failover_required(target_ms) {
+        return false;
+    }
+    if origin_path_degraded {
+        return true;
+    }
+    if local_capacity_recovery {
+        return false;
+    }
+    let idle_bound_ms = member_failover_idle_bound_ms(target_duration_ms);
+    previous.is_some_and(|previous| {
+        // A sample older than the idle bound spans a pause or a gap in observation; the drop it
+        // measured is not evidence that the origin stopped refilling an advancing playback.
+        now_ms.saturating_sub(previous.sampled_at_ms) <= idle_bound_ms
+            && previous.guaranteed_reserve_ms > target_ms
+            && reserve.conservative_playback_position_ms > previous.playback_position_ms
+    })
 }
 
 pub(super) struct HlsSessionRecoveryPressure {
@@ -201,8 +259,10 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
     let observed_latency = session.origin_control.recovery_samples.latency_snapshot();
     let workload = HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling();
     let mut retained_gap_pressure = false;
-    let pressure = aggregate_session_recovery_pressure(active_leases.iter().filter_map(|lease| {
-        let manifest = lease.last_manifest_snapshot.as_ref()?;
+    let mut lease_evidence = Vec::with_capacity(active_leases.len());
+    let mut reserve_round = Vec::with_capacity(active_leases.len());
+    for lease in &active_leases {
+        let Some(manifest) = lease.last_manifest_snapshot.as_ref() else { continue };
         let retained_gap = !effective_origin_degraded && session.has_retained_playback_gap(lease);
         let ready_timeline = session.ready_timeline_snapshot(
             lease.playback_cursor.ready_timeline_start_proxy_seq(manifest.first_proxy_seq),
@@ -210,21 +270,24 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
         );
         let recovery_trigger_budget =
             recovery_trigger_budget(policy, publication_target_duration_ms, workload, observed_latency);
+        let origin_path_degraded = effective_origin_degraded || retained_gap;
         let reserve = evaluate_lease_reserve(HlsLeaseReserveInput {
             manifest,
             cursor: &lease.playback_cursor,
             ready_timeline: &ready_timeline,
             now_ms,
             recovery_trigger_budget,
-            origin_path_degraded: effective_origin_degraded || retained_gap,
+            origin_path_degraded,
             recovery_committed: false,
         });
         retained_gap_pressure |= retained_gap && (reserve.recovery_required || reserve.cutover_required);
+        let target_ms = minimum_hls_startup_window_ms(manifest.target_duration_ms, manifest.playlist_duration_ms);
+        reserve_round.push((lease, reserve, target_ms));
         let recovery_boundary_ms =
             recovery_trigger_budget.as_millis().saturating_add(reserve.transition_margin.as_millis());
         let cutover_timing =
             HlsLeaseCutoverTiming::from_reserve(now_ms, reserve.guaranteed_reserve_ms, reserve.transition_margin, None);
-        Some(HlsLeaseRecoveryEvidence {
+        lease_evidence.push(HlsLeaseRecoveryEvidence {
             lease_id: lease.lease_id.clone(),
             reserve,
             cursor: lease.playback_cursor.clone(),
@@ -235,8 +298,11 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
                 reserve.guaranteed_reserve_ms,
                 recovery_boundary_ms,
             ),
-        })
-    }))?;
+        });
+    }
+    // Single writer of the previous-reserve evidence; the leases of this round replace it entirely.
+    session.member_health.observe_member_reserves(reserve_round, now_ms);
+    let pressure = aggregate_session_recovery_pressure(lease_evidence)?;
     let progress_phase_before = session.origin_control.progress_phase;
     let progress_condition_before = session.origin_control.path_condition;
     let decision_condition =

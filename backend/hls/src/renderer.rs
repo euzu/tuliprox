@@ -121,12 +121,13 @@ impl HlsManifestRenderer {
 
     pub fn render(session: &HlsSession, rendered_at_ms: u64) -> Result<RenderedManifest, RenderError> {
         if session.uses_fast_start_live_window() {
-            let view = session
-                .last_rendered_manifest
-                .as_ref()
-                .map_or(crate::live_window::HlsLiveWindowView::Entry, |previous| {
-                    crate::live_window::HlsLiveWindowView::Active { first_published: previous.first_proxy_seq }
-                });
+            let view = session.last_rendered_manifest.as_ref().map_or(
+                crate::live_window::HlsLiveWindowView::Entry,
+                |previous| crate::live_window::HlsLiveWindowView::Active {
+                    first_published: previous.first_proxy_seq,
+                    last_published: Some(previous.last_proxy_seq),
+                },
+            );
             let plan = session.plan_live_window(view).ok_or(RenderError::NoRenderableWindow)?;
             return Self::render_live_window(session, &plan, rendered_at_ms);
         }
@@ -268,7 +269,7 @@ pub fn renderer_candidate_window_proxy_seqs(session: &HlsSession) -> Vec<u64> {
     Vec::new()
 }
 
-fn is_renderable(entry: &SegmentEntry, session: &HlsSession) -> bool {
+pub(crate) fn is_renderable(entry: &SegmentEntry, session: &HlsSession) -> bool {
     if let Some(startup) = &session.startup {
         return entry.is_fast_start_eligible()
             && startup
@@ -964,8 +965,11 @@ mod tests {
             SegmentCacheStatus::Ready { content_length: 100, ready_at_ms: 1 };
         session.segments.get_mut(&2).expect("segment").status =
             SegmentCacheStatus::Queued { priority: SegmentFetchPriority::RenderWindow, queued_at_ms: 1 };
-        session.segments.get_mut(&3).expect("segment").status =
-            SegmentCacheStatus::Fetching { priority: SegmentFetchPriority::RenderWindow, started_at_ms: 1 };
+        session.segments.get_mut(&3).expect("segment").status = SegmentCacheStatus::Fetching {
+            priority: SegmentFetchPriority::RenderWindow,
+            started_at_ms: 1,
+            gateway_timeout: false,
+        };
 
         let rendered = HlsManifestRenderer::render(&session, 10).expect("manifest should render");
 

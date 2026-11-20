@@ -31,7 +31,7 @@ use super::{
         log_manifest_recovery_candidate_rejected, log_manifest_recovery_selected, log_manifest_retry_scheduled,
         ManifestRetryLogKind,
     },
-    FetchedOriginManifest, HlsManifestCommitAcceptanceMode, HlsManifestFetchSelection,
+    FetchedOriginManifest, HlsManifestAttemptContext, HlsManifestCommitAcceptanceMode, HlsManifestFetchSelection,
     HlsManifestRecoveryCandidateScoreReport, HlsManifestRecoveryDiagnostics, HlsOriginManifestFetchContext,
     HlsOriginManifestFetchRequest,
 };
@@ -52,9 +52,16 @@ use log::debug;
 use shared::model::{HlsManifestRecoveryBurstLevel, HlsManifestRecoveryBurstPlan};
 use std::{
     future::Future,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::task::JoinSet;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Signalled when a probe slot observes its mirror error and starts waiting for the in-flight probe.
+    pub(crate) static PROBE_SLOT_MIRROR_ERROR_OBSERVED: std::sync::Arc<tokio::sync::Notify>;
+}
 
 enum HlsManifestRecoveryAttemptError<T> {
     Fetch(OriginManifestFetchError),
@@ -74,6 +81,9 @@ pub(super) struct HlsManifestRecoveryCandidate {
 struct HlsManifestRecoveryBurstCollection {
     fetched_candidates: Vec<HlsManifestRecoveryCandidate>,
     completed_candidates: usize,
+    /// Origin requests actually issued by the joined slots, including a probe
+    /// and the bound mirror request that share one slot.
+    candidate_requests: usize,
     last_fetch_error: Option<OriginManifestFetchError>,
     last_reject_reason: Option<HlsManifestRejectLogReason>,
 }
@@ -367,6 +377,7 @@ where
     let HlsManifestRecoveryBurstCollection {
         fetched_candidates,
         completed_candidates,
+        candidate_requests,
         last_fetch_error,
         mut last_reject_reason,
     } = fetch_manifest_recovery_burst_candidates(context, &plan, burst_plan).await;
@@ -376,7 +387,7 @@ where
         }
         error => error,
     };
-    diagnostics.record_attempt(plan.attempt_index + 1, completed_candidates, burst_plan.total_candidates() > 1);
+    diagnostics.record_attempt(plan.attempt_index + 1, candidate_requests, burst_plan.total_candidates() > 1);
     record_full_manifest_acceptance_burst(
         context,
         episode_generation,
@@ -413,7 +424,7 @@ where
         episode_generation,
         &evaluation,
         &fetched_candidates,
-        completed_candidates,
+        candidate_requests,
         commit,
     )
     .await;
@@ -473,7 +484,7 @@ async fn commit_manifest_recovery_selection<T, C, Fut>(
     episode_generation: Option<HlsManifestAcceptanceGeneration>,
     evaluation: &HlsManifestRecoveryBurstEvaluation,
     fetched_candidates: &[HlsManifestRecoveryCandidate],
-    completed_candidates: usize,
+    candidate_requests: usize,
     commit: &mut C,
 ) -> HlsSelectedManifestRecoveryCommit<T>
 where
@@ -496,7 +507,7 @@ where
             episode_generation,
             acceptance_plan,
             fetched_candidates,
-            completed_candidates,
+            candidate_requests,
             commit,
         )
         .await;
@@ -795,7 +806,7 @@ async fn commit_selected_manifest_recovery_candidate<T, C, Fut>(
     episode_generation: Option<HlsManifestAcceptanceGeneration>,
     acceptance_plan: HlsManifestCommitPlan,
     fetched_candidates: &[HlsManifestRecoveryCandidate],
-    completed_candidates: usize,
+    attempt_candidate_requests: usize,
     commit: &mut C,
 ) -> HlsSelectedManifestRecoveryCommit<T>
 where
@@ -834,7 +845,7 @@ where
     } else {
         HlsManifestFetchSelection::Recovery
     };
-    let candidate_requests = plan.completed_candidate_requests.saturating_add(completed_candidates);
+    let candidate_requests = plan.completed_candidate_requests.saturating_add(attempt_candidate_requests);
     match commit(
         fetched.with_recovery_diagnostics(plan.attempt_index + 1, candidate_requests, selection),
         acceptance_mode,
@@ -948,6 +959,93 @@ pub(super) fn selected_manifest_candidate(plan: HlsManifestCommitPlan) -> Option
     }
 }
 
+struct PinnedProfileProbe {
+    binding: HlsManifestOriginBinding,
+    /// Absolute acceptance deadline the slot may never outlive.
+    acceptance_deadline: HlsAcceptanceDeadlineMs,
+}
+
+// The first reduced observation can revisit the trusted profile endpoint that
+// supplied the published timeline. Never reuse an earlier account's signed URL.
+async fn pinned_profile_followup(
+    context: &HlsOriginManifestFetchContext,
+    plan: &HlsManifestRecoveryAttemptPlan<'_>,
+) -> Option<PinnedProfileProbe> {
+    let HlsManifestRequalificationWindow::CurrentEpisode(deadline) = &plan.requalification_window else {
+        return None;
+    };
+    let entry = &context.origin_entry;
+    if plan.trigger != HlsManifestAcceptanceTrigger::Observe
+        || plan.current_burst_is_full_plan
+        || plan.attempt_index != 1
+        || !entry.profile_recovery_failover()
+        || entry.url().scheme() != "provider"
+    {
+        return None;
+    }
+    let profile = entry.url_failover_provider()?;
+    if profile.provider_url_selection_policy() != shared::model::ProviderUrlSelectionPolicy::RestartFromFirst
+        || plan.binding.provider_url_index()? == 0
+    {
+        return None;
+    }
+    let input = entry.to_input_source();
+    let resolve = |index| super::http::resolved_hls_manifest_request_url_from_input(&input, Some(index), entry.url());
+    if &resolve(plan.binding.provider_url_index()?) != plan.binding.request_url() {
+        return None;
+    }
+    let primary = resolve(0);
+    let state = context.session.read().await;
+    let pinned = state.origin_control.pinned_host.as_deref()?;
+    if !state.origin_control.acceptance_episode.as_ref()?.full_burst_completed
+        || primary.host_str() != Some(pinned)
+        || plan.binding.request_url().host_str() == Some(pinned)
+        || primary.scheme() != plan.binding.request_url().scheme()
+    {
+        return None;
+    }
+    // The probe shares its slot with the bound mirror request, so it may use
+    // the whole remaining acceptance window instead of one retry interval.
+    if deadline.as_millis_since_epoch() <= current_time_millis() {
+        return None;
+    }
+    Some(PinnedProfileProbe {
+        binding: HlsManifestOriginBinding::new(primary, Some(0)).ok()?,
+        acceptance_deadline: *deadline,
+    })
+}
+
+/// A request that races inside a probe slot reports to a detached attempt with the
+/// shared attempt's playback policy. A discarded result must not close or fail the
+/// shared attempt, while 407 handling and failover limits stay exactly as they are
+/// for the bound request. Without a shared attempt the request stays unbound.
+fn detached_slot_attempt(context: &HlsOriginManifestFetchContext) -> Option<Arc<HlsManifestAttemptContext>> {
+    context.attempt.as_deref().map(|shared| {
+        Arc::new(HlsManifestAttemptContext::new(
+            shared.requirement,
+            shared.active_live_playback,
+            shared.revalidation_generation,
+        ))
+    })
+}
+
+fn pinned_profile_probe_slot(
+    context: &HlsOriginManifestFetchContext,
+    probe: PinnedProfileProbe,
+) -> (HlsOriginManifestFetchContext, HlsManifestOriginBinding, HlsAcceptanceDeadlineMs) {
+    let mut probe_context = context.clone();
+    crate::scrub_hls_origin_headers(&mut probe_context.headers, None);
+    probe_context.origin_entry = probe_context.origin_entry.with_profile_recovery_failover(false);
+    // The slot already owns its logical attempt. A failed probe must not close the shared
+    // attempt, or the concurrent bound mirror request would be refused.
+    probe_context.attempt = detached_slot_attempt(context);
+    debug!(
+        "HLS reduced manifest retry revisits pinned profile endpoint: deadline_epoch_ms={}",
+        probe.acceptance_deadline.as_millis_since_epoch()
+    );
+    (probe_context, probe.binding, probe.acceptance_deadline)
+}
+
 async fn fetch_manifest_recovery_burst_candidates(
     context: &HlsOriginManifestFetchContext,
     plan: &HlsManifestRecoveryAttemptPlan<'_>,
@@ -955,32 +1053,36 @@ async fn fetch_manifest_recovery_burst_candidates(
 ) -> HlsManifestRecoveryBurstCollection {
     let mut tasks = JoinSet::new();
     let candidates = burst_plan.total_candidates();
+    let mut probe = pinned_profile_followup(context, plan).await;
     for candidate_index in 0..candidates {
         let context = context.clone();
+        let probe = probe.take().map(|probe| pinned_profile_probe_slot(&context, probe));
         let binding = plan.binding.clone();
         let reject_reason = plan.reject_reason.cloned();
         let attempt_index = plan.attempt_index;
         let attempts = plan.attempts;
+        #[cfg(test)]
+        let probe_slot_mirror_error_observed = PROBE_SLOT_MIRROR_ERROR_OBSERVED.try_with(std::sync::Arc::clone).ok();
         tasks.spawn(async move {
-            let stagger_ms = u64::try_from(burst_plan.slot_for_candidate(candidate_index))
-                .unwrap_or_default()
-                .saturating_mul(HLS_MANIFEST_RECOVERY_BURST_SLOT_DELAY_MS);
-            if stagger_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(stagger_ms)).await;
+            let candidate_future = async move {
+                let stagger_ms = u64::try_from(burst_plan.slot_for_candidate(candidate_index))
+                    .unwrap_or_default()
+                    .saturating_mul(HLS_MANIFEST_RECOVERY_BURST_SLOT_DELAY_MS);
+                if stagger_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(stagger_ms)).await;
+                }
+                let log = ManifestRecoveryAttemptLogContext { attempt_index, attempts, candidate_index, candidates };
+                let fetch_started = Instant::now();
+                let (origin_requests, result) =
+                    fetch_probed_recovery_candidate(&context, probe, &binding, reject_reason.as_ref(), log).await;
+                let fetch_elapsed_ms = u64::try_from(fetch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                (candidate_index, fetch_elapsed_ms, origin_requests, result)
+            };
+            #[cfg(test)]
+            if let Some(signal) = probe_slot_mirror_error_observed {
+                return PROBE_SLOT_MIRROR_ERROR_OBSERVED.scope(signal, candidate_future).await;
             }
-            if context.attempt.as_ref().is_some_and(|attempt| attempt.is_closed()) {
-                return (candidate_index, 0, Err(OriginManifestFetchError::RetryExhausted));
-            }
-            let request = HlsOriginManifestFetchRequest::recovery_direct_target(
-                &context,
-                &binding,
-                reject_reason.as_ref(),
-                ManifestRecoveryAttemptLogContext { attempt_index, attempts, candidate_index, candidates },
-            );
-            let fetch_started = Instant::now();
-            let result = fetch_hls_origin_manifest_request(request).await;
-            let fetch_elapsed_ms = u64::try_from(fetch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            (candidate_index, fetch_elapsed_ms, result)
+            candidate_future.await
         });
     }
 
@@ -988,12 +1090,14 @@ async fn fetch_manifest_recovery_burst_candidates(
     let mut last_reject_reason = None;
     let mut fetched_candidates = Vec::new();
     let mut completed_candidates = 0_usize;
+    let mut origin_requests = 0_usize;
     while let Some(join_result) = tasks.join_next().await {
         completed_candidates = completed_candidates.saturating_add(1);
-        let Ok((candidate_index, fetch_elapsed_ms, result)) = join_result else {
+        let Ok((candidate_index, fetch_elapsed_ms, slot_requests, result)) = join_result else {
             last_fetch_error = Some(OriginManifestFetchError::Request("manifest recovery task failed".to_string()));
             continue;
         };
+        origin_requests = origin_requests.saturating_add(slot_requests);
         match result {
             Ok(fetched) => {
                 match score_manifest_recovery_candidate_with_logging(
@@ -1022,6 +1126,7 @@ async fn fetch_manifest_recovery_burst_candidates(
                     return HlsManifestRecoveryBurstCollection {
                         fetched_candidates: Vec::new(),
                         completed_candidates,
+                        candidate_requests: origin_requests,
                         last_fetch_error: Some(err),
                         last_reject_reason: None,
                     };
@@ -1033,8 +1138,127 @@ async fn fetch_manifest_recovery_burst_candidates(
     HlsManifestRecoveryBurstCollection {
         fetched_candidates,
         completed_candidates,
+        candidate_requests: origin_requests,
         last_fetch_error,
         last_reject_reason,
+    }
+}
+
+/// A failed pinned primary probe must not cost the slot its bound mirror request.
+/// Both requests share the slot: the probe is preferred when it succeeds, and
+/// the slot is bounded by the remaining acceptance deadline.
+async fn fetch_probed_recovery_candidate(
+    context: &HlsOriginManifestFetchContext,
+    probe: Option<(HlsOriginManifestFetchContext, HlsManifestOriginBinding, HlsAcceptanceDeadlineMs)>,
+    binding: &HlsManifestOriginBinding,
+    reject_reason: Option<&HlsManifestRejectLogReason>,
+    log: ManifestRecoveryAttemptLogContext,
+) -> (usize, Result<FetchedOriginManifest, OriginManifestFetchError>) {
+    let Some((probe_context, primary, acceptance_deadline)) = probe else {
+        let request = HlsOriginManifestFetchRequest::recovery_direct_target(context, binding, reject_reason, log);
+        let dispatched = request.ensure_dispatch_allowed().await.is_ok();
+        return (usize::from(dispatched), fetch_hls_origin_manifest_request(request).await);
+    };
+    // The slot owns the attempt semantics while it races two requests: a discarded
+    // result must neither close nor fail the shared attempt, so both requests report to
+    // detached attempts. Only the chosen result is classified against the shared attempt.
+    let mut mirror_context = context.clone();
+    mirror_context.attempt = detached_slot_attempt(context);
+
+    let shared_closed = || context.attempt.as_ref().is_some_and(|attempt| attempt.is_closed());
+
+    // Each request of the slot counts only when the shared pre-dispatch gate admits it:
+    // the account binding and the shared attempt can refuse either request before any HTTP call.
+    // The fetch repeats the same gate immediately before dispatch.
+    let probe_requests = usize::from(!shared_closed() && probe_context.ensure_dispatch_allowed().await.is_ok());
+    let mirror_requests = usize::from(!shared_closed() && mirror_context.ensure_dispatch_allowed().await.is_ok());
+    let probe_request =
+        HlsOriginManifestFetchRequest::recovery_direct_target(&probe_context, &primary, reject_reason, log);
+    let mirror_request =
+        HlsOriginManifestFetchRequest::recovery_direct_target(&mirror_context, binding, reject_reason, log);
+
+    let remaining_ms = acceptance_deadline.as_millis_since_epoch().saturating_sub(current_time_millis());
+    if remaining_ms == 0 {
+        return (0, Err(OriginManifestFetchError::Timeout));
+    }
+    let acceptance_remaining = Duration::from_millis(remaining_ms);
+    let probe_budget = Duration::from_millis(remaining_ms.min(probe_context.origin_manifest_timeout_ms));
+
+    let probe_fetch = async {
+        if shared_closed() {
+            return Err(OriginManifestFetchError::RetryExhausted);
+        }
+        if probe_budget.is_zero() {
+            return Err(OriginManifestFetchError::Timeout);
+        }
+        tokio::time::timeout(probe_budget, fetch_hls_origin_manifest_request(probe_request))
+            .await
+            .unwrap_or(Err(OriginManifestFetchError::Timeout))
+    };
+    let mirror_fetch = async {
+        if shared_closed() {
+            return Err(OriginManifestFetchError::RetryExhausted);
+        }
+        if acceptance_remaining.is_zero() {
+            return Err(OriginManifestFetchError::Timeout);
+        }
+        tokio::time::timeout(acceptance_remaining, fetch_hls_origin_manifest_request(mirror_request))
+            .await
+            .unwrap_or(Err(OriginManifestFetchError::Timeout))
+    };
+    tokio::pin!(probe_fetch, mirror_fetch);
+    // A successful mirror grants the probe one retry interval more. The nested timeout
+    // never extends the probe budget or the acceptance deadline, because the probe keeps
+    // its own bound and the mirror keeps the remaining acceptance window.
+    let probe_grace = Duration::from_millis(
+        context.retry_policy.delay_for_attempt_ms(log.attempt_index.saturating_add(1), 0).unwrap_or_default(),
+    );
+    let mut probe_failed = false;
+    let chosen: Result<FetchedOriginManifest, OriginManifestFetchError> = loop {
+        tokio::select! {
+            biased;
+            probe_result = &mut probe_fetch, if !probe_failed => {
+                if let Ok(fetched) = probe_result {
+                    break Ok(fetched);
+                }
+                debug!("HLS pinned profile endpoint probe failed; the slot uses its bound mirror");
+                probe_failed = true;
+            }
+            mirror_result = &mut mirror_fetch => {
+                if !probe_failed {
+                    match mirror_result {
+                        Ok(fetched_mirror) => {
+                            // The probe keeps its own budget; a successful mirror grants it one retry
+                            // interval more, whichever bound ends first.
+                            let grace_result = match tokio::time::timeout(probe_grace, &mut probe_fetch).await {
+                                Ok(probe_result) => probe_result,
+                                Err(_) => Err(OriginManifestFetchError::Timeout),
+                            };
+                            if let Ok(fetched) = grace_result {
+                                break Ok(fetched);
+                            }
+                            break Ok(fetched_mirror);
+                        }
+                        Err(mirror_error) => {
+                            #[cfg(test)]
+                            let _ = PROBE_SLOT_MIRROR_ERROR_OBSERVED.try_with(|observed| observed.notify_one());
+                            // A failed mirror does not bound the probe by the grace; wait until
+                            // the probe completes or its own budget/acceptance deadline expires.
+                            if let Ok(fetched) = (&mut probe_fetch).await {
+                                break Ok(fetched);
+                            }
+                            break Err(mirror_error);
+                        }
+                    }
+                }
+                break mirror_result;
+            }
+        }
+    };
+    let requests = probe_requests.saturating_add(mirror_requests);
+    match chosen {
+        Ok(fetched) => (requests, Ok(fetched)),
+        Err(error) => (requests, Err(context.classify_current_error(error).await)),
     }
 }
 
@@ -1046,5 +1270,326 @@ fn recovery_burst_plan(
         context.manifest_recovery_burst.level.plan()
     } else {
         HlsManifestRecoveryBurstLevel::Off.plan()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        recovery_timing::{HlsOperationTimeoutMs, HlsRecoveryEtaMs, HlsRecoveryTimingPolicy},
+        HlsManifestCommitRequirement, HlsSession, HlsSessionHandle, HlsSessionKey,
+    };
+    use tokio::sync::RwLock;
+    use tuliprox_core::model::HlsManifestRecoveryBurstConfig;
+
+    /// A superseded account binding refuses the request before any HTTP call, so the
+    /// slot must not report it.
+    #[tokio::test]
+    async fn superseded_binding_counts_no_origin_request() {
+        let mut context = test_fetch_context();
+        context.origin_account_snapshot = Some(crate::origin_account_runtime::HlsOriginAccountSnapshot {
+            binding: None,
+            generation: context.session.read().await.activity.origin_work_generation.saturating_add(1),
+            provider_session_headers: axum::http::HeaderMap::default(),
+        });
+        let binding = HlsManifestOriginBinding::new(
+            url::Url::parse("http://127.0.0.1:1/index.m3u8").expect("binding url"),
+            Some(1),
+        )
+        .expect("binding");
+        let (origin_requests, outcome) = fetch_probed_recovery_candidate(
+            &context,
+            None,
+            &binding,
+            None,
+            ManifestRecoveryAttemptLogContext { attempt_index: 1, attempts: 2, candidate_index: 0, candidates: 1 },
+        )
+        .await;
+        assert_eq!(origin_requests, 0, "a refused request never reached the origin");
+        assert!(
+            matches!(
+                outcome,
+                Err(OriginManifestFetchError::RecoveryUnavailable {
+                    reason: crate::manifest_fetch::HlsManifestRecoveryUnavailableReason::BindingSuperseded
+                })
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    /// An open shared attempt dispatches its bound request, so the slot reports it.
+    #[tokio::test]
+    async fn open_shared_attempt_counts_the_dispatched_origin_request() {
+        let context = test_fetch_context();
+        let binding = HlsManifestOriginBinding::new(
+            url::Url::parse("http://127.0.0.1:1/index.m3u8").expect("binding url"),
+            Some(1),
+        )
+        .expect("binding");
+        let (origin_requests, outcome) = fetch_probed_recovery_candidate(
+            &context,
+            None,
+            &binding,
+            None,
+            ManifestRecoveryAttemptLogContext { attempt_index: 1, attempts: 2, candidate_index: 0, candidates: 1 },
+        )
+        .await;
+        assert_eq!(origin_requests, 1, "the bound request was dispatched");
+        assert!(
+            matches!(outcome, Err(OriginManifestFetchError::Request(_))),
+            "a dispatched request against a closed port fails at the transport: {outcome:?}"
+        );
+    }
+
+    /// The probe owns the slot when it wins: a mirror that the account binding refused
+    /// before dispatch must not add an origin request to the slot's report.
+    #[tokio::test]
+    async fn probe_win_does_not_count_a_mirror_refused_before_dispatch() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("probe origin binds");
+        let address = listener.local_addr().expect("probe origin address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("probe origin accepts");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.expect("probe request read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n";
+            let response =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(response.as_bytes()).await.expect("probe response");
+        });
+
+        let mut context = test_fetch_context();
+        // A finished mirror grants the probe one retry interval, so the slot must keep a real grace window.
+        context.retry_policy =
+            super::super::model::RetryPolicy { delays_ms: [0, 250, 1_000, 1_000, 1_000], jitter_max_ms: 0 };
+        // The slot's own binding is superseded, so its mirror request is refused before any HTTP call.
+        context.origin_account_snapshot = Some(crate::origin_account_runtime::HlsOriginAccountSnapshot {
+            binding: None,
+            generation: context.session.read().await.activity.origin_work_generation.saturating_add(1),
+            provider_session_headers: axum::http::HeaderMap::default(),
+        });
+        let binding = HlsManifestOriginBinding::new(
+            url::Url::parse("http://127.0.0.1:1/index.m3u8").expect("mirror binding url"),
+            Some(1),
+        )
+        .expect("mirror binding");
+        let probe_binding = HlsManifestOriginBinding::new(
+            url::Url::parse(&format!("http://{address}/index.m3u8")).expect("probe binding url"),
+            Some(1),
+        )
+        .expect("probe binding");
+
+        let (origin_requests, outcome) = fetch_probed_recovery_candidate(
+            &context,
+            Some((
+                test_fetch_context(),
+                probe_binding,
+                HlsAcceptanceDeadlineMs::from_millis_since_epoch(current_time_millis() + 1_000),
+            )),
+            &binding,
+            None,
+            ManifestRecoveryAttemptLogContext { attempt_index: 1, attempts: 2, candidate_index: 0, candidates: 1 },
+        )
+        .await;
+        server.await.expect("probe origin completes");
+
+        assert_eq!(origin_requests, 1, "only the probe reached the origin; the refused mirror did not");
+        assert!(outcome.is_ok(), "the probe wins the slot: {:?}", outcome.as_ref().err());
+    }
+
+    /// When the shared attempt closes before dispatch, a probe slot with detached attempts
+    /// must refuse both probe and mirror with `RetryExhausted` and count zero origin requests.
+    #[tokio::test]
+    async fn closed_shared_attempt_refuses_detached_probe_and_mirror_with_retry_exhausted() {
+        let context = test_fetch_context();
+        let binding = HlsManifestOriginBinding::new(
+            url::Url::parse("http://127.0.0.1:1/index.m3u8").expect("mirror binding url"),
+            Some(1),
+        )
+        .expect("mirror binding");
+        let probe_binding = HlsManifestOriginBinding::new(
+            url::Url::parse("http://127.0.0.1:2/index.m3u8").expect("probe binding url"),
+            Some(1),
+        )
+        .expect("probe binding");
+        let probe_context = test_fetch_context();
+
+        // Close the shared attempt before dispatch
+        context.attempt.as_ref().unwrap().finish(false);
+
+        let (origin_requests, outcome) = fetch_probed_recovery_candidate(
+            &context,
+            Some((
+                probe_context,
+                probe_binding,
+                HlsAcceptanceDeadlineMs::from_millis_since_epoch(current_time_millis() + 1_000),
+            )),
+            &binding,
+            None,
+            ManifestRecoveryAttemptLogContext { attempt_index: 1, attempts: 2, candidate_index: 0, candidates: 1 },
+        )
+        .await;
+
+        assert_eq!(origin_requests, 0, "refused probe and mirror never reach the origin");
+        assert!(
+            matches!(outcome, Err(OriginManifestFetchError::RetryExhausted)),
+            "expected RetryExhausted, got {outcome:?}"
+        );
+    }
+
+    /// When the acceptance deadline has already expired before request dispatch,
+    /// the probe slot computes a remaining budget of zero, refuses with Timeout,
+    /// and issues zero origin requests.
+    #[tokio::test]
+    async fn expired_acceptance_deadline_refuses_detached_probe_and_mirror_with_timeout() {
+        let context = test_fetch_context();
+        let binding = HlsManifestOriginBinding::new(
+            url::Url::parse("http://127.0.0.1:1/index.m3u8").expect("mirror binding url"),
+            Some(1),
+        )
+        .expect("mirror binding");
+        let probe_binding = HlsManifestOriginBinding::new(
+            url::Url::parse("http://127.0.0.1:2/index.m3u8").expect("probe binding url"),
+            Some(1),
+        )
+        .expect("probe binding");
+        let probe_context = test_fetch_context();
+
+        // Expired deadline in the past
+        let expired_deadline =
+            HlsAcceptanceDeadlineMs::from_millis_since_epoch(current_time_millis().saturating_sub(1_000));
+
+        let (origin_requests, outcome) = fetch_probed_recovery_candidate(
+            &context,
+            Some((probe_context, probe_binding, expired_deadline)),
+            &binding,
+            None,
+            ManifestRecoveryAttemptLogContext { attempt_index: 1, attempts: 2, candidate_index: 0, candidates: 1 },
+        )
+        .await;
+
+        assert_eq!(origin_requests, 0, "an expired acceptance deadline never reaches the origin");
+        assert!(matches!(outcome, Err(OriginManifestFetchError::Timeout)), "expected Timeout, got {outcome:?}");
+    }
+
+    /// When the mirror request finishes first with an error (e.g. 502), the slot must wait for
+    /// the in-flight probe until it completes rather than dropping it after `probe_grace`.
+    #[tokio::test]
+    async fn probe_slot_waits_for_inflight_probe_when_mirror_fails_with_zero_retry_delay() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let probe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("probe origin binds");
+        let probe_address = probe_listener.local_addr().expect("probe origin address");
+        let probe_server = tokio::spawn(async move {
+            let (mut socket, _) = probe_listener.accept().await.expect("probe origin accepts");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.expect("probe request read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n";
+            let response =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(response.as_bytes()).await.expect("probe response");
+        });
+
+        let mirror_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("mirror origin binds");
+        let mirror_address = mirror_listener.local_addr().expect("mirror origin address");
+        let mirror_server = tokio::spawn(async move {
+            let (mut socket, _) = mirror_listener.accept().await.expect("mirror origin accepts");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.expect("mirror request read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let response = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.expect("mirror response");
+        });
+
+        let mut context = test_fetch_context();
+        context.retry_policy = super::super::model::RetryPolicy { delays_ms: [0, 0, 0, 0, 0], jitter_max_ms: 0 };
+        let binding = HlsManifestOriginBinding::new(
+            url::Url::parse(&format!("http://{mirror_address}/index.m3u8")).expect("mirror binding url"),
+            Some(1),
+        )
+        .expect("mirror binding");
+        let probe_binding = HlsManifestOriginBinding::new(
+            url::Url::parse(&format!("http://{probe_address}/index.m3u8")).expect("probe binding url"),
+            Some(1),
+        )
+        .expect("probe binding");
+
+        let (origin_requests, outcome) = fetch_probed_recovery_candidate(
+            &context,
+            Some((
+                test_fetch_context(),
+                probe_binding,
+                HlsAcceptanceDeadlineMs::from_millis_since_epoch(current_time_millis() + 1_000),
+            )),
+            &binding,
+            None,
+            ManifestRecoveryAttemptLogContext { attempt_index: 1, attempts: 2, candidate_index: 0, candidates: 1 },
+        )
+        .await;
+        probe_server.await.expect("probe server completes");
+        mirror_server.await.expect("mirror server completes");
+
+        assert_eq!(origin_requests, 2, "both probe and mirror reached the origin");
+        assert!(outcome.is_ok(), "the probe wins the slot: {:?}", outcome.as_ref().err());
+    }
+
+    fn test_fetch_context() -> HlsOriginManifestFetchContext {
+        let ctx = crate::HlsCtx::for_test(tuliprox_core::model::Config::default());
+        let attempt = Arc::new(HlsManifestAttemptContext::new(
+            HlsManifestCommitRequirement::CommittedManifestAllowed,
+            true,
+            None,
+        ));
+        assert!(attempt.begin_logical_attempt(), "the fixture opens the shared attempt");
+        let session: HlsSessionHandle =
+            Arc::new(RwLock::new(HlsSession::new(HlsSessionKey::new(1, "closed-attempt"), b"secret", 0)));
+        let client = reqwest::Client::builder().no_proxy().build().expect("client");
+        HlsOriginManifestFetchContext {
+            origin_account_snapshot: None,
+            attempt: Some(attempt),
+            app_config: Arc::clone(&ctx.app_config),
+            session,
+            availability_runtime: None,
+            origin_entry: super::super::model::LiveHlsOriginEntry::parse("http://127.0.0.1:1/index.m3u8")
+                .expect("entry url"),
+            headers: axum::http::HeaderMap::default(),
+            client: client.clone(),
+            no_redirect_client: client,
+            use_manual_redirects: false,
+            origin_manifest_timeout_ms: 1_000,
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
+            retry_policy: super::super::model::RetryPolicy { delays_ms: [0, 0, 0, 0, 0], jitter_max_ms: 0 },
+            recovery_timing_policy: HlsRecoveryTimingPolicy::new(
+                HlsOperationTimeoutMs::from_millis(1_000),
+                HlsOperationTimeoutMs::from_millis(1_000),
+                HlsRecoveryEtaMs::from_millis(1_000),
+                HlsRecoveryEtaMs::from_millis(1_000),
+            ),
+            acceptance_timing_seed: None,
+            origin_telemetry: crate::origin_telemetry::OriginTelemetryRecorder::disabled(),
+        }
     }
 }

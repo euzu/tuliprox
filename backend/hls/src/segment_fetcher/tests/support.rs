@@ -570,11 +570,15 @@ pub(in crate::segment_fetcher::tests) async fn cold_startup_round(
         }
     };
     let timeline = crate::media_reserve::HlsReadyTimelineSnapshot { units: Arc::from([]) };
+    let cursor = crate::media_reserve::HlsLeasePlaybackCursor::default();
     let admission = crate::media_reserve::evaluate_startup_admission(crate::media_reserve::HlsStartupAdmissionInput {
         manifest: &publication,
+        cursor: &cursor,
         ready_timeline: &timeline,
         origin_state: crate::media_reserve::HlsStartupAdmissionOriginState::Healthy,
         recovery_trigger_budget: crate::recovery_timing::HlsRecoveryTriggerBudgetMs::from_millis(4000),
+        lease_start_proxy_seq: publication.first_proxy_seq,
+        now_ms: 0,
     });
     assert_eq!(admission.decision, crate::media_reserve::HlsStartupAdmissionDecision::Admit);
     let evidence = publication.startup_revisions.as_ref().ok_or_else(|| std::io::Error::other("evidence"))?;

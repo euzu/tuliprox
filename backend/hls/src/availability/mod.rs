@@ -4,8 +4,8 @@ use super::{
     manager::{HlsCriticalHandoffStateAccess, HlsProxyManager},
     manifest_acceptance::HlsManifestAcceptanceTrigger,
     media_reserve::{
-        evaluate_startup_admission, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode, HlsStartupAdmissionDecision,
-        HlsStartupAdmissionInput, HlsStartupAdmissionOriginState,
+        evaluate_startup_admission, HlsLeaseManifestSnapshot, HlsLeasePlaybackCursor, HlsManifestDeliveryMode,
+        HlsStartupAdmissionDecision, HlsStartupAdmissionInput, HlsStartupAdmissionOriginState,
     },
     observability::HlsRecoveryTriggerDiagnostic,
     origin_progress::HlsOriginPathCondition,
@@ -54,6 +54,11 @@ const HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS: u64 = 2_000;
 /// A member handoff is itself bounded by the failover budget; this cap only guarantees that
 /// the terminal commit happens even if a handoff hangs.
 pub(crate) const HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS: u64 = 15_000;
+/// Target durations without a playback request after which an active lease counts as paused for the
+/// reserve-driven member failover: its playback clock is frozen, so its reserve says nothing about
+/// what the origin still delivers. A previous reserve sample older than this bound is likewise too
+/// old to prove a steady reserve fall.
+pub(crate) const HLS_MEMBER_FAILOVER_IDLE_TARGET_DURATIONS: u64 = 3;
 const HLS_AVAILABILITY_REEVALUATION_MAX_BACKOFF_MS: u64 = 50;
 const HLS_TERMINAL_PENDING_RETRY_AFTER_MS: u64 = 50;
 const HLS_TERMINAL_ASSET_REVALIDATION_ATTEMPTS: usize = 2;
@@ -175,9 +180,10 @@ pub async fn hls_startup_admission_allows_snapshot(
     ctx: &HlsCtx,
     session: &HlsSessionHandle,
     snapshot: &HlsLeaseManifestSnapshot,
+    cursor: &HlsLeasePlaybackCursor,
     now_ms: u64,
 ) -> bool {
-    let (ready_timeline, origin_state, observed_latency, target_duration_ms) = {
+    let (ready_timeline, lease_start_proxy_seq, origin_state, observed_latency, target_duration_ms) = {
         let session = session.read().await;
         if session.live_entry_revalidation.required {
             return false;
@@ -200,10 +206,14 @@ pub async fn hls_startup_admission_allows_snapshot(
         {
             return true;
         }
-        // A failed object outside a recovered entry window does not invalidate
-        // that lease's fully downloaded replacement. Other origin failures keep
-        // their normal admission and reserve checks.
-        let recovered_entry = session.origin_control.path_condition
+        // One reserve rule replaces the expired-head rule: the prospective reserve of the
+        // advertised window counts the contiguous READY span from its first sequence, so a
+        // complete renderable window is admitted no matter why the origin no longer advertises
+        // the object before it. A recovered startup window is different: its objects are
+        // published from startup revisions before their bodies are READY, so the READY-timeline
+        // reserve cannot describe it. Every other origin failure keeps its normal admission and
+        // reserve checks.
+        let recovered_startup = session.origin_control.path_condition
             == crate::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure
             && snapshot
                 .startup_revisions
@@ -214,9 +224,24 @@ pub async fn hls_startup_admission_allows_snapshot(
                         && window.plan.is_current(&session)
                         && window.plan.is_ready(&session)
                 });
-        let degraded = session.origin_control.path_condition.is_degraded() && !recovered_entry;
+        let degraded = session.origin_control.path_condition.is_degraded() && !recovered_startup;
+        // The reserve is measured from the sequence the lease's first request of the entry
+        // window will use. The READY timeline stops at the first metadata gap, so when that
+        // start lies before the window and the timeline does not reach the window start, the
+        // window start is used instead, so a gap before the window never hides the window from
+        // the visible-media check. A lease that resumes a measured playback still carries its
+        // position-adjusted reserve, which a degraded origin may reject.
+        let mut lease_start_proxy_seq = cursor.entry_reserve_start_proxy_seq(snapshot.first_proxy_seq);
+        let mut ready_timeline = session.ready_timeline_snapshot(lease_start_proxy_seq, now_ms);
+        if lease_start_proxy_seq < snapshot.first_proxy_seq
+            && !ready_timeline.units.iter().any(|unit| unit.proxy_seq == snapshot.first_proxy_seq)
+        {
+            lease_start_proxy_seq = snapshot.first_proxy_seq;
+            ready_timeline = session.ready_timeline_snapshot(lease_start_proxy_seq, now_ms);
+        }
         (
-            session.ready_timeline_snapshot(snapshot.first_proxy_seq, now_ms),
+            ready_timeline,
+            lease_start_proxy_seq,
             if degraded { HlsStartupAdmissionOriginState::Degraded } else { HlsStartupAdmissionOriginState::Healthy },
             session.origin_control.recovery_samples.latency_snapshot(),
             session
@@ -234,6 +259,7 @@ pub async fn hls_startup_admission_allows_snapshot(
     );
     let admission = evaluate_startup_admission(HlsStartupAdmissionInput {
         manifest: snapshot,
+        cursor,
         ready_timeline: &ready_timeline,
         origin_state,
         recovery_trigger_budget: recovery_trigger_budget(
@@ -242,6 +268,8 @@ pub async fn hls_startup_admission_allows_snapshot(
             workload,
             observed_latency,
         ),
+        lease_start_proxy_seq,
+        now_ms,
     });
     matches!(admission.decision, HlsStartupAdmissionDecision::Admit)
 }

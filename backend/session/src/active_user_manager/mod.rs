@@ -136,13 +136,17 @@ impl MemberBinding {
 /// Per-user-session timeline rebase state for legacy (non-cache) HLS failover groups. After a
 /// member switch the client media sequence continues monotonically and a discontinuity marks the
 /// switch point; the discontinuity sequence advances once the boundary leaves the window.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LegacyHlsRebase {
     /// Added to the current member's upstream `EXT-X-MEDIA-SEQUENCE` to keep the client timeline
     /// monotonic across a switch.
     pub media_sequence_offset: i64,
     /// Client media sequence of the last served segment; the next member starts at this + 1.
     pub last_served_sequence: u64,
+    /// Client media sequence the last served window started at. A response is older than the
+    /// committed timeline when its window starts before this value; an identical re-serve starts
+    /// at it and is served.
+    pub last_served_start: u64,
     /// Client `EXT-X-DISCONTINUITY-SEQUENCE` of the last served window; never decreases.
     pub discontinuity_sequence: u64,
     /// Upstream `EXT-X-DISCONTINUITY-SEQUENCE` of the last served window; its advances are added to
@@ -152,6 +156,12 @@ pub struct LegacyHlsRebase {
     pub discontinuity_boundary_seq: Option<u64>,
     /// Insert an `EXT-X-DISCONTINUITY` before the first segment of the next manifest serve.
     pub insert_discontinuity: bool,
+    /// The member changed; the next media serve starts after `last_served_sequence` with a discontinuity.
+    pub pending_member_rebase: bool,
+    /// Bumped on every plan that changes the timeline. A request compares it with the value it saw
+    /// before downloading a playlist, so a late response for an older upstream window cannot remap
+    /// media another request already committed.
+    pub commit_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -168,7 +178,8 @@ pub struct UserSession {
     pub provider_session_cookies: Arc<crate::ProviderSessionCookieStore>,
     /// Unique per session object, so a reused token never authorizes requests of an older session.
     pub incarnation: u64,
-    /// Bumped on every provider account switch; child URLs belong to the account that issued them.
+    /// Bumped on every provider account switch and on every actual member binding change; child
+    /// URLs belong to the account and member that issued them.
     pub binding_generation: u64,
     pub change_signal: SessionChangeSignal,
     /// Shared with the response body so media confirmation survives a released VOD lease.
@@ -191,6 +202,9 @@ pub struct UserSession {
     /// A legacy segment request of the bound member failed hard (404/410/5xx); the next manifest
     /// refresh switches the member instead of serving it again.
     pub member_failed_on_segment: bool,
+    /// Monotonic failure counter for legacy HLS group members; bumped on every segment failure so an
+    /// in-flight poll that finishes after the failure cannot clear it.
+    pub member_failure_generation: u64,
     /// Single-flight guard for the legacy runtime member switch; one switch per session at a time.
     pub legacy_switch_in_flight: Arc<AtomicBool>,
 }

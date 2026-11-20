@@ -6,13 +6,14 @@
 //! backoff and the attempt/deadline caps that bound the loop live here too.
 
 use super::{
-    hls_manifest_acceptance_directive_for_reevaluation, HlsManifestAcceptanceDirective, HlsTerminalFailedClosedReason,
-    HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS, HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS,
-    HLS_AVAILABILITY_REEVALUATION_MAX_BACKOFF_MS, HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS,
+    hls_manifest_acceptance_directive_for_reevaluation, terminal_cutover::member_failover_controlling_lease,
+    HlsManifestAcceptanceDirective, HlsTerminalFailedClosedReason, HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS,
+    HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS, HLS_AVAILABILITY_REEVALUATION_MAX_BACKOFF_MS,
+    HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS,
 };
 use crate::{
     availability_reevaluation::{
-        HlsAvailabilityOwnerHandoffDecision, HlsAvailabilityReevaluationFinishDecision,
+        HlsAvailabilityOwnerHandoffDecision, HlsAvailabilityOwnerWait, HlsAvailabilityReevaluationFinishDecision,
         HlsAvailabilityReevaluationFinishReason, HlsAvailabilityReevaluationMode, HlsAvailabilityReevaluationOwnerKey,
         HlsAvailabilityReevaluationOwnership, HlsAvailabilityReevaluationRegistration,
     },
@@ -20,8 +21,7 @@ use crate::{
     origin_account_runtime::HlsMemberUnhealthyReason,
     post_refresh_availability::{
         evaluate_active_terminal_leases_for_reevaluation, evaluate_owner_failure_fallback, wait_for_owner_resolution,
-        HlsLiveReserveDeadline, HlsPostRefreshOwnerResolution, HlsPostRefreshOwnerWaitOutcome,
-        HlsPostRefreshTerminalEvaluation,
+        HlsLiveReserveDeadline, HlsPostRefreshOwnerResolution, HlsPostRefreshTerminalEvaluation,
     },
     refresh::{
         maybe_trigger_origin_refresh_with_outcome, HlsOriginRefreshTriggerOutcome, HlsPostRefreshAvailabilityAction,
@@ -30,7 +30,7 @@ use crate::{
     session_store::HlsSessionHandle,
 };
 use log::warn;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum HlsAvailabilityReevaluationAttempt {
@@ -138,27 +138,6 @@ enum HlsAvailabilityWorkerDecision {
     ContinueAttempts(HlsAvailabilityAttemptSchedule),
     RestartCycle,
     Stop,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HlsAvailabilityOwnerWaitOutcome {
-    Cancelled,
-    Woken,
-    DeadlineReached,
-}
-
-async fn wait_for_availability_owner_signal(
-    ownership: &HlsAvailabilityReevaluationOwnership,
-    wake_at_ms: u64,
-    now_ms: u64,
-) -> HlsAvailabilityOwnerWaitOutcome {
-    tokio::select! {
-        () = ownership.cancelled() => HlsAvailabilityOwnerWaitOutcome::Cancelled,
-        () = ownership.wake_requested() => HlsAvailabilityOwnerWaitOutcome::Woken,
-        () = tokio::time::sleep(Duration::from_millis(
-            wake_at_ms.saturating_sub(now_ms)
-        )) => HlsAvailabilityOwnerWaitOutcome::DeadlineReached,
-    }
 }
 
 fn finish_availability_reevaluation_cycle(
@@ -294,7 +273,9 @@ impl HlsAvailabilityReevaluationCycle {
         cycle
     }
 
-    fn retained_owner_resolution(&self, now_ms: u64) -> Option<HlsPostRefreshOwnerResolution> {
+    /// How the retained owner continues after this cycle: the same mapping
+    /// `wait_for_owner_resolution` turns into a wait.
+    pub(crate) fn retained_owner_resolution(&self, now_ms: u64) -> Option<HlsPostRefreshOwnerResolution> {
         if !self.retain_post_refresh_owner {
             return None;
         }
@@ -432,15 +413,10 @@ pub(crate) async fn evaluate_post_refresh_terminal_attempt(
         }
     } else if cycle.handoff_defer_until_ms.is_none() {
         if let Some(runtime) = policy_runtime {
-            let has_active_leases = !ctx
-                .hls_proxy
-                .terminal_playback_snapshots_for_session(&owner_key.proxy_session_id, now_ms)
-                .await
-                .is_empty();
-            // Request the switch while the playback reserve still covers it, so the player does not
-            // stall; the reserve check alone would allow live until the reserve is spent.
-            if has_active_leases {
-                runtime.notify_member_unhealthy(session, HlsMemberUnhealthyReason::TerminalPending);
+            // Ask for the member switch while the playback reserve still covers it. Decided before
+            // the terminal decision so an exhausted reserve cannot commit the terminal tail first.
+            if member_failover_controlling_lease(ctx, session, &owner_key.proxy_session_id, now_ms).await.is_some() {
+                runtime.notify_member_unhealthy(session, HlsMemberUnhealthyReason::ReservePressure);
                 let defer_until_ms = now_ms.saturating_add(HLS_MEMBER_HANDOFF_TERMINAL_DEFER_MAX_MS);
                 cycle.handoff_defer_until_ms = Some(defer_until_ms);
                 return defer_post_refresh_terminal_for_handoff(owner_key, cycle, defer_until_ms, now_ms);
@@ -603,15 +579,9 @@ pub(super) async fn run_hls_availability_reevaluation_attempt(
             .live_reserve_deadline
             .map(|deadline| deadline.next_reevaluation_at_ms)
             .map_or(work_at, |deadline| Some(work_at.map_or(deadline, |work| work.min(deadline))));
-        let outcome = if let Some(at_ms) = wake_at {
-            wait_for_availability_owner_signal(ownership, at_ms, retry_from_ms).await
-        } else {
-            tokio::select! {
-                () = ownership.cancelled() => HlsAvailabilityOwnerWaitOutcome::Cancelled,
-                () = ownership.wake_requested() => HlsAvailabilityOwnerWaitOutcome::Woken,
-            }
-        };
-        if outcome == HlsAvailabilityOwnerWaitOutcome::Cancelled {
+        // The wait itself parks outside the bounded task permit when the instant is a long one, so
+        // a session sleeping until its reserve-derived wake instant holds no coordinator capacity.
+        if ownership.wait_for_wake(wake_at, retry_from_ms).await == HlsAvailabilityOwnerWait::Cancelled {
             ownership.discard_superseded(owner_key);
             return HlsAvailabilityCycleDecision::Stop;
         }
@@ -636,16 +606,16 @@ pub(super) async fn run_hls_availability_reevaluation_attempt(
     if let Some(deadline) = cycle.live_reserve_deadline {
         retry_at_ms = retry_at_ms.min(deadline.next_reevaluation_at_ms);
     }
-    match wait_for_availability_owner_signal(ownership, retry_at_ms, retry_from_ms).await {
-        HlsAvailabilityOwnerWaitOutcome::Cancelled => {
+    match ownership.wait_for_wake(Some(retry_at_ms), retry_from_ms).await {
+        HlsAvailabilityOwnerWait::Cancelled => {
             ownership.discard_superseded(owner_key);
             HlsAvailabilityCycleDecision::Stop
         }
-        HlsAvailabilityOwnerWaitOutcome::Woken => HlsAvailabilityCycleDecision::RestartCycle,
-        HlsAvailabilityOwnerWaitOutcome::DeadlineReached if retry_at_ms >= effective_deadline_ms => {
+        HlsAvailabilityOwnerWait::Woken => HlsAvailabilityCycleDecision::RestartCycle,
+        HlsAvailabilityOwnerWait::DeadlineReached if retry_at_ms >= effective_deadline_ms => {
             HlsAvailabilityCycleDecision::FinishCycle
         }
-        HlsAvailabilityOwnerWaitOutcome::DeadlineReached => HlsAvailabilityCycleDecision::ContinueAttempts(schedule),
+        HlsAvailabilityOwnerWait::DeadlineReached => HlsAvailabilityCycleDecision::ContinueAttempts(schedule),
     }
 }
 
@@ -710,11 +680,11 @@ async fn run_hls_availability_reevaluation(
         prior_cycle = Some(cycle);
         if let Some(resolution) = retained {
             match wait_for_owner_resolution(&ownership, resolution, ctx.hls_proxy.now_ms()).await {
-                HlsPostRefreshOwnerWaitOutcome::Cancelled => {
+                HlsAvailabilityOwnerWait::Cancelled => {
                     ownership.discard_superseded(&owner_key);
                     return;
                 }
-                HlsPostRefreshOwnerWaitOutcome::Woken | HlsPostRefreshOwnerWaitOutcome::DeadlineReached => {}
+                HlsAvailabilityOwnerWait::Woken | HlsAvailabilityOwnerWait::DeadlineReached => {}
             }
             continue;
         }

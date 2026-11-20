@@ -199,6 +199,30 @@ impl HlsSession {
         let _ = self.queue_manifest_fetch_candidates(now_ms, true);
     }
 
+    /// Returns queued render-window candidates that no live plan requires any more to `Discovered`.
+    fn demote_unrequired_render_window_candidates(&mut self, required: &BTreeSet<u64>) {
+        let obsolete = self
+            .segment_prefetch_queue
+            .proxy_seqs()
+            .into_iter()
+            .filter(|seq| {
+                !required.contains(seq)
+                    && self.segments.get(seq).is_some_and(|entry| {
+                        matches!(
+                            entry.status,
+                            SegmentCacheStatus::Queued { priority: SegmentFetchPriority::RenderWindow, .. }
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        for seq in obsolete {
+            self.segment_prefetch_queue.remove(seq);
+            if let Some(entry) = self.segments.get_mut(&seq) {
+                entry.status = SegmentCacheStatus::Discovered;
+            }
+        }
+    }
+
     pub fn queue_manifest_fetch_candidates(&mut self, now_ms: u64, allow_prefetch: bool) -> ManifestFetchQueueReport {
         let mut report = ManifestFetchQueueReport::default();
         if self.is_gc_marked_for_removal() {
@@ -206,33 +230,27 @@ impl HlsSession {
         }
         if self.uses_fast_start_live_window() {
             let plans = self.required_live_windows();
-            let required = plans.iter().flat_map(|plan| plan.visible.iter().copied()).collect::<BTreeSet<_>>();
-            let obsolete = self
-                .segment_prefetch_queue
-                .proxy_seqs()
-                .into_iter()
-                .filter(|seq| {
-                    !required.contains(seq)
-                        && self.segments.get(seq).is_some_and(|entry| {
-                            matches!(
-                                entry.status,
-                                SegmentCacheStatus::Queued { priority: SegmentFetchPriority::RenderWindow, .. }
-                            )
-                        })
-                })
-                .collect::<Vec<_>>();
-            for seq in obsolete {
-                self.segment_prefetch_queue.remove(seq);
-                if let Some(entry) = self.segments.get_mut(&seq) {
-                    entry.status = SegmentCacheStatus::Discovered;
-                }
-            }
+            // Only the head of an unready live tail is raised to render-window priority: the
+            // successors the next publication needs, at least one and otherwise bounded by the
+            // same depth that bounds the prefetch set. The rest of the tail stays prefetch, so a
+            // stalled origin cannot occupy the shared segment permits with media no viewer can
+            // render yet.
+            let promoted_tail_depth = self.segment_prefetch_queue.max_prefetch_depth().max(1);
+            let mut required = plans.iter().flat_map(|plan| plan.visible.iter().copied()).collect::<BTreeSet<_>>();
+            required.extend(plans.iter().flat_map(|plan| plan.pending_tail.iter().take(promoted_tail_depth).copied()));
+            required.extend(plans.iter().flat_map(|plan| plan.reserve_promotion_tail(self, now_ms).iter().copied()));
+            self.demote_unrequired_render_window_candidates(&required);
             for seq in required {
                 if self.queue_segment_fetch_candidate(seq, SegmentFetchPriority::RenderWindow, now_ms) {
                     report.render_window_queued += 1;
                 }
             }
-            let reserve = plans.iter().flat_map(|plan| plan.hidden_tail.iter().copied()).collect::<BTreeSet<_>>();
+            let reserve = plans
+                .iter()
+                .flat_map(|plan| {
+                    plan.hidden_tail.iter().chain(plan.pending_tail.iter().skip(promoted_tail_depth)).copied()
+                })
+                .collect::<BTreeSet<_>>();
             for seq in reserve {
                 if allow_prefetch {
                     if self.queue_segment_fetch_candidate(seq, SegmentFetchPriority::Prefetch, now_ms) {

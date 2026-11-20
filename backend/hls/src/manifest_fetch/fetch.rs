@@ -67,16 +67,19 @@ impl<'a> HlsOriginManifestFetchRequest<'a> {
     ) -> Self {
         Self { context, mode: HlsOriginManifestFetchMode::RecoveryDirectTarget { binding, reason, log_context } }
     }
+
+    /// Both pre-dispatch gates: the origin binding is still current and the shared
+    /// attempt is open. The fetch repeats this gate immediately before dispatch.
+    pub(super) async fn ensure_dispatch_allowed(&self) -> Result<(), OriginManifestFetchError> {
+        self.context.ensure_dispatch_allowed().await
+    }
 }
 
 /// Fetches an origin manifest in the requested mode; a pinned recovery may fall back to the profile mirrors.
 pub async fn fetch_hls_origin_manifest_request(
     request: HlsOriginManifestFetchRequest<'_>,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    request.context.ensure_current_origin().await?;
-    if request.context.attempt.as_ref().is_some_and(|attempt| attempt.is_closed()) {
-        return Err(OriginManifestFetchError::RetryExhausted);
-    }
+    request.ensure_dispatch_allowed().await?;
     let result = match request.mode {
         HlsOriginManifestFetchMode::InitialGlobalPolicy => {
             fetch_hls_origin_manifest_initial_global_policy(request.context).await

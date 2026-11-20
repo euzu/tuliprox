@@ -3,6 +3,7 @@ use crate::{SegmentFetchPolicy, TransientResourceKind, TransientResourceRef};
 
 #[tokio::test]
 async fn catchup_reentry_after_key_failure_allows_new_current_manifest() {
+    let cursor = HlsLeasePlaybackCursor::default();
     let ctx = crate::HlsCtx::for_test(Config::default());
     let mut state =
         HlsSession::new(HlsSessionKey::new(1, "archive-key-reentry").with_archive_reference(123), b"secret", 0);
@@ -38,7 +39,7 @@ async fn catchup_reentry_after_key_failure_allows_new_current_manifest() {
     snapshot.source_commit_identity = session.read().await.transient.last_manifest_commit_identity().unwrap();
 
     assert!(
-        hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 102).await,
+        hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, &cursor, 102).await,
         "a fresh current catchup manifest must be admitted after key failure"
     );
     assert_eq!(
@@ -51,6 +52,7 @@ async fn catchup_reentry_after_key_failure_allows_new_current_manifest() {
 
 #[tokio::test]
 async fn catchup_reentry_after_media_failure_can_retry_only_a_new_current_manifest() {
+    let cursor = HlsLeasePlaybackCursor::default();
     let ctx = crate::HlsCtx::for_test(Config::default());
     let mut state = HlsSession::new(HlsSessionKey::new(1, "archive-reentry").with_archive_reference(123), b"secret", 0);
     state.mode = crate::HlsSessionMode::TransientPassthrough {
@@ -66,7 +68,7 @@ async fn catchup_reentry_after_media_failure_can_retry_only_a_new_current_manife
     snapshot.source_commit_identity = state.transient.last_manifest_commit_identity().unwrap();
     let session = Arc::new(tokio::sync::RwLock::new(state));
     assert!(
-        hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 102).await,
+        hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, &cursor, 102).await,
         "a new archive entry must be able to attempt media after a fresh manifest"
     );
     assert_eq!(
@@ -77,31 +79,31 @@ async fn catchup_reentry_after_media_failure_can_retry_only_a_new_current_manife
     assert_eq!(session.read().await.origin_control.path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
     session.write().await.segment_failure_tracker.last_failure_at_ms = Some(101);
     assert!(
-        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 102).await,
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, &cursor, 102).await,
         "old manifest cannot revive a later failed attempt"
     );
     session.write().await.segment_failure_tracker.last_failure_at_ms = Some(100);
     snapshot.source_commit_identity = HlsManifestCommitIdentity::committed(99, 102);
     assert!(
-        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 103).await,
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, &cursor, 103).await,
         "foreign snapshot cannot grant retry"
     );
     snapshot.source_commit_identity = session.read().await.transient.last_manifest_commit_identity().unwrap();
     session.write().await.key = HlsSessionKey::new(1, "live");
     assert!(
-        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 103).await,
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, &cursor, 103).await,
         "live admission stays unchanged"
     );
     session.write().await.key = HlsSessionKey::new(1, "archive-reentry").with_archive_reference(123);
     session.write().await.origin_control.path_condition = HlsOriginPathCondition::HardFetchFailure;
     assert!(
-        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 103).await,
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, &cursor, 103).await,
         "manifest failure cannot be bypassed"
     );
     session.write().await.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
     session.write().await.require_live_entry_revalidation(1);
     assert!(
-        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, 103).await,
+        !hls_startup_admission_allows_snapshot(&ctx, &session, &snapshot, &cursor, 103).await,
         "revalidation remains fail closed"
     );
 }

@@ -309,10 +309,17 @@ async fn work_rights_require_own_admission_and_cannot_chain_expired_normal_right
     tokio::time::advance(Duration::from_secs(10)).await;
     assert!(app.active_provider.reserve_hls_origin_work(owner, &input.name, tag, deadline).is_none());
     let reused = acquire(&app, &input, owner).unwrap();
+    // A sibling on the admitted allocation shares the outstanding horizon of `first`.
+    let sibling = app
+        .active_provider
+        .reserve_hls_origin_work(owner, &input.name, tag, deadline + Duration::from_secs(60))
+        .expect("sibling shares the outstanding horizon");
+    tokio::time::advance(Duration::from_secs(21)).await;
     assert!(
-        app.active_provider.reserve_hls_origin_work(owner, &input.name, tag, deadline).is_none(),
+        !sibling.is_current(),
         "an allocation backed solely by another operation cannot manufacture a new deadline"
     );
+    drop(sibling);
     app.active_provider.release_handle(&reused);
     drop(first);
     app.active_provider.clear_identified_provider_reservation(owner, &input.name, Some(tag));

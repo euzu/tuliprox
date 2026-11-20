@@ -64,7 +64,7 @@ pub(super) fn segment_fetch_attempt_matches(entry: &SegmentEntry, snapshot: &Seg
         && entry.cache_key == snapshot.cache_key
         && matches!(
             entry.status,
-            SegmentCacheStatus::Fetching { priority, started_at_ms }
+            SegmentCacheStatus::Fetching { priority, started_at_ms, .. }
                 if priority == snapshot.priority && started_at_ms == snapshot.started_at_ms
         )
 }
@@ -137,6 +137,14 @@ impl HlsSegmentWorkerPool {
                         SegmentFetchOriginFailure::Permanent
                     ) {
                         member_unhealthy = session.member_unhealthy_after_media_failure(&err);
+                        // The failed object is gone from the render queue, and the scheduler wake
+                        // only replans while work is queued. Replan here so the window that the 404
+                        // changed is dispatched immediately instead of waiting for the next commit.
+                        if session.segments.get(&snapshot.proxy_seq).is_some_and(SegmentEntry::is_clear_ts_origin_404)
+                            && session.uses_fast_start_live_window()
+                        {
+                            session.queue_manifest_fetch_candidates(finished_at_ms, false);
+                        }
                     }
                 }
             }

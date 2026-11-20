@@ -1,6 +1,7 @@
 use super::{
-    acquire_live_hls_from_lineup, alias_pool, create_test_app_config_with_dual_provider_pool,
-    create_test_app_config_with_pool, ActiveProviderManager, ConnectionKind, PlaybackLeaseRef,
+    super::leases::ProviderWorkReservation, acquire_live_hls_from_lineup, alias_pool,
+    create_test_app_config_with_dual_provider_pool, create_test_app_config_with_pool, ActiveProviderManager,
+    ConnectionKind, PlaybackLeaseRef,
 };
 use crate::EventManager;
 use shared::{defaults::default_user_priority, utils::Internable};
@@ -139,4 +140,54 @@ async fn live_hls_old_token_cleanup_cannot_mutate_rebound_retry() -> Result<(), 
     assert_eq!(manager.provider_lease_usage(&input).total(), 0);
     assert_eq!(manager.provider_lease_usage(&alias).idle, 1);
     Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn admitted_parallel_origin_work_shares_one_account_slot_and_keeps_earlier_deadline() {
+    // Origin work rights are granted on the owner's existing lease, so parallel work rights never
+    // take another account slot: the physical connection count stays at 1 for a configured limit
+    // of 1 and for an unlimited (0) account alike. Capacity is enforced when the lease is
+    // acquired, which is why a foreign owner without a lease gets no work right here.
+    for limit in [1, 0] {
+        let config = super::build_test_app_config(None, limit);
+        let manager = Arc::new(ActiveProviderManager::new(&config, &Arc::new(EventManager::new())));
+        let input = "provider_1".intern();
+        let owner = "media-owner";
+        let handle = acquire_live_hls_from_lineup(&manager, &input, owner, 40100).unwrap();
+        assert_eq!(manager.get_provider_connections_count(), 1, "limit {limit}: the bound playback holds one slot");
+        let tag = handle.binding_tag.unwrap();
+        let now = tokio::time::Instant::now();
+        let first_end = now + Duration::from_secs(4);
+        let later = now + Duration::from_secs(20);
+        let earlier = now + Duration::from_secs(2);
+        let first = manager.reserve_hls_origin_work(owner, &input, tag, first_end).unwrap();
+        assert_eq!(manager.get_provider_connections_count(), 1, "limit {limit}: the first grant adds no slot");
+        let siblings: Vec<_> =
+            (0..3).filter_map(|_| manager.reserve_hls_origin_work(owner, &input, tag, later)).collect();
+        assert_eq!(siblings.len(), 3, "configured limit {limit}");
+        assert_eq!(manager.get_provider_connections_count(), 1, "limit {limit}: four grants share one slot");
+        let earlier_sibling = manager.reserve_hls_origin_work(owner, &input, tag, earlier).unwrap();
+        assert_eq!(manager.get_provider_connections_count(), 1, "limit {limit}: five grants share one slot");
+        // A foreign owner gets no work right because it holds no lease on this binding, not
+        // because the account is full: capacity is enforced when a lease is acquired.
+        assert!(manager.reserve_hls_origin_work("another-owner", &input, tag, later).is_none());
+        manager.release_handle(&handle);
+        assert_eq!(manager.get_provider_connections_count(), 0, "limit {limit}: releasing the handle frees the slot");
+        assert!(manager.reserve_hls_origin_work(owner, &input, tag, later).is_none());
+        drop(first);
+        assert!(earlier_sibling.is_current());
+        assert!(siblings.iter().all(ProviderWorkReservation::is_current));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(!earlier_sibling.is_current(), "sibling with earlier deadline keeps its earlier deadline");
+        assert!(siblings.iter().all(ProviderWorkReservation::is_current));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(siblings.iter().all(|right| !right.is_current()), "siblings cannot extend the horizon");
+        let successor = acquire_live_hls_from_lineup(&manager, &input, owner, 40101).unwrap();
+        assert_ne!(successor.binding_tag, Some(tag));
+        assert!(manager.reserve_hls_origin_work(owner, &input, tag, later).is_none());
+        drop(earlier_sibling);
+        drop(siblings);
+        assert!(manager.reserve_hls_origin_work(owner, &input, successor.binding_tag.unwrap(), later).is_some());
+        manager.release_handle(&successor);
+    }
 }

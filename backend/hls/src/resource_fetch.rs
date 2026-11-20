@@ -485,6 +485,50 @@ where
         G,
     ) -> BoxFuture<'static, Result<T, HlsOriginResourceFetchError>>,
 {
+    run_hls_origin_resource_retry_loop_with_attempt_classification(
+        target,
+        clients,
+        policy,
+        identity,
+        |_, _| async {}.boxed(),
+        prepare_attempt,
+        cleanup_attempt,
+        commit,
+    )
+    .await
+}
+
+/// Runs the shared retry policy and reports every retrying attempt failure to
+/// `classify_attempt` before the next backoff sleep, so a caller can publish per-attempt
+/// evidence while the retry is still pending. Terminal failures return immediately without
+/// waiting for classification; the caller clears in-flight evidence when committing the terminal status.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The retry policy, its callbacks and the per-attempt classifier stay explicit at the call sites."
+)]
+pub async fn run_hls_origin_resource_retry_loop_with_attempt_classification<T, G, P, C, F, A>(
+    target: HlsOriginResourceFetchTarget,
+    clients: HlsOriginResourceClients,
+    policy: &SegmentFetchPolicy,
+    identity: &HlsLogIdentity,
+    classify_attempt: A,
+    prepare_attempt: P,
+    cleanup_attempt: C,
+    commit: F,
+) -> Result<T, HlsOriginResourceFetchError>
+where
+    T: Send + 'static,
+    G: Send + 'static,
+    P: FnMut(HlsResourceFetchAttempt) -> BoxFuture<'static, Result<G, HlsOriginResourceFetchError>>,
+    C: FnMut(G) -> BoxFuture<'static, ()>,
+    F: FnMut(
+        DecodedHttpResponse,
+        HlsResourceFetchAttempt,
+        HlsOriginResourceBodyDeadline,
+        G,
+    ) -> BoxFuture<'static, Result<T, HlsOriginResourceFetchError>>,
+    A: FnMut(&HlsResourceFetchAttempt, &HlsOriginResourceFetchError) -> BoxFuture<'static, ()>,
+{
     let coding_object_kind = match target.kind {
         HlsResourceFetchKind::Segment => HlsOriginContentCodingObjectKind::Segment,
         HlsResourceFetchKind::Map => HlsOriginContentCodingObjectKind::Map,
@@ -495,6 +539,7 @@ where
     let range_requested = target.headers.contains_key(header::RANGE);
     run_hls_origin_resource_raw_retry_core(
         HlsOriginResourceRetryRun { target, clients, policy, identity },
+        classify_attempt,
         prepare_attempt,
         cleanup_attempt,
         |response, deadline| {
@@ -570,8 +615,9 @@ fn telemetry_object_key(
     clippy::too_many_lines,
     reason = "Keep one operation deadline around preparation, retries and commit, including test barriers."
 )]
-async fn run_hls_origin_resource_raw_retry_core<T, G, R, P, C, D, F>(
+async fn run_hls_origin_resource_raw_retry_core<T, G, R, P, C, D, F, A>(
     run: HlsOriginResourceRetryRun<'_>,
+    mut classify_attempt: A,
     mut prepare_attempt: P,
     mut cleanup_attempt: C,
     mut prepare_response: D,
@@ -590,6 +636,7 @@ where
         HlsOriginResourceBodyDeadline,
         G,
     ) -> BoxFuture<'static, Result<T, HlsOriginResourceFetchError>>,
+    A: FnMut(&HlsResourceFetchAttempt, &HlsOriginResourceFetchError) -> BoxFuture<'static, ()>,
 {
     let HlsOriginResourceRetryRun { target, clients, policy, identity } = run;
     let cancellation = if let Some(session) = clients.session.as_ref() {
@@ -700,19 +747,6 @@ where
                     log_hls_resource_attempt_succeeded(identity, target.log_context(), attempt_started_at.elapsed());
                     return Ok(output);
                 }
-                Err(err) if err.aborts_without_retry() || attempt_index + 1 == attempts => {
-                    if matches!(err, HlsOriginResourceFetchError::Timeout) {
-                        log_hls_resource_timeout(
-                            identity,
-                            target.log_context(),
-                            &attempt,
-                            u128::from(timeout.effective_ms),
-                            timeout_phase,
-                        );
-                    }
-                    log_hls_resource_fetch_failed(identity, target.log_context(), &attempt, err.log_status());
-                    return Err(err);
-                }
                 Err(err) => {
                     if matches!(err, HlsOriginResourceFetchError::Timeout) {
                         log_hls_resource_timeout(
@@ -723,6 +757,13 @@ where
                             timeout_phase,
                         );
                     }
+                    if err.aborts_without_retry() || attempt_index + 1 == attempts {
+                        log_hls_resource_fetch_failed(identity, target.log_context(), &attempt, err.log_status());
+                        return Err(err);
+                    }
+                    // Report the classified outcome before backoff sleep, so evidence
+                    // describes this attempt while the retry is pending.
+                    classify_attempt(&attempt, &err).await;
                     log_hls_resource_retry_scheduled(
                         identity,
                         target.log_context(),
@@ -1161,10 +1202,11 @@ mod tests {
     mod retry_work;
     use super::{
         build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
-        fetch_hls_origin_resource_response, run_hls_origin_resource_retry_loop_with_attempt_prepare,
-        HlsCacheCommitFailure, HlsContentCodingFailure, HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline,
-        HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchAttempt,
-        HlsResourceFetchKind, HlsResourceFetchLogStatus, HlsResourceFetchSource,
+        fetch_hls_origin_resource_response, run_hls_origin_resource_retry_loop_with_attempt_classification,
+        run_hls_origin_resource_retry_loop_with_attempt_prepare, HlsCacheCommitFailure, HlsContentCodingFailure,
+        HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
+        HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchAttempt, HlsResourceFetchKind,
+        HlsResourceFetchLogStatus, HlsResourceFetchSource,
     };
     use crate::{HlsBoundAccountAcquireErrorKind, HlsLogIdentity, SegmentFetchPolicy};
     use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -1637,6 +1679,99 @@ mod tests {
         server.abort();
         assert!(matches!(result, Err(HlsOriginResourceFetchError::LocalCacheCapacity { .. })));
         assert_eq!(request_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_attempt_returns_without_classification_while_retrying_attempt_classifies() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local server");
+        let address = listener.local_addr().expect("local address");
+        let attempt_count = Arc::new(AtomicUsize::new(0));
+        let server_attempt_count = Arc::clone(&attempt_count);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                read_request(&mut stream).await;
+                let current = server_attempt_count.fetch_add(1, Ordering::Relaxed);
+                let response = if current == 0 {
+                    // First attempt: retryable 500
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    // Second attempt: terminal 404
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                stream.write_all(response.as_bytes()).await.expect("write response");
+            }
+        });
+
+        let policy = SegmentFetchPolicy {
+            retry_delays_ms: [0, 0, 0, 0, 0],
+            retry_jitter_max_ms: 0,
+            ..SegmentFetchPolicy::default()
+        };
+        let identity = test_log_identity();
+        let retrying_classified = Arc::new(AtomicUsize::new(0));
+        let retrying_classified_cb = Arc::clone(&retrying_classified);
+
+        // Run with attempt 0 (retryable 500) then attempt 1 (terminal 404)
+        let result = run_hls_origin_resource_retry_loop_with_attempt_classification(
+            fetch_target(format!("http://{address}/segment.ts")),
+            fetch_clients(false),
+            &policy,
+            &identity,
+            move |_attempt, _err| {
+                let retrying_classified = Arc::clone(&retrying_classified_cb);
+                async move {
+                    retrying_classified.fetch_add(1, Ordering::Relaxed);
+                }
+                .boxed()
+            },
+            |_| async { Ok(()) }.boxed(),
+            |()| async {}.boxed(),
+            |_response, _attempt, _deadline, ()| async { Ok(()) }.boxed(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(HlsOriginResourceFetchError::PermanentStatus(StatusCode::NOT_FOUND))));
+        // 2 requests hit the server (attempt 0 and attempt 1)
+        assert_eq!(attempt_count.load(Ordering::Relaxed), 2);
+        // Only the retrying attempt (attempt 0) is classified; the terminal attempt (attempt 1) is NOT classified!
+        assert_eq!(
+            retrying_classified.load(Ordering::Relaxed),
+            1,
+            "only retrying attempts are classified before backoff; terminal attempts return without classification"
+        );
+
+        // Also test an immediately terminal attempt (404 on first attempt)
+        let terminal_classified = Arc::new(AtomicUsize::new(0));
+        let terminal_classified_cb = Arc::clone(&terminal_classified);
+        let result_terminal = run_hls_origin_resource_retry_loop_with_attempt_classification(
+            fetch_target(format!("http://{address}/segment.ts")),
+            fetch_clients(false),
+            &policy,
+            &identity,
+            move |_attempt, _err| {
+                let terminal_classified = Arc::clone(&terminal_classified_cb);
+                async move {
+                    terminal_classified.fetch_add(1, Ordering::Relaxed);
+                }
+                .boxed()
+            },
+            |_| async { Ok(()) }.boxed(),
+            |()| async {}.boxed(),
+            |_response, _attempt, _deadline, ()| async { Ok(()) }.boxed(),
+        )
+        .await;
+
+        assert!(matches!(result_terminal, Err(HlsOriginResourceFetchError::PermanentStatus(StatusCode::NOT_FOUND))));
+        assert_eq!(
+            terminal_classified.load(Ordering::Relaxed),
+            0,
+            "terminal attempt must return without waiting for classification"
+        );
+
+        server.abort();
     }
 
     #[tokio::test]

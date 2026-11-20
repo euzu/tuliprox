@@ -813,7 +813,9 @@ async fn expired_observe_round_preserves_forty_then_twenty_two_seconds_of_real_r
         assert!(live_reserve_deadline(
             now,
             reserve,
-            HlsLeaseCutoverTiming::from_reserve(now, reserve.guaranteed_reserve_ms, reserve.transition_margin, None)
+            HlsLeaseCutoverTiming::from_reserve(now, reserve.guaranteed_reserve_ms, reserve.transition_margin, None),
+            // No member-failover window: this assertion covers the terminal reserve deadline only.
+            None,
         )
         .is_some());
         let pressure =

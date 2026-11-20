@@ -293,6 +293,11 @@ stops to buffer. If that lasts for 15 seconds, Tuliprox switches before the view
 The speed is measured with the clock inside the stream (PCR), not by counting bytes, so channels with a low bitrate
 are not mistaken for slow ones.
 
+The playback-reserve check of live HLS group streams in the shared cache has no setting. Tuliprox switches when the
+ready media ahead of the slowest playing viewer drops to three target durations (or the whole playlist, if it is
+shorter) and the origin is degraded or no longer refills what playback consumes. See
+[HLS behavior](failover-groups.md#hls-behavior).
+
 | Situation                                            | Suggestion                                                           |
 |:-----------------------------------------------------|:---------------------------------------------------------------------|
 | Switches happen although the picture is fine         | Lower `slow_source_pct` to `80` or raise `slow_source_secs` to `30`. |

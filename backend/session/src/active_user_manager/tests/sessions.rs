@@ -10,7 +10,7 @@ use shared::{
     model::{ActiveUserConnectionChange, EventMessage, StreamInfo, UserConnectionPermission},
     utils::{current_time_secs, Internable},
 };
-use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc, task::Poll, time::Duration};
 use tuliprox_core::model::{Config, Fingerprint, ProxyUserCredentials};
 use tuliprox_repository::GeoIp;
 
@@ -1383,6 +1383,46 @@ async fn session_end_wakes_waiters_without_polling() -> Result<(), Box<dyn std::
     assert!(!waiter.is_finished(), "a current session must keep the waiter pending");
     assert!(manager.terminate_session(&user.username, "tok-host").await);
     tokio::time::timeout(Duration::from_secs(1), waiter).await??;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn member_binding_change_wakes_session_end_waiters_but_rewrite_does_not() -> Result<(), Box<dyn std::error::Error>>
+{
+    let manager = Arc::new(provider_header_test_manager());
+    let mut user = ProxyUserCredentials::default();
+    user.username = "member-binding-waiter".to_string();
+    create_provider_header_session(&manager, &user, "http://provider.example/index.m3u8").await;
+    let binding_a = crate::MemberBinding {
+        group_vid: 50,
+        member_vid: 501,
+        member_index: 0,
+        input_name: "provider-input".intern(),
+        member_title: "Member 1".intern(),
+        provider: "provider-a".intern(),
+    };
+    manager.bind_member(&user.username, "tok-host", binding_a.clone()).await;
+    let identity = session_identity(&manager, &user.username, "tok-host").await.ok_or("session missing")?;
+
+    let waiter = manager.wait_for_playback_session_end(&user.username, "tok-host", identity);
+    tokio::pin!(waiter);
+    assert_eq!(futures::poll!(waiter.as_mut()), Poll::Pending);
+
+    // Identical rewrite must signal nothing: waiter stays pending
+    manager.bind_member(&user.username, "tok-host", binding_a).await;
+    assert_eq!(futures::poll!(waiter.as_mut()), Poll::Pending);
+
+    // Changing member binding advances generation and must wake waiter
+    let binding_b = crate::MemberBinding {
+        group_vid: 50,
+        member_vid: 502,
+        member_index: 1,
+        input_name: "provider-input-b".intern(),
+        member_title: "Member 2".intern(),
+        provider: "provider-b".intern(),
+    };
+    manager.bind_member(&user.username, "tok-host", binding_b).await;
+    assert_eq!(tokio::time::timeout(Duration::from_millis(50), waiter).await, Ok(()));
     Ok(())
 }
 

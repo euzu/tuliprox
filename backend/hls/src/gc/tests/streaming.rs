@@ -7,8 +7,11 @@ async fn gc_keeps_fetching_segments() {
     {
         let mut session = session.write().await;
         apply_six_segment_manifest_for_gc(&mut session);
-        session.segments.get_mut(&1).expect("segment").status =
-            SegmentCacheStatus::Fetching { priority: SegmentFetchPriority::Prefetch, started_at_ms: 1 };
+        session.segments.get_mut(&1).expect("segment").status = SegmentCacheStatus::Fetching {
+            priority: SegmentFetchPriority::Prefetch,
+            started_at_ms: 1,
+            gateway_timeout: false,
+        };
     }
 
     let report = gc.run_once(10_000).await.expect("gc should run");

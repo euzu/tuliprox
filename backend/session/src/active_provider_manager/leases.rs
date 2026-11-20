@@ -140,17 +140,15 @@ impl ActiveProviderManager {
         let connections = self.read_connections();
         connections.by_owner.get(session_owner).is_some_and(|alloc_ids| {
             alloc_ids.iter().any(|id| {
-                if let Some(info) = connections.single.get(id) {
-                    info.allocation.get_provider_name().as_ref() == Some(provider_name)
+                let allocation = if let Some(info) = connections.single.get(id) {
+                    &info.allocation
                 } else if let Some(key) = connections.shared.shared_by_allocation_id.get(id) {
-                    connections
-                        .shared
-                        .by_key
-                        .get(key)
-                        .is_some_and(|shared| shared.allocation.get_provider_name().as_ref() == Some(provider_name))
+                    let Some(shared) = connections.shared.by_key.get(key) else { return false };
+                    &shared.allocation
                 } else {
-                    false
-                }
+                    return false;
+                };
+                allocation.get_provider_name().as_ref() == Some(provider_name)
             })
         })
     }
