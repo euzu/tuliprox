@@ -575,6 +575,7 @@ pub(in crate::segment_fetcher::tests) async fn cold_startup_round(
         ready_timeline: &timeline,
         origin_state: crate::media_reserve::HlsStartupAdmissionOriginState::Healthy,
         recovery_trigger_budget: crate::recovery_timing::HlsRecoveryTriggerBudgetMs::from_millis(4000),
+        lease_start_proxy_seq: publication.first_proxy_seq,
     });
     assert_eq!(admission.decision, crate::media_reserve::HlsStartupAdmissionDecision::Admit);
     let evidence = publication.startup_revisions.as_ref().ok_or_else(|| std::io::Error::other("evidence"))?;

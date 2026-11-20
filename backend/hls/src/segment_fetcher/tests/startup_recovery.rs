@@ -5,6 +5,7 @@ use super::{
 };
 use crate::{
     api::{HlsLiveWindowView, HlsManifestRenderer},
+    media_reserve::HlsLeasePlaybackCursor,
     HlsSession, HlsSessionKey, SegmentCacheStatus,
 };
 use shared::model::{HlsStartupMode, HlsStripMode};
@@ -197,6 +198,7 @@ async fn rolled_404_head_admits_the_renderable_window_by_its_ready_reserve() {
         origin_progress::HlsOriginPathCondition,
     };
     use axum::http::StatusCode;
+    let cursor = HlsLeasePlaybackCursor::default();
 
     let server = spawn_segment_server(0).await;
     let directory = tempfile::tempdir().unwrap();
@@ -245,7 +247,7 @@ async fn rolled_404_head_admits_the_renderable_window_by_its_ready_reserve() {
     .unwrap();
     drop(session);
     assert!(
-        hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await,
+        hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, &cursor, 71).await,
         "the complete renderable window is admitted under a degraded origin path"
     );
     let mut session = context.session.write().await;
@@ -254,7 +256,7 @@ async fn rolled_404_head_admits_the_renderable_window_by_its_ready_reserve() {
     for seq in 1..=3 {
         session.segments.get_mut(&seq).unwrap().status = SegmentCacheStatus::Discovered;
         drop(session);
-        assert!(!hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await);
+        assert!(!hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, &cursor, 71).await);
         session = context.session.write().await;
         session.segments.get_mut(&seq).unwrap().status = ready();
     }
@@ -263,7 +265,7 @@ async fn rolled_404_head_admits_the_renderable_window_by_its_ready_reserve() {
     session.segments.get_mut(&4).unwrap().status = SegmentCacheStatus::Discovered;
     drop(session);
     assert!(
-        hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await,
+        hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, &cursor, 71).await,
         "the visible window alone carries the reserve"
     );
     let mut session = context.session.write().await;
@@ -273,11 +275,68 @@ async fn rolled_404_head_admits_the_renderable_window_by_its_ready_reserve() {
     // changes it.
     session.segments.get_mut(&0).unwrap().status = missing(StatusCode::FORBIDDEN);
     drop(session);
-    assert!(hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await);
+    assert!(hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, &cursor, 71).await);
     let mut session = context.session.write().await;
     session.segments.get_mut(&2).unwrap().discontinuity_before = true;
     drop(session);
-    assert!(hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await);
+    assert!(hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, &cursor, 71).await);
+}
+
+#[tokio::test]
+async fn cursor_start_before_a_metadata_gap_still_admits_the_renderable_window() {
+    use crate::{
+        api::{
+            derive_hls_lease_manifest_snapshot, hls_startup_admission_allows_snapshot, HlsLeaseManifestSnapshotInput,
+        },
+        origin_progress::HlsOriginPathCondition,
+    };
+    let server = spawn_segment_server(0).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (worker, context, _) = fetch_context(&server, &directory, &SegmentFetchPolicy::default()).await;
+    let ctx = crate::HlsCtx::for_test(tuliprox_core::model::Config::default());
+    let mode = HlsStartupMode::Optimistic;
+    {
+        let mut session = context.session.write().await;
+        *session = HlsSession::new(HlsSessionKey::new(1, "window"), b"secret", 0);
+        session.apply_origin_manifest(&manifest(&server.base_url, 8000, &[8; 4])).unwrap();
+        session.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    }
+    install_startup(&context, &worker, mode).await;
+    let mut session = context.session.write().await;
+    // The lease played sequence 0; its bound start still points at that segment.
+    let mut cursor = HlsLeasePlaybackCursor::default();
+    let token = cursor.record_request_started(0, 10);
+    let _token = cursor.bind_request_timing(token, &session.segments[&0]);
+    session.apply_origin_manifest(&manifest(&server.base_url, 8001, &[8; 4])).unwrap();
+    session.record_live_window_origin_commit(45);
+    session.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
+    prepare_selected(&mut session, &[1, 2, 3, 4], mode, true);
+    for seq in 1..=4 {
+        session.segments.get_mut(&seq).unwrap().status =
+            SegmentCacheStatus::Ready { content_length: 8, ready_at_ms: 50 };
+    }
+    // Sequence 0 is gone from the session metadata, so the cursor start cannot reach the window.
+    session.segments.remove(&0);
+    let plan = session.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+    assert_eq!(plan.visible, vec![1, 2, 3]);
+    let rendered = HlsManifestRenderer::render_live_window(&session, &plan, 70).unwrap();
+    let snapshot = derive_hls_lease_manifest_snapshot(
+        &HlsLeaseManifestSnapshotInput::FastStartWindow {
+            session: &session,
+            plan: &plan,
+            rendered: &rendered,
+            materialized_body: &rendered.body,
+        },
+        70,
+    )
+    .unwrap()
+    .unwrap();
+    drop(session);
+    assert_eq!(cursor.entry_reserve_start_proxy_seq(snapshot.first_proxy_seq), 0);
+    assert!(
+        hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, &cursor, 71).await,
+        "a metadata gap before the window does not block its admission"
+    );
 }
 
 #[tokio::test]
@@ -289,6 +348,7 @@ async fn longer_origin_window_with_a_rolled_404_predecessor_admits_the_renderabl
         origin_progress::HlsOriginPathCondition,
     };
     use axum::http::StatusCode;
+    let cursor = HlsLeasePlaybackCursor::default();
 
     let server = spawn_segment_server(0).await;
     let directory = tempfile::tempdir().unwrap();
@@ -336,7 +396,7 @@ async fn longer_origin_window_with_a_rolled_404_predecessor_admits_the_renderabl
     // The same complete window is admitted while the origin path is healthy.
     context.session.write().await.origin_control.path_condition = HlsOriginPathCondition::ProgressExpected;
     assert!(
-        hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await,
+        hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, &cursor, 71).await,
         "a healthy origin path admits the complete window"
     );
     // Under readiness pressure the identical window is admitted: the prospective reserve counts
@@ -344,7 +404,7 @@ async fn longer_origin_window_with_a_rolled_404_predecessor_admits_the_renderabl
     // before it.
     context.session.write().await.origin_control.path_condition = HlsOriginPathCondition::SegmentReadinessFailure;
     assert!(
-        hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, 71).await,
+        hls_startup_admission_allows_snapshot(&ctx, &context.session, &snapshot, &cursor, 71).await,
         "a degraded origin path admits a complete, renderable window"
     );
 }

@@ -1608,7 +1608,8 @@
 
 - **New HLS viewers start after an expired origin head.** While the origin path is degraded, an entry window is admitted
   when its contiguous ready media (the visible window plus the ready reserve segments behind it) exceeds the recovery
-  budget, for any origin window length and independent of why the previous segment is missing. The reserve segments
+  budget, for any origin window length and independent of why the previous segment is missing; startup admission
+  measures the degraded reserve from the start sequence the lease's first request uses. The reserve segments
   still missing for that budget are fetched at render-window priority, unless one of them failed permanently. A missing
   middle segment, a stale revision or a key change still blocks this start.
 

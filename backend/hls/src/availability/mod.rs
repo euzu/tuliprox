@@ -4,8 +4,8 @@ use super::{
     manager::{HlsCriticalHandoffStateAccess, HlsProxyManager},
     manifest_acceptance::HlsManifestAcceptanceTrigger,
     media_reserve::{
-        evaluate_startup_admission, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode, HlsStartupAdmissionDecision,
-        HlsStartupAdmissionInput, HlsStartupAdmissionOriginState,
+        evaluate_startup_admission, HlsLeaseManifestSnapshot, HlsLeasePlaybackCursor, HlsManifestDeliveryMode,
+        HlsStartupAdmissionDecision, HlsStartupAdmissionInput, HlsStartupAdmissionOriginState,
     },
     observability::HlsRecoveryTriggerDiagnostic,
     origin_progress::HlsOriginPathCondition,
@@ -180,9 +180,10 @@ pub async fn hls_startup_admission_allows_snapshot(
     ctx: &HlsCtx,
     session: &HlsSessionHandle,
     snapshot: &HlsLeaseManifestSnapshot,
+    cursor: &HlsLeasePlaybackCursor,
     now_ms: u64,
 ) -> bool {
-    let (ready_timeline, origin_state, observed_latency, target_duration_ms) = {
+    let (ready_timeline, lease_start_proxy_seq, origin_state, observed_latency, target_duration_ms) = {
         let session = session.read().await;
         if session.live_entry_revalidation.required {
             return false;
@@ -224,8 +225,21 @@ pub async fn hls_startup_admission_allows_snapshot(
                         && window.plan.is_ready(&session)
                 });
         let degraded = session.origin_control.path_condition.is_degraded() && !recovered_startup;
+        // The reserve is measured from the sequence the lease's first request of the entry
+        // window will use. The READY timeline stops at the first metadata gap, so when that
+        // start lies before the window and the timeline does not reach the window start, the
+        // window start is used instead; a gap before the window never blocks its admission.
+        let mut lease_start_proxy_seq = cursor.entry_reserve_start_proxy_seq(snapshot.first_proxy_seq);
+        let mut ready_timeline = session.ready_timeline_snapshot(lease_start_proxy_seq, now_ms);
+        if lease_start_proxy_seq < snapshot.first_proxy_seq
+            && !ready_timeline.units.iter().any(|unit| unit.proxy_seq == snapshot.first_proxy_seq)
+        {
+            lease_start_proxy_seq = snapshot.first_proxy_seq;
+            ready_timeline = session.ready_timeline_snapshot(lease_start_proxy_seq, now_ms);
+        }
         (
-            session.ready_timeline_snapshot(snapshot.first_proxy_seq, now_ms),
+            ready_timeline,
+            lease_start_proxy_seq,
             if degraded { HlsStartupAdmissionOriginState::Degraded } else { HlsStartupAdmissionOriginState::Healthy },
             session.origin_control.recovery_samples.latency_snapshot(),
             session
@@ -251,6 +265,7 @@ pub async fn hls_startup_admission_allows_snapshot(
             workload,
             observed_latency,
         ),
+        lease_start_proxy_seq,
     });
     matches!(admission.decision, HlsStartupAdmissionDecision::Admit)
 }

@@ -13,7 +13,10 @@ use crate::{
     origin_account_runtime::{HlsMemberHealthPolicy, HlsMemberUnhealthyReason, HlsOriginAccountRuntime},
     HlsAccessLease, HlsAccessLeaseId, HlsSession, HlsSessionHandle,
 };
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 /// Hard manifest failures in a row that report the member without waiting for the no-data timeout.
 const HARD_MANIFEST_FAILURES_BEFORE_REPORT: u32 = 2;
@@ -163,15 +166,21 @@ impl HlsMemberReserveHistory {
         round: impl IntoIterator<Item = (&'a HlsAccessLease, HlsLeaseReserveSnapshot, u64)>,
         now_ms: u64,
     ) {
-        let previous = Self { samples: std::mem::take(&mut self.samples) };
+        let previous = std::mem::take(&mut self.samples);
+        let previous_by_lease: HashMap<&HlsAccessLeaseId, &HlsMemberReserveSample> =
+            previous.iter().map(|(id, sample)| (id, sample)).collect();
         self.samples = round
             .into_iter()
             .map(|(lease, reserve, target_ms)| {
-                let sample = match previous.previous(lease) {
+                let sample = match previous_by_lease
+                    .get(&lease.lease_id)
+                    .copied()
+                    .filter(|sample| sample.observes_playback_of(lease))
+                {
                     Some(previous)
                         if previous.guaranteed_reserve_ms > target_ms && reserve.guaranteed_reserve_ms <= target_ms =>
                     {
-                        previous
+                        *previous
                     }
                     _ => HlsMemberReserveSample::of(lease, reserve, now_ms),
                 };

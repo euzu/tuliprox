@@ -184,6 +184,7 @@ async fn retryable_manifest_failure_keeps_optimistic_admission_degraded_until_me
             ready_timeline: &HlsReadyTimelineSnapshot { units: Arc::from([]) },
             origin_state,
             recovery_trigger_budget: crate::recovery_timing::HlsRecoveryTriggerBudgetMs::from_millis(0),
+            lease_start_proxy_seq: snapshot.first_proxy_seq,
         })
         .decision
     };

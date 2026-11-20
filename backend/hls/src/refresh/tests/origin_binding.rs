@@ -1572,13 +1572,12 @@ async fn probe_slot_commits_primary_when_mirror_fails_with_zero_retry_delays() {
             .await
             .expect("the pinned probe reaches the primary");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while fixture.mirror.requests.lock().await.len() < burst_candidates + 1 {
+            while fixture.mirror.requests.lock().await.len() < burst_candidates + 2 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("the probe slot's bound mirror request reaches the mirror");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        .expect("the probe slot's bound mirror and profile-failover requests reach the mirror");
         primary_gate.release.notify_one();
     };
     let (outcome, ()) = tokio::join!(recovery, release_primary);
