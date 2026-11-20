@@ -16,6 +16,7 @@ pub(crate) use self::{
     error::{classify_origin_manifest_status, OriginManifestStatusClass},
     http::{hls_manifest_redirect_host, retry_after_delay_ms},
     quality::{origin_highwater_policy_limit, score_hls_manifest_recovery_candidate},
+    recovery::PROBE_SLOT_MIRROR_ERROR_OBSERVED,
     selection_log::ManifestRecoverySelectionLogPhase,
 };
 pub use self::{

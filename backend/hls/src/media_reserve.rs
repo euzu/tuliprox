@@ -198,6 +198,11 @@ impl HlsLeasePlaybackCursor {
         }
     }
 
+    /// True when the cursor continues an earlier started playback without a forward seek.
+    pub(crate) fn continues_started_playback(&self, manifest_first_proxy_seq: u64) -> bool {
+        !self.is_forward_seek(manifest_first_proxy_seq) && self.first_segment_started_at_ms.is_some()
+    }
+
     fn is_forward_seek(&self, proxy_seq: u64) -> bool {
         self.highest_requested_proxy_seq.is_some_and(|highest| proxy_seq > highest.saturating_add(1))
     }
@@ -444,7 +449,7 @@ pub fn evaluate_lease_reserve(input: HlsLeaseReserveInput<'_>) -> HlsLeaseReserv
         guaranteed_transition_margin(input.ready_timeline, guaranteed_ready_span, conservative_playback_position_ms)
             .unwrap_or(input.manifest.target_duration_ms),
     );
-    let recovery_boundary = input.recovery_trigger_budget.as_millis().saturating_add(transition_margin.as_millis());
+    let recovery_boundary = recovery_boundary_ms(input.recovery_trigger_budget, transition_margin);
     let recovery_required = input.origin_path_degraded && guaranteed_reserve_ms <= recovery_boundary;
     let cutover_required = input.origin_path_degraded
         && guaranteed_reserve_ms <= transition_margin.as_millis()
@@ -462,6 +467,11 @@ pub fn evaluate_lease_reserve(input: HlsLeaseReserveInput<'_>) -> HlsLeaseReserv
         recovery_required,
         cutover_required,
     }
+}
+
+/// Reserve at or below this bound requires origin recovery before the lease runs dry.
+const fn recovery_boundary_ms(budget: HlsRecoveryTriggerBudgetMs, margin: HlsTransitionMarginMs) -> u64 {
+    budget.as_millis().saturating_add(margin.as_millis())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,10 +613,12 @@ pub fn minimum_hls_startup_window_ms(target_duration_ms: u64, visible_playlist_d
 #[derive(Clone, Copy)]
 pub struct HlsStartupAdmissionInput<'a> {
     pub manifest: &'a HlsLeaseManifestSnapshot,
+    pub cursor: &'a HlsLeasePlaybackCursor,
     pub ready_timeline: &'a HlsReadyTimelineSnapshot,
     pub origin_state: HlsStartupAdmissionOriginState,
     pub recovery_trigger_budget: HlsRecoveryTriggerBudgetMs,
     pub lease_start_proxy_seq: u64,
+    pub now_ms: u64,
 }
 
 /// Reason why the immutable READY evidence cannot admit a new lease.
@@ -662,15 +674,42 @@ pub fn evaluate_startup_admission(input: HlsStartupAdmissionInput<'_>) -> HlsSta
     let visible_tail_ms = aligned_visible_tail_ms(input.ready_timeline, input.manifest);
     let visible_contiguous_ready_duration_ms =
         guaranteed_ready_span.horizon_ms.min(visible_tail_ms).saturating_sub(guaranteed_ready_span.start_ms);
-    let lease_ready_span = contiguous_ready_span(input.ready_timeline, input.lease_start_proxy_seq);
-    // An admitted lease measures prospective reserve from the start sequence its first request
-    // uses: the contiguous READY span from that sequence through the visible window and any
-    // READY objects behind it. Why the origin no longer advertises any predecessor does not matter.
-    let prospective_lease_reserve_ms = lease_ready_span.ready_duration_ms();
-    let transition_margin = HlsTransitionMarginMs::from_millis(
-        guaranteed_transition_margin(input.ready_timeline, lease_ready_span, visible_tail_ms)
-            .unwrap_or(input.manifest.target_duration_ms),
-    );
+    // A lease that resumes a measured playback keeps the position-adjusted reserve its next
+    // request evaluates. Without a measured position the player consumed nothing yet, so the
+    // reserve counts from the start sequence of its first request.
+    let resumed_reserve = input
+        .cursor
+        .continues_started_playback(input.manifest.first_proxy_seq)
+        .then(|| {
+            evaluate_lease_reserve(HlsLeaseReserveInput {
+                manifest: input.manifest,
+                cursor: input.cursor,
+                ready_timeline: input.ready_timeline,
+                now_ms: input.now_ms,
+                recovery_trigger_budget: input.recovery_trigger_budget,
+                origin_path_degraded: input.origin_state == HlsStartupAdmissionOriginState::Degraded,
+                recovery_committed: false,
+            })
+        })
+        .filter(|reserve| reserve.playback_position_known);
+    let (prospective_lease_reserve_ms, transition_margin, degraded_reserve_insufficient) = if let Some(reserve) =
+        resumed_reserve
+    {
+        (reserve.guaranteed_reserve_ms, reserve.transition_margin, reserve.recovery_required)
+    } else {
+        let lease_ready_span = contiguous_ready_span(input.ready_timeline, input.lease_start_proxy_seq);
+        // An admitted lease measures prospective reserve from the start sequence its first request
+        // uses: the contiguous READY span from that sequence through the visible window and any
+        // READY objects behind it. Why the origin no longer advertises any predecessor does not matter.
+        let prospective_lease_reserve_ms = lease_ready_span.ready_duration_ms();
+        let transition_margin = HlsTransitionMarginMs::from_millis(
+            guaranteed_transition_margin(input.ready_timeline, lease_ready_span, visible_tail_ms)
+                .unwrap_or(input.manifest.target_duration_ms),
+        );
+        let degraded_reserve_insufficient = input.origin_state == HlsStartupAdmissionOriginState::Degraded
+            && prospective_lease_reserve_ms <= recovery_boundary_ms(input.recovery_trigger_budget, transition_margin);
+        (prospective_lease_reserve_ms, transition_margin, degraded_reserve_insufficient)
+    };
     let accelerated = input.manifest.startup_revisions.as_ref().is_some_and(|publication| {
         input.origin_state != HlsStartupAdmissionOriginState::Degraded
             && input
@@ -691,10 +730,7 @@ pub fn evaluate_startup_admission(input: HlsStartupAdmissionInput<'_>) -> HlsSta
     });
     let decision = if !accelerated && visible_contiguous_ready_duration_ms < minimum_startup_duration_ms {
         HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientVisibleReadyMedia)
-    } else if input.origin_state == HlsStartupAdmissionOriginState::Degraded
-        && prospective_lease_reserve_ms
-            <= input.recovery_trigger_budget.as_millis().saturating_add(transition_margin.as_millis())
-    {
+    } else if degraded_reserve_insufficient {
         HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientDegradedReserve)
     } else {
         HlsStartupAdmissionDecision::Admit
@@ -808,12 +844,15 @@ mod tests {
         origin_state: HlsStartupAdmissionOriginState,
         recovery_trigger_budget_ms: u64,
     ) -> HlsStartupAdmissionSnapshot {
+        let cursor = HlsLeasePlaybackCursor::default();
         evaluate_startup_admission(HlsStartupAdmissionInput {
             manifest,
+            cursor: &cursor,
             ready_timeline,
             origin_state,
             recovery_trigger_budget: HlsRecoveryTriggerBudgetMs::from_millis(recovery_trigger_budget_ms),
             lease_start_proxy_seq: manifest.first_proxy_seq,
+            now_ms: 0,
         })
     }
 
@@ -1528,12 +1567,15 @@ mod tests {
 
         let budget = HlsRecoveryTriggerBudgetMs::from_millis(10_000);
 
+        let default_cursor = HlsLeasePlaybackCursor::default();
         let rejected = evaluate_startup_admission(HlsStartupAdmissionInput {
             manifest: &manifest,
+            cursor: &default_cursor,
             ready_timeline: &timeline,
             origin_state: HlsStartupAdmissionOriginState::Degraded,
             recovery_trigger_budget: budget,
             lease_start_proxy_seq: 0,
+            now_ms: 0,
         });
 
         assert_eq!(
@@ -1544,10 +1586,12 @@ mod tests {
 
         let admitted = evaluate_startup_admission(HlsStartupAdmissionInput {
             manifest: &manifest,
+            cursor: &default_cursor,
             ready_timeline: &timeline,
             origin_state: HlsStartupAdmissionOriginState::Degraded,
             recovery_trigger_budget: budget,
             lease_start_proxy_seq: manifest.first_proxy_seq,
+            now_ms: 0,
         });
 
         assert_eq!(admitted.decision, HlsStartupAdmissionDecision::Admit);
@@ -1569,5 +1613,80 @@ mod tests {
         assert_eq!(default_cursor.entry_reserve_start_proxy_seq(manifest.first_proxy_seq), 1);
         assert_eq!(bound_cursor.entry_reserve_start_proxy_seq(manifest.first_proxy_seq), 0);
         assert_eq!(bound_cursor.entry_reserve_start_proxy_seq(5), 5);
+    }
+
+    /// Startup admission and lease reserve for a lease that resumes the playback started at 1 s.
+    fn continued_playback_admission(
+        origin_state: HlsStartupAdmissionOriginState,
+        now_ms: u64,
+    ) -> (HlsLeaseReserveSnapshot, HlsStartupAdmissionSnapshot) {
+        let session = variable_duration_session();
+        let mut cursor = HlsLeasePlaybackCursor::default();
+        let token = cursor.record_request_started(0, 1_000);
+        let token = cursor.bind_request_timing(token, &session.segments[&0]);
+        assert!(cursor.record_transfer_started(token, 1_000));
+        let manifest = manifest();
+        let timeline = ready_timeline();
+        let budget = HlsRecoveryTriggerBudgetMs::from_millis(8_000);
+        let reserve = evaluate_lease_reserve(HlsLeaseReserveInput {
+            manifest: &manifest,
+            cursor: &cursor,
+            ready_timeline: &timeline,
+            now_ms,
+            recovery_trigger_budget: budget,
+            origin_path_degraded: origin_state == HlsStartupAdmissionOriginState::Degraded,
+            recovery_committed: false,
+        });
+        let admission = evaluate_startup_admission(HlsStartupAdmissionInput {
+            manifest: &manifest,
+            cursor: &cursor,
+            ready_timeline: &timeline,
+            origin_state,
+            recovery_trigger_budget: budget,
+            lease_start_proxy_seq: cursor.entry_reserve_start_proxy_seq(manifest.first_proxy_seq),
+            now_ms,
+        });
+        (reserve, admission)
+    }
+
+    #[test]
+    fn startup_admission_without_a_measured_position_counts_the_ready_span() {
+        // The transfer started, but neither its media start nor its segment is known, so the
+        // playback position is unknown and the cursor has consumed no reserve.
+        let mut cursor = HlsLeasePlaybackCursor::default();
+        let token = cursor.record_request_started(99, 1_000);
+        assert!(cursor.record_transfer_started(token, 1_000));
+        let manifest = manifest();
+        assert!(cursor.continues_started_playback(manifest.first_proxy_seq));
+        let admission = evaluate_startup_admission(HlsStartupAdmissionInput {
+            manifest: &manifest,
+            cursor: &cursor,
+            ready_timeline: &ready_timeline(),
+            origin_state: HlsStartupAdmissionOriginState::Degraded,
+            recovery_trigger_budget: HlsRecoveryTriggerBudgetMs::from_millis(8_000),
+            lease_start_proxy_seq: cursor.entry_reserve_start_proxy_seq(manifest.first_proxy_seq),
+            now_ms: 18_000,
+        });
+        assert_eq!(admission.prospective_lease_reserve_ms, 27_000);
+        assert_eq!(admission.decision, HlsStartupAdmissionDecision::Admit);
+    }
+
+    #[test]
+    fn startup_admission_measures_a_resumed_playback_from_its_position() {
+        // Boundary: budget 8 s plus a 3 s transition margin. Each case differs from the rejected
+        // one in a single input.
+        let insufficient =
+            HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientDegradedReserve);
+        for (origin_state, now_ms, expected_reserve_ms, expected_decision) in [
+            (HlsStartupAdmissionOriginState::Degraded, 18_000, 10_000, insufficient),
+            (HlsStartupAdmissionOriginState::Healthy, 18_000, 10_000, HlsStartupAdmissionDecision::Admit),
+            (HlsStartupAdmissionOriginState::Degraded, 16_000, 12_000, HlsStartupAdmissionDecision::Admit),
+        ] {
+            let (reserve, admission) = continued_playback_admission(origin_state, now_ms);
+            assert_eq!(reserve.guaranteed_reserve_ms, expected_reserve_ms, "{origin_state:?} at {now_ms}");
+            assert_eq!(reserve.transition_margin.as_millis(), 3_000);
+            assert_eq!(admission.prospective_lease_reserve_ms, expected_reserve_ms, "{origin_state:?} at {now_ms}");
+            assert_eq!(admission.decision, expected_decision, "{origin_state:?} at {now_ms}");
+        }
     }
 }

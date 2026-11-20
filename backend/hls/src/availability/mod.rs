@@ -228,7 +228,9 @@ pub async fn hls_startup_admission_allows_snapshot(
         // The reserve is measured from the sequence the lease's first request of the entry
         // window will use. The READY timeline stops at the first metadata gap, so when that
         // start lies before the window and the timeline does not reach the window start, the
-        // window start is used instead; a gap before the window never blocks its admission.
+        // window start is used instead, so a gap before the window never hides the window from
+        // the visible-media check. A lease that resumes a measured playback still carries its
+        // position-adjusted reserve, which a degraded origin may reject.
         let mut lease_start_proxy_seq = cursor.entry_reserve_start_proxy_seq(snapshot.first_proxy_seq);
         let mut ready_timeline = session.ready_timeline_snapshot(lease_start_proxy_seq, now_ms);
         if lease_start_proxy_seq < snapshot.first_proxy_seq
@@ -257,6 +259,7 @@ pub async fn hls_startup_admission_allows_snapshot(
     );
     let admission = evaluate_startup_admission(HlsStartupAdmissionInput {
         manifest: snapshot,
+        cursor,
         ready_timeline: &ready_timeline,
         origin_state,
         recovery_trigger_budget: recovery_trigger_budget(
@@ -266,6 +269,7 @@ pub async fn hls_startup_admission_allows_snapshot(
             observed_latency,
         ),
         lease_start_proxy_seq,
+        now_ms,
     });
     matches!(admission.decision, HlsStartupAdmissionDecision::Admit)
 }

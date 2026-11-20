@@ -107,7 +107,7 @@ use self::support::{
 async fn retryable_manifest_failure_keeps_optimistic_admission_degraded_until_media_progress() -> std::io::Result<()> {
     use crate::{
         media_reserve::{
-            evaluate_startup_admission, HlsReadyTimelineSnapshot, HlsStartupAdmissionDecision,
+            evaluate_startup_admission, HlsLeasePlaybackCursor, HlsReadyTimelineSnapshot, HlsStartupAdmissionDecision,
             HlsStartupAdmissionInput, HlsStartupAdmissionOriginState,
         },
         origin_progress::HlsOriginPathCondition,
@@ -179,12 +179,15 @@ async fn retryable_manifest_failure_keeps_optimistic_admission_degraded_until_me
         .unwrap()
     };
     let evaluate = |origin_state| {
+        let cursor = HlsLeasePlaybackCursor::default();
         evaluate_startup_admission(HlsStartupAdmissionInput {
             manifest: &snapshot,
+            cursor: &cursor,
             ready_timeline: &HlsReadyTimelineSnapshot { units: Arc::from([]) },
             origin_state,
             recovery_trigger_budget: crate::recovery_timing::HlsRecoveryTriggerBudgetMs::from_millis(0),
             lease_start_proxy_seq: snapshot.first_proxy_seq,
+            now_ms: 0,
         })
         .decision
     };

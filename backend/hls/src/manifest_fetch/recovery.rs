@@ -57,6 +57,12 @@ use std::{
 };
 use tokio::task::JoinSet;
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Signalled when a probe slot observes its mirror error and starts waiting for the in-flight probe.
+    pub(crate) static PROBE_SLOT_MIRROR_ERROR_OBSERVED: std::sync::Arc<tokio::sync::Notify>;
+}
+
 enum HlsManifestRecoveryAttemptError<T> {
     Fetch(OriginManifestFetchError),
     Rejected(HlsManifestRejectLogReason),
@@ -1055,19 +1061,28 @@ async fn fetch_manifest_recovery_burst_candidates(
         let reject_reason = plan.reject_reason.cloned();
         let attempt_index = plan.attempt_index;
         let attempts = plan.attempts;
+        #[cfg(test)]
+        let probe_slot_mirror_error_observed = PROBE_SLOT_MIRROR_ERROR_OBSERVED.try_with(std::sync::Arc::clone).ok();
         tasks.spawn(async move {
-            let stagger_ms = u64::try_from(burst_plan.slot_for_candidate(candidate_index))
-                .unwrap_or_default()
-                .saturating_mul(HLS_MANIFEST_RECOVERY_BURST_SLOT_DELAY_MS);
-            if stagger_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(stagger_ms)).await;
+            let candidate_future = async move {
+                let stagger_ms = u64::try_from(burst_plan.slot_for_candidate(candidate_index))
+                    .unwrap_or_default()
+                    .saturating_mul(HLS_MANIFEST_RECOVERY_BURST_SLOT_DELAY_MS);
+                if stagger_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(stagger_ms)).await;
+                }
+                let log = ManifestRecoveryAttemptLogContext { attempt_index, attempts, candidate_index, candidates };
+                let fetch_started = Instant::now();
+                let (origin_requests, result) =
+                    fetch_probed_recovery_candidate(&context, probe, &binding, reject_reason.as_ref(), log).await;
+                let fetch_elapsed_ms = u64::try_from(fetch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                (candidate_index, fetch_elapsed_ms, origin_requests, result)
+            };
+            #[cfg(test)]
+            if let Some(signal) = probe_slot_mirror_error_observed {
+                return PROBE_SLOT_MIRROR_ERROR_OBSERVED.scope(signal, candidate_future).await;
             }
-            let log = ManifestRecoveryAttemptLogContext { attempt_index, attempts, candidate_index, candidates };
-            let fetch_started = Instant::now();
-            let (origin_requests, result) =
-                fetch_probed_recovery_candidate(&context, probe, &binding, reject_reason.as_ref(), log).await;
-            let fetch_elapsed_ms = u64::try_from(fetch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            (candidate_index, fetch_elapsed_ms, origin_requests, result)
+            candidate_future.await
         });
     }
 
@@ -1225,6 +1240,8 @@ async fn fetch_probed_recovery_candidate(
                             break Ok(fetched_mirror);
                         }
                         Err(mirror_error) => {
+                            #[cfg(test)]
+                            let _ = PROBE_SLOT_MIRROR_ERROR_OBSERVED.try_with(|observed| observed.notify_one());
                             // A failed mirror does not bound the probe by the grace; wait until
                             // the probe completes or its own budget/acceptance deadline expires.
                             if let Ok(fetched) = (&mut probe_fetch).await {

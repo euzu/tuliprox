@@ -1557,27 +1557,27 @@ async fn probe_slot_commits_primary_when_mirror_fails_with_zero_retry_delays() {
     )
     .await;
     fixture.request.retry_policy = no_delay_policy();
+    let observed = Arc::new(tokio::sync::Notify::new());
     let context = manifest_fetch_context(&fixture.request, None);
-    let recovery = crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
-        &context,
-        fixture.binding.clone(),
-        None,
-        None,
-        HlsManifestAcceptanceTrigger::Observe,
-        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
-        |fetched, mode| super::super::commit_manifest_recovery_candidate(&fixture.request, fetched, mode),
+    let recovery = crate::manifest_fetch::PROBE_SLOT_MIRROR_ERROR_OBSERVED.scope(
+        Arc::clone(&observed),
+        crate::manifest_fetch::retry_hls_origin_manifest_recovery_chain(
+            &context,
+            fixture.binding.clone(),
+            None,
+            None,
+            HlsManifestAcceptanceTrigger::Observe,
+            crate::manifest_fetch::HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+            |fetched, mode| super::super::commit_manifest_recovery_candidate(&fixture.request, fetched, mode),
+        ),
     );
     let release_primary = async {
         tokio::time::timeout(std::time::Duration::from_secs(5), primary_gate.entered.notified())
             .await
             .expect("the pinned probe reaches the primary");
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while fixture.mirror.requests.lock().await.len() < burst_candidates + 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the probe slot's bound mirror and profile-failover requests reach the mirror");
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed.notified())
+            .await
+            .expect("the probe slot observes its mirror error before primary answers");
         primary_gate.release.notify_one();
     };
     let (outcome, ()) = tokio::join!(recovery, release_primary);
