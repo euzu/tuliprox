@@ -1,4 +1,6 @@
-use shared::model::{HEADER_TULIPROX_FALLBACK, HEADER_TULIPROX_REJECTION, HEADER_TULIPROX_STREAM_UID};
+use shared::model::{
+    HEADER_TULIPROX_FALLBACK, HEADER_TULIPROX_PLAYER_API_PATH, HEADER_TULIPROX_REJECTION, HEADER_TULIPROX_STREAM_UID,
+};
 
 pub(crate) fn create_cors_layer<const N: usize>(methods: [axum::http::Method; N]) -> tower_http::cors::CorsLayer {
     tower_http::cors::CorsLayer::new()
@@ -9,6 +11,7 @@ pub(crate) fn create_cors_layer<const N: usize>(methods: [axum::http::Method; N]
             axum::http::HeaderName::from_static(HEADER_TULIPROX_FALLBACK),
             axum::http::HeaderName::from_static(HEADER_TULIPROX_REJECTION),
             axum::http::HeaderName::from_static(HEADER_TULIPROX_STREAM_UID),
+            axum::http::HeaderName::from_static(HEADER_TULIPROX_PLAYER_API_PATH),
         ])
         .max_age(std::time::Duration::from_hours(1))
 }
@@ -23,7 +26,10 @@ mod tests {
         routing::get,
         Router,
     };
-    use shared::model::{HEADER_TULIPROX_FALLBACK, HEADER_TULIPROX_REJECTION, HEADER_TULIPROX_STREAM_UID};
+    use shared::model::{
+        HEADER_TULIPROX_FALLBACK, HEADER_TULIPROX_PLAYER_API_PATH, HEADER_TULIPROX_REJECTION,
+        HEADER_TULIPROX_STREAM_UID,
+    };
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -60,6 +66,10 @@ mod tests {
         assert!(
             expose.contains(HEADER_TULIPROX_STREAM_UID),
             "expected expose headers to contain {HEADER_TULIPROX_STREAM_UID}, got {expose}"
+        );
+        assert!(
+            expose.contains(HEADER_TULIPROX_PLAYER_API_PATH),
+            "expected expose headers to contain {HEADER_TULIPROX_PLAYER_API_PATH}, got {expose}"
         );
     }
 

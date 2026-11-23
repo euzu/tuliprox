@@ -106,7 +106,7 @@ info:
     - `X-Tuliprox-Fallback`: Contains the exact rejection reason (e.g. `channel_unavailable`, `user_connections_exhausted`, `provider_connections_exhausted`, `low_priority_preempted`, `user_account_expired`, `provisioning`, `hls_session_or_lease_expired`, `maintenance`).
     - `X-Tuliprox-Rejection`: Present with value `admission_rejected` when admission is denied without video.
     - `Cache-Control: no-store`: Prevents intermediate caches and players from caching transient rejection responses.
-    - **CORS**: `Access-Control-Expose-Headers: X-Tuliprox-Fallback, X-Tuliprox-Rejection` is set on all CORS-enabled responses.
+    - **CORS**: `Access-Control-Expose-Headers: X-Tuliprox-Fallback, X-Tuliprox-Rejection, X-Tuliprox-Stream-Uid, X-Tuliprox-Player-Api-Path` is set on all CORS-enabled responses.
 
 servers:
   - url: "{baseUrl}{web_ui_path}"
@@ -2268,7 +2268,10 @@ paths:
       summary: Download M3U / M3U Plus playlist
       description: |
         Generates and serves the caller's personalized M3U playlist based on target settings, user bouquet,
-        and content filters.
+        and content filters. `/apiget` and `/m3u` serve the same playlist, and `POST` takes the same parameters in the
+        query or the request body. For users with Player API access, the `#EXTM3U` line carries
+        `x-tuliprox-player-api="<path>"` and the response carries `X-Tuliprox-Player-Api-Path` (same value as
+        `server_info.player_api_path` in `player_api.php`).
       parameters:
         - name: username
           in: query
@@ -2304,12 +2307,14 @@ paths:
               schema:
                 type: string
                 example: application/x-mpegurl
+            X-Tuliprox-Player-Api-Path:
+              $ref: '#/components/headers/X-Tuliprox-Player-Api-Path'
           content:
             application/x-mpegurl:
               schema:
                 type: string
                 example: |
-                  #EXTM3U
+                  #EXTM3U x-tuliprox-player-api="/ui"
                   #EXTINF:-1 tvg-id="sports1.example.com" tvg-name="Sports 1 HD" group-title="Sports",Sports 1 HD
                   http://localhost:8901/live/alice/secretpassword/1001.ts
         '401':
@@ -2436,6 +2441,14 @@ components:
         Include in the HTTP request as `Authorization: Bearer <token>`.
 
   headers:
+    X-Tuliprox-Player-Api-Path:
+      description: |
+        Player API base path prefix advertised on M3U playlist download responses (e.g. `/ui` or `/`).
+        Present only when Web UI, web authentication, and Player API access are enabled for the user.
+      schema:
+        type: string
+      example: /ui
+
     X-Tuliprox-Stream-Uid:
       description: |
         Assigned stream UID for Player API users on live stream responses.

@@ -664,8 +664,9 @@ pub async fn m3u_load_rewrite_playlist(
     cfg: &AppConfig,
     target: &ConfigTarget,
     user: &ProxyUserCredentials,
+    player_api_path: Option<String>,
 ) -> Result<M3uPlaylistM3uTextIterator, TuliproxError> {
-    M3uPlaylistM3uTextIterator::new(cfg, target, user).await
+    M3uPlaylistM3uTextIterator::new(cfg, target, user, player_api_path).await
 }
 
 pub async fn m3u_get_item_for_stream_id(

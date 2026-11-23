@@ -228,10 +228,11 @@
   `POST /api/v1/me/streams/{uid}/split`. The header is exposed through CORS. HLS playlists carry none, because the
   connection exists only after the first segment.
 
-- **Xtream account info advertises the Player API base.** `player_api.php` returns `server_info.player_api_path`
-  (`/<web_ui.path>`, or `/` without a path), so a player that knows only the playlist host finds `/auth/token` and
-  `/api/v1/me`. The field appears only when the Web UI and web authentication are enabled and the user's Player API
-  is enabled.
+- **Xtream account info and M3U playlists advertise the Player API base.** `player_api.php` returns
+  `server_info.player_api_path` (`/<web_ui.path>`, or `/` without a path), and M3U playlist downloads (`get.php`,
+  `apiget`, `m3u`) advertise the same value in the `X-Tuliprox-Player-Api-Path` response header and the `#EXTM3U` attribute
+  `x-tuliprox-player-api="<path>"`, so a player that knows only the playlist host finds `/auth/token` and `/api/v1/me`.
+  The value appears only when the Web UI and web authentication are enabled and the user's Player API is enabled.
 
 - **Private recording rules for playlist users.** API users with `player_features.recording` at `private` or `shared`
   can use `GET`, `POST`, `PATCH`, and `DELETE /api/v1/recording/rules` with their player token, in the same place as

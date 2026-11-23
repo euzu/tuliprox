@@ -47,8 +47,8 @@ The path comes from `web_ui.path` in `config.yml`; the default (`/`, an empty va
 | `tuliprox`    | `POST /tuliprox/auth/token` | `GET /tuliprox/api/v1/me/streams`   | `POST /tuliprox/mcp` |
 
 The WebSocket is `GET {BASE_URL}/ws`; playback routes (`player_api.php`, `get.php`, `live/`, `m3u-stream/`, ...) are
-mounted at the server root and do **not** use `web_ui_path`. Xtream players read `BASE_URL` from
-`server_info.player_api_path` (see [Base URL discovery](#base-url-discovery-via-xtream-account-info)).
+mounted at the server root and do **not** use `web_ui_path`. Xtream and M3U players read `BASE_URL` from
+`player_api_path` (see [Base URL discovery](#base-url-discovery)).
 
 ### Prerequisites and access control
 
@@ -326,11 +326,15 @@ Routes that hide an item return `404` instead (for example a foreign stream).
 
 ## 3. Feature discovery
 
-### Base URL discovery via Xtream account info
+### Base URL discovery
 
-A player that connects with Xtream credentials knows only the playlist host. The Player API is mounted under
-`web_ui.path`, so `player_api.php` (`action=get_account_info` or no `action`) advertises it as
-`server_info.player_api_path`:
+A player that connects with Xtream or M3U credentials knows only the playlist host. The Player API is mounted under
+`web_ui.path`, so the server advertises its base path prefix (`/<web_ui.path>`, or `/` without a path) in both Xtream
+and M3U endpoints:
+
+#### Xtream account info
+
+`player_api.php` (`action=get_account_info` or no `action`) advertises the path as `server_info.player_api_path`:
 
 ```json
 {
@@ -351,6 +355,31 @@ A player that connects with Xtream credentials knows only the playlist host. The
   slash. `https://proxy.example.com/player_api.php` gives `https://proxy.example.com/ui/auth/token`; behind a reverse
   proxy prefix, `https://host/tuliprox/player_api.php` gives `https://host/tuliprox/ui/auth/token`. For `/`, append
   nothing.
+
+#### M3U playlist download
+
+M3U playlist downloads (`get.php`, `apiget`, `m3u`) advertise the same path in two ways:
+
+1. In the `#EXTM3U` header as attribute `x-tuliprox-player-api="<path>"`, after `url-tvg` and `x-tvg-url` when an
+   EPG URL exists:
+
+   ```text
+   #EXTM3U url-tvg="https://..." x-tvg-url="https://..." x-tuliprox-player-api="/ui"
+   #EXTM3U x-tuliprox-player-api="/ui"
+   ```
+
+2. In the HTTP response header `X-Tuliprox-Player-Api-Path: <path>` (exposed through CORS).
+
+The names differ on purpose (`x-tuliprox-player-api` in the playlist, `X-Tuliprox-Player-Api-Path` as HTTP header);
+read the one your client sees. The path contains only `A-Z a-z 0-9 . _ ~ / -`; a `web_ui.path` with other characters
+is not advertised. The attribute and header use the exact same value and conditions as Xtream `player_api_path` (`/ui` for
+`web_ui.path: ui`, `/` without a path; omitted when the Web UI, web auth, or user Player API is disabled).
+
+To derive the Base URL from an M3U playlist URL, strip the `/get.php`, `/apiget`, or `/m3u` path portion (and query string) and
+append `player_api_path` without a trailing slash (for `/`, append nothing). For example,
+`https://proxy.example.com/get.php?username=alice&password=secret` with path `/ui` yields
+`https://proxy.example.com/ui/auth/token`; behind a reverse proxy prefix,
+`https://host/tuliprox/get.php?...` yields `https://host/tuliprox/ui/auth/token`.
 
 ### Feature capabilities
 

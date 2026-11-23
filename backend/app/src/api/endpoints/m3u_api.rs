@@ -58,7 +58,9 @@ async fn m3u_api(
 ) -> impl IntoResponse + Send {
     let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
 
-    match m3u_load_rewrite_playlist(&app_state.app_config, &target, &user).await {
+    let player_api_path = crate::api::auth_middleware::player_api_path(&app_state.app_config.config.load(), &user);
+
+    match m3u_load_rewrite_playlist(&app_state.app_config, &target, &user, player_api_path.clone()).await {
         Ok(m3u_iter) => {
             let content_stream = m3u_iter.map(|line| {
                 line.map(|mut line| {
@@ -71,6 +73,14 @@ async fn m3u_api(
                 axum::http::header::CONTENT_TYPE,
                 axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            if let Some(ref path) = player_api_path {
+                if let Ok(val) = axum::http::HeaderValue::from_str(path) {
+                    builder = builder.header(
+                        axum::http::HeaderName::from_static(shared::model::HEADER_TULIPROX_PLAYER_API_PATH),
+                        val,
+                    );
+                }
+            }
             if content_type == "m3u_plus" {
                 builder =
                     builder.header(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"playlist.m3u\"");
@@ -2049,5 +2059,85 @@ mod tests {
         assert_eq!(catchup_res2.status(), StatusCode::OK);
         assert_eq!(env.origin_hits("korath"), 1);
         assert_eq!(env.origin_hits("solis"), 0);
+    }
+
+    async fn assert_m3u_routes(router: &axum::Router, expected_header: Option<&str>, expected_first_line: &str) {
+        use axum::http::StatusCode;
+        use shared::model::HEADER_TULIPROX_PLAYER_API_PATH;
+        use tower::ServiceExt;
+
+        for route in ["get.php", "apiget", "m3u"] {
+            for method in ["GET", "POST"] {
+                let req = axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!("/{route}?username=viewer&password=secret&type=m3u_plus&output=ts"))
+                    .body(axum::body::Body::empty())
+                    .expect("request builder");
+                let res = router.clone().oneshot(req).await.expect("response");
+                assert_eq!(res.status(), StatusCode::OK, "failed on {method} /{route}");
+                assert_eq!(
+                    res.headers().get(HEADER_TULIPROX_PLAYER_API_PATH).and_then(|v| v.to_str().ok()),
+                    expected_header,
+                    "header mismatch on {method} /{route}"
+                );
+                let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.expect("body");
+                let body_text = String::from_utf8(body_bytes.to_vec()).expect("utf8");
+                let first_line = body_text.lines().next().unwrap_or_default();
+                assert_eq!(first_line, expected_first_line, "first line mismatch on {method} /{route}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn m3u_get_playlist_advertises_player_api_path() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use shared::model::{WebAuthConfigDto, WebUiConfigDto};
+
+        let env = GroupPlaybackEnv::builder(&["solis"]).build().await;
+
+        let web_ui_dto = WebUiConfigDto {
+            enabled: true,
+            user_ui_enabled: true,
+            player_api_enabled: Some(true),
+            auth: Some(WebAuthConfigDto { enabled: true, ..Default::default() }),
+            path: Some("ui".to_string()),
+            ..Default::default()
+        };
+        let mut config = (**env.app_state.app_config.config.load()).clone();
+        config.web_ui = Some(tuliprox_core::model::WebUiConfig::from(&web_ui_dto));
+        env.app_state.app_config.config.store(Arc::new(config));
+
+        let mut proxy = env.app_state.app_config.api_proxy.load_full().expect("api proxy").as_ref().clone();
+        let mut updated_user = proxy.user[0].credentials[0].as_ref().clone();
+        updated_user.ui_enabled = true;
+        updated_user.player_features.api_enabled = Some(true);
+        proxy.user[0].credentials = vec![Arc::new(updated_user)];
+        env.app_state.app_config.api_proxy.store(Some(Arc::new(proxy)));
+
+        let router = super::m3u_api_register()
+            .with_state(Arc::clone(&env.app_state))
+            .layer(axum::extract::connect_info::MockConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))));
+
+        let extm3u_base = "#EXTM3U url-tvg=\"https://example.test/iptv/xmltv.php?username=viewer&password=secret\" x-tvg-url=\"https://example.test/iptv/xmltv.php?username=viewer&password=secret\"";
+
+        // 1. Player API user: first line contains attribute and response contains header
+        assert_m3u_routes(&router, Some("/ui"), &format!("{extm3u_base} x-tuliprox-player-api=\"/ui\"")).await;
+
+        // 2. Player API user without web_ui.path: defaults to "/"
+        let mut config = (**env.app_state.app_config.config.load()).clone();
+        if let Some(ref mut web_ui) = config.web_ui {
+            web_ui.path = None;
+        }
+        env.app_state.app_config.config.store(Arc::new(config));
+        assert_m3u_routes(&router, Some("/"), &format!("{extm3u_base} x-tuliprox-player-api=\"/\"")).await;
+
+        // 3. User without Player API: neither attribute nor header
+        let mut proxy = env.app_state.app_config.api_proxy.load_full().expect("api proxy").as_ref().clone();
+        let mut updated_user = proxy.user[0].credentials[0].as_ref().clone();
+        updated_user.ui_enabled = false;
+        updated_user.player_features.api_enabled = Some(false);
+        proxy.user[0].credentials = vec![Arc::new(updated_user)];
+        env.app_state.app_config.api_proxy.store(Some(Arc::new(proxy)));
+        assert_m3u_routes(&router, None, extm3u_base).await;
     }
 }

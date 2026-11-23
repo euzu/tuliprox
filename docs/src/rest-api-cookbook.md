@@ -609,7 +609,9 @@ Requirements:
   rules do not allow, the answer is `403 Forbidden`.
 - A player that only knows the playlist host reads the base path from `server_info.player_api_path` in the Xtream
   `player_api.php` account info (`/ui` for `web_ui.path: ui`, `/` without a path). Append it to the URL used for
-  `player_api.php` without `/player_api.php`, so a reverse proxy prefix is kept.
+  `player_api.php` without `/player_api.php`, so a reverse proxy prefix is kept. M3U playlist downloads (`get.php`,
+  `apiget`, `m3u`) advertise the same path in the `X-Tuliprox-Player-Api-Path` response header and `#EXTM3U` attribute
+  `x-tuliprox-player-api="<path>"`.
 - The token bears the subject `api:<username>`. Permissions and `player_features` are evaluated dynamically from the live
   configuration on every request; changing a plan or user setting takes effect immediately without needing a new token.
 
@@ -881,7 +883,8 @@ X-Tuliprox-Fallback: provider_connections_exhausted
 Cache-Control: no-store
 ```
 
-CORS preflight and stream responses expose both `X-Tuliprox-Fallback` and `X-Tuliprox-Rejection` via `Access-Control-Expose-Headers`.
+CORS exposes `X-Tuliprox-Fallback`, `X-Tuliprox-Rejection`, `X-Tuliprox-Stream-Uid`, and `X-Tuliprox-Player-Api-Path`
+via `Access-Control-Expose-Headers`.
 
 Possible values for `X-Tuliprox-Fallback`:
 

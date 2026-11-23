@@ -181,6 +181,25 @@ pub(crate) fn player_api_reachable(config: &tuliprox_core::model::Config, user: 
         && can_api_user_access(config.web_ui.as_ref(), user, ApiUserAccess::PlayerApi)
 }
 
+/// Returns the Player API base path prefix when the Player API is reachable for this user, or `None`.
+///
+/// Uses `/` when `web_ui.path` is empty or unset, or `/<web_ui.path>`. Returns `None` unless every
+/// character of the final path is in `[A-Za-z0-9._~/-]`.
+#[must_use]
+pub(crate) fn player_api_path(config: &tuliprox_core::model::Config, user: &ProxyUserCredentials) -> Option<String> {
+    if !player_api_reachable(config, user) {
+        return None;
+    }
+    let raw_path = config.web_ui.as_ref().and_then(|w| w.path.as_deref()).unwrap_or("");
+    let path = shared::utils::concat_path_leading_slash(raw_path, "");
+    let final_path = if path.is_empty() { String::from("/") } else { path };
+    if final_path.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'/' | b'-')) {
+        Some(final_path)
+    } else {
+        None
+    }
+}
+
 /// Validates that an authenticated API user is known, active, and permitted by configuration.
 pub(crate) fn validate_api_user_account(
     app_state: &AppState,
@@ -1267,5 +1286,45 @@ mod tests {
             .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([10, 0, 0, 1], 12345))));
         let resp_allowed = app.oneshot(req_allowed).await.unwrap();
         assert_eq!(resp_allowed.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_player_api_path() {
+        let mut user = ProxyUserCredentials::default();
+        user.ui_enabled = true;
+        user.player_features.api_enabled = Some(true);
+
+        let web_ui_dto = WebUiConfigDto {
+            enabled: true,
+            user_ui_enabled: true,
+            player_api_enabled: Some(true),
+            auth: Some(WebAuthConfigDto { enabled: true, ..Default::default() }),
+            path: Some("ui".to_string()),
+            ..Default::default()
+        };
+        let mut config =
+            Config { web_ui: Some(tuliprox_core::model::WebUiConfig::from(&web_ui_dto)), ..Default::default() };
+
+        // "ui" -> Some("/ui")
+        assert_eq!(player_api_path(&config, &user), Some("/ui".to_string()));
+
+        // empty -> Some("/")
+        config.web_ui.as_mut().unwrap().path = Some(String::new());
+        assert_eq!(player_api_path(&config, &user), Some("/".to_string()));
+
+        config.web_ui.as_mut().unwrap().path = None;
+        assert_eq!(player_api_path(&config, &user), Some("/".to_string()));
+
+        // ui"x -> None
+        config.web_ui.as_mut().unwrap().path = Some("ui\"x".to_string());
+        assert_eq!(player_api_path(&config, &user), None);
+
+        // ui\nx -> None
+        config.web_ui.as_mut().unwrap().path = Some("ui\nx".to_string());
+        assert_eq!(player_api_path(&config, &user), None);
+
+        // ui x -> None
+        config.web_ui.as_mut().unwrap().path = Some("ui x".to_string());
+        assert_eq!(player_api_path(&config, &user), None);
     }
 }

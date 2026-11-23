@@ -233,13 +233,7 @@ async fn get_user_info(user: &ProxyUserCredentials, app_state: &AppState) -> Opt
     let active_connections = app_state.active_users.user_connections(&user.username).await;
 
     let config = app_state.app_config.config.load();
-    let player_api_path = if crate::api::auth_middleware::player_api_reachable(&config, user) {
-        let raw_path = config.web_ui.as_ref().and_then(|w| w.path.as_deref()).unwrap_or("");
-        let path = shared::utils::concat_path_leading_slash(raw_path, "");
-        Some(if path.is_empty() { String::from("/") } else { path })
-    } else {
-        None
-    };
+    let player_api_path = crate::api::auth_middleware::player_api_path(&config, user);
 
     Some(XtreamAuthorizationResponse::new(
         &server_info,
