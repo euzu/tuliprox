@@ -47,7 +47,8 @@ The path comes from `web_ui.path` in `config.yml`; the default (`/`, an empty va
 | `tuliprox`    | `POST /tuliprox/auth/token` | `GET /tuliprox/api/v1/me/streams`   | `POST /tuliprox/mcp` |
 
 The WebSocket is `GET {BASE_URL}/ws`; playback routes (`player_api.php`, `get.php`, `live/`, `m3u-stream/`, ...) are
-mounted at the server root and do **not** use `web_ui_path`.
+mounted at the server root and do **not** use `web_ui_path`. Xtream players read `BASE_URL` from
+`server_info.player_api_path` (see [Base URL discovery](#base-url-discovery-via-xtream-account-info)).
 
 ### Prerequisites and access control
 
@@ -294,18 +295,27 @@ TOKEN=$(curl -s -X POST "$BASE_URL/auth/refresh" \
 ```
 
 Refresh fails with `401` when the token is invalid, expired, revoked, or belongs to a user that no longer exists. It
-fails with `403` when the user still exists but neither `ui_enabled` nor effective `api_enabled` is true. A password change on a Web UI user also
+fails with `403` when the user still exists but neither `ui_enabled` nor effective `api_enabled` is true, or when their configured
+`network_access` rules deny the client IP. A password change on a Web UI user also
 invalidates the old token; playlist user tokens carry no password version and are not affected by Web UI passwords.
+
+### Network access rules
+
+The user's `network_access` rules (allowed networks and countries) apply to sign-in (`POST /auth/token`), refresh
+(`POST /auth/refresh`), and every request with the token: `/api/v1/me/*`, the event WebSocket, recordings, user
+settings, MCP, and the recording snapshot on `{BASE_URL}/ws`. From a network the rules do not allow, the answer is
+`403 Forbidden`. On `/ws` a snapshot request answers `RecordingWsError` with code `recording_forbidden` and serves no
+data. Do not retry: the same address keeps being denied.
 
 ### Error semantics
 
-| Status | Header                      | Body                                                                      | Meaning                                           | Client action                    |
-|:-------|:----------------------------|:--------------------------------------------------------------------------|:--------------------------------------------------|:---------------------------------|
-| `200`  | ---                         | `{"token":"...","username":"..."}`                                        | Sign-in or refresh succeeded                      | Store the token                  |
-| `401`  | `WWW-Authenticate: Bearer`  | empty (sign-in) or text (authenticated request)                           | Wrong credentials, invalid or expired token       | Sign in again                    |
-| `401`  | `X-Token-Refresh: required` | text: `token was issued for an older permission schema; refresh required` | Token schema is stale                             | Call `/auth/refresh`, then retry |
-| `403`  | ---                         | empty (sign-in) or text `principal does not have the required role`       | Correct principal, no Web UI access or permission | Show message, do not retry       |
-| `429`  | `Retry-After: <seconds>`    | empty                                                                     | Sign-in throttled after repeated failures         | Wait, then retry                 |
+| Status | Header                      | Body                                                                      | Meaning                                                                               | Client action                    |
+|:-------|:----------------------------|:--------------------------------------------------------------------------|:--------------------------------------------------------------------------------------|:---------------------------------|
+| `200`  | ---                         | `{"token":"...","username":"..."}`                                        | Sign-in or refresh succeeded                                                          | Store the token                  |
+| `401`  | `WWW-Authenticate: Bearer`  | empty (sign-in) or text (authenticated request)                           | Wrong credentials, invalid or expired token                                           | Sign in again                    |
+| `401`  | `X-Token-Refresh: required` | text: `token was issued for an older permission schema; refresh required` | Token schema is stale                                                                 | Call `/auth/refresh`, then retry |
+| `403`  | ---                         | empty (sign-in) or text `principal does not have the required role`       | Correct principal, but network rules, Web UI access, or permission deny it            | Show message, do not retry       |
+| `429`  | `Retry-After: <seconds>`    | empty                                                                     | Sign-in throttled after repeated failures                                             | Wait, then retry                 |
 
 `X-Token-Refresh: required` is sent **only** for a stale permission schema or a missing `subject_id`. Those two cases
 are recoverable with a refresh. A revoked token, a changed password, or an invalid signature is a plain `401` and
@@ -315,6 +325,34 @@ At the authentication layer, a principal that is authenticated but lacks the rol
 Routes that hide an item return `404` instead (for example a foreign stream).
 
 ## 3. Feature discovery
+
+### Base URL discovery via Xtream account info
+
+A player that connects with Xtream credentials knows only the playlist host. The Player API is mounted under
+`web_ui.path`, so `player_api.php` (`action=get_account_info` or no `action`) advertises it as
+`server_info.player_api_path`:
+
+```json
+{
+  "server_info": {
+    "url": "proxy.example.com",
+    "port": "80",
+    "https_port": "443",
+    "server_protocol": "https",
+    "player_api_path": "/ui"
+  }
+}
+```
+
+- `web_ui.path: ui` gives `/ui`; an empty path gives `/`.
+- The field is omitted when the Web UI or web authentication is disabled, or when the Player API is disabled
+  globally or for the user.
+- Base URL: the URL you used for `player_api.php`, without `/player_api.php`, plus `player_api_path` without a trailing
+  slash. `https://proxy.example.com/player_api.php` gives `https://proxy.example.com/ui/auth/token`; behind a reverse
+  proxy prefix, `https://host/tuliprox/player_api.php` gives `https://host/tuliprox/ui/auth/token`. For `/`, append
+  nothing.
+
+### Feature capabilities
 
 Start every client with `GET /api/v1/me/capabilities` and derive the UI from the answer. Do not hard-code a plan.
 
@@ -441,6 +479,24 @@ curl -s "$BASE_URL/api/v1/me/streams" -H "Authorization: Bearer $TOKEN" | jq .
 | `session_token`    | string  | Opaque session token, omitted when the server has none; never use it as a credential |
 
 Only the caller's streams are returned. Another user's `uid` is indistinguishable from a missing one.
+
+#### Matching own streams
+
+Several devices often share one login, so `virtual_id` and user agent cannot tell which listed stream is yours. Every
+direct live MPEG-TS response (Xtream `/live/...`, M3U `/m3u-stream/live/...`) carries `X-Tuliprox-Stream-Uid` for a
+user with Player API access. Its value is the `uid` of this connection in `GET /api/v1/me/streams`.
+
+1. Open the live stream and keep the `X-Tuliprox-Stream-Uid` value.
+2. To stop playback for good, close the connection and call `DELETE /api/v1/me/streams/{uid}`. The slot is free at
+   once, so the server does not have to detect the closed socket.
+3. Use the same `uid` for `POST /api/v1/me/streams/{uid}/split` and the failover routes.
+
+A reconnect opens a new connection with a new `uid`; read the header again. VOD, series, catch-up, and recording
+responses carry no header.
+
+HLS playlists carry no `X-Tuliprox-Stream-Uid`: the connection, and with it the `uid`, exists only after the first
+segment request. An HLS client finds its stream in `GET /api/v1/me/streams` by `virtual_id` and `protocol` once
+playback runs; the `uid` stays stable across manifest and segment polls.
 
 #### Stop an own stream
 
@@ -1444,7 +1500,7 @@ at `GET {BASE_URL}/api/v1/me/events`; it is **not** the binary `/ws` recording p
 Two forms are accepted:
 
 1. `Authorization: Bearer <token>` on the WebSocket upgrade. An invalid token answers `401` before the upgrade, a
-   disabled feature `403`, and a fifth concurrent socket `429` (empty body).
+   disabled feature or network access rule denial `403`, and a fifth concurrent socket `429` (empty body).
 2. No header: the server accepts the upgrade and waits up to 5 seconds for the first **text** frame:
 
 ```json
@@ -1457,6 +1513,7 @@ There is no token in the query string; tokens in URLs end up in access logs. On 
 | Frame                                            | Close reason           | Meaning                               |
 |:-------------------------------------------------|:-----------------------|:--------------------------------------|
 | `{"type":"error","code":"unauthorized"}`         | `Unauthorized`         | Invalid or expired token              |
+| `{"type":"error","code":"forbidden"}`            | `Forbidden`            | Network rules deny the client address |
 | `{"type":"error","code":"feature_disabled"}`     | `Feature disabled`     | `event_stream` is off                 |
 | `{"type":"error","code":"too_many_connections"}` | `Too many connections` | Four sockets are already open         |
 | ---                                              | `Auth timeout`         | No text frame within 5 seconds        |
@@ -1843,8 +1900,14 @@ An HLS entry URL is either `/live/{user}/{pass}/{vid}.m3u8` (target with Xtream 
 
 ### Diagnostic headers
 
-Fallback and rejection responses carry one or both headers. Browser clients can read them because the CORS layer
-exposes both names through `Access-Control-Expose-Headers`.
+Stream responses carry diagnostic headers for admission, fallbacks, rejections, and stream identification. Browser clients
+can read them because the CORS layer exposes them through `Access-Control-Expose-Headers`.
+
+```http
+HTTP/1.1 200 OK
+Content-Type: video/mp2t
+X-Tuliprox-Stream-Uid: 104
+```
 
 ```http
 HTTP/1.1 502 Bad Gateway
@@ -1853,6 +1916,11 @@ X-Tuliprox-Rejection: admission_rejected
 Cache-Control: no-store
 
 ```
+
+`X-Tuliprox-Stream-Uid`:
+On live MPEG-TS responses for users with Player API access: the `uid` of this connection in `GET /api/v1/me/streams`
+(see [Matching own streams](#matching-own-streams)). Omitted for HLS, VOD, series, catch-up, and recordings, and for
+users without Player API access.
 
 `X-Tuliprox-Fallback` values:
 

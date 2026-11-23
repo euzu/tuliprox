@@ -72,6 +72,8 @@ mcp:
 * A valid token that lacks the permission gets an MCP tool result with `isError: true` and text starting with
   `HTTP 403`. No data is returned. Other REST failures are reported the same way, for example `HTTP 503` when a feature
   such as QoS aggregation is disabled.
+* A playlist user's `network_access` rules apply to MCP calls like to every other Player API request: from a network
+  the rules do not allow, the MCP request answers `403`.
 * Use a dedicated Web UI user with a minimal group (for example only `system.read,playlist.read`) for assistants. See
   [Structure of `groups.txt`](../configuration/config.md#structure-of-groupstxt).
 * Keep `read_only: true` unless an assistant must trigger playlist updates or the GeoIP refresh.

@@ -222,6 +222,17 @@
 
 ## 🌟 New Features
 
+- **Live responses name their stream uid.** For users with Player API access, every direct live MPEG-TS response
+  carries `X-Tuliprox-Stream-Uid`, the `uid` of this connection in `GET /api/v1/me/streams`. A player on a login shared
+  by several devices stops or splits exactly its own stream with `DELETE /api/v1/me/streams/{uid}` or
+  `POST /api/v1/me/streams/{uid}/split`. The header is exposed through CORS. HLS playlists carry none, because the
+  connection exists only after the first segment.
+
+- **Xtream account info advertises the Player API base.** `player_api.php` returns `server_info.player_api_path`
+  (`/<web_ui.path>`, or `/` without a path), so a player that knows only the playlist host finds `/auth/token` and
+  `/api/v1/me`. The field appears only when the Web UI and web authentication are enabled and the user's Player API
+  is enabled.
+
 - **Private recording rules for playlist users.** API users with `player_features.recording` at `private` or `shared`
   can use `GET`, `POST`, `PATCH`, and `DELETE /api/v1/recording/rules` with their player token, in the same place as
   their recordings. `read` lists own rules plus visible shared rules of the own target, `private` also manages own
@@ -1748,6 +1759,11 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Network rules of playlist users apply to the Player API.** `network_access` (allowed networks and countries) was
+  checked on playlist, stream, HLS, and HDHomeRun routes, but not on token sign-in, refresh, or requests with the
+  token. A client outside the allowed networks could sign in and use `/api/v1/me`, the event WebSocket, recordings,
+  user settings, and MCP. All of these now answer `403`.
 
 - **Every Web UI form field has a help text.** About 115 fields showed "No dedicated explanation is available for this
   field yet." They now explain their meaning, values and defaults in all six languages. Fields whose help was looked

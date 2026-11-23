@@ -171,7 +171,7 @@ paths:
         - `web_ui.auth.enabled` must be true.
         - For playlist users: either `ui_enabled` must be true (Web UI access) or the effective
           `player_features.api_enabled` must be true (Player API access). If neither Web UI nor Player API access
-          is permitted, the server returns `403 Forbidden`. Global switches (`user_ui_enabled` and `player_api_enabled`)
+          is permitted, or if the client IP is denied by configured `network_access` rules, the server returns `403 Forbidden`. Global switches (`user_ui_enabled` and `player_api_enabled`)
           are checked per route, not at sign-in.
         - If credentials are invalid or unknown, returns `401 Unauthorized`.
         - If sign-in attempts exceed the rate limit, returns `429 Too Many Requests` with a `Retry-After` header.
@@ -213,7 +213,8 @@ paths:
       description: |
         Refreshes an active JWT Bearer token. The caller sends their current token in the `Authorization: Bearer <token>`
         header. Revoked tokens are rejected with `401 Unauthorized`. If neither `ui_enabled` nor effective
-        `player_features.api_enabled` is true since issuance, returns `403 Forbidden`.
+        `player_features.api_enabled` is true since issuance, or if the client IP is denied by configured
+        `network_access` rules, returns `403 Forbidden`.
       security:
         - bearerAuth: []
       responses:
@@ -1914,6 +1915,8 @@ paths:
               schema:
                 type: string
                 example: video/mp2t
+            X-Tuliprox-Stream-Uid:
+              $ref: '#/components/headers/X-Tuliprox-Stream-Uid'
             X-Tuliprox-Fallback:
               $ref: '#/components/headers/X-Tuliprox-Fallback'
             Cache-Control:
@@ -2160,8 +2163,12 @@ paths:
           example: 1001.ts
       responses:
         '200':
-          description: Live media stream or HLS manifest.
+          description: |
+            Live media stream or HLS manifest. `X-Tuliprox-Stream-Uid` is present only on MPEG-TS responses for users
+            with Player API access, never on an HLS manifest.
           headers:
+            X-Tuliprox-Stream-Uid:
+              $ref: '#/components/headers/X-Tuliprox-Stream-Uid'
             X-Tuliprox-Fallback:
               $ref: '#/components/headers/X-Tuliprox-Fallback'
             Cache-Control:
@@ -2321,6 +2328,8 @@ paths:
         Emulates the Xtream Codes `player_api.php` protocol.
         Without an `action` parameter, returns user authentication and server info.
         With `action`, returns live streams, VOD streams, series, categories, VOD info, or EPG listings.
+        When `action=get_account_info` or `action` is omitted, the `server_info` object includes `player_api_path`
+        (e.g. `/ui` or `/`) advertising the Player API base path prefix when Web UI, web authentication, and Player API access are enabled.
 
         **Recordings in Xtream VOD (Feature F2)**:
         - Prerequisites: Global DVR enabled (`video.recording.enabled: true`), API proxy user
@@ -2410,6 +2419,7 @@ paths:
                 server_info:
                   url: localhost
                   port: 8901
+                  player_api_path: /ui
         '401':
           $ref: '#/components/responses/UnauthorizedError'
         '403':
@@ -2426,6 +2436,14 @@ components:
         Include in the HTTP request as `Authorization: Bearer <token>`.
 
   headers:
+    X-Tuliprox-Stream-Uid:
+      description: |
+        Assigned stream UID for Player API users on live stream responses.
+        Matches the `uid` reported by `/api/v1/me/streams` for this specific connection.
+      schema:
+        type: integer
+      example: 104
+
     X-Tuliprox-Fallback:
       description: |
         Diagnostic reason explaining why a fallback slate, terminal response, or rejection

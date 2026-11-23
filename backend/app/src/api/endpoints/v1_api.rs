@@ -266,9 +266,9 @@ pub fn v1_api_register(
 
 #[cfg(test)]
 mod tests {
-    use super::{create_status_check, v1_api_register};
+    use super::create_status_check;
     use crate::{
-        api::model::{create_test_app_state, ConnectionKind, ConnectionParams},
+        api::model::{create_test_app_state, AppState, ConnectionKind, ConnectionParams},
         auth::{create_jwt_web_user, Fingerprint},
         model::{Config, RecordingConfig},
     };
@@ -282,6 +282,16 @@ mod tests {
     };
     use std::{borrow::Cow, net::SocketAddr};
     use tower::ServiceExt;
+
+    /// Test routers get a loopback peer address, as a real serve loop would provide.
+    fn v1_api_register(
+        web_auth_enabled: bool,
+        app_state: &std::sync::Arc<AppState>,
+        web_ui_path: &str,
+    ) -> axum::Router<std::sync::Arc<AppState>> {
+        super::v1_api_register(web_auth_enabled, app_state, web_ui_path)
+            .layer(axum::extract::connect_info::MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+    }
 
     /// A config whose DVR block is present and explicitly on or off.
     /// Built through the DTO so the `enabled` flag travels the same

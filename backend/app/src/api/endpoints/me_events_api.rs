@@ -3,7 +3,7 @@ use crate::{
         auth_middleware::{api_user_context, authenticate, can_api_user_access, ApiUserAccess, ApiUserContext},
         model::AppState,
     },
-    auth::{AuthBearer, AuthError},
+    auth::{AuthBearer, AuthError, Fingerprint},
     model::ProxyUserCredentials,
 };
 use axum::{
@@ -76,6 +76,7 @@ fn acquire_user_socket(username: &str) -> Option<UserSocketGuard> {
 /// WebSocket upgrade handler for the player user event stream (`GET /api/v1/me/events`).
 pub async fn get_me_events(
     State(app_state): State<Arc<AppState>>,
+    fingerprint: Fingerprint,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -84,7 +85,7 @@ pub async fn get_me_events(
         let Ok(claims) = authenticate(&app_state, &token).await else {
             return StatusCode::UNAUTHORIZED.into_response();
         };
-        let ctx = match api_user_context(&app_state, claims) {
+        let ctx = match api_user_context(&app_state, claims, &fingerprint) {
             Ok(ctx) => ctx,
             Err(AuthError::Forbidden) => return StatusCode::FORBIDDEN.into_response(),
             Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
@@ -98,11 +99,11 @@ pub async fn get_me_events(
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         };
 
-        return ws.on_upgrade(move |socket| handle_socket(socket, app_state, Some(ctx), Some(guard)));
+        return ws.on_upgrade(move |socket| handle_socket(socket, app_state, Some(ctx), Some(guard), fingerprint));
     }
 
     // 2. Without header: accept upgrade and wait for in-band auth message.
-    ws.on_upgrade(move |socket| handle_socket(socket, app_state, None, None))
+    ws.on_upgrade(move |socket| handle_socket(socket, app_state, None, None, fingerprint))
 }
 
 /// Main socket loop handling in-band authentication, event forwarding, and ping/pong.
@@ -112,6 +113,7 @@ async fn handle_socket(
     app_state: Arc<AppState>,
     initial_ctx: Option<ApiUserContext>,
     initial_guard: Option<UserSocketGuard>,
+    fingerprint: Fingerprint,
 ) {
     let (ctx, _guard) = if let (Some(c), Some(g)) = (initial_ctx, initial_guard) {
         (c, g)
@@ -145,9 +147,16 @@ async fn handle_socket(
                     send_error_and_close(&mut socket, "unauthorized", "Unauthorized").await;
                     return;
                 };
-                let Ok(ctx) = api_user_context(&app_state, claims) else {
-                    send_error_and_close(&mut socket, "unauthorized", "Unauthorized").await;
-                    return;
+                let ctx = match api_user_context(&app_state, claims, &fingerprint) {
+                    Ok(ctx) => ctx,
+                    Err(AuthError::Forbidden) => {
+                        send_error_and_close(&mut socket, "forbidden", "Forbidden").await;
+                        return;
+                    }
+                    Err(_) => {
+                        send_error_and_close(&mut socket, "unauthorized", "Unauthorized").await;
+                        return;
+                    }
                 };
                 if !ctx.user.player_features.event_stream {
                     send_error_and_close(&mut socket, "feature_disabled", "Feature disabled").await;
@@ -553,7 +562,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
+            axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
         });
         (addr, handle)
     }
@@ -1486,6 +1495,72 @@ mod tests {
             }
             other => panic!("expected close frame with 'Player API disabled', got {other:?}"),
         }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_me_events_websocket_enforces_network_access() {
+        use shared::model::NetworkAccessDto;
+
+        let env = setup_env();
+        let token = env.create_user("net_alice", true, true, PlayerRecordingLevel::None);
+        // Set network_access for net_alice restricting to 10.0.0.0/8
+        {
+            let mut api_proxy = (*env.app_state.app_config.api_proxy.load_full().unwrap()).clone();
+            for target_user in &mut api_proxy.user {
+                for cred in &mut target_user.credentials {
+                    if cred.username == "net_alice" {
+                        Arc::make_mut(cred).network_access =
+                            Some(tuliprox_core::model::NetworkAccess::from(&NetworkAccessDto {
+                                allowed_countries: None,
+                                allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+                            }));
+                    }
+                }
+            }
+            env.app_state.app_config.set_api_proxy(api_proxy).unwrap();
+        }
+
+        let (addr, handle) = start_test_server(Arc::clone(&env.app_state)).await;
+
+        // 1. Header upgrade with denied IP (192.168.1.1): rejected with 403 Forbidden
+        let url = format!("ws://{addr}/api/v1/me/events");
+        let mut req_denied = url.clone().into_client_request().unwrap();
+        req_denied.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        req_denied.headers_mut().insert("x-forwarded-for", "192.168.1.1".parse().unwrap());
+
+        let res_denied = connect_async(req_denied).await;
+        match res_denied {
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+            }
+            other => panic!("expected 403 Forbidden rejection for denied IP, got {other:?}"),
+        }
+
+        // 2. Header upgrade with allowed IP (10.0.0.1): succeeds and receives Connected event
+        let mut req_allowed = url.clone().into_client_request().unwrap();
+        req_allowed.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        req_allowed.headers_mut().insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
+
+        let (mut ws_stream, resp_allowed) = connect_async(req_allowed).await.expect("connect allowed");
+        assert_eq!(resp_allowed.status(), reqwest::StatusCode::SWITCHING_PROTOCOLS);
+        let msg = ws_stream.next().await.expect("connected msg").expect("valid msg");
+        let text = msg.to_text().unwrap();
+        let event: PlayerEvent = serde_json::from_str(text).unwrap();
+        assert!(matches!(event, PlayerEvent::Connected { .. }));
+        let _ = ws_stream.close(None).await;
+
+        // 3. In-band auth frame with denied IP (192.168.1.1): upgrade succeeds without header, auth frame denied
+        let mut req_inband = url.into_client_request().unwrap();
+        req_inband.headers_mut().insert("x-forwarded-for", "192.168.1.1".parse().unwrap());
+        let (mut ws_inband, _) = connect_async(req_inband).await.expect("connect inband");
+        let auth_payload = serde_json::to_string(&PlayerClientMessage::Auth { token }).unwrap();
+        ws_inband.send(tokio_tungstenite::tungstenite::Message::Text(auth_payload.into())).await.unwrap();
+        let err_msg = ws_inband.next().await.expect("close/error msg").expect("msg");
+        let err_text = err_msg.to_text().unwrap();
+        let err_event: PlayerEvent = serde_json::from_str(err_text).unwrap();
+        assert!(matches!(err_event, PlayerEvent::Error { code, .. } if code == "forbidden"));
 
         handle.abort();
     }

@@ -433,7 +433,8 @@ async fn test_active_client_stream_deferred_provider_grace_retains_provider_hand
         group_failover: None,
     })
     .await
-    .expect("deferred test stream admission should succeed");
+    .expect("deferred test stream admission should succeed")
+    .stream;
     pin_mut!(stream);
 
     assert!(
@@ -511,7 +512,8 @@ async fn test_active_client_stream_shared_deferred_provider_grace_retains_provid
         group_failover: None,
     })
     .await
-    .expect("shared deferred test stream admission should succeed");
+    .expect("shared deferred test stream admission should succeed")
+    .stream;
     pin_mut!(stream);
 
     assert!(

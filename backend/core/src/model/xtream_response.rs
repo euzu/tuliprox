@@ -34,6 +34,8 @@ pub struct XtreamServerInfoResponse {
     pub timestamp_now: i64,
     pub time_now: String, //"2021-06-28 17:07:37"
     pub process: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_api_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -48,6 +50,7 @@ impl XtreamAuthorizationResponse {
         user: &ProxyUserCredentials,
         active_connections: u32,
         access_control: bool,
+        player_api_path: Option<String>,
     ) -> Self {
         let now = Local::now();
         let created_default = (now - Duration::days(365)).timestamp();
@@ -117,6 +120,7 @@ impl XtreamAuthorizationResponse {
                 time_now: now.format("%Y-%m-%d %H:%M:%S").to_string(),
                 // We don't know what this field is good for, but it is in the response from XtreamCodes, so we will include it.
                 process: true,
+                player_api_path,
             },
         }
     }

@@ -42,7 +42,10 @@ mod provider_open;
 mod state;
 mod stream;
 
-pub(crate) use self::{admission::create_active_client_stream, error::StreamAdmissionError};
+pub(crate) use self::{
+    admission::{create_active_client_stream, ActiveClientStreamOutcome},
+    error::StreamAdmissionError,
+};
 use self::{
     admission::{ActiveClientStreamState, GracePeriodParams},
     grace::{resolve_grace_period_provisioning, stream_grace_period},

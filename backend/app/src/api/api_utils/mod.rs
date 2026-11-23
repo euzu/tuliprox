@@ -300,9 +300,9 @@ use self::{
     stalker::{accepts_requested_stream_url, re_resolve_stalker_url_singleflight, should_refresh_stalker_playback},
     strategy::{get_grace_period_millis, should_defer_provider_open_for_grace_hold},
     streaming::{
-        create_stream_response_details, force_stream_response, is_hop_by_hop_response_header,
-        no_custom_video_fallback_status, prepare_body_stream, try_shared_stream_response_if_any,
-        StreamingAcquireOptions,
+        attach_stream_uid_header_if_eligible, create_stream_response_details, force_stream_response,
+        is_hop_by_hop_response_header, no_custom_video_fallback_status, prepare_body_stream,
+        try_shared_stream_response_if_any, StreamingAcquireOptions,
     },
 };
 pub use self::{

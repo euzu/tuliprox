@@ -104,6 +104,7 @@ fn api_user_sign_in(
     web_auth: &WebAuthConfig,
     username: &str,
     password: &str,
+    fingerprint: &crate::auth::Fingerprint,
 ) -> SignInAttempt {
     let Some(credentials) = app_state.app_config.get_user_credentials(username) else {
         return SignInAttempt::Rejected;
@@ -114,6 +115,9 @@ fn api_user_sign_in(
     if !api_user_can_authenticate(&credentials) {
         // A decided answer, not a rejection: the credentials were correct and
         // this principal is still allowed into neither Web UI nor Player API.
+        return SignInAttempt::Refused(axum::http::StatusCode::FORBIDDEN.into_response());
+    }
+    if app_state.check_network_access(&credentials, fingerprint).is_err() {
         return SignInAttempt::Refused(axum::http::StatusCode::FORBIDDEN.into_response());
     }
     create_jwt_api_user(web_auth, username, UserId::api(&credentials.username))
@@ -158,7 +162,7 @@ async fn token(
         // sign-in should trigger.
         let mut attempt = web_user_sign_in(web_auth, &username, &req.password);
         if matches!(attempt, SignInAttempt::Rejected) {
-            attempt = api_user_sign_in(&app_state, web_auth, &username, &req.password);
+            attempt = api_user_sign_in(&app_state, web_auth, &username, &req.password, &fingerprint);
         }
         match attempt {
             SignInAttempt::Issued(token) => {
@@ -240,6 +244,7 @@ async fn revoke_all_tokens(
 
 async fn token_refresh(
     AuthBearer(token): AuthBearer,
+    fingerprint: crate::auth::Fingerprint,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse + Send {
     let config = &app_state.app_config.config.load();
@@ -265,6 +270,9 @@ async fn token_refresh(
                         return axum::http::StatusCode::UNAUTHORIZED.into_response();
                     };
                     if !api_user_can_authenticate(&user) {
+                        return axum::http::StatusCode::FORBIDDEN.into_response();
+                    }
+                    if app_state.check_network_access(&user, &fingerprint).is_err() {
                         return axum::http::StatusCode::FORBIDDEN.into_response();
                     }
                     if let Ok(token) = create_jwt_api_user(web_auth, username, UserId::api(&user.username)) {
@@ -592,6 +600,11 @@ mod tests {
     use std::{path::Path, sync::Arc};
     use tower::ServiceExt;
 
+    /// Test routers get a loopback peer address, as a real serve loop would provide.
+    fn mock_peer() -> axum::extract::connect_info::MockConnectInfo<std::net::SocketAddr> {
+        axum::extract::connect_info::MockConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+    }
+
     fn auth_with_user(username: &str, password: &str) -> crate::model::WebAuthConfig {
         crate::model::WebAuthConfig {
             enabled: true,
@@ -710,15 +723,21 @@ mod tests {
 
         let web_auth = app_state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
 
+        let fp = crate::auth::Fingerprint::new(
+            "fp".into(),
+            "127.0.0.1".into(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        );
+
         // 1. Direct function test for api_user_sign_in
-        let sign_in_player = api_user_sign_in(&app_state, &web_auth, "player_only", "pass");
+        let sign_in_player = api_user_sign_in(&app_state, &web_auth, "player_only", "pass", &fp);
         assert!(matches!(sign_in_player, super::SignInAttempt::Issued(_)));
 
-        let sign_in_both_off = api_user_sign_in(&app_state, &web_auth, "both_off", "pass");
+        let sign_in_both_off = api_user_sign_in(&app_state, &web_auth, "both_off", "pass", &fp);
         assert!(matches!(sign_in_both_off, super::SignInAttempt::Refused(_)));
 
         // 2. HTTP POST /auth/token route test
-        let router = index_register_without_path(Path::new("dummy")).with_state(app_state.clone());
+        let router = index_register_without_path(Path::new("dummy")).with_state(app_state.clone()).layer(mock_peer());
 
         let mut req_player = Request::builder()
             .method(Method::POST)
@@ -767,5 +786,94 @@ mod tests {
             .unwrap();
         let resp_refresh_both_off = router.oneshot(req_refresh_both_off).await.unwrap();
         assert_eq!(resp_refresh_both_off.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_api_user_token_and_refresh_enforces_network_access() {
+        use shared::model::NetworkAccessDto;
+
+        let web_ui_dto = WebUiConfigDto {
+            enabled: true,
+            user_ui_enabled: true,
+            player_api_enabled: Some(true),
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                secret: "0123456789abcdef0123456789abcdef".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = Config { web_ui: Some((&web_ui_dto).into()), ..Default::default() };
+        let app_state = create_test_app_state(config);
+
+        let api_proxy_dto = ApiProxyConfigDto {
+            user: vec![TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![ProxyUserCredentialsDto {
+                    username: "net_user".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(PlayerFeaturesDto { api_enabled: Some(true), ..Default::default() }),
+                    network_access: Some(NetworkAccessDto {
+                        allowed_countries: None,
+                        allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = ApiProxyConfig::from(&api_proxy_dto);
+        for tu in &mut api_proxy.user {
+            for cred in &mut tu.credentials {
+                Arc::make_mut(cred).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        app_state.app_config.set_api_proxy(api_proxy).unwrap();
+
+        let router = index_register_without_path(Path::new("dummy")).with_state(app_state.clone());
+
+        // 1. /auth/token from denied IP: 403
+        let mut req_denied = Request::builder()
+            .method(Method::POST)
+            .uri("/auth/token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"username":"net_user","password":"pass"}"#))
+            .unwrap();
+        req_denied
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 1], 12345))));
+        let resp_denied = router.clone().oneshot(req_denied).await.unwrap();
+        assert_eq!(resp_denied.status(), StatusCode::FORBIDDEN);
+
+        // 2. /auth/token from allowed IP: 200
+        let mut req_allowed = Request::builder()
+            .method(Method::POST)
+            .uri("/auth/token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"username":"net_user","password":"pass"}"#))
+            .unwrap();
+        req_allowed
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([10, 0, 0, 1], 12345))));
+        let resp_allowed = router.clone().oneshot(req_allowed).await.unwrap();
+        assert_eq!(resp_allowed.status(), StatusCode::OK);
+        let body_bytes = to_bytes(resp_allowed.into_body(), 65536).await.unwrap();
+        let token_resp: TokenResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(token_resp.username, "net_user");
+        let token = token_resp.token;
+
+        // 3. /auth/refresh from denied IP: 403
+        let mut req_refresh_denied = Request::builder()
+            .method(Method::POST)
+            .uri("/auth/refresh")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        req_refresh_denied
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 1], 12345))));
+        let resp_refresh_denied = router.oneshot(req_refresh_denied).await.unwrap();
+        assert_eq!(resp_refresh_denied.status(), StatusCode::FORBIDDEN);
     }
 }

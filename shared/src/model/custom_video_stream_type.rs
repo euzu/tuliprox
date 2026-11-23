@@ -4,6 +4,7 @@ use std::{fmt, str::FromStr};
 
 pub const HEADER_TULIPROX_FALLBACK: &str = "x-tuliprox-fallback";
 pub const HEADER_TULIPROX_REJECTION: &str = "x-tuliprox-rejection";
+pub const HEADER_TULIPROX_STREAM_UID: &str = "x-tuliprox-stream-uid";
 
 /// The reason a request is answered with a canned video clip instead of the
 /// provider stream the caller asked for.

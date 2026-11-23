@@ -1059,9 +1059,10 @@ pub(crate) async fn stream_response_with_provider_handle(
                 is_stream_shared = false;
             }
         }
-        let shared_subscriber_id =
-            tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid());
-        let mut pending_shared_cleanup = if is_stream_shared {
+        let shared_subscriber_id = is_stream_shared.then(|| {
+            tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid())
+        });
+        let mut pending_shared_cleanup = if let Some(shared_subscriber_id) = shared_subscriber_id {
             match SharedStreamManager::reserve_subscriber_cleanup(
                 &app_state.connection_manager,
                 shared_subscriber_id,
@@ -1193,7 +1194,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             driver => driver,
         };
         let open_failure = open_failure_class(&stream_details);
-        let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+        let outcome = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
             user,
@@ -1210,7 +1211,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         })
         .await
         {
-            Ok(stream) => stream,
+            Ok(outcome) => outcome,
             Err(error) => {
                 if created_media_session {
                     app_state.active_users.terminate_session(&user.username, session_token).await;
@@ -1244,6 +1245,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             };
             // Shared Stream response
             let shared_headers = provider_response.as_ref().map_or_else(Vec::new, |(h, _, _, _)| h.clone());
+            let shared_subscriber_id = pending_shared_cleanup.capability().subscriber_id();
             if let Some((broadcast_stream, _shared_provider, _cleanup_capability)) =
                 SharedStreamManager::register_shared_stream(
                     SharedStreamCtx {
@@ -1253,7 +1255,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                         connection_manager: &app_state.connection_manager,
                     },
                     shared_lookup_key.as_ref(),
-                    stream,
+                    outcome.stream,
                     &fingerprint.addr,
                     shared_subscriber_id,
                     shared_headers,
@@ -1276,6 +1278,13 @@ pub(crate) async fn stream_response_with_provider_handle(
                 }
                 let mut response = try_unwrap_body!(response.body(axum::body::Body::from_stream(broadcast_stream)));
                 mark_response_as_uncompressed(&mut response);
+                super::attach_stream_uid_header_if_eligible(
+                    &mut response,
+                    app_state,
+                    user,
+                    item_type,
+                    outcome.stream_uid,
+                );
                 response
             } else {
                 StatusCode::BAD_REQUEST.into_response()
@@ -1374,9 +1383,10 @@ pub(crate) async fn stream_response_with_provider_handle(
                 }
             }
 
-            let body_stream = prepare_body_stream(app_state, item_type, stream);
+            let body_stream = prepare_body_stream(app_state, item_type, outcome.stream);
             let mut response = try_unwrap_body!(response.body(body_stream));
             mark_response_as_uncompressed(&mut response);
+            super::attach_stream_uid_header_if_eligible(&mut response, app_state, user, item_type, outcome.stream_uid);
             response
         };
 

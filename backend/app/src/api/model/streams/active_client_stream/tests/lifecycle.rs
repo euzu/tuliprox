@@ -126,9 +126,8 @@ pub(in crate::api::model::streams::active_client_stream::tests) async fn create_
     stream_details.provider_handle = provider_handle.map(|handle| {
         tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.connection_manager.provider_manager), handle)
     });
-    let virtual_id = stream_channel.virtual_id;
 
-    let stream = create_active_client_stream(ActiveClientStreamParams {
+    let outcome = create_active_client_stream(ActiveClientStreamParams {
         stream_details,
         app_state,
         user: &user,
@@ -145,14 +144,8 @@ pub(in crate::api::model::streams::active_client_stream::tests) async fn create_
     })
     .await
     .expect("direct test stream admission should succeed");
-    let uid = app_state
-        .active_users
-        .active_streams()
-        .await
-        .into_iter()
-        .find(|active| active.username == username && active.addr == addr && active.channel.virtual_id == virtual_id)
-        .map(|active| active.uid)
-        .expect("direct test stream should be registered");
+    let stream = outcome.stream;
+    let uid = outcome.stream_uid;
 
     TestDirectStream { stream, uid }
 }

@@ -854,6 +854,17 @@ mod tests {
     };
     use tuliprox_session::active_user_manager::CreateUserSessionParams;
 
+    /// Test routers get a loopback peer address, as a real serve loop would provide.
+    fn mock_peer() -> axum::extract::connect_info::MockConnectInfo<SocketAddr> {
+        axum::extract::connect_info::MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345)))
+    }
+
+    /// Every test router is built from this registration; the wrapper installs the peer
+    /// address once instead of annotating each test's router.
+    fn me_player_api_register(web_ui_path: &str) -> axum::Router<Arc<AppState>> {
+        super::me_player_api_register(web_ui_path).layer(mock_peer())
+    }
+
     struct TestEnv {
         _dir: TempDir,
         app_state: Arc<AppState>,
@@ -2146,7 +2157,8 @@ mod tests {
     #[tokio::test]
     async fn test_routing_coexistence() {
         let env = setup_test_env();
-        let router = v1_api_register(true, &env.app_state, "").with_state(Arc::clone(&env.app_state));
+        let router =
+            v1_api_register(true, &env.app_state, "").with_state(Arc::clone(&env.app_state)).layer(mock_peer());
 
         // 1. /api/v1/me/streams is reachable by API user
         let req_me = Request::builder()
@@ -3847,5 +3859,46 @@ mod tests {
         assert_eq!(env.app_state.shared_stream_manager.subscriber_count(stream_url).await, 3);
         // Instead, a second provider connection was acquired for the dedicated stream!
         assert_eq!(env.app_state.active_provider.get_provider_connections_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_me_capabilities_enforces_network_access() {
+        use shared::model::NetworkAccessDto;
+
+        let env = setup_test_env();
+        // Update alice to have network_access restricting to 10.0.0.0/8
+        {
+            let mut api_proxy = (*env.app_state.app_config.api_proxy.load_full().unwrap()).clone();
+            Arc::make_mut(&mut api_proxy.user[0].credentials[0]).network_access =
+                Some(tuliprox_core::model::NetworkAccess::from(&NetworkAccessDto {
+                    allowed_countries: None,
+                    allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+                }));
+            env.app_state.app_config.set_api_proxy(api_proxy).unwrap();
+        }
+
+        let router = me_player_api_register("").with_state(Arc::clone(&env.app_state));
+
+        // Denied IP (192.168.1.1): 403 Forbidden
+        let mut req_denied = Request::builder()
+            .method("GET")
+            .uri("/api/v1/me/capabilities")
+            .header("Authorization", format!("Bearer {}", env.alice_token))
+            .body(Body::empty())
+            .unwrap();
+        req_denied.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([192, 168, 1, 1], 12345))));
+        let res_denied = router.clone().oneshot(req_denied).await.unwrap();
+        assert_eq!(res_denied.status(), StatusCode::FORBIDDEN);
+
+        // Allowed IP (10.0.0.1): 200 OK
+        let mut req_allowed = Request::builder()
+            .method("GET")
+            .uri("/api/v1/me/capabilities")
+            .header("Authorization", format!("Bearer {}", env.alice_token))
+            .body(Body::empty())
+            .unwrap();
+        req_allowed.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 12345))));
+        let res_allowed = router.oneshot(req_allowed).await.unwrap();
+        assert_eq!(res_allowed.status(), StatusCode::OK);
     }
 }

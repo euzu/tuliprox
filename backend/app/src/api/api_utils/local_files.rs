@@ -242,6 +242,7 @@ pub(crate) async fn activate_local_file_stream(
         group_failover: None,
     })
     .await
+    .map(crate::api::model::ActiveClientStreamOutcome::into_stream)
     .map_err(|error| Box::new(stream_admission_rejected_response(error, &user.username)))
 }
 

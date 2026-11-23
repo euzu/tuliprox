@@ -193,6 +193,7 @@ where
 
 async fn mcp_post(
     Extension(state): Extension<Arc<McpState>>,
+    fingerprint: crate::auth::Fingerprint,
     verified_claims: Option<Extension<crate::api::auth_middleware::VerifiedClaims>>,
     headers: HeaderMap,
     body: Bytes,
@@ -201,7 +202,7 @@ async fn mcp_post(
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": "Origin not allowed" }))).into_response();
     }
     let verified = verified_claims.as_ref().map(|Extension(c)| &c.0);
-    match handle_message(&state, &headers, &body, verified).await {
+    match handle_message(&state, &headers, &body, verified, &fingerprint).await {
         Some(reply) => axum::Json(reply).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
     }
@@ -253,6 +254,7 @@ async fn handle_message(
     headers: &HeaderMap,
     body: &[u8],
     verified_claims: Option<&shared::model::Claims>,
+    fingerprint: &crate::auth::Fingerprint,
 ) -> Option<Value> {
     let message: Value = match serde_json::from_slice(body) {
         Ok(message) => message,
@@ -280,12 +282,12 @@ async fn handle_message(
 
     Some(match method {
         "initialize" => {
-            let caller = resolve_caller(state, headers, verified_claims).await;
+            let caller = resolve_caller(state, headers, verified_claims, fingerprint).await;
             rpc_result(id, initialize_result(params, &caller))
         }
         "ping" => rpc_result(id, json!({})),
         "tools/list" => {
-            let caller = resolve_caller(state, headers, verified_claims).await;
+            let caller = resolve_caller(state, headers, verified_claims, fingerprint).await;
             rpc_result(
                 id,
                 json!({
@@ -299,7 +301,7 @@ async fn handle_message(
                 }),
             )
         }
-        "tools/call" => match call_tool(state, headers, params, verified_claims).await {
+        "tools/call" => match call_tool(state, headers, params, verified_claims, fingerprint).await {
             Ok(result) => rpc_result(id, result),
             Err(message) => rpc_error(id, INVALID_PARAMS, message),
         },
@@ -311,6 +313,7 @@ async fn resolve_caller(
     state: &McpState,
     headers: &HeaderMap,
     verified_claims: Option<&shared::model::Claims>,
+    fingerprint: &crate::auth::Fingerprint,
 ) -> CallerContext {
     let enabled = state
         .app_state
@@ -336,7 +339,7 @@ async fn resolve_caller(
         claims
     };
     if claims.subject_id.as_ref().is_some_and(shared::model::UserId::is_api) {
-        if let Ok(ctx) = crate::api::auth_middleware::api_user_context(&state.app_state, claims) {
+        if let Ok(ctx) = crate::api::auth_middleware::api_user_context(&state.app_state, claims, fingerprint) {
             return CallerContext::ApiUser {
                 effective_permissions: ctx.claims.permissions,
                 claims: ctx.claims,
@@ -434,8 +437,9 @@ async fn call_tool(
     headers: &HeaderMap,
     params: Option<&Value>,
     verified_claims: Option<&shared::model::Claims>,
+    fingerprint: &crate::auth::Fingerprint,
 ) -> Result<Value, String> {
-    call_tool_in(state, &state.tool_view().await, headers, params, verified_claims).await
+    call_tool_in(state, &state.tool_view().await, headers, params, verified_claims, fingerprint).await
 }
 
 /// Rejects arguments the tool schema does not declare, so every tool answers a typo the same way.
@@ -455,10 +459,11 @@ async fn call_tool_in(
     headers: &HeaderMap,
     params: Option<&Value>,
     verified_claims: Option<&shared::model::Claims>,
+    fingerprint: &crate::auth::Fingerprint,
 ) -> Result<Value, String> {
     let params = params.and_then(Value::as_object).ok_or("params must be an object")?;
     let name = params.get("name").and_then(Value::as_str).ok_or("params.name is required")?;
-    let caller = resolve_caller(state, headers, verified_claims).await;
+    let caller = resolve_caller(state, headers, verified_claims, fingerprint).await;
     let tool = view
         .find_for_caller(name, &caller, state.effective_read_only(), state.player_tools(), &state.app_state)
         .ok_or_else(|| format!("Unknown tool: {name}"))?;
@@ -685,9 +690,12 @@ async fn call_tool_in(
         }
         None => Body::empty(),
     };
-    let Ok(request) = request.body(body) else {
+    let Ok(mut request) = request.body(body) else {
         return Ok(tool_result(true, "Failed to build request"));
     };
+    // The dispatched request has no socket of its own; the caller's fingerprint carries the real peer address
+    // so the routes apply the same network-access rules as to the MCP request itself.
+    request.extensions_mut().insert(fingerprint.clone());
 
     let response = match state.router.clone().oneshot(request).await {
         Ok(response) => response,
@@ -1039,6 +1047,7 @@ mod tests {
         model::{Config, WebAuthConfig, WebUiUser},
     };
     use shared::model::{Permission, WebAuthConfigDto, WebUiConfigDto};
+    use std::net::SocketAddr;
     use tower::ServiceExt;
 
     fn args(value: Value) -> Map<String, Value> {
@@ -1090,11 +1099,22 @@ mod tests {
 
     fn bearer(token: &str) -> String { format!("Bearer {token}") }
 
+    /// Test routers get a loopback peer address, as a real serve loop would provide.
+    fn mock_peer() -> axum::extract::connect_info::MockConnectInfo<SocketAddr> {
+        axum::extract::connect_info::MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345)))
+    }
+
     fn mcp_router(config: Config) -> Router {
         let web_auth_enabled = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).is_some();
         let app_state = create_test_app_state(config);
+        // The MCP state keeps its own clone of the v1 router for tool dispatch, so both
+        // routers need the peer address: the endpoint extracts it, the dispatched
+        // request inherits it from the v1 router's layer.
         let v1 = v1_api_register(web_auth_enabled, &app_state, "");
-        mcp_api_register_if_enabled::<()>(&v1, &app_state, web_auth_enabled, "").expect("mcp enabled").with_state(())
+        mcp_api_register_if_enabled::<()>(&v1, &app_state, web_auth_enabled, "")
+            .expect("mcp enabled")
+            .with_state(())
+            .layer(mock_peer())
     }
 
     async fn post(router: &Router, body: &str, extra: &[(&str, &str)]) -> (StatusCode, Value) {
@@ -1102,15 +1122,17 @@ mod tests {
         for (name, value) in extra {
             request = request.header(*name, *value);
         }
-        let response = router
-            .clone()
-            .oneshot(request.body(Body::from(body.to_owned())).expect("request"))
-            .await
-            .expect("response");
+        let mut req = request.body(Body::from(body.to_owned())).expect("request");
+        req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let response = router.clone().oneshot(req).await.expect("response");
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
         let value = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).expect("json body") };
         (status, value)
+    }
+
+    fn test_fingerprint() -> crate::auth::Fingerprint {
+        crate::auth::Fingerprint::from_headers_and_addr(&HeaderMap::new(), SocketAddr::from(([127, 0, 0, 1], 12345)))
     }
 
     fn rpc(id: u32, method: &str, params: Value) -> String {
@@ -1734,8 +1756,15 @@ mod tests {
 
         let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
         let alice_headers = auth_headers(&env.alice_token);
-        let reply_alice =
-            handle_message(&env.state, &alice_headers, rpc(2, "initialize", json!({})).as_bytes(), None).await.unwrap();
+        let reply_alice = handle_message(
+            &env.state,
+            &alice_headers,
+            rpc(2, "initialize", json!({})).as_bytes(),
+            None,
+            &test_fingerprint(),
+        )
+        .await
+        .unwrap();
         let player_instructions = reply_alice["result"]["instructions"].as_str().expect("player instructions");
         assert_eq!(player_instructions, MCP_PLAYER_INSTRUCTIONS);
         assert_ne!(player_instructions.trim(), "");
@@ -2308,7 +2337,8 @@ mod tests {
         let config = config_with_mcp(false, enabled(true));
         let app_state = create_test_app_state(config);
         let v1 = v1_api_register(false, &app_state, "ui");
-        let router = mcp_api_register_if_enabled::<()>(&v1, &app_state, false, "ui").unwrap().with_state(());
+        let router =
+            mcp_api_register_if_enabled::<()>(&v1, &app_state, false, "ui").unwrap().with_state(()).layer(mock_peer());
         let response = router
             .oneshot(
                 Request::builder()
@@ -2337,7 +2367,9 @@ mod tests {
     }
 
     async fn call_stub(state: &McpState, name: &str) -> Value {
-        handle_message(state, &HeaderMap::new(), call(name, json!({})).as_bytes(), None).await.expect("reply")
+        handle_message(state, &HeaderMap::new(), call(name, json!({})).as_bytes(), None, &test_fingerprint())
+            .await
+            .expect("reply")
     }
 
     #[tokio::test]
@@ -2439,7 +2471,7 @@ mod tests {
 
     async fn call_plugin(state: &McpState, view: &ToolView, name: &str, arguments: Value) -> Result<Value, String> {
         let params = json!({ "name": name, "arguments": arguments });
-        call_tool_in(state, view, &HeaderMap::new(), Some(&params), None).await
+        call_tool_in(state, view, &HeaderMap::new(), Some(&params), None, &test_fingerprint()).await
     }
 
     fn listed(view: &ToolView, read_only: bool) -> Vec<String> {
@@ -2963,7 +2995,9 @@ mod tests {
 
         let params = json!({ "name": "plugin_ui_demo_echo", "arguments": { "input": "living-room", "query": "news" } });
         let reply =
-            call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params), None).await.expect("reply");
+            call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params), None, &test_fingerprint())
+                .await
+                .expect("reply");
         assert_eq!(reply["isError"], false, "{reply}");
         let parsed: Value = serde_json::from_str(result_text(&reply)).expect("the guest's answer");
         assert_eq!(parsed["echo"]["args"], json!({ "query": "news" }));
@@ -3005,9 +3039,16 @@ mod tests {
             ("m3u-input", "no configured plugin input is named `m3u-input`"),
         ] {
             let params = json!({ "name": "plugin_ui_demo_echo", "arguments": { "input": name } });
-            let reply = call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params), None)
-                .await
-                .expect("reply");
+            let reply = call_tool_in(
+                &fixture.state,
+                &fixture.view,
+                &HeaderMap::new(),
+                Some(&params),
+                None,
+                &test_fingerprint(),
+            )
+            .await
+            .expect("reply");
             assert_eq!(reply["isError"], true, "{name}: {reply}");
             let text = result_text(&reply);
             assert!(text.contains("400"), "{name}: {text}");
@@ -3029,7 +3070,9 @@ mod tests {
             }
         });
         let reply =
-            call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params), None).await.expect("reply");
+            call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params), None, &test_fingerprint())
+                .await
+                .expect("reply");
         assert_eq!(reply["isError"], true);
         let text = result_text(&reply);
         assert!(text.contains("input_draft"), "{text}");
@@ -3079,7 +3122,7 @@ mod tests {
             let params = json!({ "name": name, "arguments": { "input": "emby_input" } });
             let state = &state;
             let view = &view;
-            async move { call_tool_in(state, view, &HeaderMap::new(), Some(&params), None).await }
+            async move { call_tool_in(state, view, &HeaderMap::new(), Some(&params), None, &test_fingerprint()).await }
         };
 
         let reply = call_media("list_media_server_libraries").await.expect("tool result");
@@ -3098,7 +3141,9 @@ mod tests {
         assert_eq!(reply["structuredContent"]["reachable"], true);
 
         let params = json!({ "name": "refresh_media_server_input", "arguments": { "input": "emby_input", "action": "refresh" } });
-        let err = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params), None).await.expect_err("read-only");
+        let err = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params), None, &test_fingerprint())
+            .await
+            .expect_err("read-only");
         assert!(err.contains("read-only"), "{err}");
         server.abort();
     }
@@ -3127,7 +3172,9 @@ mod tests {
         let view = state.tool_view().await;
 
         let params = json!({ "name": "refresh_media_server_input", "arguments": { "input": "emby_input", "action": "refresh" } });
-        let reply = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params), None).await.expect("tool result");
+        let reply = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params), None, &test_fingerprint())
+            .await
+            .expect("tool result");
 
         assert_eq!(reply["isError"], false, "{reply}");
         assert!(reply["structuredContent"]["run_id"].is_string(), "{reply}");
@@ -3347,7 +3394,8 @@ mod tests {
 
         // 1. Web admin sees no player tools, all admin tools
         let admin_headers = auth_headers(&env_write.admin_token);
-        let reply_admin = handle_message(&env_write.state, &admin_headers, req.as_bytes(), None).await.unwrap();
+        let reply_admin =
+            handle_message(&env_write.state, &admin_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
         let tools_admin = reply_admin["result"]["tools"].as_array().unwrap();
         let admin_names: Vec<String> = tools_admin.iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert!(!admin_names.iter().any(|n| n.starts_with("me_")));
@@ -3355,7 +3403,8 @@ mod tests {
 
         // 2. API user Alice (all features on, player_tools = Write) sees exact list of 16 player tools, 0 admin tools
         let alice_headers = auth_headers(&env_write.alice_token);
-        let reply_alice = handle_message(&env_write.state, &alice_headers, req.as_bytes(), None).await.unwrap();
+        let reply_alice =
+            handle_message(&env_write.state, &alice_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
         let tools_alice = reply_alice["result"]["tools"].as_array().unwrap();
         let mut alice_names: Vec<String> =
             tools_alice.iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
@@ -3384,7 +3433,8 @@ mod tests {
 
         // 3. API user Alice with player_tools = Read sees only read tools (9 tools, 0 write tools)
         let env_read = setup_mcp_player_test_env(shared::model::McpPlayerTools::Read).await;
-        let reply_read = handle_message(&env_read.state, &alice_headers, req.as_bytes(), None).await.unwrap();
+        let reply_read =
+            handle_message(&env_read.state, &alice_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
         let tools_read = reply_read["result"]["tools"].as_array().unwrap();
         let mut alice_read_names: Vec<String> =
             tools_read.iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
@@ -3405,7 +3455,8 @@ mod tests {
 
         // 4. API user Carol with features off sees only the 5 featureless tools
         let carol_headers = auth_headers(&env_write.carol_token);
-        let reply_carol = handle_message(&env_write.state, &carol_headers, req.as_bytes(), None).await.unwrap();
+        let reply_carol =
+            handle_message(&env_write.state, &carol_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
         let tools_carol = reply_carol["result"]["tools"].as_array().unwrap();
         let mut carol_names: Vec<String> =
             tools_carol.iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
@@ -3422,7 +3473,8 @@ mod tests {
 
         // 5. API user with player_tools = Off sees 0 tools
         let env_off = setup_mcp_player_test_env(shared::model::McpPlayerTools::Off).await;
-        let reply_off = handle_message(&env_off.state, &alice_headers, req.as_bytes(), None).await.unwrap();
+        let reply_off =
+            handle_message(&env_off.state, &alice_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
         let tools_off = reply_off["result"]["tools"].as_array().unwrap();
         assert_eq!(tools_off.len(), 0);
     }
@@ -3437,17 +3489,23 @@ mod tests {
 
         // API user calling admin tool -> Unknown tool
         let params = json!({ "name": "get_status", "arguments": {} });
-        let err = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap_err();
+        let err = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap_err();
         assert_eq!(err, "Unknown tool: get_status");
 
         // Web admin calling player tool -> Unknown tool
         let params = json!({ "name": "me_capabilities", "arguments": {} });
-        let err = call_tool_in(&env.state, &env.view, &admin_headers, Some(&params), None).await.unwrap_err();
+        let err = call_tool_in(&env.state, &env.view, &admin_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap_err();
         assert_eq!(err, "Unknown tool: me_capabilities");
 
         // Carol (source_switch disabled) calling me_list_sources -> Unknown tool
         let params = json!({ "name": "me_list_sources", "arguments": { "vid": 100 } });
-        let err = call_tool_in(&env.state, &env.view, &carol_headers, Some(&params), None).await.unwrap_err();
+        let err = call_tool_in(&env.state, &env.view, &carol_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap_err();
         assert_eq!(err, "Unknown tool: me_list_sources");
 
         // When player_tools = Read, calling write tool me_record_program -> Unknown tool
@@ -3461,7 +3519,10 @@ mod tests {
                 "title": "News"
             }
         });
-        let err = call_tool_in(&env_read.state, &env_read.view, &alice_headers, Some(&params), None).await.unwrap_err();
+        let err =
+            call_tool_in(&env_read.state, &env_read.view, &alice_headers, Some(&params), None, &test_fingerprint())
+                .await
+                .unwrap_err();
         assert_eq!(err, "Unknown tool: me_record_program");
     }
 
@@ -3474,7 +3535,9 @@ mod tests {
 
         // 1. me_search_channels
         let params = json!({ "name": "me_search_channels", "arguments": { "query": "News" } });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], false);
         let channels: Vec<shared::model::UserChannelDto> =
             serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -3490,7 +3553,9 @@ mod tests {
                 "to": "1740003600"
             }
         });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], false);
 
         // 3. me_record_program -> creates exactly 1 recording
@@ -3503,12 +3568,16 @@ mod tests {
             "title": "Morning News"
         });
         let params = json!({ "name": "me_record_program", "arguments": record_args });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], false, "me_record_program reply: {reply:?}");
         assert_eq!(env.app_state.recording.queue.scheduled.read().await.len(), 1);
 
         // 4. Calling me_record_program a second time with exact same arguments is idempotent -> still 1 recording
-        let reply2 = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply2 = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply2["isError"], false, "reply2: {reply2:?}");
         assert_eq!(env.app_state.recording.queue.scheduled.read().await.len(), 1);
     }
@@ -3530,11 +3599,15 @@ mod tests {
             "title": "Morning News"
         });
         let params = json!({ "name": "me_record_program", "arguments": record_args });
-        let _ = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let _ = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
 
         // Call me_list_recordings
         let params = json!({ "name": "me_list_recordings", "arguments": {} });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], false);
 
         // Obtain snapshot directly as websocket handler does
@@ -3571,7 +3644,9 @@ mod tests {
             "method": "tools/list",
             "params": {}
         });
-        let reply = handle_message(&env.state, &alice_headers, req.to_string().as_bytes(), None).await.unwrap();
+        let reply = handle_message(&env.state, &alice_headers, req.to_string().as_bytes(), None, &test_fingerprint())
+            .await
+            .unwrap();
         let tools = reply["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 0, "expired API user must see 0 MCP tools");
     }
@@ -3592,7 +3667,9 @@ mod tests {
             "visibility": "private"
         });
         let params = json!({ "name": "me_create_rule", "arguments": create_args });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], false);
         let rule_json: Value = serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
         let rule_id = rule_json["id"].as_str().unwrap().to_string();
@@ -3602,7 +3679,9 @@ mod tests {
 
         // 2. List rules via me_list_rules
         let params = json!({ "name": "me_list_rules", "arguments": {} });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], false);
         let rules_list: Vec<Value> = serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
         assert!(rules_list.iter().any(|r| r["id"] == rule_id));
@@ -3610,12 +3689,16 @@ mod tests {
         // 3. Delete rule via me_delete_rule
         let delete_args = json!({ "id": rule_id });
         let params = json!({ "name": "me_delete_rule", "arguments": delete_args });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], false);
 
         // 4. Verify rule is gone via me_list_rules
         let params = json!({ "name": "me_list_rules", "arguments": {} });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], false);
         let rules_list_after: Vec<Value> = serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
         assert!(!rules_list_after.iter().any(|r| r["id"] == rule_id));
@@ -3623,7 +3706,8 @@ mod tests {
         // 5. Verify Carol (no recording feature) cannot see rule tools
         let carol_headers = auth_headers(&env.carol_token);
         let req = rpc(2, "tools/list", json!({}));
-        let reply_carol = handle_message(&env.state, &carol_headers, req.as_bytes(), None).await.unwrap();
+        let reply_carol =
+            handle_message(&env.state, &carol_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
         let carol_tools = reply_carol["result"]["tools"].as_array().unwrap();
         assert!(!carol_tools
             .iter()
@@ -3637,7 +3721,9 @@ mod tests {
 
         let delete_args = json!({ "id": "rule/slash?question", "future": "retain" });
         let params = json!({ "name": "me_delete_rule", "arguments": delete_args });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], true);
         let text = reply["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("recording_rule_unknown"), "Expected recording_rule_unknown but got: {text}");
@@ -3650,12 +3736,15 @@ mod tests {
 
         // Call me_split_stream with non-existent uid -> tool executes endpoint and returns 404 (isError: true)
         let params = json!({ "name": "me_split_stream", "arguments": { "uid": 9999 } });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], true);
 
         // Carol (no source_switch feature) calling me_split_stream -> rejected / unavailable
         let carol_headers = auth_headers(&env.carol_token);
-        let reply_carol = call_tool_in(&env.state, &env.view, &carol_headers, Some(&params), None).await;
+        let reply_carol =
+            call_tool_in(&env.state, &env.view, &carol_headers, Some(&params), None, &test_fingerprint()).await;
         assert!(reply_carol.is_err(), "Carol without source_switch must not find me_split_stream");
 
         // Active shared stream with 2 subscribers for Alice -> success with password redacted in URL
@@ -3697,7 +3786,9 @@ mod tests {
 
         let params_success = json!({ "name": "me_split_stream", "arguments": { "uid": uid } });
         let reply_success =
-            call_tool_in(&env.state, &env.view, &alice_headers, Some(&params_success), None).await.unwrap();
+            call_tool_in(&env.state, &env.view, &alice_headers, Some(&params_success), None, &test_fingerprint())
+                .await
+                .unwrap();
         assert_eq!(reply_success["isError"], false);
         let text = reply_success["content"][0]["text"].as_str().unwrap();
         assert!(
@@ -3726,8 +3817,78 @@ mod tests {
             "bogus_arg": "invalid"
         });
         let params = json!({ "name": "me_record_program", "arguments": record_args });
-        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None).await.unwrap();
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
         assert_eq!(reply["isError"], true);
         assert_eq!(reply["content"][0]["text"], "Unknown argument 'bogus_arg'");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_api_user_enforces_network_access() {
+        use shared::model::NetworkAccessDto;
+
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Read).await;
+        // Restrict alice to 10.0.0.0/8
+        {
+            let mut api_proxy = (*env.app_state.app_config.api_proxy.load_full().unwrap()).clone();
+            for target_user in &mut api_proxy.user {
+                for cred in &mut target_user.credentials {
+                    if cred.username == "alice" {
+                        Arc::make_mut(cred).network_access =
+                            Some(tuliprox_core::model::NetworkAccess::from(&NetworkAccessDto {
+                                allowed_countries: None,
+                                allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+                            }));
+                    }
+                }
+            }
+            env.app_state.app_config.set_api_proxy(api_proxy).unwrap();
+        }
+
+        let v1 = crate::api::endpoints::v1_api::v1_api_register(true, &env.app_state, "");
+        let router = mcp_api_register_if_enabled::<()>(&v1, &env.app_state, true, "").unwrap();
+
+        // 1. HTTP route: Alice from denied IP gets 403 Forbidden
+        let mut denied_req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", env.alice_token))
+            .body(Body::from(rpc(1, "tools/list", json!({}))))
+            .unwrap();
+        denied_req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([192, 168, 1, 1], 12345))));
+        let denied_resp = router.clone().oneshot(denied_req).await.unwrap();
+        assert_eq!(denied_resp.status(), StatusCode::FORBIDDEN);
+
+        // 2. HTTP route: Alice from allowed IP gets 200 OK
+        let mut allowed_req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", env.alice_token))
+            .body(Body::from(rpc(1, "tools/list", json!({}))))
+            .unwrap();
+        allowed_req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 12345))));
+        let allowed_resp = router.oneshot(allowed_req).await.unwrap();
+        assert_eq!(allowed_resp.status(), StatusCode::OK);
+
+        // 3. Direct resolve_caller: denied fingerprint yields CallerContext::Denied
+        let denied_headers = auth_headers(&env.alice_token);
+        let fp_denied = crate::auth::Fingerprint::from_headers_and_addr(
+            &HeaderMap::new(),
+            SocketAddr::from(([192, 168, 1, 1], 12345)),
+        );
+        let caller_denied = resolve_caller(&env.state, &denied_headers, None, &fp_denied).await;
+        assert!(matches!(caller_denied, CallerContext::Denied));
+
+        // 4. Direct resolve_caller: allowed fingerprint yields CallerContext::ApiUser
+        let allowed_headers = auth_headers(&env.alice_token);
+        let fp_allowed = crate::auth::Fingerprint::from_headers_and_addr(
+            &HeaderMap::new(),
+            SocketAddr::from(([10, 0, 0, 1], 12345)),
+        );
+        let caller_allowed = resolve_caller(&env.state, &allowed_headers, None, &fp_allowed).await;
+        assert!(matches!(caller_allowed, CallerContext::ApiUser { .. }));
     }
 }

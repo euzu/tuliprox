@@ -176,6 +176,10 @@ in your `config.yml`. Without it, these fields are purely cosmetic!
 
 Tuliprox supports per-user network access restrictions to limit streaming based on the client's IP address or geographic location.
 
+The rules also apply to the Player API: token sign-in and refresh (`POST /auth/token`, `/auth/refresh`) and every
+request with the user's token (`/api/v1/me/*`, the event WebSocket, recordings, user settings, MCP) answer `403` from a
+network the rules do not allow.
+
 **How it works:**
 
 - Uses OR logic — matching ANY `allowed_networks` (CIDR range) OR ANY `allowed_countries` grants access

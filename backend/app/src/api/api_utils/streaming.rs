@@ -1058,7 +1058,7 @@ pub(super) async fn force_stream_response(
         stream_channel.shared = share_stream;
         let socket_bound = user_session.socket_bound;
         let target_id = stream_channel.target_id;
-        let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+        let outcome = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
             user: ctx.user,
@@ -1075,7 +1075,7 @@ pub(super) async fn force_stream_response(
         })
         .await
         {
-            Ok(stream) => stream,
+            Ok(outcome) => outcome,
             Err(error) => {
                 app_state
                     .active_users
@@ -1123,7 +1123,7 @@ pub(super) async fn force_stream_response(
         }
 
         let stream = attach_legacy_segment_body_error_recording(
-            stream,
+            outcome.stream,
             hls_resource,
             app_state,
             &ctx.user.username,
@@ -1139,6 +1139,7 @@ pub(super) async fn force_stream_response(
         );
         let mut response = try_unwrap_body!(response.body(body_stream));
         mark_response_as_uncompressed(&mut response);
+        attach_stream_uid_header_if_eligible(&mut response, app_state, ctx.user, item_type, outcome.stream_uid);
         return response;
     }
 
@@ -1344,11 +1345,12 @@ pub(super) async fn try_shared_stream_response_if_any(
             (0, None)
         };
         stream_channel.shared_stream_id = Some(u64::from(meter_uid));
+        let item_type = stream_channel.item_type;
         // The pending registration is carried through admission so its drop guard rolls
         // the reservation back if the client stream is never created.
         let mut metering =
             StreamMeteringConfig { meter_uid, meter_stream: false, pending_shared_registration: pending_registration };
-        let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+        let outcome = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
             user,
@@ -1365,9 +1367,9 @@ pub(super) async fn try_shared_stream_response_if_any(
         })
         .await
         {
-            Ok(stream) => {
+            Ok(outcome) => {
                 metering.commit_shared_registration();
-                stream.boxed()
+                outcome
             }
             Err(error) => {
                 app_state
@@ -1386,11 +1388,35 @@ pub(super) async fn try_shared_stream_response_if_any(
         for (key, value) in &header_map {
             response = response.header(key, value);
         }
-        let mut response = response.body(axum::body::Body::from_stream(stream)).ok()?;
+        let mut response = response.body(axum::body::Body::from_stream(outcome.stream)).ok()?;
         mark_response_as_uncompressed(&mut response);
+        attach_stream_uid_header_if_eligible(&mut response, app_state, user, item_type, outcome.stream_uid);
         return Some(response);
     }
     None
+}
+
+pub(crate) fn attach_stream_uid_header_if_eligible(
+    response: &mut axum::response::Response,
+    app_state: &AppState,
+    user: &ProxyUserCredentials,
+    item_type: PlaylistItemType,
+    stream_uid: u32,
+) {
+    if !matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveUnknown) {
+        return;
+    }
+    if user.is_recording_proxy_user() {
+        return;
+    }
+    let config = app_state.app_config.config.load();
+    if !crate::api::auth_middleware::player_api_reachable(&config, user) {
+        return;
+    }
+    response.headers_mut().insert(
+        axum::http::HeaderName::from_static(shared::model::HEADER_TULIPROX_STREAM_UID),
+        axum::http::HeaderValue::from(stream_uid),
+    );
 }
 
 pub fn is_stream_share_enabled(item_type: PlaylistItemType, target: &ConfigTarget) -> bool {

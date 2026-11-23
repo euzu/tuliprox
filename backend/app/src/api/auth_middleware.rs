@@ -7,10 +7,10 @@
 
 use crate::{
     api::model::AppState,
-    auth::{validate_password_version, validate_token_claims, verify_token, AuthBearer, AuthError},
+    auth::{validate_password_version, validate_token_claims, verify_token, AuthBearer, AuthError, Fingerprint},
     model::{ConfigTarget, ProxyUserCredentials},
 };
-use axum::{extract::FromRequestParts, http::request::Parts};
+use axum::{extract::FromRequestParts, http::request::Parts, response::IntoResponse};
 use log::warn;
 use shared::model::{
     permission::{permission_to_name, Permission, PermissionSet},
@@ -83,7 +83,7 @@ fn verify_claims(app_state: &Arc<AppState>, token: &str) -> Result<Claims, AuthE
 /// If the user is unknown or the subject does not match, an empty set is returned.
 pub(crate) fn effective_permissions(app_state: &Arc<AppState>, claims: &Claims) -> PermissionSet {
     if claims.subject_id.as_ref().is_some_and(shared::model::UserId::is_api) {
-        if let Ok(user) = validate_api_user(app_state, claims, ApiUserAccess::Any) {
+        if let Ok(user) = validate_api_user_account(app_state, claims, ApiUserAccess::Any) {
             if !user.permission_denied(&app_state.app_config) {
                 return tuliprox_core::model::api_user_permissions(&user.player_features);
             }
@@ -170,8 +170,19 @@ pub(crate) fn can_api_user_access(
     }
 }
 
+/// Decides whether the Player API is reachable for this user under the current configuration.
+///
+/// Requires the Web UI to be enabled, Web authentication to be active, and the user to be permitted for the Player API.
+#[must_use]
+pub(crate) fn player_api_reachable(config: &tuliprox_core::model::Config, user: &ProxyUserCredentials) -> bool {
+    let web_ui_enabled = config.web_ui.as_ref().is_some_and(|c| c.enabled);
+    web_ui_enabled
+        && crate::api::main_api::is_web_auth_enabled(config, web_ui_enabled)
+        && can_api_user_access(config.web_ui.as_ref(), user, ApiUserAccess::PlayerApi)
+}
+
 /// Validates that an authenticated API user is known, active, and permitted by configuration.
-fn validate_api_user(
+pub(crate) fn validate_api_user_account(
     app_state: &AppState,
     claims: &Claims,
     access: ApiUserAccess,
@@ -191,12 +202,25 @@ fn validate_api_user(
     Ok(user)
 }
 
+/// Validates that an authenticated API user is known, active, permitted by configuration, and allowed by network access.
+pub(crate) fn validate_api_user(
+    app_state: &AppState,
+    claims: &Claims,
+    access: ApiUserAccess,
+    fingerprint: &Fingerprint,
+) -> Result<Arc<ProxyUserCredentials>, AuthError> {
+    let user = validate_api_user_account(app_state, claims, access)?;
+    app_state.try_check_network_access(&user, fingerprint).map_err(|_| AuthError::Forbidden)?;
+    Ok(user)
+}
+
 /// [`validate_api_user`] plus an active account and the user's resolved target, as the player routes require.
 pub(crate) fn validate_api_user_target(
     app_state: &AppState,
     claims: &Claims,
+    fingerprint: &Fingerprint,
 ) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), AuthError> {
-    let user = validate_api_user(app_state, claims, ApiUserAccess::PlayerApi)?;
+    let user = validate_api_user(app_state, claims, ApiUserAccess::PlayerApi, fingerprint)?;
     if user.permission_denied(&app_state.app_config) {
         return Err(AuthError::Forbidden);
     }
@@ -209,6 +233,7 @@ pub(crate) fn settings_owner(
     app_state: &AppState,
     claims: Option<&Claims>,
     access: ApiUserAccess,
+    fingerprint: &Fingerprint,
 ) -> Result<tuliprox_repository::user_settings_repository::SettingsOwner, AuthError> {
     use tuliprox_repository::user_settings_repository::SettingsOwner;
     let config = app_state.app_config.config.load();
@@ -218,7 +243,7 @@ pub(crate) fn settings_owner(
     let claims = claims.ok_or(AuthError::InvalidToken)?;
     let subject = claims.subject_id.as_ref().ok_or(AuthError::InvalidToken)?;
     let username = if subject.is_api() {
-        validate_api_user(app_state, claims, access)?.username.clone()
+        validate_api_user(app_state, claims, access, fingerprint)?.username.clone()
     } else {
         let user = auth
             .t_users
@@ -247,8 +272,12 @@ pub(crate) struct ApiUserContext {
 }
 
 /// Resolves an `ApiUserContext` from authenticated claims, validating the user and target and populating effective permissions.
-pub(crate) fn api_user_context(app_state: &AppState, mut claims: Claims) -> Result<ApiUserContext, AuthError> {
-    let (user, target) = validate_api_user_target(app_state, &claims)?;
+pub(crate) fn api_user_context(
+    app_state: &AppState,
+    mut claims: Claims,
+    fingerprint: &Fingerprint,
+) -> Result<ApiUserContext, AuthError> {
+    let (user, target) = validate_api_user_target(app_state, &claims, fingerprint)?;
     claims.permissions = tuliprox_core::model::api_user_permissions(&user.player_features);
     Ok(ApiUserContext { claims, user, target })
 }
@@ -257,6 +286,10 @@ impl FromRequestParts<Arc<AppState>> for ApiUserContext {
     type Rejection = axum::response::Response;
 
     async fn from_request_parts(parts: &mut Parts, app_state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
+        let fingerprint = Fingerprint::from_request_parts(parts, app_state)
+            .await
+            .map_err(axum::response::IntoResponse::into_response)?;
+
         let claims = if let Some(VerifiedClaims(claims)) = parts.extensions.remove::<VerifiedClaims>() {
             claims
         } else {
@@ -265,7 +298,7 @@ impl FromRequestParts<Arc<AppState>> for ApiUserContext {
             authenticate(app_state, &token).await.map_err(rejection_for)?
         };
 
-        let ctx = api_user_context(app_state, claims).map_err(rejection_for)?;
+        let ctx = api_user_context(app_state, claims, &fingerprint).map_err(rejection_for)?;
         parts.extensions.insert(VerifiedClaims(ctx.claims.clone()));
         Ok(ctx)
     }
@@ -273,7 +306,7 @@ impl FromRequestParts<Arc<AppState>> for ApiUserContext {
 
 pub async fn validator_authenticated(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    mut request: axum::extract::Request,
+    request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let enabled = app_state
@@ -287,17 +320,24 @@ pub async fn validator_authenticated(
     if !enabled {
         return next.run(request).await;
     }
-    let Ok(AuthBearer(token)) = AuthBearer::from_headers(request.headers()) else {
+    let (mut parts, body) = request.into_parts();
+    let fingerprint = match Fingerprint::from_request_parts(&mut parts, &app_state).await {
+        Ok(fp) => fp,
+        Err(err) => return err.into_response(),
+    };
+    let Ok(AuthBearer(token)) = AuthBearer::from_headers(&parts.headers) else {
         return rejection_for(AuthError::InvalidToken);
     };
     let claims = match authenticate(&app_state, &token).await {
         Ok(claims) => claims,
         Err(err) => return rejection_for(err),
     };
-    if let Err(err) = settings_owner(&app_state, Some(&claims), ApiUserAccess::Any) {
+    if let Err(err) = settings_owner(&app_state, Some(&claims), ApiUserAccess::Any, &fingerprint) {
         return rejection_for(err);
     }
-    request.extensions_mut().insert(VerifiedClaims(claims));
+    parts.extensions.insert(VerifiedClaims(claims));
+    parts.extensions.insert(fingerprint);
+    let request = axum::extract::Request::from_parts(parts, body);
     next.run(request).await
 }
 
@@ -315,18 +355,27 @@ pub async fn validator_admin(
 
 pub async fn validator_api_user(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    AuthBearer(token): AuthBearer,
-    mut request: axum::extract::Request,
+    request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let (mut parts, body) = request.into_parts();
+    let fingerprint = match Fingerprint::from_request_parts(&mut parts, &app_state).await {
+        Ok(fp) => fp,
+        Err(err) => return err.into_response(),
+    };
+    let Ok(AuthBearer(token)) = AuthBearer::from_headers(&parts.headers) else {
+        return rejection_for(AuthError::InvalidToken);
+    };
     let claims = match authenticate(&app_state, &token).await {
         Ok(claims) => claims,
         Err(err) => return rejection_for(err),
     };
-    if let Err(err) = validate_api_user(&app_state, &claims, ApiUserAccess::WebUi) {
+    if let Err(err) = validate_api_user(&app_state, &claims, ApiUserAccess::WebUi, &fingerprint) {
         return rejection_for(err);
     }
-    request.extensions_mut().insert(VerifiedClaims(claims));
+    parts.extensions.insert(VerifiedClaims(claims));
+    parts.extensions.insert(fingerprint);
+    let request = axum::extract::Request::from_parts(parts, body);
     next.run(request).await
 }
 
@@ -338,18 +387,30 @@ pub async fn validator_api_user(
 pub async fn require_permission<const P: u32>(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     AuthBearer(token): AuthBearer,
-    mut request: axum::extract::Request,
+    request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let claims = match authenticate(&app_state, &token).await {
         Ok(claims) => claims,
         Err(err) => return rejection_for(err),
     };
-    let client_ip = audit_client_ip(request.headers());
+    let (mut parts, body) = request.into_parts();
+    if claims.subject_id.as_ref().is_some_and(shared::model::UserId::is_api) {
+        let fingerprint = match Fingerprint::from_request_parts(&mut parts, &app_state).await {
+            Ok(fp) => fp,
+            Err(err) => return err.into_response(),
+        };
+        if let Err(err) = validate_api_user(&app_state, &claims, ApiUserAccess::Any, &fingerprint) {
+            return rejection_for(err);
+        }
+        parts.extensions.insert(fingerprint);
+    }
+    let client_ip = audit_client_ip(&parts.headers);
     if let Err(err) = check_permission::<P>(&app_state, &claims, client_ip.as_deref()) {
         return rejection_for(err);
     }
-    request.extensions_mut().insert(VerifiedClaims(claims));
+    parts.extensions.insert(VerifiedClaims(claims));
+    let request = axum::extract::Request::from_parts(parts, body);
     next.run(request).await
 }
 
@@ -438,6 +499,15 @@ impl<const P: u32> FromRequestParts<Arc<AppState>> for AuthorizedClaims<P> {
             parts.extensions.insert(VerifiedClaims(claims.clone()));
             claims
         };
+        if claims.subject_id.as_ref().is_some_and(shared::model::UserId::is_api) {
+            let fingerprint = match Fingerprint::from_request_parts(parts, app_state).await {
+                Ok(fp) => fp,
+                Err(err) => return Err(AuthorizeRejection::Header(err)),
+            };
+            validate_api_user(app_state, &claims, ApiUserAccess::Any, &fingerprint)
+                .map_err(AuthorizeRejection::Token)?;
+            parts.extensions.insert(fingerprint);
+        }
         let client_ip = audit_client_ip(&parts.headers);
         check_permission::<P>(app_state, &claims, client_ip.as_deref()).map_err(AuthorizeRejection::Token)?;
         Ok(Self(claims))
@@ -474,6 +544,14 @@ mod tests {
     };
     use std::sync::Arc;
     use tuliprox_core::model::{ApiProxyConfig, Config};
+
+    /// Parts built straight from a `Request` carry no peer address, which the
+    /// fingerprint extractor rejects. Give those parts a loopback peer.
+    fn parts_with_peer(req: axum::http::Request<()>) -> axum::http::request::Parts {
+        let (mut parts, ()) = req.into_parts();
+        parts.extensions.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))));
+        parts
+    }
 
     fn configure_api_user_target(app_state: &AppState, username: &str, recording: Option<PlayerRecordingLevel>) {
         let target = Arc::new(ConfigTarget {
@@ -765,7 +843,7 @@ mod tests {
             create_jwt_web_user(&web_auth, "admin", Permission::ConfigRead.into(), 0, UserId::web("admin")).unwrap();
 
         let req = Request::builder().header("Authorization", format!("Bearer {web_token}")).body(()).unwrap();
-        let (mut parts, ()) = req.into_parts();
+        let mut parts = parts_with_peer(req);
         let res = ApiUserContext::from_request_parts(&mut parts, &app_state).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().status(), StatusCode::FORBIDDEN);
@@ -778,7 +856,7 @@ mod tests {
         }
         let api_token_alice = create_jwt_api_user(&web_auth, "alice", UserId::api("alice")).unwrap();
         let req = Request::builder().header("Authorization", format!("Bearer {api_token_alice}")).body(()).unwrap();
-        let (mut parts, ()) = req.into_parts();
+        let mut parts = parts_with_peer(req);
         let res = ApiUserContext::from_request_parts(&mut parts, &app_state).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().status(), StatusCode::FORBIDDEN);
@@ -839,7 +917,7 @@ mod tests {
         app_state.auth.token_revocations.revoke_subject(&UserId::api("bob"), i64::MAX).await.unwrap();
 
         let req = Request::builder().header("Authorization", format!("Bearer {revoked_token}")).body(()).unwrap();
-        let (mut parts, ()) = req.into_parts();
+        let mut parts = parts_with_peer(req);
         let res = ApiUserContext::from_request_parts(&mut parts, &app_state).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().status(), StatusCode::UNAUTHORIZED);
@@ -847,7 +925,7 @@ mod tests {
         // 4. OK -> handler sees effective permissions
         let ok_token = create_jwt_api_user(&web_auth, "alice", UserId::api("alice")).unwrap();
         let req = Request::builder().header("Authorization", format!("Bearer {ok_token}")).body(()).unwrap();
-        let (mut parts, ()) = req.into_parts();
+        let mut parts = parts_with_peer(req);
         let ctx = ApiUserContext::from_request_parts(&mut parts, &app_state).await.expect("ok context");
         assert_eq!(ctx.user.username, "alice");
         assert_eq!(ctx.target.name, "main");
@@ -1027,7 +1105,7 @@ mod tests {
         update_user(false, Some(true));
         update_config(false, Some(true));
         let req = Request::builder().header("Authorization", format!("Bearer {token}")).body(()).unwrap();
-        let (mut parts, ()) = req.into_parts();
+        let mut parts = parts_with_peer(req);
         let ctx = ApiUserContext::from_request_parts(&mut parts, &app_state)
             .await
             .expect("player-only user must be accepted");
@@ -1037,7 +1115,7 @@ mod tests {
         update_user(true, Some(false));
         update_config(true, Some(true));
         let req = Request::builder().header("Authorization", format!("Bearer {token}")).body(()).unwrap();
-        let (mut parts, ()) = req.into_parts();
+        let mut parts = parts_with_peer(req);
         let res = ApiUserContext::from_request_parts(&mut parts, &app_state).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().status(), StatusCode::FORBIDDEN);
@@ -1046,7 +1124,7 @@ mod tests {
         update_user(true, Some(true));
         update_config(true, Some(false));
         let req = Request::builder().header("Authorization", format!("Bearer {token}")).body(()).unwrap();
-        let (mut parts, ()) = req.into_parts();
+        let mut parts = parts_with_peer(req);
         let res = ApiUserContext::from_request_parts(&mut parts, &app_state).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().status(), StatusCode::FORBIDDEN);
@@ -1069,7 +1147,8 @@ mod tests {
 
         let app = Router::new()
             .route("/test", get(|| async { StatusCode::OK }))
-            .route_layer(from_fn_with_state(Arc::clone(&app_state), validator_api_user));
+            .route_layer(from_fn_with_state(Arc::clone(&app_state), validator_api_user))
+            .layer(axum::extract::connect_info::MockConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))));
 
         let req = Request::builder()
             .uri("/test")
@@ -1079,5 +1158,114 @@ mod tests {
 
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_validator_api_user_enforces_network_access() {
+        use crate::auth::create_jwt_api_user;
+        use axum::{
+            http::{Request, StatusCode},
+            middleware::from_fn_with_state,
+            routing::get,
+            Router,
+        };
+        use shared::model::NetworkAccessDto;
+        use tower::ServiceExt;
+
+        let (app_state, _) = setup_api_user_state(None);
+        // Add network_access for alice restricting to 10.0.0.0/8
+        {
+            let mut api_proxy = (*app_state.app_config.api_proxy.load_full().unwrap()).clone();
+            Arc::make_mut(&mut api_proxy.user[0].credentials[0]).network_access =
+                Some(tuliprox_core::model::NetworkAccess::from(&NetworkAccessDto {
+                    allowed_countries: None,
+                    allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+                }));
+            app_state.app_config.set_api_proxy(api_proxy).unwrap();
+        }
+        let web_auth = app_state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
+        let alice_token = create_jwt_api_user(&web_auth, "alice", UserId::api("alice")).unwrap();
+
+        let app = Router::new()
+            .route("/test", get(|| async { StatusCode::OK }))
+            .route_layer(from_fn_with_state(Arc::clone(&app_state), validator_api_user));
+
+        // Denied IP (192.168.1.1): 403
+        let mut req_denied = Request::builder()
+            .uri("/test")
+            .header("Authorization", format!("Bearer {alice_token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req_denied
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 1], 12345))));
+        let resp_denied = app.clone().oneshot(req_denied).await.unwrap();
+        assert_eq!(resp_denied.status(), StatusCode::FORBIDDEN);
+
+        // Allowed IP (10.0.0.1): 200
+        let mut req_allowed = Request::builder()
+            .uri("/test")
+            .header("Authorization", format!("Bearer {alice_token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req_allowed
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([10, 0, 0, 1], 12345))));
+        let resp_allowed = app.oneshot(req_allowed).await.unwrap();
+        assert_eq!(resp_allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_require_permission_api_user_enforces_network_access() {
+        use crate::auth::create_jwt_api_user;
+        use axum::{
+            http::{Request, StatusCode},
+            routing::get,
+            Router,
+        };
+        use shared::model::NetworkAccessDto;
+        use tower::ServiceExt;
+
+        let (app_state, _) = setup_api_user_state(Some(PlayerRecordingLevel::Shared));
+        // Add network_access for alice restricting to 10.0.0.0/8
+        {
+            let mut api_proxy = (*app_state.app_config.api_proxy.load_full().unwrap()).clone();
+            Arc::make_mut(&mut api_proxy.user[0].credentials[0]).network_access =
+                Some(tuliprox_core::model::NetworkAccess::from(&NetworkAccessDto {
+                    allowed_countries: None,
+                    allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+                }));
+            app_state.app_config.set_api_proxy(api_proxy).unwrap();
+        }
+        let web_auth = app_state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
+        let alice_token = create_jwt_api_user(&web_auth, "alice", UserId::api("alice")).unwrap();
+
+        let app = Router::new()
+            .route("/perm_test", get(|| async { StatusCode::OK }))
+            .layer(permission_layer!(&app_state, Permission::RecordingRead));
+
+        // Denied IP (192.168.1.1): 403
+        let mut req_denied = Request::builder()
+            .uri("/perm_test")
+            .header("Authorization", format!("Bearer {alice_token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req_denied
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 1], 12345))));
+        let resp_denied = app.clone().oneshot(req_denied).await.unwrap();
+        assert_eq!(resp_denied.status(), StatusCode::FORBIDDEN);
+
+        // Allowed IP (10.0.0.1): 200
+        let mut req_allowed = Request::builder()
+            .uri("/perm_test")
+            .header("Authorization", format!("Bearer {alice_token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req_allowed
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([10, 0, 0, 1], 12345))));
+        let resp_allowed = app.oneshot(req_allowed).await.unwrap();
+        assert_eq!(resp_allowed.status(), StatusCode::OK);
     }
 }

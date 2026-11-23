@@ -82,6 +82,18 @@ impl FromRequestParts<Arc<AppState>> for AuthClaims {
                 let mut claims = crate::api::auth_middleware::authenticate(&app_state, &token)
                     .await
                     .map_err(auth_claims_rejection)?;
+                if claims.subject_id.as_ref().is_some_and(UserId::is_api) {
+                    let fingerprint = crate::auth::Fingerprint::from_request_parts(parts, state)
+                        .await
+                        .map_err(axum::response::IntoResponse::into_response)?;
+                    crate::api::auth_middleware::validate_api_user(
+                        &app_state,
+                        &claims,
+                        crate::api::auth_middleware::ApiUserAccess::Any,
+                        &fingerprint,
+                    )
+                    .map_err(crate::api::auth_middleware::rejection_for)?;
+                }
                 claims.permissions = crate::api::auth_middleware::effective_permissions(&app_state, &claims);
                 Ok(Self(claims))
             }
@@ -817,7 +829,9 @@ mod tests {
         task.uuid = "rec-uuid-1".to_string();
         state.recording.queue.finished.write().await.push(task);
 
-        let router = crate::api::endpoints::v1_api::v1_api_register(true, &state, "").with_state(Arc::clone(&state));
+        let router = crate::api::endpoints::v1_api::v1_api_register(true, &state, "")
+            .with_state(Arc::clone(&state))
+            .layer(axum::extract::connect_info::MockConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))));
 
         let body = serde_json::json!({
             "source": {
@@ -889,6 +903,71 @@ mod tests {
             body_str.contains("recording_missing_permission"),
             "expected recording_missing_permission, got: {body_str}"
         );
+
+        // 5. API user with network_access restriction: denied IP gets 403, allowed IP passes
+        {
+            let mut api_proxy = (*state.app_config.api_proxy.load_full().unwrap()).clone();
+            for target_user in &mut api_proxy.user {
+                for cred in &mut target_user.credentials {
+                    if cred.username == "player_private" {
+                        Arc::make_mut(cred).network_access =
+                            Some(tuliprox_core::model::NetworkAccess::from(&shared::model::NetworkAccessDto {
+                                allowed_countries: None,
+                                allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+                            }));
+                    }
+                }
+            }
+            state.app_config.set_api_proxy(api_proxy).unwrap();
+        }
+        let mut req_denied = Request::builder()
+            .method("POST")
+            .uri("/api/v1/recording/requests")
+            .header(header::AUTHORIZATION, format!("Bearer {player_priv_token}"))
+            .header("x-forwarded-for", "192.168.1.1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&body)?))?;
+        req_denied
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 1], 12345))));
+        let denied_resp = router.clone().oneshot(req_denied).await?;
+        assert_eq!(denied_resp.status(), StatusCode::FORBIDDEN);
+
+        let mut req_allowed = Request::builder()
+            .method("POST")
+            .uri("/api/v1/recording/requests")
+            .header(header::AUTHORIZATION, format!("Bearer {player_priv_token}"))
+            .header("x-forwarded-for", "10.0.0.1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&body)?))?;
+        req_allowed
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([10, 0, 0, 1], 12345))));
+        let allowed_resp = router.clone().oneshot(req_allowed).await?;
+        assert_ne!(allowed_resp.status(), StatusCode::FORBIDDEN);
+
+        // 6. Real route test: GET /api/v1/recording/rules enforces network access (403 denied, 200 allowed)
+        let mut req_rules_denied = Request::builder()
+            .method("GET")
+            .uri("/api/v1/recording/rules")
+            .header(header::AUTHORIZATION, format!("Bearer {player_priv_token}"))
+            .body(axum::body::Body::empty())?;
+        req_rules_denied
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 1], 12345))));
+        let rules_denied_resp = router.clone().oneshot(req_rules_denied).await?;
+        assert_eq!(rules_denied_resp.status(), StatusCode::FORBIDDEN);
+
+        let mut req_rules_allowed = Request::builder()
+            .method("GET")
+            .uri("/api/v1/recording/rules")
+            .header(header::AUTHORIZATION, format!("Bearer {player_priv_token}"))
+            .body(axum::body::Body::empty())?;
+        req_rules_allowed
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([10, 0, 0, 1], 12345))));
+        let rules_allowed_resp = router.clone().oneshot(req_rules_allowed).await?;
+        assert_eq!(rules_allowed_resp.status(), StatusCode::OK);
 
         Ok(())
     }

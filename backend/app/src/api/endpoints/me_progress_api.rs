@@ -179,7 +179,7 @@ pub fn me_progress_api_router() -> Router<Arc<AppState>> {
 mod tests {
     use super::*;
     use crate::{
-        api::{endpoints::v1_api::v1_api_register, model::create_test_app_state},
+        api::{endpoints::v1_api::v1_api_register as real_v1_api_register, model::create_test_app_state},
         auth::create_jwt_api_user,
         model::{ApiProxyConfig, Config, ConfigSource, ConfigTarget, SourcesConfig},
     };
@@ -199,6 +199,16 @@ mod tests {
         app_state: Arc<AppState>,
         alice_token: String, // watch_progress: true
         carol_token: String, // watch_progress: false
+    }
+
+    /// Every test router gets a loopback peer address, as a real serve loop would provide.
+    fn v1_api_register(
+        web_auth_enabled: bool,
+        app_state: &Arc<AppState>,
+        web_ui_path: &str,
+    ) -> axum::Router<Arc<AppState>> {
+        real_v1_api_register(web_auth_enabled, app_state, web_ui_path)
+            .layer(axum::extract::connect_info::MockConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))))
     }
 
     fn setup_test_env() -> TestEnv {
@@ -677,6 +687,7 @@ mod tests {
 
         let req = Request::builder().header("Authorization", format!("Bearer {}", env.carol_token)).body(()).unwrap();
         let (mut parts, ()) = req.into_parts();
+        parts.extensions.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))));
         let user_ctx = ApiUserContext::from_request_parts(&mut parts, &env.app_state).await.unwrap();
 
         let result = resolve_progress_path(&env.app_state, &user_ctx);

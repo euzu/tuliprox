@@ -245,7 +245,8 @@ async fn test_active_client_stream_immediate_provider_stream_emits_meter_batches
         group_failover: None,
     })
     .await
-    .expect("metered test stream admission should succeed");
+    .expect("metered test stream admission should succeed")
+    .stream;
     pin_mut!(stream);
 
     let first_chunk = stream.next().await;

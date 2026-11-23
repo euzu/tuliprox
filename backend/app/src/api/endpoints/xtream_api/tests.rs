@@ -2471,3 +2471,247 @@ mod recording_vod {
         assert_eq!(body, serde_json::json!([]));
     }
 }
+
+mod player_api_account_info {
+    use super::*;
+    use crate::api::endpoints::xtream_api::{xtream_api_register, xtream_player_api};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        response::IntoResponse,
+    };
+    use shared::model::{
+        ApiProxyConfigDto, ApiProxyServerInfoDto, PlayerFeaturesDto, ProxyUserCredentialsDto, TargetUserDto,
+        WebAuthConfigDto, WebUiConfigDto,
+    };
+    use tower::ServiceExt;
+
+    async fn player_api_account_info_response(
+        web_ui_enabled: bool,
+        web_auth_enabled: bool,
+        web_ui_path: Option<&str>,
+        user_ui_enabled: bool,
+        user_player_api_enabled: Option<bool>,
+        global_player_api_enabled: Option<bool>,
+    ) -> serde_json::Value {
+        let dir = tempdir().expect("temp dir");
+        let web_ui_dto = WebUiConfigDto {
+            enabled: web_ui_enabled,
+            user_ui_enabled: true,
+            player_api_enabled: global_player_api_enabled,
+            path: web_ui_path.map(ToString::to_string),
+            auth: if web_auth_enabled {
+                Some(WebAuthConfigDto {
+                    enabled: true,
+                    issuer: "test".to_string(),
+                    secret: "test-secret".to_string(),
+                    ..WebAuthConfigDto::default()
+                })
+            } else {
+                None
+            },
+            ..WebUiConfigDto::default()
+        };
+        let config = Config {
+            storage_dir: dir.path().to_string_lossy().into_owned(),
+            user_config_dir: Some(dir.path().join("user_config").to_string_lossy().into_owned()),
+            web_ui: Some((&web_ui_dto).into()),
+            user_access_control: true,
+            ..Config::default()
+        };
+        let app_state = create_test_app_state(config);
+        let api_proxy_dto = ApiProxyConfigDto {
+            server: vec![ApiProxyServerInfoDto {
+                name: "default".to_string(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some("8901".to_string()),
+                timezone: "UTC".to_string(),
+                message: "test".to_string(),
+                path: None,
+            }],
+            user: vec![TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: user_ui_enabled,
+                    max_connections: 1,
+                    player_features: Some(PlayerFeaturesDto {
+                        api_enabled: user_player_api_enabled,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = crate::model::ApiProxyConfig::from(&api_proxy_dto);
+        for target_user in &mut api_proxy.user {
+            for credential in &mut target_user.credentials {
+                Arc::make_mut(credential).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        app_state.app_config.set_api_proxy(api_proxy).expect("set api proxy");
+        let target = Arc::new(ConfigTarget { name: "main".to_string(), ..short_epg_target() });
+        let sources = SourcesConfig {
+            sources: vec![crate::model::ConfigSource { inputs: Vec::new(), targets: vec![Arc::clone(&target)] }],
+            ..SourcesConfig::default()
+        };
+        app_state.app_config.sources.store(Arc::new(sources));
+
+        let request = UserApiRequest {
+            username: "alice".to_string(),
+            password: "pass".to_string(),
+            action: crate::model::XC_ACTION_GET_ACCOUNT_INFO.to_string(),
+            ..UserApiRequest::default()
+        };
+        let fingerprint =
+            Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5001".parse().expect("addr"));
+        let response = xtream_player_api(&fingerprint, request, &app_state).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = response_body_text(response).await.expect("body text");
+        serde_json::from_str(&text).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn account_info_player_api_path_with_ui_path() {
+        let body = player_api_account_info_response(
+            true,       // web_ui_enabled
+            true,       // web_auth_enabled
+            Some("ui"), // web_ui.path = "ui"
+            true,       // user_ui_enabled
+            Some(true), // user player_api_enabled
+            Some(true), // global player_api_enabled
+        )
+        .await;
+        assert_eq!(body["server_info"]["player_api_path"], "/ui");
+    }
+
+    #[tokio::test]
+    async fn account_info_player_api_path_empty_path() {
+        let body = player_api_account_info_response(
+            true,     // web_ui_enabled
+            true,     // web_auth_enabled
+            Some(""), // empty web_ui.path
+            true,     // user_ui_enabled
+            Some(true),
+            Some(true),
+        )
+        .await;
+        assert_eq!(body["server_info"]["player_api_path"], "/");
+    }
+
+    #[tokio::test]
+    async fn account_info_player_api_path_omitted_when_player_api_disabled_and_web_ui_disabled() {
+        // Case A: User without Player API (api_enabled: false, ui_enabled: false)
+        let body_user_disabled = player_api_account_info_response(
+            true,
+            true,
+            Some("ui"),
+            false,       // user_ui_enabled: false
+            Some(false), // user_player_api_enabled: false
+            Some(true),
+        )
+        .await;
+        assert!(body_user_disabled["server_info"].get("player_api_path").is_none());
+
+        // Case B: Web UI disabled
+        let body_web_ui_disabled = player_api_account_info_response(
+            false, // web_ui_enabled: false
+            true,
+            Some("ui"),
+            true,
+            Some(true),
+            Some(true),
+        )
+        .await;
+        assert!(body_web_ui_disabled["server_info"].get("player_api_path").is_none());
+
+        // Case C: Web auth disabled
+        let body_web_auth_disabled = player_api_account_info_response(
+            true,
+            false, // web_auth_enabled: false
+            Some("ui"),
+            true,
+            Some(true),
+            Some(true),
+        )
+        .await;
+        assert!(body_web_auth_disabled["server_info"].get("player_api_path").is_none());
+    }
+
+    #[tokio::test]
+    async fn account_info_player_api_path_empty_action_via_router() {
+        let dir = tempdir().expect("temp dir");
+        let web_ui_dto = WebUiConfigDto {
+            enabled: true,
+            user_ui_enabled: true,
+            player_api_enabled: Some(true),
+            path: Some("ui".to_string()),
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "test".to_string(),
+                secret: "test-secret".to_string(),
+                ..WebAuthConfigDto::default()
+            }),
+            ..WebUiConfigDto::default()
+        };
+        let config = Config {
+            storage_dir: dir.path().to_string_lossy().into_owned(),
+            user_config_dir: Some(dir.path().join("user_config").to_string_lossy().into_owned()),
+            web_ui: Some((&web_ui_dto).into()),
+            user_access_control: true,
+            ..Config::default()
+        };
+        let app_state = create_test_app_state(config);
+        let api_proxy_dto = ApiProxyConfigDto {
+            server: vec![ApiProxyServerInfoDto {
+                name: "default".to_string(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some("8901".to_string()),
+                timezone: "UTC".to_string(),
+                message: "test".to_string(),
+                path: None,
+            }],
+            user: vec![TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    max_connections: 1,
+                    player_features: Some(PlayerFeaturesDto { api_enabled: Some(true), ..Default::default() }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = crate::model::ApiProxyConfig::from(&api_proxy_dto);
+        for target_user in &mut api_proxy.user {
+            for credential in &mut target_user.credentials {
+                Arc::make_mut(credential).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        app_state.app_config.set_api_proxy(api_proxy).expect("set api proxy");
+        let target = Arc::new(ConfigTarget { name: "main".to_string(), ..short_epg_target() });
+        let sources = SourcesConfig {
+            sources: vec![crate::model::ConfigSource { inputs: Vec::new(), targets: vec![Arc::clone(&target)] }],
+            ..SourcesConfig::default()
+        };
+        app_state.app_config.sources.store(Arc::new(sources));
+
+        let router = xtream_api_register().with_state(Arc::clone(&app_state));
+        let mut req = Request::builder()
+            .uri("/player_api.php?username=alice&password=pass")
+            .body(Body::empty())
+            .expect("request builder");
+        req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let response = router.oneshot(req).await.expect("endpoint response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = response_body_text(response).await.expect("body text");
+        let body: serde_json::Value = serde_json::from_str(&text).expect("json body");
+        assert_eq!(body["server_info"]["player_api_path"], "/ui");
+    }
+}

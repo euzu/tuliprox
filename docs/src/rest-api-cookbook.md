@@ -605,6 +605,11 @@ Requirements:
   When unset, `player_api_enabled` follows `user_ui_enabled`. The `/me` router is always mounted on the server; if
   Player API access is disabled globally (`player_api_enabled: false`) or for the user (`api_enabled: false`),
   requests return `403 Forbidden`.
+- The user's `network_access` rules apply to sign-in, refresh, and every request with the token. From a network the
+  rules do not allow, the answer is `403 Forbidden`.
+- A player that only knows the playlist host reads the base path from `server_info.player_api_path` in the Xtream
+  `player_api.php` account info (`/ui` for `web_ui.path: ui`, `/` without a path). Append it to the URL used for
+  `player_api.php` without `/player_api.php`, so a reverse proxy prefix is kept.
 - The token bears the subject `api:<username>`. Permissions and `player_features` are evaluated dynamically from the live
   configuration on every request; changing a plan or user setting takes effect immediately without needing a new token.
 

@@ -614,7 +614,7 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
     false
 }
 
-fn is_web_auth_enabled(cfg: &Arc<Config>, web_ui_enabled: bool) -> bool {
+pub(crate) fn is_web_auth_enabled(cfg: &Config, web_ui_enabled: bool) -> bool {
     if web_ui_enabled {
         if let Some(web_auth) = &cfg.web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
             return web_auth.enabled;
