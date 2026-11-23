@@ -513,13 +513,19 @@ mod tests {
             .await
             .unwrap();
         let bytes_before = std::fs::read(&file_path).unwrap();
+        // The atomic write replaces the file, so an unchanged inode proves no rewrite happened.
+        #[cfg(unix)]
         let inode_before = std::fs::metadata(&file_path).unwrap().ino();
 
         delete_progress_one(&file_path, &locks, WatchProgressKind::Episode, 42).await.unwrap();
         let bytes_after = std::fs::read(&file_path).unwrap();
-        let inode_after = std::fs::metadata(&file_path).unwrap().ino();
         assert_eq!(bytes_before, bytes_after, "file bytes must not change when no item was deleted");
-        assert_eq!(inode_before, inode_after, "file inode must not change when no item was deleted");
+        #[cfg(unix)]
+        assert_eq!(
+            inode_before,
+            std::fs::metadata(&file_path).unwrap().ino(),
+            "file inode must not change when no item was deleted"
+        );
 
         // 3. Deleting the actual item: removes it and writes
         delete_progress_one(&file_path, &locks, WatchProgressKind::Movie, 42).await.unwrap();
