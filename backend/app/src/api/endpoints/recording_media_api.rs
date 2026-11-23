@@ -735,7 +735,7 @@ mod tests {
             auth: Some(shared::model::WebAuthConfigDto {
                 enabled: true,
                 issuer: "test".to_string(),
-                secret: "test_secret_01234567890123456789".to_string(),
+                secret: "0123456789abcdef0123456789abcdef".to_string(),
                 ..shared::model::WebAuthConfigDto::default()
             }),
             user_ui_enabled: true,

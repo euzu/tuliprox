@@ -841,7 +841,7 @@ The source is named by server-owned identifiers; a stream URL is never accepted.
 curl -s -X POST "$BASE_URL/api/v1/recording/requests" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
-    -H "Idempotency-Key: 7f4c1c2a-record-morning-match" \
+    -H "Idempotency-Key: 5f1c0f1e-2b7a-4f5d-9d2e-6c3f0f1b2a44" \
     -d '{
           "source": {
             "target_id": "main",

@@ -670,7 +670,7 @@ mod tests {
             player_api_enabled: Some(true),
             auth: Some(WebAuthConfigDto {
                 enabled: true,
-                secret: "test_secret_at_least_32_characters_long_for_hs256".to_string(),
+                secret: "0123456789abcdef0123456789abcdef".to_string(),
                 ..Default::default()
             }),
             ..Default::default()
