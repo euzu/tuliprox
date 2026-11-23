@@ -22,7 +22,8 @@ create_bitset!(
     RecordingManage,
     RecordingDelete,
     MaintenanceRead,
-    MaintenanceWrite
+    MaintenanceWrite,
+    RecordingShare
 );
 
 pub const PERM_ALL: PermissionSet = PermissionSet::ALL;
@@ -59,6 +60,7 @@ pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("recording.delete", Permission::RecordingDelete),
     ("maintenance.read", Permission::MaintenanceRead),
     ("maintenance.write", Permission::MaintenanceWrite),
+    ("recording.share", Permission::RecordingShare),
 ];
 
 pub fn permission_from_name(name: &str) -> Option<Permission> {
@@ -142,6 +144,7 @@ mod tests {
         assert!(PERM_ALL.contains(Permission::RecordingCreate));
         assert!(PERM_ALL.contains(Permission::RecordingManage));
         assert!(PERM_ALL.contains(Permission::RecordingDelete));
+        assert!(PERM_ALL.contains(Permission::RecordingShare));
     }
 
     #[test]
@@ -199,13 +202,14 @@ mod tests {
             ("recording.delete", 1 << 17),
             ("maintenance.read", 1 << 18),
             ("maintenance.write", 1 << 19),
+            ("recording.share", 1 << 20),
         ];
         // The table is the layout of this schema version. Changing a bit means
         // editing the table, and the version beside it has to move with it so
         // tokens minted under the old layout fail closed.
         assert_eq!(
             crate::model::CURRENT_PERMISSION_SCHEMA_VERSION,
-            5,
+            6,
             "the bit table changed: bump CURRENT_PERMISSION_SCHEMA_VERSION and this expected value together"
         );
         assert_eq!(PermissionSet::VARIANT_COUNT, expected.len());
@@ -224,6 +228,7 @@ mod tests {
         assert_eq!(permission_from_name("recording.create"), Some(Permission::RecordingCreate));
         assert_eq!(permission_from_name("recording.manage"), Some(Permission::RecordingManage));
         assert_eq!(permission_from_name("recording.delete"), Some(Permission::RecordingDelete));
+        assert_eq!(permission_from_name("recording.share"), Some(Permission::RecordingShare));
         assert_eq!(permission_from_name("nonexistent"), None);
         assert_eq!(permission_from_name(""), None);
     }
@@ -236,6 +241,7 @@ mod tests {
         assert_eq!(permission_to_name(Permission::RecordingCreate), Some("recording.create"));
         assert_eq!(permission_to_name(Permission::RecordingManage), Some("recording.manage"));
         assert_eq!(permission_to_name(Permission::RecordingDelete), Some("recording.delete"));
+        assert_eq!(permission_to_name(Permission::RecordingShare), Some("recording.share"));
     }
 
     #[test]

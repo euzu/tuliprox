@@ -21,7 +21,7 @@ use shared::{
 };
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::File,
     io::Read,
     path::{Path, PathBuf},
@@ -294,6 +294,25 @@ impl AppConfig {
 
     pub fn get_user_credentials(&self, username: &str) -> Option<Arc<ProxyUserCredentials>> {
         self.api_proxy.load().as_ref().as_ref().and_then(|api_proxy| api_proxy.get_user_credentials(username))
+    }
+
+    pub fn live_api_user_recording_quotas(&self) -> HashMap<shared::model::UserId, u64> {
+        let mut map = HashMap::new();
+        if let Some(api_proxy) = self.api_proxy.load().as_ref() {
+            for target_user in &api_proxy.user {
+                for user in &target_user.credentials {
+                    if let Some(quota) = user.player_features.recording_quota_bytes {
+                        map.insert(shared::model::UserId::api(&user.username), quota);
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    pub fn live_api_user_max_concurrent_recordings_for(&self, owner: &shared::model::UserId) -> Option<u32> {
+        let username = owner.api_username()?;
+        self.get_user_credentials(&username).and_then(|user| user.player_features.max_concurrent_recordings)
     }
 
     pub fn get_auth_error_status(&self) -> axum::http::StatusCode {

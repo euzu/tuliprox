@@ -116,7 +116,7 @@ pub fn RecordingConfigView() -> Html {
     let transfer_view = html! {
         <>
             <Card class="tp__config-view__card">
-                { config_field_child!(translate.t(LABEL_EXTENSIONS), "RECORDING_CONFIG.EXTENSIONS", {
+                { config_field_child!(translate.t(LABEL_EXTENSIONS), "VIDEO_CONFIG.EXTENSIONS", {
                     html! { <div class="tp__config-view__tags">{ for video_state.form.extensions.iter().map(|extension| html! { <span>{extension}</span> }) }</div> }
                 }) }
                 { config_field_child!(translate.t(LABEL_HEADERS), "RECORDING_CONFIG.HEADERS", {
@@ -129,13 +129,13 @@ pub fn RecordingConfigView() -> Html {
         <>
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_RECORDING_QUEUE)}</h1>
-                { config_field!(state.form, translate.t(LABEL_RESERVE_SLOTS_FOR_USERS), reserve_slots_for_users, "RECORDING_CONFIG.RESERVE_SLOTS_FOR_USERS") }
-                { config_field!(state.form, translate.t(LABEL_MAX_BACKGROUND_PER_PROVIDER), max_background_per_provider, "RECORDING_CONFIG.MAX_BACKGROUND_PER_PROVIDER") }
-                { config_field!(state.form, translate.t(LABEL_RETRY_BACKOFF_INITIAL), retry_backoff_initial_secs, "RECORDING_CONFIG.RETRY_BACKOFF_INITIAL") }
-                { config_field!(state.form, translate.t(LABEL_RETRY_BACKOFF_MULTIPLIER), retry_backoff_multiplier, "RECORDING_CONFIG.RETRY_BACKOFF_MULTIPLIER") }
-                { config_field!(state.form, translate.t(LABEL_RETRY_BACKOFF_MAX), retry_backoff_max_secs, "RECORDING_CONFIG.RETRY_BACKOFF_MAX") }
-                { config_field!(state.form, translate.t(LABEL_RETRY_BACKOFF_JITTER_PERCENT), retry_backoff_jitter_percent, "RECORDING_CONFIG.RETRY_BACKOFF_JITTER_PERCENT") }
-                { config_field!(state.form, translate.t(LABEL_RETRY_MAX_ATTEMPTS), retry_max_attempts, "RECORDING_CONFIG.RETRY_MAX_ATTEMPTS") }
+                { config_field!(state.form, translate.t(LABEL_RESERVE_SLOTS_FOR_USERS), reserve_slots_for_users) }
+                { config_field!(state.form, translate.t(LABEL_MAX_BACKGROUND_PER_PROVIDER), max_background_per_provider) }
+                { config_field!(state.form, translate.t(LABEL_RETRY_BACKOFF_INITIAL), retry_backoff_initial_secs) }
+                { config_field!(state.form, translate.t(LABEL_RETRY_BACKOFF_MULTIPLIER), retry_backoff_multiplier) }
+                { config_field!(state.form, translate.t(LABEL_RETRY_BACKOFF_MAX), retry_backoff_max_secs) }
+                { config_field!(state.form, translate.t(LABEL_RETRY_BACKOFF_JITTER_PERCENT), retry_backoff_jitter_percent) }
+                { config_field!(state.form, translate.t(LABEL_RETRY_MAX_ATTEMPTS), retry_max_attempts) }
             </Card>
         </>
     };
@@ -143,8 +143,8 @@ pub fn RecordingConfigView() -> Html {
     let transfer_edit = html! {
         <>
             <Card class="tp__config-view__card">
-                { edit_field_list!(video_state, translate.t(LABEL_EXTENSIONS), extensions, VideoConfigFormAction::Extensions, translate.t(LABEL_ADD_EXTENSION)) }
-                <KeyValueEditor label={Some(translate.t(LABEL_HEADERS))} entries={state.form.headers.clone()} readonly={false} on_change={handle_headers} />
+                { edit_field_list!(video_state, translate.t(LABEL_EXTENSIONS), extensions, VideoConfigFormAction::Extensions, translate.t(LABEL_ADD_EXTENSION), "VIDEO_CONFIG.EXTENSIONS") }
+                <KeyValueEditor label={Some(translate.t(LABEL_HEADERS))} field_id={Some("RECORDING_CONFIG.HEADERS".to_string())} entries={state.form.headers.clone()} readonly={false} on_change={handle_headers} />
             </Card>
         </>
     };

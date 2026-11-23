@@ -550,6 +550,7 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
                 </div>
                 <NumberInput
                     name="duration_minutes"
+                    field_id={Some("RECORDING_FORM.DURATION_MINUTES".to_string())}
                     label={ duration_label.clone() }
                     value={ Some(*duration_minutes_state as i64) }
                     on_change={ on_duration_change }
@@ -562,6 +563,7 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
             </div>
             <NumberInput
                 name="pre_roll_secs"
+                field_id={Some("RECORDING_FORM.PRE_ROLL_SECS".to_string())}
                 label={pre_roll_label}
                 placeholder={prefill.padding.default_pre_roll_secs.to_string()}
                 value={Some(*pre_state as i64)}
@@ -569,6 +571,7 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
             />
             <NumberInput
                 name="post_roll_secs"
+                field_id={Some("RECORDING_FORM.POST_ROLL_SECS".to_string())}
                 label={post_roll_label}
                 placeholder={prefill.padding.default_post_roll_secs.to_string()}
                 value={Some(*post_state as i64)}

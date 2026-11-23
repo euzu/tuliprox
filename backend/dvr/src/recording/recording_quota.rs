@@ -65,13 +65,19 @@ pub struct QuotaTotals {
 pub struct QuotaLimits {
     pub default_private_bytes: Option<u64>,
     pub per_user_bytes: HashMap<UserId, u64>,
+    pub plan_user_bytes: HashMap<UserId, u64>,
     pub shared_bytes: Option<u64>,
 }
 
 /// Effective limit for a given pool. `None` means unlimited.
 pub fn limit_for_pool(pool: &QuotaPool, limits: &QuotaLimits) -> Option<u64> {
     match pool {
-        QuotaPool::Private(uid) => limits.per_user_bytes.get(uid).copied().or(limits.default_private_bytes),
+        QuotaPool::Private(uid) => limits
+            .per_user_bytes
+            .get(uid)
+            .copied()
+            .or_else(|| limits.plan_user_bytes.get(uid).copied())
+            .or(limits.default_private_bytes),
         QuotaPool::Shared => limits.shared_bytes,
     }
 }
@@ -159,6 +165,8 @@ pub trait QuotaRecordingTaskView {
     /// Defaults to a key of its own, so a view that does not know about sharing
     /// is counted separately rather than silently merged with another file.
     fn media_key(&self) -> String { format!("uuid:{}", self.uuid()) }
+    /// Whether the task was cancelled by its owner while kept alive for attached clips.
+    fn cancelled_by_owner(&self) -> bool { false }
 }
 
 impl QuotaRecordingTaskView for RecordingTask {
@@ -168,6 +176,7 @@ impl QuotaRecordingTaskView for RecordingTask {
     fn media_key(&self) -> String {
         crate::recording::recording_service::recording_identity_key(&self.recording, self.url.as_str())
     }
+    fn cancelled_by_owner(&self) -> bool { self.cancelled_by_owner }
 }
 
 impl QuotaRecordingTaskView for PersistedRecordingTask {
@@ -181,12 +190,18 @@ impl QuotaRecordingTaskView for PersistedRecordingTask {
         }
         self.media_identity.clone()
     }
+    fn cancelled_by_owner(&self) -> bool { self.cancelled_by_owner }
 }
 
 /// `charge_for_task` is the public surface that walks a real
 /// `RecordingTask`. The shape-based test below covers the same
 /// state→charge logic.
-pub fn charge_for_task<V: QuotaRecordingTaskView>(task: &V) -> u64 { charge_for_state(task.state(), task.recording()) }
+pub fn charge_for_task<V: QuotaRecordingTaskView>(task: &V) -> u64 {
+    if task.cancelled_by_owner() {
+        return 0;
+    }
+    charge_for_state(task.state(), task.recording())
+}
 
 /// Pure state-driven charge. Kept separate from `charge_for_task`
 /// so it can be unit-tested without a full `RecordingTask`.
@@ -310,7 +325,7 @@ pub fn split_measured_reserved_for_user_from_tasks<V: QuotaRecordingTaskView>(
         let meta = task.recording();
         let is_user =
             meta.visibility == shared::model::recording::RecordingVisibility::Private && meta.owner_id() == subject_id;
-        if !is_user {
+        if !is_user || task.cancelled_by_owner() {
             continue;
         }
         let charge = charge_for_task(task);
@@ -483,6 +498,48 @@ mod tests {
         assert_eq!(limit_for_pool(&QuotaPool::Private(UserId::from("web:alice")), &limits), Some(5_000));
         // bob falls back to the default
         assert_eq!(limit_for_pool(&QuotaPool::Private(UserId::from("web:bob")), &limits), Some(1000));
+    }
+
+    #[test]
+    fn quota_order_three_cases_with_exact_limits_and_boundary() {
+        let mut limits = QuotaLimits { default_private_bytes: Some(1000), ..Default::default() };
+        limits.per_user_bytes.insert(UserId::from("api:alice"), 5_000);
+        limits.plan_user_bytes.insert(UserId::from("api:alice"), 3_000);
+
+        limits.plan_user_bytes.insert(UserId::from("api:bob"), 3_000);
+
+        // Case 1: per_user wins (5000) over plan (3000) and default (1000)
+        assert_eq!(limit_for_pool(&QuotaPool::Private(UserId::from("api:alice")), &limits), Some(5_000));
+        assert_eq!(
+            would_exceed(&QuotaPool::Private(UserId::from("api:alice")), 0, 5_000, &limits),
+            AdmissionOutcome::Ok { used_after: 5_000, limit: 5_000 }
+        );
+        assert_eq!(
+            would_exceed(&QuotaPool::Private(UserId::from("api:alice")), 0, 5_001, &limits),
+            AdmissionOutcome::OverLimit { used: 0, limit: 5_000, would_be: 5_001 }
+        );
+
+        // Case 2: plan value used (3000) when per_user is missing, beats default (1000)
+        assert_eq!(limit_for_pool(&QuotaPool::Private(UserId::from("api:bob")), &limits), Some(3_000));
+        assert_eq!(
+            would_exceed(&QuotaPool::Private(UserId::from("api:bob")), 0, 3_000, &limits),
+            AdmissionOutcome::Ok { used_after: 3_000, limit: 3_000 }
+        );
+        assert_eq!(
+            would_exceed(&QuotaPool::Private(UserId::from("api:bob")), 0, 3_001, &limits),
+            AdmissionOutcome::OverLimit { used: 0, limit: 3_000, would_be: 3_001 }
+        );
+
+        // Case 3: default used (1000) when neither per_user nor plan has entry
+        assert_eq!(limit_for_pool(&QuotaPool::Private(UserId::from("api:carol")), &limits), Some(1_000));
+        assert_eq!(
+            would_exceed(&QuotaPool::Private(UserId::from("api:carol")), 0, 1_000, &limits),
+            AdmissionOutcome::Ok { used_after: 1_000, limit: 1_000 }
+        );
+        assert_eq!(
+            would_exceed(&QuotaPool::Private(UserId::from("api:carol")), 0, 1_001, &limits),
+            AdmissionOutcome::OverLimit { used: 0, limit: 1_000, would_be: 1_001 }
+        );
     }
 
     #[test]

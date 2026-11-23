@@ -14,6 +14,7 @@ pub(super) enum McpToolKind {
 pub(super) enum McpToolMethod {
     Get,
     Post,
+    Delete,
 }
 
 impl McpToolMethod {
@@ -21,8 +22,25 @@ impl McpToolMethod {
         match self {
             Self::Get => axum::http::Method::GET,
             Self::Post => axum::http::Method::POST,
+            Self::Delete => axum::http::Method::DELETE,
         }
     }
+}
+
+/// Intended audience of an MCP tool: admin tools for operator assistants, player tools for playlist API users.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum McpAudience {
+    Admin,
+    Player,
+}
+
+/// Feature gate for player tools derived from live player capabilities and permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlayerToolFeature {
+    SourceSwitch,
+    Joinable,
+    RecordingRead,
+    RecordingWrite,
 }
 
 pub(super) struct McpTool {
@@ -37,10 +55,14 @@ pub(super) struct McpTool {
     /// Route below `{web_ui_path}/api/v1`.
     pub path: &'static str,
     pub kind: McpToolKind,
+    pub audience: McpAudience,
+    pub feature: Option<PlayerToolFeature>,
     /// Scrub secrets from the JSON result before it leaves the server.
     pub redact_secrets: bool,
     /// `destructiveHint` of a write tool.
     pub destructive: bool,
+    /// Internal snapshot dispatch without an HTTP request.
+    pub is_internal: bool,
 }
 
 impl McpTool {
@@ -82,6 +104,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "list_active_streams",
@@ -92,6 +117,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_config",
@@ -102,6 +130,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: true,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_playlist_update_status",
@@ -112,6 +143,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "query_stream_history",
@@ -122,6 +156,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_stream_history_summary",
@@ -132,6 +169,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_hls_origin_telemetry",
@@ -142,6 +182,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "list_qos_snapshots",
@@ -152,6 +195,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_qos_snapshot",
@@ -162,6 +208,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_event_stats",
@@ -172,6 +221,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_ip_info",
@@ -182,6 +234,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "list_playlist_sources",
@@ -192,6 +247,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: true,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "query_playlist_items",
@@ -215,6 +273,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: true,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "list_media_server_libraries",
@@ -225,6 +286,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_media_server_status",
@@ -235,6 +299,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "refresh_media_server_input",
@@ -245,6 +312,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Write,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "query_target_epg_channels",
@@ -264,6 +334,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: true,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_target_epg_channel",
@@ -283,6 +356,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: true,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_overrides",
@@ -298,6 +374,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: true,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "get_override_item",
@@ -315,6 +394,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: true,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "list_override_orphans",
@@ -325,6 +407,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: true,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "search_epg_ids",
@@ -342,6 +427,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Read,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "update_playlists",
@@ -352,6 +440,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Write,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "save_overrides",
@@ -395,6 +486,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Write,
         redact_secrets: false,
         destructive: true,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "discard_overrides",
@@ -416,6 +510,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Write,
         redact_secrets: false,
         destructive: true,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "update_geoip",
@@ -426,6 +523,9 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Write,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
     },
     McpTool {
         name: "update_imdb_ratings",
@@ -436,6 +536,230 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         kind: McpToolKind::Write,
         redact_secrets: false,
         destructive: false,
+        audience: McpAudience::Admin,
+        feature: None,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_capabilities",
+        description: "Discovers effective capabilities and limits of the authenticated playlist user (connection limits, active connections, recording level, quota, and permitted features).",
+        input_schema: NO_ARGUMENTS,
+        method: McpToolMethod::Get,
+        path: "/me/capabilities",
+        kind: McpToolKind::Read,
+        audience: McpAudience::Player,
+        feature: None,
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_search_channels",
+        description: "Search live TV channels in the caller's playlist that pass their content filter. Workflow step 1 before checking EPG or scheduling a recording. Filter by query text or exact group. Returns virtual_id, name, group, epg_channel_id, is_group.",
+        input_schema: r#"{"type":"object","properties":{"query":{"type":"string","description":"Case-insensitive search query matched against channel name, title, group, or EPG id."},"group":{"type":"string","description":"Exact channel group name to filter by."},"limit":{"type":"integer","description":"Maximum channels to return (default 50, maximum 500)."}},"additionalProperties":false}"#,
+        method: McpToolMethod::Get,
+        path: "/me/channels",
+        kind: McpToolKind::Read,
+        audience: McpAudience::Player,
+        feature: None,
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_get_epg",
+        description: "Get Electronic Programme Guide (EPG) listings for one visible live channel by virtual_id (vid). Workflow step 2 before recording. Times can be provided as unix timestamp seconds (e.g. 1763679600) or ISO-8601 / RFC 3339 strings (e.g. '2026-11-20T22:00:00Z'). Maximum query window is 48 hours. Returns programmes with start/stop times as unix seconds (start_ts, stop_ts) and ISO-8601 strings with the user's timeshift offset applied.",
+        input_schema: r#"{"type":"object","properties":{"vid":{"type":"integer","description":"Virtual ID of the channel from me_search_channels."},"from":{"type":"string","description":"Window start as unix timestamp seconds or RFC 3339 / ISO-8601 string. Defaults to now."},"to":{"type":"string","description":"Window end as unix timestamp seconds or RFC 3339 / ISO-8601 string. Maximum 48 hours after from."}},"required":["vid"],"additionalProperties":false}"#,
+        method: McpToolMethod::Get,
+        path: "/me/epg",
+        kind: McpToolKind::Read,
+        audience: McpAudience::Player,
+        feature: None,
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_list_streams",
+        description: "List all currently active playback streams belonging to the authenticated playlist user, including uid, virtual_id, member_vid, title, protocol, shared, and started_at.",
+        input_schema: NO_ARGUMENTS,
+        method: McpToolMethod::Get,
+        path: "/me/streams",
+        kind: McpToolKind::Read,
+        audience: McpAudience::Player,
+        feature: None,
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_stop_stream",
+        description: "Stop and disconnect an active playback stream belonging to the authenticated playlist user by its stream uid.",
+        input_schema: r#"{"type":"object","properties":{"uid":{"type":"integer","description":"Unique identifier of the stream from me_list_streams."}},"required":["uid"],"additionalProperties":false}"#,
+        method: McpToolMethod::Delete,
+        path: "/me/streams/{uid}",
+        kind: McpToolKind::Write,
+        audience: McpAudience::Player,
+        feature: None,
+        redact_secrets: false,
+        destructive: true,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_list_sources",
+        description: "List available failover source members with health status and media quality for a group channel by virtual_id (vid). Requires source_switch capability.",
+        input_schema: r#"{"type":"object","properties":{"vid":{"type":"integer","description":"Virtual ID of the group channel from me_search_channels."}},"required":["vid"],"additionalProperties":false}"#,
+        method: McpToolMethod::Get,
+        path: "/me/channels/{vid}/failover-members",
+        kind: McpToolKind::Read,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::SourceSwitch),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_switch_source",
+        description: "Switch an active stream to a specific failover member source. Requires source_switch capability.",
+        input_schema: r#"{"type":"object","properties":{"uid":{"type":"integer","description":"Stream unique identifier from me_list_streams."},"member_vid":{"type":"integer","description":"Target member virtual ID from me_list_sources."}},"required":["uid","member_vid"],"additionalProperties":false}"#,
+        method: McpToolMethod::Post,
+        path: "/me/streams/{uid}/failover-switch",
+        kind: McpToolKind::Write,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::SourceSwitch),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_split_stream",
+        description: "Split an active shared stream session off into a dedicated stream connection. Requires source_switch capability.",
+        input_schema: r#"{"type":"object","properties":{"uid":{"type":"integer","description":"Stream unique identifier from me_list_streams."}},"required":["uid"],"additionalProperties":false}"#,
+        method: McpToolMethod::Post,
+        path: "/me/streams/{uid}/split",
+        kind: McpToolKind::Write,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::SourceSwitch),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_list_joinable",
+        description: "List joinable live streams on the server that can be shared without consuming an extra provider connection. Requires joinable_streams capability.",
+        input_schema: NO_ARGUMENTS,
+        method: McpToolMethod::Get,
+        path: "/me/streams/joinable",
+        kind: McpToolKind::Read,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::Joinable),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_list_recordings",
+        description: "List recordings and tasks visible to the caller, including available status, quota summary, and current task details. Requires recording read capability. Uses internal snapshot dispatch.",
+        input_schema: NO_ARGUMENTS,
+        method: McpToolMethod::Get,
+        path: "",
+        kind: McpToolKind::Read,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::RecordingRead),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: true,
+    },
+    McpTool {
+        name: "me_record_program",
+        description: "Schedule a live programme recording. Workflow step 3 after me_search_channels and me_get_epg. Provide the channel virtual_id (vid), start and end times in unix timestamp seconds (program_start, program_end), and program title. Optional pre_roll_secs and post_roll_secs add padding. Visibility defaults to private (or shared if permitted). Repeated calls with the same arguments are idempotent. Potential errors include recording_quota_exceeded (insufficient storage quota), recording_concurrency_exceeded (exceeds concurrent recording limits), recording_invalid_source (channel or source unavailable).",
+        input_schema: r#"{"type":"object","properties":{"vid":{"type":"integer","description":"Virtual ID of the channel from me_search_channels."},"program_start":{"type":"integer","description":"Programme start time as unix timestamp seconds from me_get_epg (start_ts)."},"program_end":{"type":"integer","description":"Programme end time as unix timestamp seconds from me_get_epg (stop_ts)."},"title":{"type":"string","description":"Title of the programme from me_get_epg."},"visibility":{"type":"string","enum":["private","shared"],"description":"Recording visibility (default: private)."},"pre_roll_secs":{"type":"integer","description":"Seconds to record before scheduled start."},"post_roll_secs":{"type":"integer","description":"Seconds to record after scheduled end."}},"required":["vid","program_start","program_end","title"],"additionalProperties":false}"#,
+        method: McpToolMethod::Post,
+        path: "/recording/requests",
+        kind: McpToolKind::Write,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::RecordingWrite),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_cancel_recording",
+        description: "Cancel a scheduled or in-progress recording request by its id. Requires recording write capability.",
+        input_schema: r#"{"type":"object","properties":{"id":{"type":"string","description":"Recording request ID from me_list_recordings."}},"required":["id"],"additionalProperties":false}"#,
+        method: McpToolMethod::Post,
+        path: "/recording/requests/{id}/cancel",
+        kind: McpToolKind::Write,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::RecordingWrite),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_delete_recording",
+        description: "Delete a completed or failed recording request and its associated files by its id. Requires recording write capability.",
+        input_schema: r#"{"type":"object","properties":{"id":{"type":"string","description":"Recording request ID from me_list_recordings."}},"required":["id"],"additionalProperties":false}"#,
+        method: McpToolMethod::Delete,
+        path: "/recording/requests/{id}",
+        kind: McpToolKind::Write,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::RecordingWrite),
+        redact_secrets: false,
+        destructive: true,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_recording_conflicts",
+        description: "Preview potential recording conflicts and capacity demand before scheduling a recording. Provide the channel virtual_id (vid), start and end times in unix timestamp seconds (program_start, program_end). Requires recording write capability. Potential errors include recording_invalid_source.",
+        input_schema: r#"{"type":"object","properties":{"vid":{"type":"integer","description":"Virtual ID of the channel from me_search_channels."},"program_start":{"type":"integer","description":"Programme start time as unix timestamp seconds."},"program_end":{"type":"integer","description":"Programme end time as unix timestamp seconds."},"pre_roll_secs":{"type":"integer","description":"Seconds to record before scheduled start."},"post_roll_secs":{"type":"integer","description":"Seconds to record after scheduled end."},"priority":{"type":"integer","description":"Scheduling priority (default: 0)."}},"required":["vid","program_start","program_end"],"additionalProperties":false}"#,
+        method: McpToolMethod::Post,
+        path: "/recording/conflicts/preview",
+        kind: McpToolKind::Read,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::RecordingWrite),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_list_rules",
+        description: "List recurring recording rules visible to the caller (own rules and visible shared rules). Requires recording read capability.",
+        input_schema: NO_ARGUMENTS,
+        method: McpToolMethod::Get,
+        path: "/recording/rules",
+        kind: McpToolKind::Read,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::RecordingRead),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_create_rule",
+        description: "Create a recurring weekly timeslot recording rule. Provide the channel virtual_id (vid), ISO 8601 weekday (1=Monday .. 7=Sunday), local start time in HH:MM format (24-hour), and duration_secs. Optional timezone (default: UTC), visibility (private or shared), pre_roll_secs, and post_roll_secs. Requires recording write capability.",
+        input_schema: r#"{"type":"object","properties":{"vid":{"type":"integer","description":"Virtual ID of the channel from me_search_channels."},"weekday":{"type":"integer","minimum":1,"maximum":7,"description":"ISO 8601 weekday: 1 = Monday, 7 = Sunday."},"local_start_time":{"type":"string","description":"Local start time in 24-hour format (HH:MM), e.g. 20:00."},"duration_secs":{"type":"integer","minimum":1,"description":"Duration of the recording in seconds."},"timezone":{"type":"string","description":"IANA timezone name (default: UTC), e.g. Europe/Berlin."},"visibility":{"type":"string","enum":["private","shared"],"description":"Recording rule visibility (default: private)."},"pre_roll_secs":{"type":"integer","description":"Seconds to record before scheduled start."},"post_roll_secs":{"type":"integer","description":"Seconds to record after scheduled end."}},"required":["vid","weekday","local_start_time","duration_secs"],"additionalProperties":false}"#,
+        method: McpToolMethod::Post,
+        path: "/recording/rules",
+        kind: McpToolKind::Write,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::RecordingWrite),
+        redact_secrets: false,
+        destructive: false,
+        is_internal: false,
+    },
+    McpTool {
+        name: "me_delete_rule",
+        description: "Delete a recurring recording rule by its id. Requires recording write capability. The future parameter controls upcoming recordings ('retain' or 'cancel', default: 'retain').",
+        input_schema: r#"{"type":"object","properties":{"id":{"type":"string","description":"Recording rule ID from me_list_rules."},"future":{"type":"string","enum":["retain","cancel"],"description":"How to handle upcoming recordings: retain (keep scheduled) or cancel (cancel upcoming, default: retain)."}},"required":["id"],"additionalProperties":false}"#,
+        method: McpToolMethod::Delete,
+        path: "/recording/rules/{id}",
+        kind: McpToolKind::Write,
+        audience: McpAudience::Player,
+        feature: Some(PlayerToolFeature::RecordingWrite),
+        redact_secrets: false,
+        destructive: true,
+        is_internal: false,
     },
 ];
 
@@ -557,10 +881,38 @@ impl McpToolRef<'_> {
         }
     }
 
+    pub(super) fn path(&self) -> &str {
+        match self {
+            Self::Builtin(tool) => tool.path,
+            Self::Plugin(tool) => &tool.path,
+        }
+    }
+
     pub(super) const fn redact_secrets(&self) -> bool {
         match self {
             Self::Builtin(tool) => tool.redact_secrets,
             Self::Plugin(tool) => tool.redact_secrets,
+        }
+    }
+
+    pub(super) const fn audience(&self) -> McpAudience {
+        match self {
+            Self::Builtin(tool) => tool.audience,
+            Self::Plugin(_) => McpAudience::Admin,
+        }
+    }
+
+    pub(super) const fn feature(&self) -> Option<PlayerToolFeature> {
+        match self {
+            Self::Builtin(tool) => tool.feature,
+            Self::Plugin(_) => None,
+        }
+    }
+
+    pub(super) const fn is_internal(&self) -> bool {
+        match self {
+            Self::Builtin(tool) => tool.is_internal,
+            Self::Plugin(_) => false,
         }
     }
 
@@ -604,12 +956,124 @@ impl ToolView {
     }
 
     /// What `tools/list` shows: write tools only when `read_only` is off.
+    #[cfg(test)]
     pub(super) fn visible(&self, read_only: bool) -> impl Iterator<Item = McpToolRef<'_>> {
+        MCP_TOOLS.iter().map(McpToolRef::Builtin).chain(self.plugin.iter().map(McpToolRef::Plugin)).filter(
+            move |tool| tool.audience() == McpAudience::Admin && (!read_only || tool.kind() == McpToolKind::Read),
+        )
+    }
+
+    /// What `tools/list` shows for the caller: Admin tools for web users, Player tools for API users.
+    pub(super) fn visible_for_caller<'a>(
+        &'a self,
+        caller: &'a CallerContext,
+        admin_read_only: bool,
+        player_tools: shared::model::McpPlayerTools,
+        app_state: &'a crate::api::model::AppState,
+    ) -> impl Iterator<Item = McpToolRef<'a>> {
         MCP_TOOLS
             .iter()
             .map(McpToolRef::Builtin)
             .chain(self.plugin.iter().map(McpToolRef::Plugin))
-            .filter(move |tool| !read_only || tool.kind() == McpToolKind::Read)
+            .filter(move |tool| caller.allows_tool(tool, admin_read_only, player_tools, app_state))
+    }
+
+    /// Finds a tool by name that is visible to `caller`. Hidden tools return `None`.
+    pub(super) fn find_for_caller(
+        &self,
+        name: &str,
+        caller: &CallerContext,
+        admin_read_only: bool,
+        player_tools: shared::model::McpPlayerTools,
+        app_state: &crate::api::model::AppState,
+    ) -> Option<McpToolRef<'_>> {
+        let tool = self.find(name)?;
+        match caller {
+            CallerContext::Denied => None,
+            CallerContext::NoAuth | CallerContext::WebUser => {
+                if tool.audience() != McpAudience::Admin {
+                    return None;
+                }
+                Some(tool)
+            }
+            CallerContext::ApiUser { .. } => {
+                if caller.allows_tool(&tool, admin_read_only, player_tools, app_state) {
+                    Some(tool)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Context of the caller identified by Bearer token or absence of auth.
+#[derive(Debug, Clone)]
+pub(super) enum CallerContext {
+    NoAuth,
+    WebUser,
+    Denied,
+    ApiUser {
+        claims: shared::model::Claims,
+        user: std::sync::Arc<tuliprox_core::model::ProxyUserCredentials>,
+        target: std::sync::Arc<tuliprox_core::model::ConfigTarget>,
+        effective_permissions: shared::model::PermissionSet,
+    },
+}
+
+impl CallerContext {
+    pub(super) fn is_feature_effective(
+        &self,
+        app_state: &crate::api::model::AppState,
+        feature: PlayerToolFeature,
+    ) -> bool {
+        let Self::ApiUser { user, effective_permissions, .. } = self else {
+            return false;
+        };
+        match feature {
+            PlayerToolFeature::SourceSwitch => user.player_features.source_switch,
+            PlayerToolFeature::Joinable => user.player_features.joinable_streams,
+            PlayerToolFeature::RecordingRead => {
+                crate::api::model::recording::recording_supervisor::recording_enabled(&app_state.app_config)
+                    && effective_permissions.contains(shared::model::Permission::RecordingRead)
+            }
+            PlayerToolFeature::RecordingWrite => {
+                crate::api::model::recording::recording_supervisor::recording_enabled(&app_state.app_config)
+                    && effective_permissions.contains(shared::model::Permission::RecordingCreate)
+            }
+        }
+    }
+
+    pub(super) fn allows_tool(
+        &self,
+        tool: &McpToolRef<'_>,
+        admin_read_only: bool,
+        player_tools: shared::model::McpPlayerTools,
+        app_state: &crate::api::model::AppState,
+    ) -> bool {
+        match self {
+            Self::Denied => false,
+            Self::NoAuth | Self::WebUser => {
+                tool.audience() == McpAudience::Admin && (!admin_read_only || tool.kind() == McpToolKind::Read)
+            }
+            Self::ApiUser { .. } => {
+                if tool.audience() != McpAudience::Player {
+                    return false;
+                }
+                match player_tools {
+                    shared::model::McpPlayerTools::Off => false,
+                    shared::model::McpPlayerTools::Read => {
+                        if tool.kind() != McpToolKind::Read {
+                            return false;
+                        }
+                        tool.feature().is_none_or(|f| self.is_feature_effective(app_state, f))
+                    }
+                    shared::model::McpPlayerTools::Write => {
+                        tool.feature().is_none_or(|f| self.is_feature_effective(app_state, f))
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -306,21 +306,6 @@ impl HlsProvisioningState {
 
 use tuliprox_core::utils::current_time_millis;
 
-fn hls_response(hls_content: String) -> axum::response::Response {
-    match axum::response::Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        .header(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")
-        .body(Body::from(hls_content))
-    {
-        Ok(response) => response,
-        Err(err) => {
-            error!("Failed to build HLS response: {}", sanitize_sensitive_info(err.to_string().as_str()));
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
 pub(crate) fn hls_custom_video_type_configured(app_state: &Arc<AppState>, video_type: CustomVideoStreamType) -> bool {
     if !is_custom_video_stream_enabled(&app_state.app_config) {
         return false;
@@ -442,10 +427,10 @@ async fn hls_custom_video_manifest_response_with_access(
     access: Option<HlsStandaloneCustomAccess>,
 ) -> axum::response::Response {
     if !hls_custom_video_type_configured(app_state, video_type) {
-        return fallback_status.into_response();
+        return super::fallback_status_response(fallback_status, video_type);
     }
     let Some(server_info) = app_state.app_config.get_user_server_info(user) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return super::fallback_status_response(StatusCode::SERVICE_UNAVAILABLE, video_type);
     };
 
     let base_url = server_info.get_base_url();
@@ -453,18 +438,18 @@ async fn hls_custom_video_manifest_response_with_access(
         build_hls_panel_provisioning_manifest_body(|index| hls_panel_provisioning_segment_url(&base_url, user, index))
     } else {
         let Some(reason) = HlsRuntimeCustomTailReason::from_video_type(video_type) else {
-            return fallback_status.into_response();
+            return super::fallback_status_response(fallback_status, video_type);
         };
         let access = access.unwrap_or_else(|| HlsStandaloneCustomAccess::for_user(user.username.clone()));
         let Ok(plan) =
             build_hls_standalone_custom_plan(&app_state.hls_ctx(), &base_url, access, reason, current_time_millis())
                 .await
         else {
-            return fallback_status.into_response();
+            return super::fallback_status_response(fallback_status, video_type);
         };
         plan.manifest_body.to_string()
     };
-    hls_response(manifest)
+    super::fallback_manifest_response(manifest, video_type)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -500,7 +485,7 @@ pub(crate) async fn try_hls_panel_provisioning_manifest_response(
             // A ready provisioning job only means that credentials were persisted/probed.
             // Stream handoff must happen in a route that can reserve a runtime origin account first.
             if !hls_custom_video_type_configured(app_state, CustomVideoStreamType::Provisioning) {
-                return Some(fallback_status.into_response());
+                return Some(super::fallback_status_response(fallback_status, CustomVideoStreamType::Provisioning));
             }
             let server_path = server_path
                 .map(str::to_string)

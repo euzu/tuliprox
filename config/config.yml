@@ -110,10 +110,10 @@ video:
       cleanup_interval_secs: 3600
       safety_bytes: 1073741824
     quota:
-      default_private_bytes: 53687091200
-      shared_bytes: 536870912000
-      per_user_bytes:
-        "web:alice": 107374182400
+      default_private: 50GB
+      shared: 500GB
+      per_user:
+        "web:alice": 100GB
     notifications:
       outbox_buffer: 1024
       max_attempts: 6

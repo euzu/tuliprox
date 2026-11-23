@@ -14,7 +14,10 @@
 pub use shared::model::RecordingTaskState;
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{atomic::AtomicU64, Arc, Mutex as StdMutex},
+    sync::{
+        atomic::{AtomicU32, AtomicU64},
+        Arc, Mutex as StdMutex,
+    },
 };
 use tokio::sync::{Mutex, Notify, RwLock};
 use tuliprox_repository::recording_repository::RecordingRepository;
@@ -28,6 +31,10 @@ fn poisoned_repository() -> std::io::Error {
 }
 
 const RECORDING_WINDOW_EXPIRED_ERR: &str = "Recording window already expired";
+
+pub const RECORDING_SOURCE_RECORDING_FAILED: &str = "recording_source_recording_failed";
+
+pub const RECORDING_SOURCE_GAP: &str = "recording_source_gap";
 
 const RECORDING_INTERRUPTED_ERR: &str = "Recording was interrupted by a restart and cannot be resumed";
 
@@ -75,6 +82,9 @@ pub struct RecordingQueue {
     /// In-memory mirror of the persisted queue revision. Incremented
     /// once per committed mutation.
     pub revision: Arc<AtomicU64>,
+    /// Next recording VOD id to hand out. Mirrors the persisted counter; only a
+    /// queue mutation moves it forward.
+    pub(crate) vod_id_counter: Arc<AtomicU32>,
     mutation_guard: Arc<Mutex<()>>,
 }
 
@@ -93,7 +103,7 @@ mod promotion;
 mod task;
 mod waiters;
 mod workers;
-pub use control::RecordingControl;
+pub use control::{task_retains_media, CancelledEnclosingAction, RecordingControl};
 pub use error::{PersistedError, QueueMutationError};
 pub use mutation::{mutate, mutate_optional, mutate_prepared, mutate_then, mutate_with_idempotency};
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
@@ -101,7 +111,7 @@ pub use promotion::{
     attach_to_completed, media_held_by_another, media_is_still_referenced, promote_from_queue, promotion_decision,
     PromotionDecision,
 };
-pub use task::{PersistedRecordingQueue, RecordingTask};
+pub use task::{complete_clip, PersistedRecordingQueue, RecordingTask, RecordingVodEntry};
 use waiters::RecordingWaiters;
 pub use waiters::{RecordingWaitOutcome, RecordingWaiterSnapshot};
 pub use workers::RecordingWorkerState;

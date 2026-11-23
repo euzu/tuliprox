@@ -330,7 +330,7 @@ async fn reservation_diagnostics_distinguish_real_capacity_and_io_conflicts() {
             request.session.write().await.origin_account_binding = Some(HlsOriginAccountBinding::rebound(
                 old.input_name,
                 old.account_name,
-                old.session_owner,
+                "hls-cache:foreign".to_string(),
                 old.generation + 1,
                 101,
             ));

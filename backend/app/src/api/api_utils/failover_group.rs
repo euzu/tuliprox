@@ -6,19 +6,22 @@ use crate::{
     api::model::{AppState, BoxedProviderStream, ProviderStreamCustomReason, StreamDetails, StreamError},
     auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
+    repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},
 };
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use futures::StreamExt;
 use shared::model::{
-    FailoverGroupPlayback, FailoverGroupPolicy, FailoverGroupStartConfig, PlaylistItemType, StreamChannel,
-    UserConnectionPermission, VirtualId,
+    FailoverGroupPlayback, FailoverGroupPolicy, FailoverGroupStartConfig, M3uPlaylistItem, PlaylistItemType,
+    StreamChannel, UserConnectionPermission, VirtualId, XtreamCluster, XtreamPlaylistItem,
 };
-use std::{collections::VecDeque, future::Future, net::SocketAddr, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::VecDeque, future::Future, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::Notify;
+use tuliprox_core::model::AppConfig;
 use tuliprox_repository::{
     failover_group_repository::{FailoverGroupRecord, GroupMember},
     target_stream_item::ResolvedStreamTarget,
+    PlaylistStorageState,
 };
 pub(crate) use tuliprox_session::failover_group::{member_key, CircuitAdmission, CircuitView, SelectionMode};
 use tuliprox_session::{
@@ -954,4 +957,67 @@ pub(crate) async fn open_group_member(
     details.stream = Some(provider_stream);
     record_member_success(&app_state.member_health, &member, half_open);
     Ok(OpenedGroupMember { index, tier, member, input, url, channel, details, payload })
+}
+
+/// Returns the playlist item that the content filter must judge for the given stream target.
+///
+/// When the target is a failover group member, the filter judges the playlist entry of the
+/// parent group (`group.group_vid`) rather than the synthesized member item. If that entry cannot
+/// be loaded, returns `None` so the caller can reject the request identically to a filtered item.
+/// For group and single-item targets, returns the requested item unmodified.
+pub(crate) async fn content_filter_item_for_resolved_target<'a, T, F, Fut>(
+    resolved_target: &ResolvedStreamTarget,
+    requested_item: &'a T,
+    load_group_entry: F,
+) -> Option<Cow<'a, T>>
+where
+    T: Clone,
+    F: FnOnce(u32) -> Fut,
+    Fut: Future<Output = Result<T, std::io::Error>>,
+{
+    match resolved_target {
+        ResolvedStreamTarget::Member { group, .. } => match load_group_entry(group.group_vid.get()).await {
+            Ok(group_item) => Some(Cow::Owned(group_item)),
+            Err(_) => None,
+        },
+        ResolvedStreamTarget::Group(_) | ResolvedStreamTarget::Item => Some(Cow::Borrowed(requested_item)),
+    }
+}
+
+pub(crate) async fn content_filter_item_for_xtream<'a>(
+    resolved_target: &ResolvedStreamTarget,
+    requested_item: &'a XtreamPlaylistItem,
+    app_config: &Arc<AppConfig>,
+    playlists: &PlaylistStorageState,
+    target: &ConfigTarget,
+    cluster: Option<XtreamCluster>,
+) -> Option<Cow<'a, XtreamPlaylistItem>> {
+    content_filter_item_for_resolved_target(resolved_target, requested_item, |group_vid| {
+        xtream_get_item_for_stream_id(group_vid, app_config, playlists, target, cluster)
+    })
+    .await
+}
+
+pub(crate) async fn content_filter_item_for_m3u<'a>(
+    resolved_target: &ResolvedStreamTarget,
+    requested_item: &'a M3uPlaylistItem,
+    app_config: &Arc<AppConfig>,
+    playlists: &PlaylistStorageState,
+    target: &ConfigTarget,
+) -> Option<Cow<'a, M3uPlaylistItem>> {
+    content_filter_item_for_resolved_target(resolved_target, requested_item, |group_vid| {
+        m3u_get_item_for_stream_id(group_vid, app_config.as_ref(), playlists, target)
+    })
+    .await
+}
+
+pub(crate) async fn load_group_playlist_item(
+    app_config: &Arc<AppConfig>,
+    playlists: &PlaylistStorageState,
+    target: &ConfigTarget,
+    group_vid: u32,
+) -> Option<shared::model::PlaylistItem> {
+    tuliprox_repository::load_target_playlist_item(group_vid, app_config, playlists, target, None)
+        .await
+        .map(|i| i.to_playlist_item())
 }

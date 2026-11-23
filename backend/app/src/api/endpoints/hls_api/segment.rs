@@ -36,7 +36,10 @@ pub(super) use access::{
     touch_pending_manifest_follow_up_window, validate_hls_proxy_access_context, validate_hls_proxy_access_request,
     HlsResourceAccess,
 };
-pub(in crate::api) use entry::{build_virtual_hls_entry_path, handle_hls_stream_request};
+pub(in crate::api) use entry::{
+    build_virtual_hls_entry_path, handle_hls_stream_request, manual_switch_legacy_hls_group_session,
+    LegacySwitchOutcome,
+};
 pub(super) use entry::{get_stream_channel, HlsCacheManifestOrigin, HlsCacheOriginResolution};
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub(super) use fallback::{

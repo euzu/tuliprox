@@ -7,7 +7,7 @@
 //! reads it from this module.
 
 use futures::StreamExt;
-use shared::model::{TargetType, VirtualId, XtreamCluster};
+use shared::model::{PlaylistEntry, TargetType, VirtualId, XtreamCluster};
 use std::sync::Arc;
 use tuliprox_core::model::{AppConfig, ConfigInput, ConfigTarget, SourcesConfig};
 use tuliprox_repository::{iter_raw_m3u_target_playlist, iter_raw_xtream_target_playlist};
@@ -67,13 +67,42 @@ pub async fn resolve_live_group(
     input_name: &str,
     virtual_id: &str,
 ) -> Option<String> {
+    find_live_item_field(app_config, target_name, input_name, virtual_id, |item| non_blank_group(&item.get_group()))
+        .await
+}
+
+/// Provider stream id of a live channel in the target playlist.
+///
+/// Reads the persisted target playlist to resolve the provider-side stream
+/// identity when the caller has not supplied it up front.
+pub async fn resolve_live_provider_id(
+    app_config: &AppConfig,
+    target_name: &str,
+    input_name: &str,
+    virtual_id: &str,
+) -> Option<String> {
+    find_live_item_field(app_config, target_name, input_name, virtual_id, |item| {
+        item.get_input_stream_id().map(|s| s.to_string())
+    })
+    .await
+}
+
+/// One pass over the live items of the target playlist (Xtream output first, then M3U): the field `accessor`
+/// extracts from the item with `virtual_id`.
+async fn find_live_item_field(
+    app_config: &AppConfig,
+    target_name: &str,
+    input_name: &str,
+    virtual_id: &str,
+    accessor: impl Fn(&dyn PlaylistEntry) -> Option<String>,
+) -> Option<String> {
     let wanted = VirtualId::new(virtual_id.parse::<u32>().ok()?);
     let target = resolve_recording_target(app_config, target_name, input_name)?;
     if target.has_output(TargetType::Xtream) {
         if let Some(mut items) = iter_raw_xtream_target_playlist(app_config, &target, XtreamCluster::Live).await {
             while let Some(entry) = items.next().await {
                 match entry {
-                    Ok(item) if item.virtual_id == wanted => return non_blank_group(&item.group),
+                    Ok(item) if item.virtual_id == wanted => return accessor(&item),
                     _ => {}
                 }
             }
@@ -83,7 +112,7 @@ pub async fn resolve_live_group(
         if let Some(mut items) = iter_raw_m3u_target_playlist(app_config, &target, Some(XtreamCluster::Live)).await {
             while let Some(entry) = items.next().await {
                 match entry {
-                    Ok(item) if item.virtual_id == wanted => return non_blank_group(&item.group),
+                    Ok(item) if item.virtual_id == wanted => return accessor(&item),
                     _ => {}
                 }
             }

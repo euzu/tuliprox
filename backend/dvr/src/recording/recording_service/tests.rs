@@ -20,6 +20,8 @@ fn source(target_name: &str, virtual_id: &str, input_name: &str) -> RecordingSou
         virtual_id: virtual_id.to_string(),
         cluster: XtreamCluster::Live,
         input_name: input_name.to_string(),
+        provider_id: None,
+        is_group: false,
     }
 }
 
@@ -51,6 +53,7 @@ fn persisted_media(uuid: &str, owner: &str, visibility: RecordingVisibility, url
         media_identity: String::new(),
         partition: crate::recording::recording_queue::RecordingPartition::default(),
         uuid: uuid.to_string(),
+        vod_id: 0,
         kind: RecordingKind::Vod,
         file_dir: std::path::PathBuf::from("/tmp"),
         file_path: std::path::PathBuf::from(format!("/tmp/{uuid}.mp4")),
@@ -67,6 +70,8 @@ fn persisted_media(uuid: &str, owner: &str, visibility: RecordingVisibility, url
         retry_attempts: 0,
         next_retry_at: None,
         recording: meta,
+        clip: None,
+        cancelled_by_owner: false,
     }
 }
 
@@ -90,6 +95,7 @@ fn persisted_rule_recording(uuid: &str, rule_id: Option<&str>, start_at: i64) ->
         media_identity: String::new(),
         partition: crate::recording::recording_queue::RecordingPartition::default(),
         uuid: uuid.to_string(),
+        vod_id: 0,
         file_dir: std::path::PathBuf::from("/tmp"),
         file_path: std::path::PathBuf::from(format!("/tmp/{uuid}.ts")),
         filename: format!("{uuid}.ts"),
@@ -106,6 +112,8 @@ fn persisted_rule_recording(uuid: &str, rule_id: Option<&str>, start_at: i64) ->
         retry_attempts: 0,
         next_retry_at: None,
         recording: meta,
+        clip: None,
+        cancelled_by_owner: false,
     }
 }
 
@@ -199,6 +207,33 @@ async fn committed_records(queue: &RecordingQueue) -> Vec<PersistedRecordingTask
     .expect("join")
     .expect("load")
     .tasks
+}
+
+async fn committed_materializations(
+    queue: &RecordingQueue,
+) -> Vec<tuliprox_repository::recording_repository::PersistedMaterialization> {
+    let repository = queue.repository.clone().expect("queue is repository backed");
+    tokio::task::spawn_blocking(move || {
+        let mut guard = repository.lock().expect("repository lock");
+        guard.materializations()
+    })
+    .await
+    .expect("join")
+    .expect("materializations")
+}
+
+fn dave_claims() -> shared::model::Claims {
+    shared::model::Claims {
+        username: "dave".to_string(),
+        iss: "tuliprox".to_string(),
+        iat: 0,
+        exp: 0,
+        roles: shared::model::RoleSet::new(),
+        permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
+        pwd_version: 0,
+        subject_id: Some(UserId::from("web:dave")),
+        permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+    }
 }
 
 fn test_app_config() -> Arc<AppConfig> {
@@ -340,6 +375,8 @@ fn media_input() -> CreateMediaRecordingInput {
             virtual_id: "77".to_string(),
             cluster: XtreamCluster::Video,
             input_name: "input-a".to_string(),
+            provider_id: None,
+            is_group: false,
         },
         title: "The Film".to_string(),
         extension: "mp4".to_string(),
@@ -385,6 +422,8 @@ fn disk_test_input() -> CreateRecordingInput {
             virtual_id: "42".to_string(),
             cluster: XtreamCluster::Live,
             input_name: "input-a".to_string(),
+            provider_id: None,
+            is_group: false,
         },
         program_title: "title".to_string(),
         program_start: now,
@@ -398,6 +437,30 @@ fn disk_test_input() -> CreateRecordingInput {
         provenance: RecordingProvenance::default(),
         epg: None,
     }
+}
+
+#[test]
+fn windows_overlap_matrix_cases() {
+    let now = 1_000;
+    // 1. live + live overlap: [900..1100] and [1000..1200]
+    assert!(super::create::windows_overlap(Some(900), Some(1100), Some(1000), Some(1200), now));
+    // live + live non-overlap: [800..900] and [1000..1100]
+    assert!(!super::create::windows_overlap(Some(800), Some(900), Some(1000), Some(1100), now));
+
+    // 2. live + VOD: live contains now -> overlaps
+    assert!(super::create::windows_overlap(Some(900), Some(1100), None, None, now));
+    assert!(super::create::windows_overlap(None, None, Some(900), Some(1100), now));
+
+    // 3. future live + running VOD: future live [1100..1200] does not contain now -> no overlap
+    assert!(!super::create::windows_overlap(Some(1100), Some(1200), None, None, now));
+    assert!(!super::create::windows_overlap(None, None, Some(1100), Some(1200), now));
+
+    // past live + running VOD: past live [800..900] does not contain now -> no overlap
+    assert!(!super::create::windows_overlap(Some(800), Some(900), None, None, now));
+    assert!(!super::create::windows_overlap(None, None, Some(800), Some(900), now));
+
+    // 4. VOD + VOD: both windowless -> overlap
+    assert!(super::create::windows_overlap(None, None, None, None, now));
 }
 
 mod admission;

@@ -12,12 +12,13 @@ use crate::{
             AppState,
         },
     },
+    model::{ConfigTarget, ProxyUserCredentials},
     repository::recording_rule_repository::RecordingRuleRepository,
 };
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, patch, post},
     Json, Router,
 };
@@ -70,7 +71,8 @@ fn service_error_status(err: &ServiceError) -> StatusCode {
         | ServiceError::ProvenanceImmutable
         | ServiceError::Duplicate
         | ServiceError::InvalidPath
-        | ServiceError::QuotaExceeded => StatusCode::BAD_REQUEST,
+        | ServiceError::QuotaExceeded
+        | ServiceError::ConcurrencyExceeded => StatusCode::BAD_REQUEST,
         ServiceError::DiskFull => StatusCode::INSUFFICIENT_STORAGE,
         ServiceError::Disabled => StatusCode::NOT_IMPLEMENTED,
         ServiceError::Forbidden | ServiceError::SharedCreationNotAdministrator => StatusCode::FORBIDDEN,
@@ -126,6 +128,17 @@ pub async fn create_recording_request(
     else {
         return service_error_response(&ServiceError::InvalidSource);
     };
+    if let Err(err) = authorize_api_user_source(
+        &app_state,
+        &claims,
+        &source.target_id,
+        resolved_source.virtual_id,
+        Some(source.cluster),
+    )
+    .await
+    {
+        return service_error_response(&err);
+    }
     if source.cluster != XtreamCluster::Live {
         return create_http_recording_task(&app_state, &claims, body, source, resolved_source, idempotency).await;
     }
@@ -139,6 +152,8 @@ pub async fn create_recording_request(
             virtual_id: source.virtual_id,
             cluster: source.cluster,
             input_name: source.input_name,
+            provider_id: resolved_source.provider_id,
+            is_group: resolved_source.is_group,
         },
         program_title: body.program_title,
         program_start,
@@ -191,6 +206,8 @@ async fn create_http_recording_task(
             virtual_id: source.virtual_id,
             cluster: source.cluster,
             input_name: source.input_name,
+            provider_id: resolved.provider_id,
+            is_group: resolved.is_group,
         },
         title: resolved.title,
         extension,
@@ -422,7 +439,7 @@ pub async fn preview_recording_conflicts(
     let mut source = RecordingSourceInput::from(&body.source);
     // EPG rows do not know the input, so the preview resolves the same
     // playlist channel the create request will record.
-    if resolve_recording_source(
+    let Some(resolved_source) = resolve_recording_source(
         &state,
         &body.source.target_name,
         &mut source.virtual_id,
@@ -432,12 +449,20 @@ pub async fn preview_recording_conflicts(
         body.source.channel_name.as_deref(),
     )
     .await
-    .is_none()
-    {
+    else {
         return service_error_response(&ServiceError::InvalidSource);
+    };
+    if let Err(err) =
+        authorize_api_user_source(&state, &claims, &source.target_id, resolved_source.virtual_id, Some(source.cluster))
+            .await
+    {
+        return service_error_response(&err);
     }
+    let mut source_input = source;
+    source_input.provider_id = resolved_source.provider_id;
+    source_input.is_group = resolved_source.is_group;
     let request = crate::api::model::recording_service::ConflictPreviewRequest {
-        source,
+        source: source_input,
         padded_start: body.candidate.padded_start,
         padded_end: body.candidate.padded_end,
         pre_roll_secs: body.candidate.pre_roll_secs,
@@ -500,6 +525,8 @@ impl From<&PreviewSourceDto> for RecordingSourceInput {
             virtual_id: value.virtual_id.clone(),
             cluster: shared::model::XtreamCluster::Live,
             input_name: value.input_name.clone(),
+            provider_id: None,
+            is_group: false,
         }
     }
 }
@@ -651,9 +678,10 @@ fn rule_error_response(err: &crate::api::model::recording_rule_service::RuleServ
         RuleServiceError::Forbidden
         | RuleServiceError::SharedManagementNotAdministrator
         | RuleServiceError::NotOwner => StatusCode::FORBIDDEN,
-        RuleServiceError::InvalidRule | RuleServiceError::InvalidFuture | RuleServiceError::Unsupported { .. } => {
-            StatusCode::BAD_REQUEST
-        }
+        RuleServiceError::InvalidRule
+        | RuleServiceError::InvalidFuture
+        | RuleServiceError::LimitExceeded
+        | RuleServiceError::Unsupported { .. } => StatusCode::BAD_REQUEST,
         RuleServiceError::UnknownRule => StatusCode::NOT_FOUND,
         RuleServiceError::PersistenceFailed | RuleServiceError::PartialOperation { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
@@ -688,7 +716,7 @@ async fn resolve_recording_source(
     } else {
         None
     };
-    if let Some(epg_id) = epg_id {
+    let mut resolved = if let Some(epg_id) = epg_id {
         if cluster != XtreamCluster::Live {
             return None;
         }
@@ -701,18 +729,291 @@ async fn resolve_recording_source(
         )
         .await?;
         // The EPG lookup already checked the input's scope.
-        return accept_resolved_recording_source(virtual_id, input_name, &resolved).then_some(resolved);
+        accept_resolved_recording_source(virtual_id, input_name, &resolved).then_some(resolved)?
+    } else {
+        let virtual_id_value = recording_virtual_id(virtual_id)?;
+        let resolved = crate::api::endpoints::v1_api_playlist::resolve_target_recording_source(
+            &app_state.app_config,
+            target_name,
+            input_name,
+            virtual_id_value,
+            cluster,
+        )
+        .await?;
+        accept_resolved_recording_source(virtual_id, input_name, &resolved).then_some(resolved)?
+    };
+
+    if let Some(target) = app_state.app_config.sources.load().get_target_by_name(target_name) {
+        let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
+            &app_state.app_config,
+            &app_state.playlists,
+            target,
+            shared::model::VirtualId::new(resolved.virtual_id),
+        )
+        .await;
+        if matches!(classified, tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(_)) {
+            resolved.is_group = true;
+            resolved.provider_id = None;
+        }
     }
-    let virtual_id_value = recording_virtual_id(virtual_id)?;
-    let resolved = crate::api::endpoints::v1_api_playlist::resolve_target_recording_source(
+    Some(resolved)
+}
+
+pub(crate) async fn load_target_playlist_item_for_evaluation(
+    app_state: &AppState,
+    target: &tuliprox_core::model::ConfigTarget,
+    virtual_id: u32,
+    cluster: Option<XtreamCluster>,
+) -> Option<(shared::model::PlaylistItemType, shared::model::PlaylistItem)> {
+    let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
         &app_state.app_config,
-        target_name,
-        input_name,
-        virtual_id_value,
-        cluster,
+        &app_state.playlists,
+        target,
+        shared::model::VirtualId::new(virtual_id),
     )
-    .await?;
-    accept_resolved_recording_source(virtual_id, input_name, &resolved).then_some(resolved)
+    .await;
+
+    match classified {
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { ref group, index } => {
+            let member_type = group.members[index].item_type;
+            let group_item = crate::api::api_utils::failover_group::load_group_playlist_item(
+                &app_state.app_config,
+                &app_state.playlists,
+                target,
+                group.group_vid.get(),
+            )
+            .await?;
+            Some((member_type, group_item))
+        }
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(_) => {
+            let group_item = crate::api::api_utils::failover_group::load_group_playlist_item(
+                &app_state.app_config,
+                &app_state.playlists,
+                target,
+                virtual_id,
+            )
+            .await?;
+            let item_type = group_item.header.item_type;
+            Some((item_type, group_item))
+        }
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => {
+            let item = tuliprox_repository::load_target_playlist_item(
+                virtual_id,
+                &app_state.app_config,
+                &app_state.playlists,
+                target,
+                cluster,
+            )
+            .await?;
+            Some((item.item_type(), item.to_playlist_item()))
+        }
+    }
+}
+
+pub async fn evaluate_api_user_target_source(
+    app_state: &AppState,
+    user: &ProxyUserCredentials,
+    target: &ConfigTarget,
+    target_id: &str,
+    virtual_id: u32,
+    cluster: Option<XtreamCluster>,
+) -> bool {
+    resolve_api_user_source_input_name(app_state, user, target, target_id, virtual_id, cluster).await.is_some()
+}
+
+pub async fn resolve_api_user_source_input_name(
+    app_state: &AppState,
+    user: &ProxyUserCredentials,
+    target: &ConfigTarget,
+    target_id: &str,
+    virtual_id: u32,
+    cluster: Option<XtreamCluster>,
+) -> Option<String> {
+    if user.permission_denied(&app_state.app_config) {
+        return None;
+    }
+    if target.name != target_id && target_id.parse::<u16>() != Ok(target.id) {
+        return None;
+    }
+    if user.t_filter.is_none() {
+        if let Some(cluster) = cluster {
+            if !user.allows_cluster(cluster) {
+                return None;
+            }
+        }
+    }
+    let (item_type, judge_item) =
+        load_target_playlist_item_for_evaluation(app_state, target, virtual_id, cluster).await?;
+    if !user.allows_item_type(item_type) {
+        return None;
+    }
+    if !crate::api::endpoints::hls_api::user_allows_playlist_filter(user, &judge_item) {
+        return None;
+    }
+    Some(judge_item.header.input_name.to_string())
+}
+
+pub async fn authorize_api_user_source(
+    app_state: &AppState,
+    claims: &shared::model::Claims,
+    target_id: &str,
+    virtual_id: u32,
+    cluster: Option<XtreamCluster>,
+) -> Result<Option<String>, ServiceError> {
+    let Some(subject_id) = claims.subject_id.as_ref() else {
+        return Ok(None);
+    };
+    if !subject_id.is_api() {
+        return Ok(None);
+    }
+
+    let Some((user, target)) = app_state.app_config.get_target_for_username(&claims.username) else {
+        return Err(ServiceError::InvalidSource);
+    };
+
+    resolve_api_user_source_input_name(app_state, &user, &target, target_id, virtual_id, cluster)
+        .await
+        .ok_or(ServiceError::InvalidSource)
+        .map(Some)
+}
+
+#[cfg(test)]
+pub async fn check_recording_visibility(
+    app_state: &AppState,
+    meta: &shared::model::recording::RecordingMetadata,
+    claims: &shared::model::Claims,
+    subject_id: &UserId,
+) -> bool {
+    check_recording_visibility_with_context(app_state, meta, claims, subject_id, None).await
+}
+
+pub async fn check_recording_visibility_with_context(
+    app_state: &AppState,
+    meta: &shared::model::recording::RecordingMetadata,
+    claims: &shared::model::Claims,
+    subject_id: &UserId,
+    visibility: Option<&AppRecordingVisibility<'_>>,
+) -> bool {
+    // The generic owner/visibility rule first; API users additionally see shared recordings only from their own
+    // target and inside their content filter.
+    if !crate::api::model::recording::recording_ws::task_visible_to(meta, claims, subject_id) {
+        return false;
+    }
+    if !subject_id.is_api() || meta.owner_id() == subject_id {
+        return true;
+    }
+    let user_target = if let Some(vis) = visibility {
+        vis.get_api_user_target(&claims.username)
+    } else {
+        app_state.app_config.get_target_for_username(&claims.username)
+    };
+    let Some((user, target)) = user_target else {
+        return false;
+    };
+    let Ok(vid) = meta.source.virtual_id.parse::<u32>() else {
+        return false;
+    };
+    // The item cache is keyed by (vid, cluster) only, so reject other targets before consulting it.
+    let source_target_id = meta.source.target_id.as_str();
+    if !app_state.app_config.sources.load().target_ref_is(&target, source_target_id) {
+        return false;
+    }
+    let cluster = Some(meta.source.cluster);
+    if let Some(vis) = visibility {
+        vis.evaluate_item_visibility(&user, &target, source_target_id, vid, cluster).await
+    } else {
+        evaluate_api_user_target_source(app_state, &user, &target, source_target_id, vid, cluster).await
+    }
+}
+
+type CachedApiUserTarget = Option<(String, Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)>)>;
+type ItemVisibilityCache = std::collections::HashMap<(u32, Option<XtreamCluster>), bool>;
+
+pub struct AppRecordingVisibility<'a> {
+    pub app_state: &'a AppState,
+    cached_api_user_target: std::sync::Mutex<CachedApiUserTarget>,
+    item_cache: std::sync::Mutex<ItemVisibilityCache>,
+}
+
+impl<'a> AppRecordingVisibility<'a> {
+    #[must_use]
+    pub fn new(app_state: &'a AppState) -> Self {
+        Self {
+            app_state,
+            cached_api_user_target: std::sync::Mutex::new(None),
+            item_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn get_api_user_target(&self, username: &str) -> Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)> {
+        let mut guard = self.cached_api_user_target.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((cached_username, cached)) = guard.as_ref() {
+            if cached_username == username {
+                return cached.clone();
+            }
+        }
+        let resolved = self.app_state.app_config.get_target_for_username(username);
+        *guard = Some((username.to_string(), resolved.clone()));
+        resolved
+    }
+
+    fn get_cached_item(&self, key: (u32, Option<XtreamCluster>)) -> Option<bool> {
+        self.item_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).copied()
+    }
+
+    fn insert_cached_item(&self, key: (u32, Option<XtreamCluster>), allowed: bool) {
+        self.item_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, allowed);
+    }
+
+    async fn evaluate_item_visibility(
+        &self,
+        user: &ProxyUserCredentials,
+        target: &ConfigTarget,
+        source_target_id: &str,
+        vid: u32,
+        cluster: Option<XtreamCluster>,
+    ) -> bool {
+        if let Some(cached) = self.get_cached_item((vid, cluster)) {
+            return cached;
+        }
+        let allowed =
+            evaluate_api_user_target_source(self.app_state, user, target, source_target_id, vid, cluster).await;
+        self.insert_cached_item((vid, cluster), allowed);
+        allowed
+    }
+}
+
+impl tuliprox_dvr::recording::recording_catalog_access::RecordingVisibilityPort for AppRecordingVisibility<'_> {
+    fn is_visible<'b>(
+        &'b self,
+        meta: &'b shared::model::recording::RecordingMetadata,
+        claims: &'b shared::model::Claims,
+        subject_id: &'b UserId,
+    ) -> futures::future::BoxFuture<'b, bool> {
+        Box::pin(async move {
+            check_recording_visibility_with_context(self.app_state, meta, claims, subject_id, Some(self)).await
+        })
+    }
+}
+
+pub(crate) async fn recording_snapshot_response(
+    app_state: &AppState,
+    claims: &shared::model::Claims,
+) -> shared::model::ProtocolMessage {
+    let visibility = AppRecordingVisibility::new(app_state);
+    let snapshot = crate::api::model::recording::recording_ws::recording_snapshot(
+        &app_state.recording.queue,
+        claims,
+        &app_state.app_config,
+        Some(&visibility),
+    )
+    .await;
+    shared::model::ProtocolMessage::RecordingSnapshotResponse {
+        revision: snapshot.revision,
+        available: snapshot.available,
+        quota: snapshot.quota,
+        tasks: snapshot.tasks,
+    }
 }
 
 /// GET /api/v1/recording/rules
@@ -731,14 +1032,53 @@ pub async fn list_recording_rules(
     };
     let admin = is_admin(&claims);
     let revision = app_state.recording.queue.revision.load(std::sync::atomic::Ordering::SeqCst);
-    Json(
-        rules
+
+    let mut visible_rules = Vec::new();
+    if admin {
+        visible_rules = rules;
+    } else if !subject_id.is_api() {
+        visible_rules = rules
             .into_iter()
-            .filter(|rule| rule.visibility == RuleVisibility::Shared || admin || &rule.owner_id == subject_id)
-            .map(|rule| RecordingRuleResponse { revision, rule })
-            .collect::<Vec<_>>(),
-    )
-    .into_response()
+            .filter(|rule| rule.visibility == RuleVisibility::Shared || &rule.owner_id == subject_id)
+            .collect();
+    } else {
+        let vis = AppRecordingVisibility::new(&app_state);
+        let user_target = vis.get_api_user_target(&claims.username);
+        for rule in rules {
+            if &rule.owner_id == subject_id {
+                visible_rules.push(rule);
+            } else if rule.visibility == RuleVisibility::Shared {
+                let Some((user, target)) = user_target.as_ref() else {
+                    continue;
+                };
+                let source_target_id = rule.source.target_id.as_str();
+                if !app_state.app_config.sources.load().target_ref_is(target, source_target_id) {
+                    continue;
+                }
+                let Ok(vid) = rule.source.virtual_id.parse::<u32>() else {
+                    continue;
+                };
+                if vis.evaluate_item_visibility(user, target, source_target_id, vid, Some(XtreamCluster::Live)).await {
+                    visible_rules.push(rule);
+                }
+            }
+        }
+    }
+
+    if claims.is_admin() {
+        Json(visible_rules.into_iter().map(|rule| RecordingRuleResponse { revision, rule }).collect::<Vec<_>>())
+            .into_response()
+    } else {
+        let caller_sub = claims.subject_id.as_ref();
+        let user_rules: Vec<shared::model::recording_rule::UserRecordingRuleDto> = visible_rules
+            .into_iter()
+            .map(|rule| {
+                let is_own = caller_sub.is_some_and(|sub| sub == &rule.owner_id);
+                shared::model::recording_rule::UserRecordingRuleDto::from_rule(&rule, revision, is_own)
+            })
+            .collect();
+        Json(user_rules).into_response()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -750,34 +1090,117 @@ pub struct RecordingRuleResponse {
     pub rule: RecordingRule,
 }
 
+async fn resolve_rule_source_and_apply(
+    app_state: &Arc<AppState>,
+    source: &mut RuleSource,
+    channel_id: Option<&str>,
+) -> Result<(), RuleServiceError> {
+    let resolved = resolve_recording_source(
+        app_state,
+        &source.target_id,
+        &mut source.virtual_id,
+        &mut source.input_name,
+        XtreamCluster::Live,
+        channel_id,
+        None,
+    )
+    .await
+    .ok_or(RuleServiceError::InvalidRule)?;
+    source.is_group = resolved.is_group;
+    source.provider_id = resolved.provider_id;
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+async fn resolve_and_authorize_api_user_rule_source(
+    app_state: &Arc<AppState>,
+    claims: &shared::model::Claims,
+    rule: &mut RecordingRule,
+) -> Result<(), Response> {
+    rule.source.input_name.clear();
+    if resolve_rule_source_and_apply(app_state, &mut rule.source, rule.channel_id.as_deref()).await.is_err() {
+        return Err(service_error_response(&ServiceError::InvalidSource));
+    }
+    let vid =
+        rule.source.virtual_id.parse::<u32>().map_err(|_| service_error_response(&ServiceError::InvalidSource))?;
+    match authorize_api_user_source(app_state, claims, &rule.source.target_id, vid, Some(XtreamCluster::Live)).await {
+        Ok(Some(input_name)) => {
+            rule.source.input_name = input_name;
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(err) => Err(service_error_response(&err)),
+    }
+}
+
 /// POST /api/v1/recording/rules
 pub async fn create_recording_rule(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
-    Json(mut body): Json<CreateRecordingRuleBody>,
+    Json(body): Json<CreateRecordingRuleBody>,
 ) -> impl IntoResponse {
     let Some(owner_id) = claims.subject_id.clone() else {
         return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
     };
-    if resolve_recording_source(
-        &app_state,
-        &body.target_id,
-        &mut body.virtual_id,
-        &mut body.input_name,
-        XtreamCluster::Live,
-        body.channel_id.as_deref(),
-        None,
-    )
-    .await
-    .is_none()
-    {
-        return rule_error_response(&RuleServiceError::InvalidRule);
+    if !can_write_rules(&claims) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
+
+    let is_api = owner_id.is_api();
+    let (api_user_opt, api_target_opt) = if is_api {
+        let Some((u, t)) = app_state.app_config.get_target_for_username(&claims.username) else {
+            return service_error_response(&ServiceError::InvalidSource);
+        };
+        (Some(u), Some(t))
+    } else {
+        (None, None)
+    };
+
+    let target_id = match body.target_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(tid) => {
+            if let Some(target) = api_target_opt.as_ref() {
+                if tid != target.name && tid != target.id.to_string() {
+                    return service_error_response(&ServiceError::InvalidSource);
+                }
+                target.name.clone()
+            } else {
+                let sources = app_state.app_config.sources.load();
+                let found_target = sources
+                    .get_target_by_name(tid)
+                    .cloned()
+                    .or_else(|| tid.parse::<u16>().ok().and_then(|id| sources.get_target_by_id(id)));
+                if let Some(target) = found_target {
+                    target.name.clone()
+                } else {
+                    return service_error_response(&ServiceError::InvalidSource);
+                }
+            }
+        }
+        None => {
+            if let Some(target) = api_target_opt.as_ref() {
+                target.name.clone()
+            } else {
+                return rule_error_response(&RuleServiceError::InvalidRule);
+            }
+        }
+    };
+
     let now = chrono::Utc::now().timestamp();
-    let rule = recording_rule_from_create(owner_id, body, now);
+    let mut rule = recording_rule_from_create(owner_id, body, target_id, now);
+    if is_api {
+        if let Err(resp) = resolve_and_authorize_api_user_rule_source(&app_state, &claims, &mut rule).await {
+            return resp;
+        }
+    } else if let Err(err) =
+        resolve_rule_source_and_apply(&app_state, &mut rule.source, rule.channel_id.as_deref()).await
+    {
+        return rule_error_response(&err);
+    }
+
     if let Err(err) = crate::api::model::recording_rule_service::validate_rule(&rule).and_then(|()| {
         crate::api::model::recording_rule_service::authorize_rule_action(
             can_write_rules(&claims),
+            claims.permissions.contains(Permission::RecordingShare),
             claims.is_admin(),
             &rule.owner_id,
             &rule,
@@ -785,23 +1208,34 @@ pub async fn create_recording_rule(
     }) {
         return rule_error_response(&err);
     }
-    match recording_rule_repo(&app_state).create(rule).await {
+
+    let max_rules = api_user_opt.as_ref().map(|u| u.player_features.max_recording_rules);
+    match recording_rule_repo(&app_state).create_with_owner_limit(rule, max_rules).await {
         Ok(rule) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
-            Json(RecordingRuleResponse {
-                revision: app_state.recording.queue.revision.load(std::sync::atomic::Ordering::SeqCst),
-                rule,
-            })
-            .into_response()
+            let revision = app_state.recording.queue.revision.load(std::sync::atomic::Ordering::SeqCst);
+            if claims.is_admin() {
+                Json(RecordingRuleResponse { revision, rule }).into_response()
+            } else {
+                Json(shared::model::recording_rule::UserRecordingRuleDto::from_rule(&rule, revision, true))
+                    .into_response()
+            }
         }
-        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed"),
+        Err(tuliprox_repository::recording_rule_repository::CreateRuleError::LimitExceeded) => {
+            rule_error_response(&RuleServiceError::LimitExceeded)
+        }
+        Err(tuliprox_repository::recording_rule_repository::CreateRuleError::Io(_)) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed")
+        }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateRecordingRuleBody {
-    pub target_id: String,
+    #[serde(default)]
+    pub target_id: Option<String>,
     pub virtual_id: String,
+    #[serde(default)]
     pub input_name: String,
     pub body: RuleBody,
     #[serde(default)]
@@ -814,13 +1248,18 @@ pub struct CreateRecordingRuleBody {
     pub post_roll_secs: u64,
 }
 
-fn recording_rule_from_create(owner_id: UserId, body: CreateRecordingRuleBody, now: i64) -> RecordingRule {
+fn recording_rule_from_create(
+    owner_id: UserId,
+    body: CreateRecordingRuleBody,
+    target_id: String,
+    now: i64,
+) -> RecordingRule {
     RecordingRule {
         id: format!("rule-{}-{}", now, shared::utils::generate_random_string(8)),
         owner_id,
         visibility: body.visibility.unwrap_or_default(),
         enabled: true,
-        source: RuleSource::new(body.target_id, body.virtual_id, body.input_name),
+        source: RuleSource::new(target_id, body.virtual_id, body.input_name),
         channel_id: body.channel_id,
         body: body.body,
         pre_roll_secs: body.pre_roll_secs,
@@ -850,6 +1289,7 @@ pub async fn edit_recording_rule(
         },
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed"),
     };
+    let channel_id_changed = body.channel_id.is_some() || body.clear_channel_id;
     if let Err(err) = authorize_and_apply_recording_rule_edit(&claims, &mut rule, body, chrono::Utc::now().timestamp())
     {
         return match err {
@@ -859,14 +1299,26 @@ pub async fn edit_recording_rule(
             EditRuleError::Rule(err) => rule_error_response(&err),
         };
     }
+    if channel_id_changed {
+        if claims.subject_id.as_ref().is_some_and(shared::model::UserId::is_api) {
+            if let Err(resp) = resolve_and_authorize_api_user_rule_source(&app_state, &claims, &mut rule).await {
+                return resp;
+            }
+        } else {
+            let _ = resolve_rule_source_and_apply(&app_state, &mut rule.source, rule.channel_id.as_deref()).await;
+        }
+    }
     match repo.update(rule).await {
         Ok(Some(rule)) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
-            Json(RecordingRuleResponse {
-                revision: app_state.recording.queue.revision.load(std::sync::atomic::Ordering::SeqCst),
-                rule,
-            })
-            .into_response()
+            let revision = app_state.recording.queue.revision.load(std::sync::atomic::Ordering::SeqCst);
+            if claims.is_admin() {
+                Json(RecordingRuleResponse { revision, rule }).into_response()
+            } else {
+                let is_own = claims.subject_id.as_ref().is_some_and(|sub| sub == &rule.owner_id);
+                Json(shared::model::recording_rule::UserRecordingRuleDto::from_rule(&rule, revision, is_own))
+                    .into_response()
+            }
         }
         Ok(None) => rule_error_response(&crate::api::model::recording_rule_service::RuleServiceError::UnknownRule),
         Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed"),
@@ -906,6 +1358,7 @@ fn authorize_and_apply_recording_rule_edit(
     let subject_id = claims.subject_id.as_ref().ok_or(EditRuleError::MissingSubject)?;
     crate::api::model::recording_rule_service::authorize_rule_action(
         can_write_rules(claims),
+        claims.permissions.contains(Permission::RecordingShare),
         claims.is_admin(),
         subject_id,
         rule,
@@ -915,6 +1368,7 @@ fn authorize_and_apply_recording_rule_edit(
     crate::api::model::recording_rule_service::validate_rule(rule).map_err(EditRuleError::Rule)?;
     crate::api::model::recording_rule_service::authorize_rule_action(
         can_write_rules(claims),
+        claims.permissions.contains(Permission::RecordingShare),
         claims.is_admin(),
         subject_id,
         rule,
@@ -974,6 +1428,9 @@ pub async fn delete_recording_rule(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
+    if claims.subject_id.is_none() {
+        return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
+    }
     let future = match crate::api::model::recording_rule_service::validate_delete(params.future.as_deref()) {
         Ok(future) => future,
         Err(err) => return rule_error_response(&err),
@@ -993,6 +1450,7 @@ pub async fn delete_recording_rule(
     };
     if let Err(err) = crate::api::model::recording_rule_service::authorize_rule_action(
         can_write_rules(&claims),
+        claims.permissions.contains(Permission::RecordingShare),
         claims.is_admin(),
         subject_id,
         &rule,
@@ -1660,6 +2118,8 @@ mod tests {
             series_name: None,
             extension: Some("mp4".to_string()),
             downloadable: true,
+            provider_id: None,
+            is_group: false,
         };
         (body, source, resolved)
     }
@@ -1669,7 +2129,7 @@ mod tests {
             username: user.to_string(),
             subject_id: Some(UserId::from(format!("web:{user}"))),
             permissions,
-            ..edit_claims(None, false)
+            ..edit_claims(None, true)
         }
     }
 
@@ -1821,6 +2281,687 @@ mod tests {
         assert_eq!(rule.visibility, RuleVisibility::Shared);
     }
 
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn api_user_rules_permission_levels_matrix() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "1".to_string(),
+                credentials: vec![
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "user_none".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            recording: Some(shared::model::PlayerRecordingLevel::None),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "user_read".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            recording: Some(shared::model::PlayerRecordingLevel::Read),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "user_private".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            recording: Some(shared::model::PlayerRecordingLevel::Private),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "user_shared".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            recording: Some(shared::model::PlayerRecordingLevel::Shared),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let claims_none = test_api_claims("user_none", shared::model::PermissionSet::new());
+        let claims_read = test_api_claims("user_read", Permission::RecordingRead);
+        let claims_private = test_api_claims(
+            "user_private",
+            Permission::RecordingRead
+                | Permission::RecordingCreate
+                | Permission::RecordingManage
+                | Permission::RecordingDelete,
+        );
+        let claims_shared = test_api_claims(
+            "user_shared",
+            Permission::RecordingRead
+                | Permission::RecordingCreate
+                | Permission::RecordingManage
+                | Permission::RecordingDelete
+                | Permission::RecordingShare,
+        );
+
+        let make_rule_body = |vis: Option<RuleVisibility>| CreateRecordingRuleBody {
+            target_id: None, // defaults to caller target "1"
+            virtual_id: "42".to_string(),
+            input_name: String::new(),
+            channel_id: None,
+            visibility: vis,
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 3,
+                local_start_time: "20:00".to_string(),
+                duration_secs: 3600,
+                timezone: "UTC".to_string(),
+            },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+        };
+
+        // 1. None: list -> 403, create -> 403
+        let res =
+            list_recording_rules(State(Arc::clone(&state)), AuthClaims(claims_none.clone())).await.into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let res = create_recording_rule(
+            State(Arc::clone(&state)),
+            AuthClaims(claims_none.clone()),
+            Json(make_rule_body(Some(RuleVisibility::Private))),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // 2. Read: list -> 200, create -> 403
+        let res =
+            list_recording_rules(State(Arc::clone(&state)), AuthClaims(claims_read.clone())).await.into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = create_recording_rule(
+            State(Arc::clone(&state)),
+            AuthClaims(claims_read.clone()),
+            Json(make_rule_body(Some(RuleVisibility::Private))),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // 3. Private: create private -> 200, create shared -> 403
+        let res = create_recording_rule(
+            State(Arc::clone(&state)),
+            AuthClaims(claims_private.clone()),
+            Json(make_rule_body(Some(RuleVisibility::Shared))),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(json["error"], "recording_shared_not_administrator");
+
+        let res = create_recording_rule(
+            State(Arc::clone(&state)),
+            AuthClaims(claims_private.clone()),
+            Json(make_rule_body(Some(RuleVisibility::Private))),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let priv_rule_id = json["id"].as_str().unwrap().to_string();
+
+        // Private: edit own private rule -> 200
+        let edit_body = EditRecordingRuleBody { pre_roll_secs: Some(120), ..Default::default() };
+        let res = edit_recording_rule(
+            axum::extract::Path(priv_rule_id.clone()),
+            State(Arc::clone(&state)),
+            AuthClaims(claims_private.clone()),
+            Json(edit_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Private: edit own rule to shared -> 403
+        let edit_shared = EditRecordingRuleBody { visibility: Some(RuleVisibility::Shared), ..Default::default() };
+        let res = edit_recording_rule(
+            axum::extract::Path(priv_rule_id.clone()),
+            State(Arc::clone(&state)),
+            AuthClaims(claims_private.clone()),
+            Json(edit_shared),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // Private: delete own rule -> 204
+        let res = delete_recording_rule(
+            axum::extract::Path(priv_rule_id),
+            axum::extract::Query(DeleteRuleParams { future: Some("retain".to_string()) }),
+            State(Arc::clone(&state)),
+            AuthClaims(claims_private.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        // 4. Shared: create shared -> 200, edit -> 200, delete -> 204
+        let res = create_recording_rule(
+            State(Arc::clone(&state)),
+            AuthClaims(claims_shared.clone()),
+            Json(make_rule_body(Some(RuleVisibility::Shared))),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let shared_rule_id = json["id"].as_str().unwrap().to_string();
+
+        let edit_body = EditRecordingRuleBody { pre_roll_secs: Some(60), ..Default::default() };
+        let res = edit_recording_rule(
+            axum::extract::Path(shared_rule_id.clone()),
+            State(Arc::clone(&state)),
+            AuthClaims(claims_shared.clone()),
+            Json(edit_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = delete_recording_rule(
+            axum::extract::Path(shared_rule_id),
+            axum::extract::Query(DeleteRuleParams { future: Some("retain".to_string()) }),
+            State(Arc::clone(&state)),
+            AuthClaims(claims_shared.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn api_user_rules_own_vs_foreign_matrix() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "1".to_string(),
+                credentials: vec![
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "alice".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            recording: Some(shared::model::PlayerRecordingLevel::Private),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "bob".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            recording: Some(shared::model::PlayerRecordingLevel::Private),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let alice_claims = test_api_claims(
+            "alice",
+            Permission::RecordingRead
+                | Permission::RecordingCreate
+                | Permission::RecordingManage
+                | Permission::RecordingDelete,
+        );
+        let bob_claims = test_api_claims(
+            "bob",
+            Permission::RecordingRead
+                | Permission::RecordingCreate
+                | Permission::RecordingManage
+                | Permission::RecordingDelete,
+        );
+        let admin_claims = edit_claims(Some(UserId::builtin_admin()), true);
+
+        let make_body = || CreateRecordingRuleBody {
+            target_id: Some("1".to_string()),
+            virtual_id: "42".to_string(),
+            input_name: String::new(),
+            channel_id: None,
+            visibility: Some(RuleVisibility::Private),
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 1,
+                local_start_time: "18:00".to_string(),
+                duration_secs: 1800,
+                timezone: "UTC".to_string(),
+            },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+        };
+
+        // Bob creates a rule
+        let res = create_recording_rule(State(Arc::clone(&state)), AuthClaims(bob_claims.clone()), Json(make_body()))
+            .await
+            .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let bob_rule_id = json["id"].as_str().unwrap().to_string();
+
+        // Alice tries to edit Bob's rule -> 403 recording_rule_not_owner
+        let edit_body = EditRecordingRuleBody { pre_roll_secs: Some(30), ..Default::default() };
+        let res = edit_recording_rule(
+            axum::extract::Path(bob_rule_id.clone()),
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims.clone()),
+            Json(edit_body.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(json["error"], "recording_rule_not_owner");
+
+        // Alice tries to delete Bob's rule -> 403 recording_rule_not_owner
+        let res = delete_recording_rule(
+            axum::extract::Path(bob_rule_id.clone()),
+            axum::extract::Query(DeleteRuleParams { future: Some("retain".to_string()) }),
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(json["error"], "recording_rule_not_owner");
+
+        // Admin can edit Bob's rule
+        let res = edit_recording_rule(
+            axum::extract::Path(bob_rule_id.clone()),
+            State(Arc::clone(&state)),
+            AuthClaims(admin_claims.clone()),
+            Json(edit_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Admin can delete Bob's rule
+        let res = delete_recording_rule(
+            axum::extract::Path(bob_rule_id),
+            axum::extract::Query(DeleteRuleParams { future: Some("retain".to_string()) }),
+            State(Arc::clone(&state)),
+            AuthClaims(admin_claims),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_user_rules_foreign_target_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "1".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Private),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let alice_claims = test_api_claims(
+            "alice",
+            Permission::RecordingRead
+                | Permission::RecordingCreate
+                | Permission::RecordingManage
+                | Permission::RecordingDelete,
+        );
+
+        let body = CreateRecordingRuleBody {
+            target_id: Some("foreign_target".to_string()),
+            virtual_id: "42".to_string(),
+            input_name: String::new(),
+            channel_id: None,
+            visibility: Some(RuleVisibility::Private),
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 1,
+                local_start_time: "18:00".to_string(),
+                duration_secs: 1800,
+                timezone: "UTC".to_string(),
+            },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+        };
+
+        let res = create_recording_rule(State(Arc::clone(&state)), AuthClaims(alice_claims), Json(body))
+            .await
+            .into_response();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(json["error"], "recording_invalid_source");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_user_rules_limit_reached() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "1".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Private),
+                        max_recording_rules: Some(2),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let alice_claims = test_api_claims(
+            "alice",
+            Permission::RecordingRead
+                | Permission::RecordingCreate
+                | Permission::RecordingManage
+                | Permission::RecordingDelete,
+        );
+
+        let make_body = |weekday: u8| CreateRecordingRuleBody {
+            target_id: None,
+            virtual_id: "42".to_string(),
+            input_name: String::new(),
+            channel_id: None,
+            visibility: Some(RuleVisibility::Private),
+            body: RuleBody::WeeklyTimeslot {
+                weekday,
+                local_start_time: "18:00".to_string(),
+                duration_secs: 1800,
+                timezone: "UTC".to_string(),
+            },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+        };
+
+        // Rule 1 -> OK
+        let res =
+            create_recording_rule(State(Arc::clone(&state)), AuthClaims(alice_claims.clone()), Json(make_body(1)))
+                .await
+                .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Rule 2 -> OK (limit 2 reached)
+        let res =
+            create_recording_rule(State(Arc::clone(&state)), AuthClaims(alice_claims.clone()), Json(make_body(2)))
+                .await
+                .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Rule 3 -> 400 recording_rule_limit_exceeded
+        let res = create_recording_rule(State(Arc::clone(&state)), AuthClaims(alice_claims), Json(make_body(3)))
+            .await
+            .into_response();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(json["error"], "recording_rule_limit_exceeded");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_user_rules_shared_visibility_content_filter() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![
+                shared::model::TargetUserDto {
+                    target: "1".to_string(),
+                    credentials: vec![
+                        shared::model::ProxyUserCredentialsDto {
+                            username: "alice".to_string(),
+                            password: "pass".to_string(),
+                            ui_enabled: true,
+                            player_features: Some(shared::model::PlayerFeaturesDto {
+                                recording: Some(shared::model::PlayerRecordingLevel::Shared),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        shared::model::ProxyUserCredentialsDto {
+                            username: "bob".to_string(),
+                            password: "pass".to_string(),
+                            ui_enabled: true,
+                            // Bob allows only "Channel 4K" (channel 43); "Channel HD" (channel 42) is filtered out
+                            filter: Some(r#"Title = "Channel 4K""#.to_string()),
+                            player_features: Some(shared::model::PlayerFeaturesDto {
+                                recording: Some(shared::model::PlayerRecordingLevel::Read),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    ],
+                },
+                shared::model::TargetUserDto {
+                    target: "other".to_string(),
+                    credentials: vec![shared::model::ProxyUserCredentialsDto {
+                        username: "carol".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            recording: Some(shared::model::PlayerRecordingLevel::Shared),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                },
+            ],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let bob_claims = test_api_claims("bob", Permission::RecordingRead);
+
+        let make_rule = |target: &str, vid: &str, vis: RuleVisibility, owner: UserId, id: &str| RecordingRule {
+            id: id.to_string(),
+            owner_id: owner,
+            visibility: vis,
+            enabled: true,
+            source: RuleSource::new(target, vid, "input-a"),
+            channel_id: None,
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 1,
+                local_start_time: "20:00".to_string(),
+                duration_secs: 1800,
+                timezone: "UTC".to_string(),
+            },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let repo = recording_rule_repo(&state);
+        // Rule 1: Shared on target 1, channel 42 (filtered out for Bob)
+        repo.create(make_rule("1", "42", RuleVisibility::Shared, UserId::api("alice"), "rule-shared-42")).await?;
+        // Rule 2: Shared on target 1, channel 43 (allowed for Bob)
+        repo.create(make_rule("1", "43", RuleVisibility::Shared, UserId::api("alice"), "rule-shared-43")).await?;
+        // Rule 3: Private owned by Alice
+        repo.create(make_rule("1", "43", RuleVisibility::Private, UserId::api("alice"), "rule-priv-alice")).await?;
+        // Rule 4: Shared on target "other"
+        repo.create(make_rule("other", "43", RuleVisibility::Shared, UserId::api("carol"), "rule-other-target"))
+            .await?;
+
+        // Bob lists rules:
+        let res = list_recording_rules(State(Arc::clone(&state)), AuthClaims(bob_claims)).await.into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&bytes)?;
+
+        let visible_ids: Vec<&str> = json.iter().map(|item| item["id"].as_str().unwrap()).collect();
+        // Bob only sees rule-shared-43 (same target and allowed by content filter)
+        assert_eq!(visible_ids, vec!["rule-shared-43"]);
+        assert_eq!(json[0]["own"], false);
+        assert!(json[0].get("owner_id").is_none(), "owner_id must be omitted for other users' shared rules");
+        assert!(json[0]["source"].get("input_name").is_none(), "input_name must be omitted");
+        assert!(json[0]["source"].get("provider_id").is_none(), "provider_id must be omitted");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_user_rule_derives_real_input_name_and_ignores_client_value() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "1".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "user_private".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Private),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let claims_private = test_api_claims(
+            "user_private",
+            Permission::RecordingRead
+                | Permission::RecordingCreate
+                | Permission::RecordingManage
+                | Permission::RecordingDelete,
+        );
+
+        // 1. Pass a client forged input name - server must override it with real input name "input-a"
+        let res = create_recording_rule(
+            State(Arc::clone(&state)),
+            AuthClaims(claims_private.clone()),
+            Json(CreateRecordingRuleBody {
+                target_id: None,
+                virtual_id: "42".to_string(),
+                input_name: "client-forged-input".to_string(),
+                channel_id: None,
+                visibility: Some(RuleVisibility::Private),
+                body: RuleBody::WeeklyTimeslot {
+                    weekday: 3,
+                    local_start_time: "20:00".to_string(),
+                    duration_secs: 3600,
+                    timezone: "UTC".to_string(),
+                },
+                pre_roll_secs: 0,
+                post_roll_secs: 0,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let resp_json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(resp_json["own"], true);
+        assert_eq!(resp_json["owner_id"], "api:user_private");
+        assert!(resp_json["source"].get("input_name").is_none(), "input_name must be omitted in user response");
+        assert!(resp_json["source"].get("provider_id").is_none(), "provider_id must be omitted in user response");
+
+        let rule_id = resp_json["id"].as_str().expect("rule id");
+        let repo = recording_rule_repo(&state);
+        let stored_rule = repo.list().await?.into_iter().find(|r| r.id == rule_id).expect("stored rule");
+        assert_eq!(stored_rule.source.input_name, "input-a");
+
+        // 2. Pass empty input name - server also derives "input-a"
+        let res2 = create_recording_rule(
+            State(Arc::clone(&state)),
+            AuthClaims(claims_private),
+            Json(CreateRecordingRuleBody {
+                target_id: Some("1".to_string()),
+                virtual_id: "42".to_string(),
+                input_name: String::new(),
+                channel_id: None,
+                visibility: Some(RuleVisibility::Private),
+                body: RuleBody::WeeklyTimeslot {
+                    weekday: 4,
+                    local_start_time: "21:00".to_string(),
+                    duration_secs: 1800,
+                    timezone: "UTC".to_string(),
+                },
+                pre_roll_secs: 0,
+                post_roll_secs: 0,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(res2.status(), StatusCode::OK);
+        let bytes2 = axum::body::to_bytes(res2.into_body(), usize::MAX).await?;
+        let resp_json2: serde_json::Value = serde_json::from_slice(&bytes2)?;
+        assert_eq!(resp_json2["own"], true);
+        assert!(resp_json2["source"].get("input_name").is_none());
+
+        let rule_id2 = resp_json2["id"].as_str().expect("rule id");
+        let stored_rule2 = repo.list().await?.into_iter().find(|r| r.id == rule_id2).expect("stored rule");
+        assert_eq!(stored_rule2.source.input_name, "input-a");
+
+        Ok(())
+    }
+
     #[test]
     fn edit_rule_clear_channel_id_is_distinct_from_unchanged() {
         let mut unchanged = editable_rule();
@@ -1850,6 +2991,8 @@ mod tests {
             series_name: None,
             extension: Some("ts".to_string()),
             downloadable: true,
+            provider_id: None,
+            is_group: false,
         };
         let mut virtual_id = "00042".to_string();
         let mut input_name = "input-b".to_string();
@@ -1878,7 +3021,7 @@ mod tests {
         }))
         .expect("parse weekly rule");
 
-        assert_eq!(parsed.target_id, "default");
+        assert_eq!(parsed.target_id.as_deref(), Some("default"));
         assert!(matches!(parsed.body, RuleBody::WeeklyTimeslot { weekday: 3, .. }));
     }
 
@@ -1936,7 +3079,7 @@ mod tests {
         }))
         .expect("parse new episode rule");
 
-        let rule = recording_rule_from_create(UserId::from("web:alice"), body, 123);
+        let rule = recording_rule_from_create(UserId::from("web:alice"), body, "default".to_string(), 123);
 
         assert_eq!(rule.source.target_id, "default");
         assert!(matches!(rule.body, RuleBody::NewEpisode { series_id: Some(ref id), .. } if id == "series-1"));
@@ -2109,5 +3252,648 @@ mod tests {
     fn delete_rule_params_accepts_future_cancel() {
         let parsed: DeleteRuleParams = serde_json::from_value(json!({"future": "cancel"})).expect("parse cancel");
         assert_eq!(parsed.future.as_deref(), Some("cancel"));
+    }
+
+    fn test_api_claims(username: &str, perms: impl Into<shared::model::PermissionSet>) -> shared::model::Claims {
+        shared::model::Claims {
+            username: username.to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: shared::model::RoleSet::new(),
+            permissions: perms.into(),
+            pwd_version: 0,
+            subject_id: Some(UserId::from(format!("api:{username}"))),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        }
+    }
+
+    #[tokio::test]
+    async fn api_user_source_scoping_matrix() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![
+                shared::model::TargetUserDto {
+                    target: "1".to_string(),
+                    credentials: vec![
+                        shared::model::ProxyUserCredentialsDto {
+                            username: "alice".to_string(),
+                            password: "pass".to_string(),
+                            ui_enabled: true,
+                            ..Default::default()
+                        },
+                        shared::model::ProxyUserCredentialsDto {
+                            username: "bob".to_string(),
+                            password: "pass".to_string(),
+                            ui_enabled: true,
+                            filter: Some(r#"Title = "Channel HD""#.to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                },
+                shared::model::TargetUserDto {
+                    target: "other".to_string(),
+                    credentials: vec![shared::model::ProxyUserCredentialsDto {
+                        username: "carol".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        ..Default::default()
+                    }],
+                },
+            ],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let alice_claims = test_api_claims("alice", Permission::RecordingCreate | Permission::RecordingRead);
+        let bob_claims = test_api_claims("bob", Permission::RecordingCreate | Permission::RecordingRead);
+        let carol_claims = test_api_claims("carol", Permission::RecordingCreate | Permission::RecordingRead);
+
+        let start = chrono::Utc::now().timestamp() + 3_600;
+
+        // 1. API user records a channel of another target -> recording_invalid_source
+        let foreign_body = serde_json::from_value(json!({
+            "source": {"target_id": "1", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News",
+            "program_start": start,
+            "program_end": start + 120,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        let foreign_res = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(carol_claims),
+            HeaderMap::new(),
+            Json(foreign_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(foreign_res.status(), StatusCode::BAD_REQUEST);
+        let foreign_bytes = axum::body::to_bytes(foreign_res.into_body(), usize::MAX).await?;
+        let foreign_json: serde_json::Value = serde_json::from_slice(&foreign_bytes)?;
+        assert_eq!(foreign_json["error"], "recording_invalid_source");
+
+        // 2. Filtered channel -> recording_invalid_source (Bob's filter allows only "Channel HD", channel 43 is "Channel 4K")
+        let filtered_body = serde_json::from_value(json!({
+            "source": {"target_id": "1", "virtual_id": "43", "input_name": "input-b", "cluster": "Live"},
+            "program_title": "News 4K",
+            "program_start": start,
+            "program_end": start + 120,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel 4K"
+        }))?;
+        let filtered_res = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(bob_claims),
+            HeaderMap::new(),
+            Json(filtered_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(filtered_res.status(), StatusCode::BAD_REQUEST);
+        let filtered_bytes = axum::body::to_bytes(filtered_res.into_body(), usize::MAX).await?;
+        let filtered_json: serde_json::Value = serde_json::from_slice(&filtered_bytes)?;
+        assert_eq!(filtered_json["error"], "recording_invalid_source");
+
+        // 3. Own visible channel -> accepted (Alice records channel 42 on target 1)
+        let visible_body = serde_json::from_value(json!({
+            "source": {"target_id": "1", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News",
+            "program_start": start,
+            "program_end": start + 120,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        let visible_res = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims),
+            HeaderMap::new(),
+            Json(visible_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(visible_res.status(), StatusCode::NO_CONTENT);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
+    async fn shared_recording_visibility_matrix() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![
+                shared::model::TargetUserDto {
+                    target: "1".to_string(),
+                    credentials: vec![
+                        shared::model::ProxyUserCredentialsDto {
+                            username: "alice".to_string(),
+                            password: "pass".to_string(),
+                            ui_enabled: true,
+                            ..Default::default()
+                        },
+                        shared::model::ProxyUserCredentialsDto {
+                            username: "bob".to_string(),
+                            password: "pass".to_string(),
+                            ui_enabled: true,
+                            // Bob's filter only allows "Channel 4K" (43), so "Channel HD" (42) is hidden from Bob
+                            filter: Some(r#"Title = "Channel 4K""#.to_string()),
+                            ..Default::default()
+                        },
+                        shared::model::ProxyUserCredentialsDto {
+                            username: "dave".to_string(),
+                            password: "pass".to_string(),
+                            ui_enabled: true,
+                            ..Default::default()
+                        },
+                    ],
+                },
+                shared::model::TargetUserDto {
+                    target: "other".to_string(),
+                    credentials: vec![shared::model::ProxyUserCredentialsDto {
+                        username: "carol".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        ..Default::default()
+                    }],
+                },
+            ],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let alice_claims = test_api_claims(
+            "alice",
+            Permission::RecordingCreate | Permission::RecordingShare | Permission::RecordingRead,
+        );
+        let bob_claims = test_api_claims("bob", Permission::RecordingCreate | Permission::RecordingRead);
+        let carol_claims = test_api_claims("carol", Permission::RecordingCreate | Permission::RecordingRead);
+
+        let start = chrono::Utc::now().timestamp() + 3_600;
+
+        // 1. User A (no filter) creates shared recording on channel X (42: "Channel HD") of target T ("1")
+        let shared_body = serde_json::from_value(json!({
+            "source": {"target_id": "1", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News",
+            "program_start": start,
+            "program_end": start + 120,
+            "visibility": "shared",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        let shared_response = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims.clone()),
+            HeaderMap::new(),
+            Json(shared_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(shared_response.status(), StatusCode::NO_CONTENT);
+
+        let (_, tasks) = state.recording.queue.committed_snapshot().await;
+        assert_eq!(tasks.len(), 1);
+        let shared_task = tasks[0].clone();
+
+        // Check snapshot for Alice (creator, no filter, same target): sees the task
+        let vis = AppRecordingVisibility::new(&state);
+        let alice_snapshot = crate::api::model::recording::recording_ws::recording_snapshot(
+            &state.recording.queue,
+            &alice_claims,
+            &state.app_config,
+            Some(&vis),
+        )
+        .await;
+        assert_eq!(alice_snapshot.tasks.len(), 1);
+
+        // 2. User B on T with filter hiding X (42) sees neither the task in snapshot nor can access it
+        let vis = AppRecordingVisibility::new(&state);
+        let bob_snapshot = crate::api::model::recording::recording_ws::recording_snapshot(
+            &state.recording.queue,
+            &bob_claims,
+            &state.app_config,
+            Some(&vis),
+        )
+        .await;
+        assert_eq!(bob_snapshot.tasks.len(), 0, "Bob should not see filtered shared recording in snapshot");
+
+        let bob_thumb = crate::api::endpoints::recording_media_api::thumbnail_recording(
+            State(Arc::clone(&state)),
+            AuthClaims(bob_claims.clone()),
+            axum::extract::Path(shared_task.uuid.clone()),
+        )
+        .await;
+        assert_eq!(
+            bob_thumb.status(),
+            StatusCode::FORBIDDEN,
+            "Bob cannot access thumbnail of filtered shared recording"
+        );
+
+        // 3. User C on another target ("other") cannot see it
+        let vis = AppRecordingVisibility::new(&state);
+        let carol_snapshot = crate::api::model::recording::recording_ws::recording_snapshot(
+            &state.recording.queue,
+            &carol_claims,
+            &state.app_config,
+            Some(&vis),
+        )
+        .await;
+        assert_eq!(carol_snapshot.tasks.len(), 0, "Carol on another target cannot see shared recording");
+
+        let carol_thumb = crate::api::endpoints::recording_media_api::thumbnail_recording(
+            State(Arc::clone(&state)),
+            AuthClaims(carol_claims),
+            axum::extract::Path(shared_task.uuid.clone()),
+        )
+        .await;
+        assert_eq!(carol_thumb.status(), StatusCode::FORBIDDEN, "Carol on another target cannot access media");
+
+        // 4. Unresolvable vid -> hidden
+        let mut unresolvable_task = shared_task.clone();
+        unresolvable_task.uuid = "unresolvable-task-1".to_string();
+        unresolvable_task.recording.source.virtual_id = "999999".to_string();
+        state.recording.queue.scheduled.write().await.push(unresolvable_task);
+
+        let vis = AppRecordingVisibility::new(&state);
+        let bob_snapshot_unresolvable = crate::api::model::recording::recording_ws::recording_snapshot(
+            &state.recording.queue,
+            &bob_claims,
+            &state.app_config,
+            Some(&vis),
+        )
+        .await;
+        assert_eq!(bob_snapshot_unresolvable.tasks.len(), 0, "Unresolvable vid hidden from filtered user");
+
+        // 5. B's own private recording stays visible
+        let bob_private_body = serde_json::from_value(json!({
+            "source": {"target_id": "1", "virtual_id": "43", "input_name": "input-b", "cluster": "Live"},
+            "program_title": "Bob News 4K",
+            "program_start": start + 300,
+            "program_end": start + 420,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel 4K"
+        }))?;
+        let bob_private_response = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(bob_claims.clone()),
+            HeaderMap::new(),
+            Json(bob_private_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(bob_private_response.status(), StatusCode::NO_CONTENT);
+
+        let vis = AppRecordingVisibility::new(&state);
+        let bob_snapshot_with_private = crate::api::model::recording::recording_ws::recording_snapshot(
+            &state.recording.queue,
+            &bob_claims,
+            &state.app_config,
+            Some(&vis),
+        )
+        .await;
+        assert_eq!(bob_snapshot_with_private.tasks.len(), 1, "Bob's own private recording is visible to Bob");
+        assert_eq!(bob_snapshot_with_private.tasks[0].title, "Bob News 4K");
+
+        // 6. One visibility instance must not reuse a same-vid decision across targets.
+        let dave_claims = test_api_claims("dave", Permission::RecordingRead);
+        let dave_subject = dave_claims.subject_id.clone().ok_or("dave subject")?;
+        let mut foreign_meta = shared_task.recording.clone();
+        foreign_meta.source.target_id = "other".to_string();
+        let vis = AppRecordingVisibility::new(&state);
+        assert!(
+            check_recording_visibility_with_context(
+                &state,
+                &shared_task.recording,
+                &dave_claims,
+                &dave_subject,
+                Some(&vis)
+            )
+            .await,
+            "Dave sees the shared recording of his own target"
+        );
+        assert!(
+            !check_recording_visibility_with_context(&state, &foreign_meta, &dave_claims, &dave_subject, Some(&vis))
+                .await,
+            "a cached same-vid decision must not leak a recording of another target"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_check_recording_visibility_enforces_item_type_on_shared() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "1".to_string(),
+                credentials: vec![
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "alice".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        ..Default::default()
+                    },
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "dave".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        output_clusters: Some(shared::model::ClusterFlags::Vod),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let alice_claims = test_api_claims(
+            "alice",
+            Permission::RecordingCreate | Permission::RecordingShare | Permission::RecordingRead,
+        );
+        let dave_claims = test_api_claims("dave", Permission::RecordingCreate | Permission::RecordingRead);
+
+        let start = chrono::Utc::now().timestamp() + 3_600;
+        let shared_body = serde_json::from_value(json!({
+            "source": {"target_id": "1", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News",
+            "program_start": start,
+            "program_end": start + 120,
+            "visibility": "shared",
+            "channel_id": "42",
+            "channel_name": "Channel HD"
+        }))?;
+        let create_resp = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims),
+            HeaderMap::new(),
+            Json(shared_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(create_resp.status(), StatusCode::NO_CONTENT);
+
+        let (_, tasks) = state.recording.queue.committed_snapshot().await;
+        assert_eq!(tasks.len(), 1);
+        let recorded_item = &tasks[0].recording;
+
+        let dave_subject = dave_claims.subject_id.as_ref().unwrap();
+
+        // 1. Dave has output_clusters = [Vod] -> cannot see shared Live recording
+        let visible = check_recording_visibility(&state, recorded_item, &dave_claims, dave_subject).await;
+        assert!(!visible, "shared Live recording must be hidden from user with only Vod cluster");
+
+        // 2. Dave has output_clusters = [Live] -> can see shared Live recording
+        let mut api_proxy_dto2 = api_proxy_dto.clone();
+        api_proxy_dto2.user[0].credentials[1].output_clusters = Some(shared::model::ClusterFlags::Live);
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto2))));
+
+        let visible = check_recording_visibility(&state, recorded_item, &dave_claims, dave_subject).await;
+        assert!(visible, "shared Live recording must be visible to user with Live cluster");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_edit_recording_rule_source_resolution_behavior() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+        let repo = recording_rule_repo(&state);
+
+        let rule = RecordingRule {
+            id: "rule-unresolvable".into(),
+            owner_id: UserId::api("alice"),
+            visibility: RuleVisibility::Private,
+            enabled: true,
+            source: RuleSource::new("target-1", "99999", "input-a"),
+            channel_id: None,
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 1,
+                local_start_time: "20:00".to_string(),
+                duration_secs: 1800,
+                timezone: "UTC".to_string(),
+            },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            created_at: 100,
+            updated_at: 100,
+        };
+        repo.create(rule).await?;
+
+        let alice_claims = test_api_claims("alice", Permission::RecordingManage);
+        let admin_claims = edit_claims(Some(UserId::builtin_admin()), true);
+
+        // 1. API user edits enabled / padding on unresolvable rule: succeeds without re-resolving source
+        let patch_enabled =
+            EditRecordingRuleBody { enabled: Some(false), pre_roll_secs: Some(120), ..Default::default() };
+        let res = edit_recording_rule(
+            axum::extract::Path("rule-unresolvable".to_string()),
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims.clone()),
+            Json(patch_enabled),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 2. Admin edits enabled / padding on unresolvable rule: also succeeds
+        let patch_admin = EditRecordingRuleBody { enabled: Some(true), ..Default::default() };
+        let res = edit_recording_rule(
+            axum::extract::Path("rule-unresolvable".to_string()),
+            State(Arc::clone(&state)),
+            AuthClaims(admin_claims.clone()),
+            Json(patch_admin),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 3. Admin edits channel_id on unresolvable rule: succeeds by keeping stored source
+        let patch_ch =
+            EditRecordingRuleBody { channel_id: Some("nonexistent_channel".to_string()), ..Default::default() };
+        let res = edit_recording_rule(
+            axum::extract::Path("rule-unresolvable".to_string()),
+            State(Arc::clone(&state)),
+            AuthClaims(admin_claims),
+            Json(patch_ch.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 4. API user edits channel_id on unresolvable rule: fails resolution
+        let res = edit_recording_rule(
+            axum::extract::Path("rule-unresolvable".to_string()),
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims),
+            Json(patch_ch),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_create_rule_canonicalizes_numeric_target_id_to_name() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "1".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Private),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let alice_claims = test_api_claims("alice", Permission::RecordingCreate | Permission::RecordingManage);
+
+        // Pass numeric target id "11" for target named "1" (whose numeric id in live_request_state is 11)
+        let body = CreateRecordingRuleBody {
+            target_id: Some("11".to_string()),
+            virtual_id: "42".to_string(),
+            input_name: String::new(),
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 1,
+                local_start_time: "20:00".to_string(),
+                duration_secs: 1800,
+                timezone: "UTC".to_string(),
+            },
+            visibility: Some(RuleVisibility::Private),
+            channel_id: None,
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+        };
+
+        let res = create_recording_rule(State(Arc::clone(&state)), AuthClaims(alice_claims), Json(body))
+            .await
+            .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let rule_id = json["id"].as_str().unwrap();
+
+        let repo = recording_rule_repo(&state);
+        let stored = repo.list().await?.into_iter().find(|r| r.id == rule_id).unwrap();
+        assert_eq!(stored.source.target_id, "1", "target_id must be canonicalized to target NAME");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_api_user_edit_recording_rule_channel_id_forbidden_by_filter() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "1".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "bob".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    // Bob allows only "Channel HD" (VID 42); "Legacy" (VID 45, epg "shared.epg") is filtered out
+                    filter: Some(r#"Title = "Channel HD""#.to_string()),
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Private),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+        let bob_claims = test_api_claims("bob", Permission::RecordingCreate | Permission::RecordingManage);
+
+        // First verify what create returns when Bob tries to target "shared.epg" (forbidden channel)
+        let create_forbidden = CreateRecordingRuleBody {
+            target_id: Some("1".to_string()),
+            virtual_id: String::new(),
+            input_name: String::new(),
+            channel_id: Some("shared.epg".to_string()),
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 1,
+                local_start_time: "20:00".to_string(),
+                duration_secs: 1800,
+                timezone: "UTC".to_string(),
+            },
+            visibility: Some(RuleVisibility::Private),
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+        };
+        let create_res =
+            create_recording_rule(State(Arc::clone(&state)), AuthClaims(bob_claims.clone()), Json(create_forbidden))
+                .await
+                .into_response();
+        assert_eq!(create_res.status(), StatusCode::BAD_REQUEST);
+        let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX).await?;
+        let create_err: serde_json::Value = serde_json::from_slice(&create_bytes)?;
+        assert_eq!(create_err["error"], "recording_invalid_source");
+
+        // Bob has an existing rule pointing to channel 45 ("shared.epg" -> "Legacy", VID 45)
+        let rule = RecordingRule {
+            id: "bob-rule-1".into(),
+            owner_id: UserId::api("bob"),
+            visibility: RuleVisibility::Private,
+            enabled: true,
+            source: RuleSource::new("1", "45", "input-a"),
+            channel_id: Some("shared.epg".to_string()),
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 1,
+                local_start_time: "20:00".to_string(),
+                duration_secs: 1800,
+                timezone: "UTC".to_string(),
+            },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            created_at: 100,
+            updated_at: 100,
+        };
+        let repo = recording_rule_repo(&state);
+        repo.create(rule).await?;
+
+        // Bob edits his rule's channel_id to "shared.epg" (forbidden by his filter)
+        let patch = EditRecordingRuleBody { channel_id: Some("shared.epg".to_string()), ..Default::default() };
+        let edit_res = edit_recording_rule(
+            axum::extract::Path("bob-rule-1".to_string()),
+            State(Arc::clone(&state)),
+            AuthClaims(bob_claims),
+            Json(patch),
+        )
+        .await
+        .into_response();
+
+        // Must be refused with the same error create returns
+        assert_eq!(edit_res.status(), StatusCode::BAD_REQUEST);
+        let edit_bytes = axum::body::to_bytes(edit_res.into_body(), usize::MAX).await?;
+        let edit_err: serde_json::Value = serde_json::from_slice(&edit_bytes)?;
+        assert_eq!(edit_err, create_err);
+
+        Ok(())
     }
 }

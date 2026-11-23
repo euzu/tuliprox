@@ -1,7 +1,7 @@
 use super::{
     buffer::SubscriberId, reader::resolve_min_burst_buffer_bytes, PendingJoinGuard, PendingSharedMeterRegistration,
     PendingSharedSubscriberCleanup, SharedMeterEntry, SharedStreamManager, SharedStreamState, SharedStreamsRegister,
-    DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS, SHARED_CLEANUP_ADMISSION_TIMEOUT,
+    SharedSubscriber, DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS, SHARED_CLEANUP_ADMISSION_TIMEOUT,
 };
 use crate::{
     streams::buffered_stream::CHANNEL_SIZE, ActiveProviderManager, BoxedProviderStream, ConnectionManager,
@@ -34,6 +34,14 @@ pub struct SharedStreamCtx<'a> {
     pub connection_manager: &'a Arc<ConnectionManager>,
 }
 
+/// A free joiner whose stream lost its last paid holder, planned under the shared-stream lock.
+struct FreeJoinConversion {
+    subscriber_id: SubscriberId,
+    username: Arc<str>,
+    session_token: Arc<str>,
+    state: Arc<SharedStreamState>,
+}
+
 impl SharedStreamManager {
     pub async fn reserve_subscriber_cleanup(
         connection_manager: &ConnectionManager,
@@ -58,17 +66,108 @@ impl SharedStreamManager {
     }
 
     pub fn new(provider_manager: Arc<ActiveProviderManager>) -> Self {
+        let register = SharedStreamsRegister::default();
+        let live_free_joins = Arc::clone(&register.live_free_joins);
         Self {
             provider_manager,
-            shared_streams: RwLock::new(SharedStreamsRegister::default()),
+            shared_streams: RwLock::new(register),
             meter_uids: std::sync::Mutex::new(HashMap::new()),
+            user_manager: tokio::sync::OnceCell::new(),
+            live_free_joins,
             #[cfg(test)]
             test_preflight_barrier: std::sync::Mutex::new(None),
         }
     }
 
+    pub fn set_user_manager(&self, manager: &Arc<crate::ActiveUserManager>) {
+        let _ = self.user_manager.set(Arc::downgrade(manager));
+    }
+
+    /// Whether any free-join reservations currently exist.
+    ///
+    /// Uses Acquire ordering so when true, all writes performed during free-join reservation
+    /// are visible to subsequent reads. Returns false immediately to gate out lock acquisition
+    /// on regular stream registrations when no free joins are active.
+    pub fn has_free_joins(&self) -> bool { self.live_free_joins.load(std::sync::atomic::Ordering::Acquire) > 0 }
+
+    #[cfg(test)]
+    pub fn live_free_joins_count(&self) -> usize { self.live_free_joins.load(std::sync::atomic::Ordering::Acquire) }
+
+    pub async fn user_free_shared_joins(&self, username: &str) -> u32 {
+        self.shared_streams.read().await.free_joins_by_user.get(username).copied().unwrap_or(0)
+    }
+
+    pub async fn is_subscriber_free(&self, subscriber_id: SubscriberId) -> bool {
+        if !self.has_free_joins() {
+            return false;
+        }
+        let register = self.shared_streams.read().await;
+        if let Some(url) = register.key_by_subscriber.get(&subscriber_id) {
+            if let Some(state) = register.by_key.get(url) {
+                let subs = state.subscribers.read().await;
+                return subs.get(&subscriber_id).is_some_and(|s| s.free_join);
+            }
+        }
+        false
+    }
+
+    pub async fn set_subscriber_free_join(&self, subscriber_id: SubscriberId, free_join: bool) {
+        let mut register = self.shared_streams.write().await;
+        if let Some(url) = register.key_by_subscriber.get(&subscriber_id) {
+            if let Some(state) = register.by_key.get(url).cloned() {
+                let mut subs = state.subscribers.write().await;
+                if let Some(s) = subs.get_mut(&subscriber_id) {
+                    if s.free_join != free_join {
+                        s.free_join = free_join;
+                        if free_join {
+                            register.record_free_join(subscriber_id, &s.username);
+                        } else {
+                            register.remove_free_join_for_subscriber(subscriber_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn get_shared_state(&self, stream_url: &str) -> Option<Arc<SharedStreamState>> {
         self.shared_streams.read().await.by_key.get(stream_url).map(Arc::clone)
+    }
+
+    pub async fn subscriber_count(&self, key: &str) -> usize {
+        if let Some(state) = self.get_shared_state(key).await {
+            state.subscribers.read().await.len()
+        } else {
+            0
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_test_subscriber_count(&self, key: &str, count: usize) {
+        let mut reg = self.shared_streams.write().await;
+        if count == 0 {
+            reg.by_key.remove(key);
+            return;
+        }
+        let state = reg
+            .by_key
+            .entry(Arc::from(key))
+            .or_insert_with(|| Arc::new(SharedStreamState::new(Vec::new(), 10, None, 1024, None)));
+        state.subscribers.write().await.clear();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        for i in 0..count {
+            let uid = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
+            state
+                .register_subscriber_entry(
+                    SharedSubscriberId::from_stream_uid(uid),
+                    &addr,
+                    tokio_util::sync::CancellationToken::new(),
+                    "test_user",
+                    "test_token",
+                    false,
+                )
+                .await;
+        }
     }
 
     pub async fn get_shared_state_headers(&self, stream_url: &str) -> Option<Vec<(String, String)>> {
@@ -156,8 +255,7 @@ impl SharedStreamManager {
             if !register.by_key.get(stream_url).is_some_and(|state| Arc::ptr_eq(state, expected)) {
                 return;
             }
-            register.key_by_subscriber.retain(|_, url| url.as_ref() != stream_url);
-            register.by_key.remove(stream_url)
+            register.remove_stream(stream_url)
         };
         drop(register);
         if let Some(state) = state {
@@ -170,10 +268,7 @@ impl SharedStreamManager {
         if register.by_key.get(stream_url).is_none_or(|state| state.provider_allocation_id() != Some(allocation_id)) {
             return;
         }
-        let state = {
-            register.key_by_subscriber.retain(|_, url| url.as_ref() != stream_url);
-            register.by_key.remove(stream_url)
-        };
+        let state = register.remove_stream(stream_url);
         drop(register);
         self.remove_meter_uid_if_owned_by(stream_url, Some(allocation_id));
         if let Some(state) = state {
@@ -183,7 +278,7 @@ impl SharedStreamManager {
     }
 
     /// Releases all subscribers on a closed transport. Playback cleanup uses the id variant.
-    pub async fn release_connection(&self, addr: &SocketAddr, _send_stop_signal: bool) {
+    pub async fn release_connection(self: &Arc<Self>, addr: &SocketAddr, _send_stop_signal: bool) {
         let states: Vec<Arc<SharedStreamState>> = {
             let register = self.shared_streams.read().await;
             register.by_key.values().cloned().collect()
@@ -204,11 +299,24 @@ impl SharedStreamManager {
         }
     }
 
-    pub async fn release_subscriber(&self, subscriber_id: SubscriberId) {
+    pub async fn release_subscriber(self: &Arc<Self>, subscriber_id: SubscriberId) {
+        let conversions = self.remove_subscriber(subscriber_id).await;
+        if !conversions.is_empty() {
+            let manager = Arc::clone(self);
+            tokio::spawn(async move {
+                manager.settle_free_joiners(conversions).await;
+            });
+        }
+    }
+
+    /// Removes one subscriber and plans the conversion of the free joiners left without a paid holder.
+    async fn remove_subscriber(&self, subscriber_id: SubscriberId) -> Vec<FreeJoinConversion> {
         let mut register = self.shared_streams.write().await;
+        let mut conversion_plans = Vec::new();
         let stopped = {
             // Registry then subscribers is the shared-stream lock order. Joining and
             // removing the final subscriber must not race an origin replacement.
+            register.remove_free_join_for_subscriber(subscriber_id);
             if let Some(url) = register.key_by_subscriber.remove(&subscriber_id) {
                 if let Some(state) = register.by_key.get(&url).cloned() {
                     let mut subscribers = state.subscribers.write().await;
@@ -220,6 +328,19 @@ impl SharedStreamManager {
                         drop(subscribers);
                         Some((url, state))
                     } else {
+                        if !subscribers.values().any(SharedSubscriber::is_paid_holder) {
+                            for (id, sub) in subscribers.iter() {
+                                if sub.free_join {
+                                    conversion_plans.push(FreeJoinConversion {
+                                        subscriber_id: *id,
+                                        username: Arc::clone(&sub.username),
+                                        session_token: Arc::clone(&sub.session_token),
+                                        state: Arc::clone(&state),
+                                    });
+                                }
+                            }
+                        }
+                        drop(subscribers);
                         None
                     }
                 } else {
@@ -234,11 +355,46 @@ impl SharedStreamManager {
         if let Some((url, state)) = stopped {
             self.finish_unregister(&url, &state).await;
         }
+        conversion_plans
+    }
+
+    /// Converts free joiners of a stream that lost its last paid holder into counted connections, or ends them
+    /// when their user has no free slot. Admission runs under the joiner's playback transition guard; a joiner that
+    /// left meanwhile, or a stream that regained a paid holder (an earlier conversion), is left untouched.
+    async fn settle_free_joiners(&self, conversions: Vec<FreeJoinConversion>) {
+        if conversions.is_empty() {
+            return;
+        }
+        let Some(user_manager) = self.user_manager.get().and_then(std::sync::Weak::upgrade) else {
+            return;
+        };
+        for conversion in conversions {
+            let FreeJoinConversion { subscriber_id, username, session_token, state } = conversion;
+            let _transition = user_manager.acquire_playback_transition(&username, &session_token).await;
+            {
+                let subscribers = state.subscribers.read().await;
+                let still_free = subscribers.get(&subscriber_id).is_some_and(|s| s.free_join);
+                if !still_free || subscribers.values().any(SharedSubscriber::is_paid_holder) {
+                    continue;
+                }
+            }
+            let admitted =
+                user_manager.try_admit_converted_free_join(&username, &session_token, subscriber_id.stream_uid()).await;
+            if admitted {
+                self.set_subscriber_free_join(subscriber_id, false).await;
+            } else {
+                // Without a free slot the joiner ends; the ordinary removal cancels and releases it.
+                let _ = self.remove_subscriber(subscriber_id).await;
+            }
+        }
     }
 
     pub async fn shutdown(&self) {
         let stopped = {
             let mut register = self.shared_streams.write().await;
+            register.free_joins_by_user.clear();
+            register.free_join_owner_by_subscriber.clear();
+            register.live_free_joins.store(0, std::sync::atomic::Ordering::Release);
             register.key_by_subscriber.clear();
             register.by_key.drain().collect::<Vec<_>>()
         };
@@ -255,6 +411,7 @@ impl SharedStreamManager {
         self.lock_meter_uids().clear();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn subscribe_stream(
         &self,
         stream_url: &str,
@@ -263,6 +420,9 @@ impl SharedStreamManager {
         connection_manager: Arc<ConnectionManager>,
         user_priority: i8,
         connection_kind: crate::active_provider_manager::ConnectionKind,
+        username: &str,
+        session_token: &str,
+        free_join_max: Option<u32>,
     ) -> Result<Option<(BoxedProviderStream, Option<Arc<str>>, SharedCleanupCapability)>, ConnectionRejectionReason>
     {
         let Some(_admission) = connection_manager.begin_admission().await else {
@@ -293,6 +453,12 @@ impl SharedStreamManager {
                 pending_cleanup.disarm();
                 return Ok(None);
             };
+            if let Some(max) = free_join_max {
+                if !register.try_reserve_free_join(subscriber_id, username, max) {
+                    pending_cleanup.disarm();
+                    return Ok(None);
+                }
+            }
             if let Err(err) = self.provider_manager.add_shared_connection(
                 addr,
                 subscriber_id,
@@ -301,6 +467,9 @@ impl SharedStreamManager {
                 connection_kind,
             ) {
                 warn!("Failed joining shared stream: {}", sanitize_sensitive_info(&err));
+                if free_join_max.is_some() {
+                    register.remove_free_join_for_subscriber(subscriber_id);
+                }
                 pending_cleanup.disarm();
                 return Ok(None);
             }
@@ -309,7 +478,18 @@ impl SharedStreamManager {
             (state, pending_join)
         };
         Ok(Some(
-            state.subscribe(addr, subscriber_id, Arc::clone(&connection_manager), pending_cleanup, pending_join).await,
+            state
+                .subscribe(
+                    addr,
+                    subscriber_id,
+                    Arc::clone(&connection_manager),
+                    pending_cleanup,
+                    pending_join,
+                    username,
+                    session_token,
+                    free_join_max.is_some(),
+                )
+                .await,
         ))
     }
 
@@ -326,6 +506,8 @@ impl SharedStreamManager {
         pending_cleanup: PendingSharedSubscriberCleanup,
         user_priority: i8,
         connection_kind: crate::active_provider_manager::ConnectionKind,
+        username: &str,
+        session_token: &str,
     ) -> Option<(BoxedProviderStream, Option<Arc<str>>, SharedCleanupCapability)>
     where
         S: Stream<Item = Result<Bytes, E>> + Unpin + 'static + Send,
@@ -354,7 +536,16 @@ impl SharedStreamManager {
             let pending_join = PendingJoinGuard::new(&existing);
             drop(register);
             let response = existing
-                .subscribe(addr, subscriber_id, Arc::clone(ctx.connection_manager), pending_cleanup, pending_join)
+                .subscribe(
+                    addr,
+                    subscriber_id,
+                    Arc::clone(ctx.connection_manager),
+                    pending_cleanup,
+                    pending_join,
+                    username,
+                    session_token,
+                    false,
+                )
                 .await;
             return Some(response);
         }
@@ -387,7 +578,16 @@ impl SharedStreamManager {
         let pending_join = PendingJoinGuard::new(&shared_state);
         drop(register);
         let subscribed_stream = shared_state
-            .subscribe(addr, subscriber_id, Arc::clone(ctx.connection_manager), pending_cleanup, pending_join)
+            .subscribe(
+                addr,
+                subscriber_id,
+                Arc::clone(ctx.connection_manager),
+                pending_cleanup,
+                pending_join,
+                username,
+                session_token,
+                false,
+            )
             .await;
         debug_if_enabled!(
             "Shared stream startup register+subscribe completed for {} in {} ms",
@@ -429,6 +629,7 @@ impl SharedStreamManager {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn subscribe_shared_stream(
         ctx: SharedStreamCtx<'_>,
         stream_url: &str,
@@ -436,6 +637,9 @@ impl SharedStreamManager {
         subscriber_id: SubscriberId,
         user_priority: i8,
         connection_kind: crate::active_provider_manager::ConnectionKind,
+        username: &str,
+        session_token: &str,
+        free_join_max: Option<u32>,
     ) -> Result<Option<(BoxedProviderStream, Option<Arc<str>>, SharedCleanupCapability)>, ConnectionRejectionReason>
     {
         ctx.shared_stream_manager
@@ -446,6 +650,9 @@ impl SharedStreamManager {
                 Arc::clone(ctx.connection_manager),
                 user_priority,
                 connection_kind,
+                username,
+                session_token,
+                free_join_max,
             )
             .await
     }

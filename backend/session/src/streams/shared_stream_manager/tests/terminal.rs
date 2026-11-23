@@ -32,6 +32,9 @@ async fn test_preempted_shared_subscriber_switches_to_low_priority_fallback() {
             connection_manager,
             pending_cleanup,
             super::super::PendingJoinGuard::new(&state),
+            "test_user",
+            "test_token",
+            false,
         )
         .await;
 

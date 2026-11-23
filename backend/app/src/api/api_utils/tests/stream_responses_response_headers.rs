@@ -335,6 +335,8 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
         pending_cleanup,
         0,
         crate::api::model::ConnectionKind::Normal,
+        "test_user",
+        "test_token",
     )
     .await;
     assert!(registered.is_some(), "shared stream should register");
@@ -392,6 +394,8 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
         admission.kind().unwrap_or(crate::api::model::ConnectionKind::Normal),
         false,
         None,
+        false,
+        false,
     )
     .await
     .into_response();
@@ -402,6 +406,92 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
         .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, "soft-session")
         .await;
     assert_eq!(session_admission.kind(), Some(crate::api::model::ConnectionKind::Soft));
+}
+
+#[tokio::test]
+async fn requesting_joinable_virtual_id_at_provider_limit_joins_shared_stream() {
+    let app_state = create_test_provider_app_state();
+    let stream_url = "http://provider-1.example/live/shared.ts";
+    let input_name = "provider_1".intern();
+    let input = app_state.app_config.get_input_by_name(&input_name).expect("provider input should exist");
+    let target = Arc::new(create_test_shared_target());
+
+    let owner_addr = "127.0.0.1:55150".parse().unwrap_or_else(|_| unreachable!());
+    let owner_handle = app_state
+        .active_provider
+        .acquire_connection(&input.name, &owner_addr, 0, crate::api::model::ConnectionKind::Normal)
+        .expect("owner allocation should exist");
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1, "provider at limit 1");
+
+    let subscriber_id =
+        tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid());
+    let pending_cleanup =
+        SharedStreamManager::reserve_subscriber_cleanup(&app_state.connection_manager, subscriber_id, owner_addr)
+            .await
+            .expect("shared cleanup admission should succeed");
+    let shared_stream = stream::pending::<Result<Bytes, std::io::Error>>();
+    let registered = SharedStreamManager::register_shared_stream(
+        SharedStreamCtx {
+            app_config: &app_state.app_config,
+            shared_stream_manager: &app_state.shared_stream_manager,
+            active_provider: &app_state.active_provider,
+            connection_manager: &app_state.connection_manager,
+        },
+        stream_url,
+        shared_stream,
+        &owner_addr,
+        subscriber_id,
+        Vec::new(),
+        1,
+        Some(tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), owner_handle)),
+        pending_cleanup,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+        "test_user",
+        "test_token",
+    )
+    .await;
+    assert!(registered.is_some(), "shared stream should register");
+
+    // Second user joins the listed channel
+    let mut joiner = ProxyUserCredentials::default();
+    joiner.username = "joiner".to_string();
+    joiner.max_connections = 1;
+
+    let joiner_addr = "127.0.0.1:55151".parse().unwrap_or_else(|_| unreachable!());
+    let joiner_fingerprint = create_test_fingerprint(joiner_addr);
+    let joiner_channel = create_test_live_channel(stream_url); // virtual_id 42
+
+    let admission = app_state
+        .active_users
+        .connection_admission(&joiner.username, joiner.max_connections, joiner.soft_connections)
+        .await;
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
+
+    let response = stream_response(
+        &joiner_fingerprint,
+        &app_state,
+        "joiner-session",
+        None,
+        joiner_channel,
+        PlaybackSource::Single { input: &input, stream_url },
+        None,
+        &HeaderMap::default(),
+        &target,
+        &joiner,
+        admission.permission(),
+        admission.kind().unwrap_or(crate::api::model::ConnectionKind::Normal),
+        false,
+        None,
+        false,
+        false,
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Provider count remains 1 because joiner attached to the shared stream
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1);
 }
 
 #[test]

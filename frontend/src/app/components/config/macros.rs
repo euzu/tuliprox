@@ -142,50 +142,6 @@ macro_rules! config_field {
 }
 
 #[macro_export]
-macro_rules! config_field_custom {
-    ($label:expr, $value:expr) => {
-        html! {
-            <div class="tp__form-field tp__form-field__text">
-                <$crate::app::components::FieldLabel
-                    label={$label.to_string()}
-                    field_id={$label.to_string()}
-                />
-                <span class="tp__form-field__value">{$value}</span>
-            </div>
-        }
-    };
-    ($label:expr, $value:expr, $hint:expr) => {
-        html! {
-            <div class="tp__form-field tp__form-field__text">
-                <$crate::app::components::FieldLabel
-                    label={$label.to_string()}
-                    field_id={$label.to_string()}
-                    hint_key={$hint}
-                />
-                <span class="tp__form-field__value">{$value}</span>
-            </div>
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! config_field_custom_hide {
-    ($label:expr, $value:expr) => {
-        html! {
-            <div class="tp__form-field tp__form-field__text">
-                <$crate::app::components::FieldLabel
-                    label={$label.to_string()}
-                    field_id={$label.to_string()}
-                />
-                <span class="tp__form-field__value">
-                    <$crate::app::components::HideContent content={$value}></$crate::app::components::HideContent>
-                </span>
-            </div>
-        }
-    };
-}
-
-#[macro_export]
 macro_rules! config_field_child {
     ($label:expr,  $field_id:expr, $body:block) => {
         html! {
@@ -330,10 +286,10 @@ $crate::edit_field_byte_size_option!(@inner $instance, $label, $field, $action, 
                     autocomplete={true}
                     value={instance.form.$field.as_ref().map_or_else(String::new, |v|v.to_string())}
                     on_change={Callback::from(move |value: String| {
-                        instance.dispatch($action(if value.is_empty() {
+                        instance.dispatch($action(if value.trim().is_empty() {
                             None
                         } else {
-                            Some(shared::model::ByteSize::new(value))
+                            Some(shared::model::ByteSize::new(value.trim()))
                         }));
                     })}
                 />
@@ -779,6 +735,10 @@ macro_rules! edit_field_exp_date {
 #[macro_export]
 macro_rules! edit_field_list {
     ($instance:expr, $label:expr, $field:ident, $action:path, $placeholder:expr) => {{
+        let field_id = $crate::app::components::dto_field_id(&$instance.form, stringify!($field));
+        $crate::edit_field_list!($instance, $label, $field, $action, $placeholder, field_id)
+    }};
+    ($instance:expr, $label:expr, $field:ident, $action:path, $placeholder:expr, $field_id:expr) => {{
         let instance = $instance.clone();
         let tag_list = instance
             .form
@@ -790,7 +750,7 @@ macro_rules! edit_field_list {
             <div class="tp__form-field tp__form-field__list">
                 <$crate::app::components::FieldLabel
                     label={$label.to_string()}
-                    field_id={$crate::app::components::dto_field_id(&instance.form, stringify!($field))}
+                    field_id={$field_id.to_string()}
                 />
                 <$crate::app::components::TagList
                      tags={tag_list}

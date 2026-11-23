@@ -560,6 +560,19 @@ impl SourcesConfig {
         self.sources.iter().flat_map(|source| &source.targets).find(|target| target.name == name)
     }
 
+    /// Whether `id_or_name` refers to `target`: matches by target name first,
+    /// otherwise if no target has `id_or_name` as its name, matches by numeric target id.
+    #[must_use]
+    pub fn target_ref_is(&self, target: &ConfigTarget, id_or_name: &str) -> bool {
+        if id_or_name == target.name {
+            true
+        } else if self.get_target_by_name(id_or_name).is_some() {
+            false
+        } else {
+            id_or_name.parse::<u16>() == Ok(target.id)
+        }
+    }
+
     pub fn get_source_inputs_by_target_by_name(&self, target_name: &str) -> Option<Vec<Arc<str>>> {
         for source in &self.sources {
             for target in &source.targets {
@@ -833,5 +846,37 @@ mod tests {
         });
 
         assert_eq!(provider.provider_url_selection_policy(), ProviderUrlSelectionPolicy::RestartFromFirst);
+    }
+
+    #[test]
+    fn target_ref_is_resolution_semantics() {
+        let mut dto = sources_dto();
+        let target = |id: u16, name: &str| ConfigTargetDto { id, name: name.to_string(), ..ConfigTargetDto::default() };
+        dto.sources = vec![ConfigSourceDto {
+            inputs: vec!["first-input".into()],
+            targets: vec![target(1, "target-a"), target(2, "target-b"), target(3, "2"), target(42, "target-d")],
+        }];
+        let sources = SourcesConfig::try_from(&dto).expect("sources load");
+        let target_b = sources.get_target_by_name("target-b").expect("target-b exists");
+        let target_d = sources.get_target_by_name("target-d").expect("target-d exists");
+
+        // 1. Name match
+        assert!(sources.target_ref_is(target_b, "target-b"));
+
+        // 2. Other name
+        assert!(!sources.target_ref_is(target_b, "target-a"));
+
+        // 3. Numeric id match
+        assert!(sources.target_ref_is(target_d, "42"));
+
+        // 4. Numeric id of another target
+        assert!(!sources.target_ref_is(target_d, "1"));
+
+        // 5. Numeric string that is also a name of another target
+        // "2" is the unique name of target id 3; target_b has id 2, but name takes precedence
+        assert!(!sources.target_ref_is(target_b, "2"));
+
+        // 6. Garbage
+        assert!(!sources.target_ref_is(target_d, "not-a-valid-target-id-or-name"));
     }
 }

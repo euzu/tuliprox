@@ -26,6 +26,7 @@ Add an `mcp:` block to `config.yml`:
 mcp:
   enabled: true
   read_only: true
+  player_tools: off
   allowed_origins: []
   max_response_bytes: 262144
 ```
@@ -33,7 +34,8 @@ mcp:
 | Parameter            |       Type      | Default  | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 |:---------------------|:---------------:|:---------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `enabled`            |       Bool      | `false`  | Mounts `POST {web_ui_path}/mcp`. When `false` (or the block is absent) no MCP route exists.                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `read_only`          |       Bool      | `true`   | Hides write tools from `tools/list` and rejects them in `tools/call`. Set to `false` to expose `update_playlists`, `update_geoip` and `update_imdb_ratings`. Forced to `true` when Web UI authentication is disabled (see [Security model](#3-security-model)).                                                                                                                                                                                                                                     |
+| `read_only`          |       Bool      | `true`   | Hides write tools from `tools/list` and rejects them in `tools/call`. Set to `false` to expose `update_playlists`, `update_geoip` and `update_imdb_ratings`. Applies only to admin tools. Forced to `true` when Web UI authentication is disabled (see [Security model](#3-security-model)).                                                                                                                                                                                                        |
+| `player_tools`       |       Enum      | `off`    | Level of player tools offered to playlist proxy API users (`off`, `read`, `write`). `off` disables all player tools; `read` offers search, EPG and inspection tools; `write` allows recording and playback management. Tools are additionally filtered by the caller's effective features and permissions. When Web UI authentication is disabled, no player tools are offered.                                                                                                                     |
 | `allowed_origins`    | List of Strings | `[]`     | Additional `Origin` values accepted besides the request `Host`, for example `https://claude.ai`. Entries are trimmed and a trailing `/` is removed; for `http`, `https`, `ws` and `wss` the host is lowercased and a default port is dropped (`https://claude.ai:443` is stored as `https://claude.ai`), as browsers send it. Each entry must be an origin (`scheme://host[:port]`, custom schemes allowed) without path, query, fragment or user info; anything else fails the configuration load. |
 | `max_response_bytes` |       Int       | `262144` | Tool results larger than this many bytes are truncated and end with an explicit marker. Must be at least `1024`, otherwise the configuration is rejected while loading.                                                                                                                                                                                                                                                                                                                             |
 
@@ -59,7 +61,7 @@ mcp:
 * With web authentication enabled, a **missing, invalid or expired token is a real HTTP `401`** with
   `WWW-Authenticate: Bearer`, for every JSON-RPC method including `initialize` and `tools/list`. Clients and the stdio
   bridge can therefore detect an expired session at the transport level and sign in again.
-* There is no OAuth flow. Obtain a token from `POST {web_ui_path}/auth/token` (see [Remote clients](#52-remote-streamable-http-clients)).
+* There is no OAuth flow. Obtain a token from `POST {web_ui_path}/auth/token` (see [Remote clients](#62-remote-streamable-http-clients)).
   The token lifetime is `web_ui.auth.token_ttl_mins` (default `30`); see
   [Authentication & RBAC](../configuration/config.md#24-authentication--rbac-auth).
 
@@ -156,7 +158,7 @@ Notes:
 
 How a client learns to use these tools: `tools/list` carries a description and a JSON Schema per tool (parameters, enums
 and one line per selectable field), and the `initialize` result carries an `instructions` text with the recommended
-workflow. The names below are exactly those enums.
+workflow (admin and web callers receive `MCP_INSTRUCTIONS`; playlist API users receive `MCP_PLAYER_INSTRUCTIONS`). The names below are exactly those enums.
 
 Start with `list_playlist_sources`. It returns the names that the other tools expect, never credentials or URLs:
 
@@ -326,9 +328,88 @@ the loaded wasm and `mcp.plugin_tools` is on (see
 * A stored record that cannot be decoded is skipped by the database reader and logged on the server. It is missing from
   the pages, and the response reports how many were skipped in `skipped_records` together with a `note`.
 
-## 5. Client setup
+## 5. Player tools for playlist users
 
-### 5.1 Local clients over stdio (Claude Desktop, Cursor)
+When `mcp.player_tools` is set to `read` or `write`, playlist proxy API users can control player features (channel and
+EPG search, streams, failover source switching, shared-stream splitting, personal recordings, and recurring recording
+rules) through AI assistants. Watch progress and the player event stream are REST/WebSocket only and have no MCP tools.
+
+### 5.1 Authentication for playlist users
+
+API users authenticate using a Bearer token obtained from `POST {web_ui_path}/auth/token` with their Xtream
+credentials (`username` and `password`). Sign-in needs `ui_enabled` or effective `player_features.api_enabled`;
+player tools need the effective Player API switches (`player_features.api_enabled`, unset follows `ui_enabled`;
+`web_ui.player_api_enabled`, unset follows `user_ui_enabled`). With the player API off, the MCP endpoint lists no
+player tools and tool calls fail with "Unknown tool" (no 403).
+
+The issued token carries the API user's identity. Tuliprox resolves the effective permissions and plan features
+(e.g. `source_switch`, `joinable_streams`, `recording`, `max_recording_rules`) dynamically on every request.
+
+* API users see **only** player tools matching their effective features and the configured `mcp.player_tools` level
+  (`read` offers read-only tools; `write` offers read and write tools).
+* Admin tools are completely hidden from API users; attempting to call an admin tool or an unauthorized player tool
+  returns an `Unknown tool: <name>` error (`-32602`).
+* Protocol `initialize` returns role-scoped instructions: admin workflow guidance for administrators and player tool instructions for playlist API users.
+* When Web UI authentication is disabled, all write tools remain inaccessible.
+
+### 5.2 Player tool catalog
+
+| Tool                     | Kind  | Underlying route                          | Required feature             | Arguments                                                                                                                                                                                                        |
+|:-------------------------|:------|:------------------------------------------|:-----------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `me_capabilities`        | read  | `GET /me/capabilities`                    | none (always available)      | none. Reports effective permissions, quotas, and limits.                                                                                                                                                         |
+| `me_search_channels`     | read  | `GET /me/channels`                        | none (always available)      | optional `query` (filter name), `group` (filter group), `limit` (1-500, default 50). Returns live channels passing the user's content filter.                                                                    |
+| `me_get_epg`             | read  | `GET /me/epg`                             | none (always available)      | required `vid` (virtual channel ID), `from`, `to` (unix seconds or RFC 3339; max 48-hour window). Times in unix seconds and ISO-8601 with timeshift applied.                                                     |
+| `me_list_streams`        | read  | `GET /me/streams`                         | none (always available)      | none. Lists active playback streams owned by the caller.                                                                                                                                                         |
+| `me_stop_stream`         | write | `DELETE /me/streams/{uid}`                | none (always available)      | required `uid` (stream ID). Stops the caller's active stream (destructive) and emits `stream_ended` with reason `stopped`.                                                                                       |
+| `me_list_sources`        | read  | `GET /me/channels/{vid}/failover-members` | `source_switch`              | required `vid` (virtual channel ID). Lists failover members for a group channel with redacted health and quality details.                                                                                        |
+| `me_switch_source`       | write | `POST /me/streams/{uid}/failover-switch`  | `source_switch`              | required `uid` (stream ID), `member_vid`. Switches stream source.                                                                                                                                                |
+| `me_split_stream`        | write | `POST /me/streams/{uid}/split`            | `source_switch`              | required `uid` (stream ID). Returns `reconnect_required` and the dedicated `url` (`dedicated=1`) with the password replaced by `***`; the client closes the old stream and opens the new one. Live MPEG-TS only. |
+| `me_list_joinable`       | read  | `GET /me/streams/joinable`                | `joinable_streams`           | none. Lists shared streams the user can join without consuming an additional provider connection.                                                                                                                |
+| `me_list_recordings`     | read  | internal recording snapshot               | `recording` (read)           | none. Returns the full recording snapshot JSON (same format as the WebSocket snapshot).                                                                                                                          |
+| `me_record_program`      | write | `POST /recording/requests`                | `recording` (private/shared) | required `vid`, `program_start`, `program_end`, `title`; optional `visibility`, `pre_roll_secs`, `post_roll_secs`. Idempotent.                                                                                   |
+| `me_cancel_recording`    | write | `POST /recording/requests/{id}/cancel`    | `recording` (private/shared) | required `id` (recording request ID). Cancels a scheduled or in-progress recording.                                                                                                                              |
+| `me_delete_recording`    | write | `DELETE /recording/requests/{id}`         | `recording` (private/shared) | required `id` (recording request ID). Deletes a recording or library entry (destructive).                                                                                                                        |
+| `me_recording_conflicts` | read  | `POST /recording/conflicts/preview`       | `recording` (private/shared) | required `vid`, `program_start`, `program_end`; optional `pre_roll_secs`, `post_roll_secs`, `priority`. Previews scheduling conflicts.                                                                           |
+| `me_list_rules`          | read  | `GET /recording/rules`                    | `recording` (read)           | none. Lists recurring recording rules visible to the caller (own rules and visible shared rules of the own target) in the redacted `UserRecordingRuleDto` shape (`own`, `owner_id` only for own rules).          |
+| `me_create_rule`         | write | `POST /recording/rules`                   | `recording` (private/shared) | required `vid`, `weekday` (1-7), `local_start_time` (HH:MM), `duration_secs`; optional `timezone`, `visibility`, `pre_roll_secs`, `post_roll_secs`. Enforces `max_recording_rules`.                              |
+| `me_delete_rule`         | write | `DELETE /recording/rules/{id}`            | `recording` (private/shared) | required `id` (recording rule ID); optional `future` (`retain` or `cancel`, default `retain`). Deletes a recurring recording rule (destructive).                                                                 |
+
+### 5.3 Example workflow: recording a show
+
+To fulfill a request like *"Record the show at 10:00 on channel Sports 1"*, the assistant executes the following
+sequence:
+
+1. **Find the channel**:
+   Call `me_search_channels` with `{"query": "Sports 1"}`. The result contains matching visible channels with their
+   `virtual_id` (e.g. `1042`).
+2. **Find the programme in EPG**:
+   Call `me_get_epg` with `{"vid": 1042, "from": 1740045600, "to": 1740052800}` (a window covering 10:00).
+   The response provides the programme's title, description, `start_ts`, and `stop_ts` (with user timeshift applied).
+3. **Schedule the recording**:
+   Call `me_record_program` with:
+
+   ```json
+   {
+     "vid": 1042,
+     "title": "Morning Match",
+     "program_start": 1740045600,
+     "program_end": 1740049200
+   }
+   ```
+
+   The server automatically attaches an `Idempotency-Key` header computed from the user's identity and arguments.
+   If the assistant repeats the call with the same arguments, no duplicate recording is created.
+
+Possible recording errors reported in `isError` tool results:
+
+* `recording_quota_exceeded`: The user's private recording byte quota is exhausted.
+* `recording_concurrency_exceeded`: The user has reached their maximum concurrent recordings limit for the requested
+  time window.
+* `recording_invalid_source`: The channel does not exist or is excluded by the user's content filter.
+
+## 6. Client setup
+
+### 6.1 Local clients over stdio (Claude Desktop, Cursor)
 
 Clients that start a local command use the built-in bridge. It reads newline-delimited JSON-RPC on stdin, forwards each
 message to the HTTP endpoint of a running instance and writes the answers to stdout. It signs in with a Web UI user via
@@ -368,7 +449,7 @@ shape:
 * Passing the password through the environment keeps it out of the process list. Restrict the permissions of the client
   config file.
 
-### 5.2 Remote Streamable HTTP clients
+### 6.2 Remote Streamable HTTP clients
 
 Clients that support remote MCP servers over Streamable HTTP can connect directly. Use a bearer token:
 
@@ -395,10 +476,10 @@ Then configure the client with the URL `https://tuliprox.example.com/mcp` and th
 
 The token expires after `web_ui.auth.token_ttl_mins` (default 30 minutes) and there is no refresh flow on the MCP
 endpoint, so the client has to be given a new token after it expires. For unattended local use prefer the
-[stdio bridge](#51-local-clients-over-stdio-claude-desktop-cursor), which signs in again on its own. Always use HTTPS
+[stdio bridge](#61-local-clients-over-stdio-claude-desktop-cursor), which signs in again on its own. Always use HTTPS
 when the endpoint is reachable from outside a trusted network.
 
-### 5.3 Verifying with curl
+### 6.3 Verifying with curl
 
 ```bash
 curl -s http://localhost:8901/mcp \
@@ -407,7 +488,7 @@ curl -s http://localhost:8901/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_status","arguments":{}}}' | jq
 ```
 
-## 6. Protocol behavior and limits
+## 7. Protocol behavior and limits
 
 * **Methods:** `initialize`, `notifications/initialized`, `ping`, `tools/list` and `tools/call`. Any other method
   answers JSON-RPC error `-32601`.
@@ -425,7 +506,7 @@ curl -s http://localhost:8901/mcp \
   `[truncated: response exceeded N bytes]`. Narrow the query (date range, `page_size`, `limit`, provider filter) or
   raise `max_response_bytes`.
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom                                                           | Cause and fix                                                                                                                                                                                                      |
 |:------------------------------------------------------------------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -440,7 +521,7 @@ curl -s http://localhost:8901/mcp \
 | Claude Desktop or Cursor reports invalid JSON from the stdio tool | Something other than protocol JSON reached stdout. Run the bridge command directly in a terminal, check stderr, and make sure no wrapper script prints to stdout.                                                  |
 | The stdio bridge keeps failing with `401`                         | Wrong `TULIPROX_MCP_USER` / `TULIPROX_MCP_PASSWORD`, or the user is throttled after repeated failed sign-ins. Check the `auth.sign_in.throttled` event in the log.                                                 |
 
-## 8. Non-goals and follow-ups
+## 9. Non-goals and follow-ups
 
 * **No configuration write tools.** The REST save endpoints take whole configuration documents and offer no diff or
   preview, which is unsafe for an LLM. Configuration is readable through `get_config` only.

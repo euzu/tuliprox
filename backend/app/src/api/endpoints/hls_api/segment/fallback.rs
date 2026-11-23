@@ -29,7 +29,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_custom_video_manifest_respon
     if let Some(user) = app_state.app_config.get_user_credentials(username) {
         return hls_custom_video_manifest_response(app_state, &user, video_type, fallback_status).await;
     }
-    fallback_status.into_response()
+    crate::api::model::fallback_status_response(fallback_status, video_type)
 }
 
 pub(in crate::api::endpoints::hls_api) async fn hls_custom_video_manifest_response_for_lease(
@@ -39,7 +39,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_custom_video_manifest_respon
     fallback_status: StatusCode,
 ) -> axum::response::Response {
     let Some(user) = app_state.app_config.get_user_credentials(&lease.username) else {
-        return fallback_status.into_response();
+        return crate::api::model::fallback_status_response(fallback_status, video_type);
     };
     hls_custom_video_manifest_response_for_access_lease(app_state, &user, video_type, fallback_status, lease).await
 }
@@ -77,7 +77,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_runtime_custom_tail_response
     if outcome == HlsRuntimeCustomTailOutcome::PendingOwnerRegistered {
         return hls_temporary_resource_unavailable_response(HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS);
     }
-    fallback_status.into_response()
+    crate::api::model::fallback_status_response(fallback_status, reason.video_type())
 }
 
 pub(in crate::api::endpoints::hls_api) async fn hls_runtime_or_standalone_custom_tail_response(
@@ -92,7 +92,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_runtime_or_standalone_custom
     let Some(lease) =
         app_state.hls.proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await
     else {
-        return fallback_status.into_response();
+        return crate::api::model::fallback_status_response(fallback_status, reason.video_type());
     };
     match &lease.playback_mode {
         HlsLeasePlaybackMode::TerminalTail(_)
@@ -118,7 +118,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_runtime_or_standalone_custom
             .await;
         }
         HlsLeasePlaybackMode::Ended if !reason.permits_unpublished_lease_standalone_tail() => {
-            return fallback_status.into_response();
+            return crate::api::model::fallback_status_response(fallback_status, reason.video_type());
         }
         HlsLeasePlaybackMode::Live | HlsLeasePlaybackMode::Ended => {}
     }
@@ -206,10 +206,10 @@ pub(in crate::api::endpoints::hls_api) async fn hls_manifest_access_denial_runti
     fallback_status: StatusCode,
 ) -> axum::response::Response {
     let Some(lease) = lease_snapshot else {
-        return fallback_status.into_response();
+        return crate::api::model::fallback_status_response(fallback_status, reason.video_type());
     };
     let Some(session) = app_state.hls.proxy.sessions().get_by_proxy_session_id(proxy_session_id).await else {
-        return fallback_status.into_response();
+        return crate::api::model::fallback_status_response(fallback_status, reason.video_type());
     };
     hls_runtime_or_standalone_custom_tail_response(
         app_state,

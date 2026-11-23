@@ -10,9 +10,11 @@ use super::{
     MetadataRetryDbKey, MetadataRetryDbValue,
 };
 #[cfg(test)]
-use crate::api_user_recovery::{StoredApiUserV2, StoredApiUserV3, StoredApiUserV4, StoredApiUserV5, StoredApiUserV6};
+use crate::api_user_recovery::{
+    StoredApiUserV2, StoredApiUserV3, StoredApiUserV4, StoredApiUserV5, StoredApiUserV6, StoredApiUserV7,
+};
 use crate::{
-    api_user_recovery::{decode_user_record, ApiUserRecovery, ApiUserRepository, StoredApiUserV7},
+    api_user_recovery::{decode_user_record, ApiUserRecovery, ApiUserRepository, StoredApiUserV8},
     qos_snapshot_repository::{QosAggregationCheckpoint, QosSnapshotRecord},
     storage_const,
     target_id_mapping::VirtualIdRecord,
@@ -860,7 +862,8 @@ fn marker_file_name() -> String { format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VE
 //   V4              – 17 fields, added soft_connections and soft_priority
 //   V5              – 18 fields, added output_clusters
 //   V6              – 19 fields, added network_access
-//   V7 (current)    – 21 fields, added plan and filter
+//   V7              – 21 fields, added plan and filter
+//   V8 (current)    – 22 fields, added player_features
 //
 // On first startup after an upgrade the file is still in an older format.
 // `migrate_user_db_schema` detects this, converts every record in-place, and
@@ -926,13 +929,13 @@ fn scan_user_records(
 }
 
 /// Publishes only a fully decoded and verified set of migrated users.
-fn store_migrated_users(db_path: &Path, users: &mut BPlusTree<String, StoredApiUserV7>) -> io::Result<()> {
+fn store_migrated_users(db_path: &Path, users: &mut BPlusTree<String, StoredApiUserV8>) -> io::Result<()> {
     let name = db_path.file_name().ok_or_else(|| io::Error::other("user database has no file name"))?;
     let staging = db_path.with_file_name(format!("{}.{}.v3.tmp", name.to_string_lossy(), uuid::Uuid::new_v4()));
     let artifacts = BPlusTreeStagingArtifacts::new(db_path, &staging)?;
     let result = (|| {
         users.store(&staging)?;
-        let verified = BPlusTree::<String, StoredApiUserV7>::load(&staging)?;
+        let verified = BPlusTree::<String, StoredApiUserV8>::load(&staging)?;
         if verified.len() != users.len() || verified.get_metadata() != users.get_metadata() {
             return Err(io::Error::other("migrated user count or database metadata did not verify"));
         }
@@ -942,7 +945,7 @@ fn store_migrated_users(db_path: &Path, users: &mut BPlusTree<String, StoredApiU
                 return Err(io::Error::other("migrated user fields did not verify"));
             }
         }
-        publish_staged_database::<String, StoredApiUserV7>(&staging, db_path)
+        publish_staged_database::<String, StoredApiUserV8>(&staging, db_path)
     })();
     if let Err(error) = artifacts.remove_owned_staging_artifacts() {
         warn!("Could not remove user migration staging artifacts: {error}");
@@ -950,7 +953,7 @@ fn store_migrated_users(db_path: &Path, users: &mut BPlusTree<String, StoredApiU
     result
 }
 
-/// Normalizes historical and compact user records to the full V7 layout.
+/// Normalizes historical and compact user records to the full V8 layout.
 ///
 /// Tracked databases are repaired only from history matching their identity and
 /// revision. Untracked records are decoded individually, without skipping any
@@ -972,7 +975,7 @@ pub(crate) fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) ->
         return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported user B+Tree storage version"));
     }
     if storage_version == STORAGE_VERSION {
-        if BPlusTree::<String, StoredApiUserV7>::load(db_path).is_ok() {
+        if BPlusTree::<String, StoredApiUserV8>::load(db_path).is_ok() {
             return Ok(false);
         }
         let tracked = {
@@ -992,7 +995,7 @@ pub(crate) fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) ->
     users.set_metadata(source.get_metadata().clone());
     let mut schema_changed = false;
     for (key, value) in &source {
-        schema_changed |= value.as_array().is_none_or(|fields| fields.len() != 21);
+        schema_changed |= value.as_array().is_none_or(|fields| fields.len() != 22);
         let user = decode_user_record(value.clone()).map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -1015,7 +1018,7 @@ pub struct AllStartupMigrationStats {
 }
 
 /// Runs all startup migrations in sequence:
-/// 1. User DB normalization/recovery into the full V7 layout and current storage format
+/// 1. User DB normalization/recovery into the full V8 layout and current storage format
 /// 2. Storage-format migration for the remaining B+Tree databases
 ///
 /// `config_dir` is the directory that contains `api_user.db` and the merge-guard
@@ -1066,7 +1069,7 @@ pub fn run_startup_migrations(config_paths: &ConfigPaths) {
                 );
             }
             if stats.user_db_migrated {
-                info!("User DB schema migrated to V7");
+                info!("User DB schema migrated to V8");
             }
         }
         Err(err) => {
@@ -1512,8 +1515,8 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
-        let user = v7_tree
+        let v8_tree = BPlusTree::<String, StoredApiUserV8>::load(&db_path)?;
+        let user = v8_tree
             .query(&"alice".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "alice missing after migration"))?;
         assert_eq!(user.username, "alice");
@@ -1525,6 +1528,7 @@ mod tests {
         assert_eq!(user.network_access, None);
         assert_eq!(user.plan, None);
         assert_eq!(user.filter, None);
+        assert_eq!(user.player_features, None);
 
         Ok(())
     }
@@ -1563,8 +1567,8 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
-        let user = v7_tree
+        let v8_tree = BPlusTree::<String, StoredApiUserV8>::load(&db_path)?;
+        let user = v8_tree
             .query(&"bob".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "bob missing after migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::all());
@@ -1573,6 +1577,7 @@ mod tests {
         assert_eq!(user.soft_priority, None);
         assert_eq!(user.network_access, None);
         assert_eq!(user.plan, None);
+        assert_eq!(user.player_features, None);
 
         Ok(())
     }
@@ -1613,8 +1618,8 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
-        let user = v7_tree
+        let v8_tree = BPlusTree::<String, StoredApiUserV8>::load(&db_path)?;
+        let user = v8_tree
             .query(&"carol".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "carol missing after migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::all());
@@ -1622,6 +1627,7 @@ mod tests {
         assert_eq!(user.soft_priority, Some(-4));
         assert_eq!(user.network_access, None);
         assert_eq!(user.plan, None);
+        assert_eq!(user.player_features, None);
 
         Ok(())
     }
@@ -1663,8 +1669,8 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
-        let user = v7_tree
+        let v8_tree = BPlusTree::<String, StoredApiUserV8>::load(&db_path)?;
+        let user = v8_tree
             .query(&"dave".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "dave missing after v7 migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
@@ -1673,6 +1679,7 @@ mod tests {
         assert_eq!(user.soft_priority, Some(-4));
         assert_eq!(user.network_access, None);
         assert_eq!(user.plan, None);
+        assert_eq!(user.player_features, None);
         assert_eq!(user.filter, None);
 
         Ok(())
@@ -1720,8 +1727,8 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
-        let user = v7_tree
+        let v8_tree = BPlusTree::<String, StoredApiUserV8>::load(&db_path)?;
+        let user = v8_tree
             .query(&"erin".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "erin missing after v7 migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
@@ -1734,20 +1741,73 @@ mod tests {
         );
         assert_eq!(user.plan, None);
         assert_eq!(user.filter, None);
+        assert_eq!(user.player_features, None);
 
         Ok(())
     }
 
     #[test]
-    fn user_db_schema_v7_is_detected_without_writing_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v7_to_v8_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
 
         let mut v7_tree: BPlusTree<String, StoredApiUserV7> = BPlusTree::new();
         v7_tree.insert(
-            "frank".to_string(),
+            "grace".to_string(),
             StoredApiUserV7 {
+                target: "channels".to_string(),
+                username: "grace".to_string(),
+                password: "secret".to_string(),
+                token: None,
+                proxy: ProxyType::Reverse(None),
+                server: None,
+                epg_timeshift: None,
+                epg_request_timeshift: None,
+                created_at: None,
+                exp_date: None,
+                max_connections: Some(2),
+                status: Some(ProxyUserStatus::Active),
+                output_clusters: ClusterFlags::all(),
+                ui_enabled: true,
+                comment: Some("v7 user".to_string()),
+                priority: Some(3),
+                soft_connections: Some(1),
+                soft_priority: Some(1),
+                network_access: None,
+                plan: Some("premium".to_string()),
+                filter: Some(r#"Group ~ "^DE.*""#.to_string()),
+            },
+        );
+        let _ = v7_tree.store(&db_path)?;
+        assert!(!merge_guard_path.exists());
+
+        let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
+        assert!(migrated);
+        assert!(merge_guard_path.exists());
+
+        let v8_tree = BPlusTree::<String, StoredApiUserV8>::load(&db_path)?;
+        let user = v8_tree
+            .query(&"grace".to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "grace missing after v8 migration"))?;
+        assert_eq!(user.username, "grace");
+        assert_eq!(user.plan.as_deref(), Some("premium"));
+        assert_eq!(user.filter.as_deref(), Some(r#"Group ~ "^DE.*""#));
+        assert_eq!(user.player_features, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn user_db_schema_v8_is_detected_without_writing_merge_guard() -> io::Result<()> {
+        let temp = tempdir()?;
+        let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
+        let merge_guard_path = user_db_merge_guard_path(temp.path());
+
+        let mut v8_tree: BPlusTree<String, StoredApiUserV8> = BPlusTree::new();
+        v8_tree.insert(
+            "frank".to_string(),
+            StoredApiUserV8 {
                 target: "channels".to_string(),
                 username: "frank".to_string(),
                 password: "secret".to_string(),
@@ -1769,21 +1829,23 @@ mod tests {
                 network_access: None,
                 plan: Some("basic".to_string()),
                 filter: Some(r#"Group ~ "^DE.*""#.to_string()),
+                player_features: None,
             },
         );
-        let _ = v7_tree.store(&db_path)?;
+        let _ = v8_tree.store(&db_path)?;
         assert!(!merge_guard_path.exists());
 
         let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
         assert!(!migrated);
         assert!(!merge_guard_path.exists());
 
-        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
-        let user = v7_tree
+        let v8_tree = BPlusTree::<String, StoredApiUserV8>::load(&db_path)?;
+        let user = v8_tree
             .query(&"frank".to_string())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "frank missing after v7 detection"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "frank missing after v8 detection"))?;
         assert_eq!(user.plan.as_deref(), Some("basic"));
         assert_eq!(user.filter.as_deref(), Some(r#"Group ~ "^DE.*""#));
+        assert_eq!(user.player_features, None);
 
         Ok(())
     }
@@ -1868,6 +1930,7 @@ mod tests {
             network_access: None,
             plan: Some("premium".to_string()),
             filter: Some(r#"Group ~ "^DE.*""#.to_string()),
+            player_features: None,
         };
         repository.commit(vec![("alice".to_string(), cred)])?;
         drop(repository);
@@ -1890,25 +1953,26 @@ mod tests {
         let (db_path, merge_guard_path) = create_tracked_compact_fixture(temp.path())?;
 
         assert!(!merge_guard_path.exists());
-        assert!(BPlusTree::<String, StoredApiUserV7>::load(&db_path).is_err(), "compact records must fail V7 load");
+        assert!(BPlusTree::<String, StoredApiUserV8>::load(&db_path).is_err(), "compact records must fail V8 load");
 
         let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
         assert!(migrated, "migration should return Ok(true)");
         assert!(merge_guard_path.exists(), "merge guard must exist");
 
-        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
-        let user = v7_tree
+        let v8_tree = BPlusTree::<String, StoredApiUserV8>::load(&db_path)?;
+        let user = v8_tree
             .query(&"alice".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "alice missing after rebuild"))?;
         assert_eq!(user.plan.as_deref(), Some("premium"));
         assert_eq!(user.filter.as_deref(), Some(r#"Group ~ "^DE.*""#));
+        assert_eq!(user.player_features, None);
 
         let mut query = BPlusTreeQuery::<String, Value>::try_new(&db_path)?;
         let mut count = 0;
         for entry in query.iter() {
             let (_, val) = entry?;
             let arr = val.as_array().ok_or_else(|| io::Error::other("stored record is not an array"))?;
-            assert_eq!(arr.len(), 21, "all records must have 21 fields");
+            assert_eq!(arr.len(), 22, "all records must have 22 fields");
             count += 1;
         }
         assert_eq!(count, 1);

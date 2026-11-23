@@ -39,14 +39,25 @@ async fn shared_clients_on_same_socket_keep_independent_streams_and_capacity() -
         pending_cleanup,
         0,
         ConnectionKind::Normal,
+        "first",
+        "first_token",
     )
     .await
     .ok_or("first subscription missing")?;
-    let (mut second, _, _) =
-        SharedStreamManager::subscribe_shared_stream(ctx, url, &addr, second_id, 0, ConnectionKind::Normal)
-            .await
-            .map_err(|_| "second shared cleanup admission failed")?
-            .ok_or("second subscription missing")?;
+    let (mut second, _, _) = SharedStreamManager::subscribe_shared_stream(
+        ctx,
+        url,
+        &addr,
+        second_id,
+        0,
+        ConnectionKind::Normal,
+        "second",
+        "second_token",
+        None,
+    )
+    .await
+    .map_err(|_| "second shared cleanup admission failed")?
+    .ok_or("second subscription missing")?;
     register_user(&users, addr, second_id.stream_uid(), "second", url).await?;
 
     tx.send(Ok(Bytes::from_static(b"first chunk"))).await?;
@@ -181,6 +192,8 @@ async fn concurrent_shared_origin_creation_releases_only_losing_allocation() -> 
         pending_1,
         0,
         ConnectionKind::Normal,
+        "first",
+        "first_token",
     )
     .await
     .ok_or("first origin registration failed")?;
@@ -211,6 +224,8 @@ async fn concurrent_shared_origin_creation_releases_only_losing_allocation() -> 
         pending_2,
         0,
         ConnectionKind::Normal,
+        "second",
+        "second_token",
     )
     .await
     .ok_or("second subscriber join failed")?;
@@ -290,10 +305,121 @@ async fn shared_cold_miss_does_not_consume_cleanup_capacity_or_emit_cleanup() ->
         id,
         0,
         ConnectionKind::Normal,
+        "test_user",
+        "test_token",
+        None,
     )
     .await?;
 
     assert!(res.is_none());
     assert_eq!(connections.cleanup_tx().capacity(), initial_capacity, "cold miss must not consume cleanup capacity");
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_free_joins_with_max_one_admits_exactly_one() -> Result<(), Box<dyn std::error::Error>> {
+    let app_cfg = Arc::new(create_test_app_config_with_conns(10));
+    let events = Arc::new(EventManager::new());
+    let (providers, users, manager, connections) = create_test_connection_manager(&app_cfg, &events);
+    let owner_addr = "127.0.0.1:41101".parse()?;
+    let owner_id = SharedSubscriberId::from_stream_uid(connections.next_stream_uid());
+    let url = "https://example.invalid/live/concurrent-free.ts";
+    register_user(&users, owner_addr, owner_id.stream_uid(), "owner", url).await?;
+    let allocation = ManagedProviderHandle::new(
+        Arc::clone(&providers),
+        providers.acquire_connection(&"provider_1".intern(), &owner_addr, 0, ConnectionKind::Normal).unwrap(),
+    );
+    let pending_cleanup =
+        SharedStreamManager::reserve_subscriber_cleanup(&connections, owner_id, owner_addr).await.unwrap();
+    let ctx = super::super::SharedStreamCtx {
+        app_config: &app_cfg,
+        shared_stream_manager: &manager,
+        active_provider: &providers,
+        connection_manager: &connections,
+    };
+    let _owner_res = SharedStreamManager::register_shared_stream(
+        ctx,
+        url,
+        futures::stream::pending::<Result<Bytes, std::io::Error>>(),
+        &owner_addr,
+        owner_id,
+        Vec::new(),
+        8,
+        Some(allocation),
+        pending_cleanup,
+        0,
+        ConnectionKind::Normal,
+        "owner",
+        "owner_token",
+    )
+    .await
+    .unwrap();
+
+    let addr1: SocketAddr = "127.0.0.1:41102".parse()?;
+    let id1 = SharedSubscriberId::from_stream_uid(connections.next_stream_uid());
+    register_user(&users, addr1, id1.stream_uid(), "user1", url).await?;
+
+    let addr2: SocketAddr = "127.0.0.1:41103".parse()?;
+    let id2 = SharedSubscriberId::from_stream_uid(connections.next_stream_uid());
+    register_user(&users, addr2, id2.stream_uid(), "user1", url).await?;
+
+    let j1 = {
+        let app_cfg = Arc::clone(&app_cfg);
+        let providers = Arc::clone(&providers);
+        let manager = Arc::clone(&manager);
+        let connections = Arc::clone(&connections);
+        tokio::spawn(async move {
+            SharedStreamManager::subscribe_shared_stream(
+                super::super::SharedStreamCtx {
+                    app_config: &app_cfg,
+                    shared_stream_manager: &manager,
+                    active_provider: &providers,
+                    connection_manager: &connections,
+                },
+                url,
+                &addr1,
+                id1,
+                0,
+                ConnectionKind::Normal,
+                "user1",
+                "token1",
+                Some(1),
+            )
+            .await
+        })
+    };
+    let j2 = {
+        let app_cfg = Arc::clone(&app_cfg);
+        let providers = Arc::clone(&providers);
+        let manager = Arc::clone(&manager);
+        let connections = Arc::clone(&connections);
+        tokio::spawn(async move {
+            SharedStreamManager::subscribe_shared_stream(
+                super::super::SharedStreamCtx {
+                    app_config: &app_cfg,
+                    shared_stream_manager: &manager,
+                    active_provider: &providers,
+                    connection_manager: &connections,
+                },
+                url,
+                &addr2,
+                id2,
+                0,
+                ConnectionKind::Normal,
+                "user1",
+                "token2",
+                Some(1),
+            )
+            .await
+        })
+    };
+
+    let (r1, r2) = tokio::join!(j1, j2);
+    let s1 = r1.unwrap().unwrap();
+    let s2 = r2.unwrap().unwrap();
+
+    // Exactly one admitted, one rejected
+    assert!(s1.is_some() ^ s2.is_some());
+    assert_eq!(manager.user_free_shared_joins("user1").await, 1);
     Ok(())
 }

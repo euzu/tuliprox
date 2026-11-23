@@ -85,7 +85,9 @@ pub(super) fn stalker_options_fields(
             { size_cap_field(state, translate.t("LABEL.STALKER_GET_EPG_MB"), "stalker_get_epg_mb", "STALKER_ACTION_SIZE_CAP.GET_EPG_MB", caps.get_epg_mb, |caps, value| caps.get_epg_mb = value) }
             <div class="tp__form-field tp__form-field__number">
                 <NumberInput label={translate.t("LABEL.STALKER_CATALOG_PAGE_LIMIT")}
-                    name="stalker_catalog_page_limit" value={state.catalog_max_pages.map(i64::from)}
+                    name="stalker_catalog_page_limit"
+                    field_id={Some("STALKER_INPUT_CONFIG.CATALOG_MAX_PAGES".to_string())}
+                    value={state.catalog_max_pages.map(i64::from)}
                     on_change={Callback::from(move |value| {
                         let mut config = (*page_limit_state).clone();
                         config.catalog_max_pages = parsed_size_cap(value).filter(|value| *value > 0);

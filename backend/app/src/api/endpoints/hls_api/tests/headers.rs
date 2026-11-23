@@ -1,11 +1,12 @@
 use super::{
     apply_hls_user_agent_stream_index, assert_hls_cache_stream_registered, build_hls_manifest_request_headers,
-    cache_recording_test_item, configure_recording_test_listener, enable_hls_cache, encode_test_manifest, get_response,
-    hls_proxy_uri, hls_session_last_media_at_ms, legacy_manifest_test_client_headers, legacy_manifest_test_input,
-    map_transient_resource, recording_test_response, recording_test_router, recording_test_url, response_body,
-    spawn_recording_header_origin, spawn_test_encoded_manifest_origin, spawn_test_transient_origin,
-    store_test_sources_with_target, test_app_state, test_app_state_with_inputs, test_hls_share_target,
-    test_m3u_hls_item,
+    cache_recording_test_item, configure_recording_test_listener, disable_custom_stream_response,
+    enable_channel_unavailable_custom_response, enable_hls_cache, encode_test_manifest, get_response,
+    hls_custom_video_test_user, hls_proxy_uri, hls_session_last_media_at_ms, legacy_manifest_test_client_headers,
+    legacy_manifest_test_input, map_transient_resource, recording_test_response, recording_test_router,
+    recording_test_url, response_body, spawn_recording_header_origin, spawn_test_encoded_manifest_origin,
+    spawn_test_transient_origin, store_test_sources_with_target, test_app_state, test_app_state_with_inputs,
+    test_hls_share_target, test_m3u_hls_item,
 };
 use crate::{
     api::model::{HlsSession, HlsSessionKey, ProxySessionId},
@@ -380,4 +381,66 @@ fn transient_cross_origin_redirect_strips_sensitive_headers() {
     assert!(!headers.contains_key("proxy-authorization"));
     assert!(!headers.contains_key(header::HOST));
     assert_eq!(headers[header::RANGE], "bytes=0-1");
+}
+
+#[tokio::test]
+async fn hls_fallback_manifest_response_contains_fallback_and_cache_control_headers() {
+    let app_state = test_app_state();
+    enable_channel_unavailable_custom_response(&app_state);
+    let user = hls_custom_video_test_user();
+
+    // 1. With custom video enabled: response delivers 200 OK fallback manifest
+    let response = crate::api::endpoints::hls_api::hls_custom_video_manifest_response(
+        &app_state,
+        &user,
+        shared::model::CustomVideoStreamType::ChannelUnavailable,
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(shared::model::HEADER_TULIPROX_FALLBACK).and_then(|v| v.to_str().ok()),
+        Some("channel_unavailable")
+    );
+    assert_eq!(response.headers().get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()), Some("no-store"));
+
+    // 2. With custom video disabled: response delivers fallback error status with both headers
+    disable_custom_stream_response(&app_state);
+    let response = crate::api::endpoints::hls_api::hls_custom_video_manifest_response(
+        &app_state,
+        &user,
+        shared::model::CustomVideoStreamType::ChannelUnavailable,
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers().get(shared::model::HEADER_TULIPROX_FALLBACK).and_then(|v| v.to_str().ok()),
+        Some("channel_unavailable")
+    );
+    assert_eq!(response.headers().get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()), Some("no-store"));
+}
+
+#[tokio::test]
+async fn hls_manifest_access_denial_fallback_headers_when_lease_missing() {
+    let app_state = test_app_state();
+    let proxy_session_id = ProxySessionId("non-existent-session".to_string());
+
+    let response = crate::api::endpoints::hls_api::hls_manifest_access_denial_runtime_response(
+        &app_state,
+        &proxy_session_id,
+        None,
+        tuliprox_hls::api::HlsRuntimeCustomTailReason::ChannelUnavailable,
+        StatusCode::BAD_GATEWAY,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        response.headers().get(shared::model::HEADER_TULIPROX_FALLBACK).and_then(|v| v.to_str().ok()),
+        Some("channel_unavailable")
+    );
+    assert_eq!(response.headers().get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()), Some("no-store"));
 }

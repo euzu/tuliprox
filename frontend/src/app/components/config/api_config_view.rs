@@ -14,7 +14,7 @@ use crate::{
         },
         context::ConfigContext,
     },
-    config_field, config_field_bool, config_field_custom, config_field_empty, edit_field_bool, edit_field_number_u16,
+    config_field, config_field_bool, config_field_child, config_field_empty, edit_field_bool, edit_field_number_u16,
     edit_field_text, generate_form_reducer, html_if,
     i18n::use_translation,
     use_default_form_reducer,
@@ -247,6 +247,7 @@ fn CredentialGenEdit(props: &CredentialGenEditProps) -> Html {
                         <NumberInput
                             label={translate.t(LABEL_CREDENTIAL_LENGTH)}
                             name={format!("{name}_{idx}_length")}
+                            field_id={Some("API_PROXY_CONFIG.CREDENTIAL_LENGTH".to_string())}
                             hint_key={Some("API_PROXY_CONFIG.CREDENTIAL_LENGTH".to_string())}
                             value={i64::from(segment.length)}
                             min_i64={i64::from(CREDENTIAL_LENGTH_MIN)}
@@ -258,6 +259,7 @@ fn CredentialGenEdit(props: &CredentialGenEditProps) -> Html {
                         <Input
                             label={translate.t(LABEL_CREDENTIAL_CHARS)}
                             name={format!("{name}_{idx}_chars")}
+                            field_id={Some("API_PROXY_CONFIG.CREDENTIAL_CHARS".to_string())}
                             placeholder={placeholder_chars}
                             autocomplete={false}
                             hint_key={Some("API_PROXY_CONFIG.CREDENTIAL_CHARS".to_string())}
@@ -269,6 +271,7 @@ fn CredentialGenEdit(props: &CredentialGenEditProps) -> Html {
                         <Input
                             label={translate.t(LABEL_CREDENTIAL_EXCLUDE)}
                             name={format!("{name}_{idx}_exclude")}
+                            field_id={Some("API_PROXY_CONFIG.CREDENTIAL_EXCLUDE".to_string())}
                             placeholder={"1lI0O".to_string()}
                             autocomplete={false}
                             hint_key={Some("API_PROXY_CONFIG.CREDENTIAL_EXCLUDE".to_string())}
@@ -817,9 +820,9 @@ pub fn ApiConfigView() -> Html {
                                                         </span>
                                                     </div>
                                                     <div class="tp__api-config-view__credential-gen__segment-fields">
-                                                        { config_field!(segment, translate.t(LABEL_CREDENTIAL_LENGTH), length, Some("API_PROXY_CONFIG.CREDENTIAL_LENGTH".to_string())) }
-                                                        { config_field_custom!(translate.t(LABEL_CREDENTIAL_CHARS), chars_display, Some("API_PROXY_CONFIG.CREDENTIAL_CHARS".to_string())) }
-                                                        { config_field_custom!(translate.t(LABEL_CREDENTIAL_EXCLUDE), exclude_display, Some("API_PROXY_CONFIG.CREDENTIAL_EXCLUDE".to_string())) }
+                                                        { config_field_child!(translate.t(LABEL_CREDENTIAL_LENGTH), "API_PROXY_CONFIG.CREDENTIAL_LENGTH", { html! { <span class="tp__form-field__value">{segment.length.to_string()}</span> } }) }
+                                                        { config_field_child!(translate.t(LABEL_CREDENTIAL_CHARS), "API_PROXY_CONFIG.CREDENTIAL_CHARS", { html! { <span class="tp__form-field__value">{chars_display}</span> } }) }
+                                                        { config_field_child!(translate.t(LABEL_CREDENTIAL_EXCLUDE), "API_PROXY_CONFIG.CREDENTIAL_EXCLUDE", { html! { <span class="tp__form-field__value">{exclude_display}</span> } }) }
                                                     </div>
                                                 </div>
                                             }

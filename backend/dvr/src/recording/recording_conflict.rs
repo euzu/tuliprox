@@ -22,6 +22,10 @@
 //! or task id. Logs and the response only carry the provider scope,
 //! anonymized interval, and severity.
 
+/// Pure: return true if two half-open intervals [start1, end1) and [start2, end2) overlap.
+#[must_use]
+pub fn intervals_overlap(start1: i64, end1: i64, start2: i64, end2: i64) -> bool { start1 < end2 && start2 < end1 }
+
 /// A demand point: a recording (the candidate or another scheduled /
 /// active recording) plus the effective interval it occupies.
 #[derive(Debug, Clone, PartialEq, Eq)]

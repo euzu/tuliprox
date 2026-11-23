@@ -1,15 +1,24 @@
 use crate::{
     app::components::{
+        build_recording_options, build_tri_state_options,
         input::Input,
         menu_item::MenuItem,
+        parse_optional_input, parse_plan_recording_level, parse_positive_byte_size, parse_tri_state_selection,
         popup_menu::PopupMenu,
+        select::Select,
+        selection_first_owned,
         userlist::{ProxyTypeInput, ProxyTypeView},
-        AppIcon, Breadcrumbs, Card, CustomDialog, FieldWrapper, NoContent, Table, TableDefinition, TextButton,
+        AppIcon, Breadcrumbs, Card, CustomDialog, DropDownSelection, FieldWrapper, NoContent, Table, TableDefinition,
+        TextButton, ToggleSwitch, MSG_BYTE_SIZE_INVALID,
     },
+    config_field_child,
     hooks::use_service_context,
     i18n::use_translation,
 };
-use shared::model::{ClusterFlags, PlansConfigDto, ProxyType, SortOrder, UserPlanDto, UserPlanTrialDto};
+use shared::model::{
+    ClusterFlags, PlansConfigDto, PlayerFeaturesDto, PlayerRecordingLevel, ProxyType, SortOrder, UserPlanDto,
+    UserPlanTrialDto,
+};
 use std::{rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
 use yew::{platform::spawn_local, prelude::*};
@@ -60,6 +69,7 @@ fn build_default_plan(existing_plans: &[UserPlanDto]) -> UserPlanDto {
                 filter: None,
                 trial: None,
                 comment: None,
+                player_features: None,
             };
         }
         index += 1;
@@ -86,6 +96,29 @@ fn cluster_flags_label(flags: Option<ClusterFlags>) -> String {
             parts.push("S");
         }
         parts.join(" ")
+    })
+}
+
+fn update_plan_features<F>(dialog_form: &UseStateHandle<UserPlanDto>, updater: F)
+where
+    F: FnOnce(&mut PlayerFeaturesDto),
+{
+    let mut form = (**dialog_form).clone();
+    let mut features = form.player_features.unwrap_or_default();
+    updater(&mut features);
+    form.player_features = if features.is_empty() { None } else { Some(features) };
+    dialog_form.set(form);
+}
+
+fn make_feature_toggle_handler(
+    dialog_form: &UseStateHandle<UserPlanDto>,
+    setter: fn(&mut PlayerFeaturesDto, Option<bool>),
+) -> Callback<bool> {
+    let dialog_form = dialog_form.clone();
+    Callback::from(move |checked: bool| {
+        update_plan_features(&dialog_form, move |f| {
+            setter(f, if checked { Some(true) } else { None });
+        });
     })
 }
 
@@ -248,6 +281,97 @@ pub fn PlansView() -> Html {
         })
     };
 
+    let handle_api_enabled_select = {
+        let dialog_form = dialog_form.clone();
+        Callback::from(move |(_name, selections): (String, DropDownSelection)| {
+            let val = parse_tri_state_selection(&selections);
+            update_plan_features(&dialog_form, move |f| {
+                f.api_enabled = val;
+            });
+        })
+    };
+
+    let handle_source_switch_change = make_feature_toggle_handler(&dialog_form, |f, val| f.source_switch = val);
+
+    let handle_joinable_streams_change = make_feature_toggle_handler(&dialog_form, |f, val| f.joinable_streams = val);
+
+    let handle_free_shared_joins_change = make_feature_toggle_handler(&dialog_form, |f, val| f.free_shared_joins = val);
+
+    let handle_plan_recording_select = {
+        let dialog_form = dialog_form.clone();
+        Callback::from(move |(_, selections): (String, DropDownSelection)| {
+            let selected_id = selection_first_owned(selections);
+            let level = parse_plan_recording_level(selected_id.as_deref());
+            update_plan_features(&dialog_form, move |f| {
+                f.recording = level;
+            });
+        })
+    };
+
+    let handle_recording_quota_change = {
+        let dialog_form = dialog_form.clone();
+        Callback::from(move |value: String| {
+            let quota = (!value.trim().is_empty()).then(|| shared::model::ByteSize::new(value.trim()));
+            update_plan_features(&dialog_form, move |f| {
+                f.recording_quota = quota;
+            });
+        })
+    };
+
+    let handle_max_concurrent_recordings_change = {
+        let dialog_form = dialog_form.clone();
+        Callback::from(move |value: String| {
+            if let Ok(concurrent) = parse_optional_input::<u32>(&value) {
+                update_plan_features(&dialog_form, move |f| {
+                    f.max_concurrent_recordings = concurrent;
+                });
+            }
+        })
+    };
+
+    let handle_max_recording_rules_change = {
+        let dialog_form = dialog_form.clone();
+        Callback::from(move |value: String| {
+            if let Ok(rules) = parse_optional_input::<u32>(&value) {
+                update_plan_features(&dialog_form, move |f| {
+                    f.max_recording_rules = rules;
+                });
+            }
+        })
+    };
+
+    let handle_watch_progress_change = make_feature_toggle_handler(&dialog_form, |f, val| f.watch_progress = val);
+
+    let handle_event_stream_change = make_feature_toggle_handler(&dialog_form, |f, val| f.event_stream = val);
+
+    let handle_max_free_shared_joins_change = {
+        let dialog_form = dialog_form.clone();
+        Callback::from(move |value: String| {
+            if let Ok(joins) = parse_optional_input::<u32>(&value) {
+                update_plan_features(&dialog_form, move |f| {
+                    f.max_free_shared_joins = joins;
+                });
+            }
+        })
+    };
+
+    let current_recording =
+        dialog_form.player_features.as_ref().and_then(|f| f.recording).unwrap_or(PlayerRecordingLevel::None);
+    let plan_recording_options = use_memo((current_recording, translate.clone()), |(current, translate)| {
+        build_recording_options(Some(*current), false, |k| translate.t(k))
+    });
+    let plan_api_enabled_options = use_memo(
+        (dialog_form.player_features.as_ref().and_then(|f| f.api_enabled), translate.clone()),
+        |(current, translate)| {
+            build_tri_state_options(
+                *current,
+                &translate.t("LABEL.FOLLOW_USER_UI"),
+                &translate.t("LABEL.ENABLED"),
+                &translate.t("LABEL.DISABLED"),
+            )
+        },
+    );
+
     let handle_dialog_save = {
         let dialog_mode = dialog_mode.clone();
         let dialog_form = dialog_form.clone();
@@ -258,6 +382,19 @@ pub fn PlansView() -> Html {
         Callback::from(move |_| {
             let Some(mode) = *dialog_mode else { return };
             let mut plan = (*dialog_form).clone();
+            if let Some(features) = &plan.player_features {
+                if features.recording_quota.as_ref().is_some_and(|q| parse_positive_byte_size(q.as_str()).is_err()) {
+                    dialog_error.set(Some(translate.t(MSG_BYTE_SIZE_INVALID)));
+                    return;
+                }
+                if features.max_concurrent_recordings == Some(0)
+                    || features.max_recording_rules == Some(0)
+                    || features.max_free_shared_joins == Some(0)
+                {
+                    dialog_error.set(Some(translate.t("MESSAGES.VALIDATION.PLAYER_FEATURES_NUMBER_GREATER_THAN_ZERO")));
+                    return;
+                }
+            }
             if let Err(err) = plan.prepare() {
                 dialog_error.set(Some(err.to_string()));
                 return;
@@ -417,6 +554,98 @@ pub fn PlansView() -> Html {
                                 on_change={Some(handle_filter_change.clone())}
                             />
                         </div>
+                        <div class="tp__api-server-dialog__section">
+                            <div class="tp__api-server-dialog__section-title">{translate.t("LABEL.PLAYER_FEATURES")}</div>
+                            <div class="tp__api-server-dialog__section-hint">{translate.t("LABEL.PLAYER_FEATURES_HINT")}</div>
+                        </div>
+                        { config_field_child!(translate.t("LABEL.PLAYER_API_ENABLED"), "USER_PLAN.PLAYER_API_ENABLED", {
+                            html! {
+                                <Select
+                                    name="plan_player_api_enabled"
+                                    multi_select={false}
+                                    options={plan_api_enabled_options.clone()}
+                                    on_select={handle_api_enabled_select.clone()}
+                                />
+                            }
+                        }) }
+                        { config_field_child!(translate.t("LABEL.SOURCE_SWITCH"), "USER_PLAN.SOURCE_SWITCH", {
+                            html! {
+                                <ToggleSwitch
+                                    value={dialog_form.player_features.as_ref().and_then(|f| f.source_switch).unwrap_or(false)}
+                                    on_change={handle_source_switch_change.clone()}
+                                />
+                            }
+                        }) }
+                        { config_field_child!(translate.t("LABEL.JOINABLE_STREAMS"), "USER_PLAN.JOINABLE_STREAMS", {
+                            html! {
+                                <ToggleSwitch
+                                    value={dialog_form.player_features.as_ref().and_then(|f| f.joinable_streams).unwrap_or(false)}
+                                    on_change={handle_joinable_streams_change.clone()}
+                                />
+                            }
+                        }) }
+                        { config_field_child!(translate.t("LABEL.RECORDING"), "USER_PLAN.RECORDING", {
+                            html! {
+                                <Select
+                                    name="plan_recording"
+                                    multi_select={false}
+                                    options={plan_recording_options.clone()}
+                                    on_select={handle_plan_recording_select.clone()}
+                                />
+                            }
+                        }) }
+                        <Input
+                            name="plan_recording_quota"
+                            field_id={Some("USER_PLAN.RECORDING_QUOTA".to_string())}
+                            label={Some(translate.t("LABEL.PLAYER_RECORDING_QUOTA"))}
+                            value={dialog_form.player_features.as_ref().and_then(|f| f.recording_quota.as_ref()).map(|v| v.as_str().to_string()).unwrap_or_default()}
+                            on_change={Some(handle_recording_quota_change.clone())}
+                        />
+                        <Input
+                            name="plan_max_concurrent_recordings"
+                            field_id={Some("USER_PLAN.MAX_CONCURRENT_RECORDINGS".to_string())}
+                            label={Some(translate.t("LABEL.MAX_CONCURRENT_RECORDINGS"))}
+                            value={dialog_form.player_features.as_ref().and_then(|f| f.max_concurrent_recordings).map(|v| v.to_string()).unwrap_or_default()}
+                            on_change={Some(handle_max_concurrent_recordings_change.clone())}
+                        />
+                        <Input
+                            name="plan_max_recording_rules"
+                            field_id={Some("USER_PLAN.MAX_RECORDING_RULES".to_string())}
+                            label={Some(translate.t("LABEL.MAX_RECORDING_RULES"))}
+                            value={dialog_form.player_features.as_ref().and_then(|f| f.max_recording_rules).map(|v| v.to_string()).unwrap_or_default()}
+                            on_change={Some(handle_max_recording_rules_change.clone())}
+                        />
+                        { config_field_child!(translate.t("LABEL.FREE_SHARED_JOINS"), "USER_PLAN.FREE_SHARED_JOINS", {
+                            html! {
+                                <ToggleSwitch
+                                    value={dialog_form.player_features.as_ref().and_then(|f| f.free_shared_joins).unwrap_or(false)}
+                                    on_change={handle_free_shared_joins_change.clone()}
+                                />
+                            }
+                        }) }
+                        <Input
+                            name="plan_max_free_shared_joins"
+                            field_id={Some("USER_PLAN.MAX_FREE_SHARED_JOINS".to_string())}
+                            label={Some(translate.t("LABEL.MAX_FREE_SHARED_JOINS"))}
+                            value={dialog_form.player_features.as_ref().and_then(|f| f.max_free_shared_joins).map(|v| v.to_string()).unwrap_or_default()}
+                            on_change={Some(handle_max_free_shared_joins_change.clone())}
+                        />
+                        { config_field_child!(translate.t("LABEL.WATCH_PROGRESS"), "USER_PLAN.WATCH_PROGRESS", {
+                            html! {
+                                <ToggleSwitch
+                                    value={dialog_form.player_features.as_ref().and_then(|f| f.watch_progress).unwrap_or(false)}
+                                    on_change={handle_watch_progress_change.clone()}
+                                />
+                            }
+                        }) }
+                        { config_field_child!(translate.t("LABEL.EVENT_STREAM"), "USER_PLAN.EVENT_STREAM", {
+                            html! {
+                                <ToggleSwitch
+                                    value={dialog_form.player_features.as_ref().and_then(|f| f.event_stream).unwrap_or(false)}
+                                    on_change={handle_event_stream_change.clone()}
+                                />
+                            }
+                        }) }
                     </div>
                     {
                         if let Some(error) = (*dialog_error).as_ref() {
@@ -496,5 +725,73 @@ pub fn PlansView() -> Html {
             </div>
             {dialog_html}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_player_features_validation_rejects_zero() {
+        let mut plan = UserPlanDto {
+            name: "plan_test".to_string(),
+            player_features: Some(PlayerFeaturesDto {
+                recording_quota: Some(shared::model::ByteSize::new("0")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(plan.prepare().is_err());
+
+        plan.player_features = Some(PlayerFeaturesDto { max_concurrent_recordings: Some(0), ..Default::default() });
+        assert!(plan.prepare().is_err());
+
+        plan.player_features = Some(PlayerFeaturesDto { max_recording_rules: Some(0), ..Default::default() });
+        assert!(plan.prepare().is_err());
+
+        plan.player_features = Some(PlayerFeaturesDto { max_free_shared_joins: Some(0), ..Default::default() });
+        assert!(plan.prepare().is_err());
+
+        plan.player_features = Some(PlayerFeaturesDto {
+            recording_quota: Some(shared::model::ByteSize::new("1024")),
+            max_concurrent_recordings: Some(1),
+            max_free_shared_joins: Some(1),
+            ..Default::default()
+        });
+        assert!(plan.prepare().is_ok());
+    }
+
+    #[test]
+    fn plan_player_features_empty_cleared_on_prepare() {
+        let mut plan = UserPlanDto {
+            name: "plan_empty_feat".to_string(),
+            player_features: Some(PlayerFeaturesDto::default()),
+            ..Default::default()
+        };
+        assert!(plan.prepare().is_ok());
+        assert_eq!(plan.player_features, None);
+    }
+
+    #[test]
+    fn plan_player_features_api_enabled_retained() {
+        let mut plan = UserPlanDto {
+            name: "plan_api_feat".to_string(),
+            player_features: Some(PlayerFeaturesDto { api_enabled: Some(true), ..Default::default() }),
+            ..Default::default()
+        };
+        assert!(plan.prepare().is_ok());
+        assert_eq!(plan.player_features.unwrap().api_enabled, Some(true));
+    }
+
+    #[test]
+    fn plan_player_features_api_disabled_retained() {
+        let mut plan = UserPlanDto {
+            name: "plan_api_disabled".to_string(),
+            player_features: Some(PlayerFeaturesDto { api_enabled: Some(false), ..Default::default() }),
+            ..Default::default()
+        };
+        assert!(plan.prepare().is_ok());
+        assert_eq!(plan.player_features.unwrap().api_enabled, Some(false));
     }
 }

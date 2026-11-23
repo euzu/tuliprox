@@ -6,20 +6,21 @@ use crate::{
                 config_view_context::ConfigViewContext,
                 use_emit_config_form,
             },
-            AppIcon, Card,
+            selection_parse_first, AppIcon, Card, DropDownOption, DropDownSelection, Select,
         },
         context::ConfigContext,
     },
-    config_field, config_field_bool, config_field_tags, edit_field_bool, edit_field_list,
+    config_field, config_field_bool, config_field_child, config_field_tags, edit_field_bool, edit_field_list,
     edit_field_number_usize_strict, generate_form_reducer,
     i18n::use_translation,
     use_default_form_reducer,
 };
-use shared::model::McpConfigDto;
+use shared::model::{McpConfigDto, McpPlayerTools};
 use yew::prelude::*;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_READ_ONLY: &str = "LABEL.READ_ONLY";
+const LABEL_PLAYER_TOOLS: &str = "LABEL.PLAYER_TOOLS";
 const LABEL_ALLOWED_ORIGINS: &str = "LABEL.ALLOWED_ORIGINS";
 const LABEL_ADD_ORIGIN: &str = "LABEL.ADD_ORIGIN";
 const LABEL_MAX_RESPONSE_BYTES: &str = "LABEL.MAX_RESPONSE_BYTES";
@@ -32,6 +33,7 @@ generate_form_reducer!(
     fields {
         Enabled => enabled: bool,
         ReadOnly => read_only: bool,
+        PlayerTools => player_tools: McpPlayerTools,
         AllowedOrigins => allowed_origins: Vec<String>,
         MaxResponseBytes => max_response_bytes: usize,
     }
@@ -67,6 +69,26 @@ pub fn McpConfigView() -> Html {
         .and_then(|web_ui| web_ui.auth.as_ref())
         .is_some_and(|auth| auth.enabled);
 
+    let player_tools_options = use_memo((form_state.form.player_tools, translate.clone()), |(current, translate)| {
+        vec![
+            DropDownOption {
+                id: "off".to_string(),
+                label: html! { translate.t("LABEL.PLAYER_TOOLS_OFF") },
+                selected: *current == McpPlayerTools::Off,
+            },
+            DropDownOption {
+                id: "read".to_string(),
+                label: html! { translate.t("LABEL.PLAYER_TOOLS_READ") },
+                selected: *current == McpPlayerTools::Read,
+            },
+            DropDownOption {
+                id: "write".to_string(),
+                label: html! { translate.t("LABEL.PLAYER_TOOLS_WRITE") },
+                selected: *current == McpPlayerTools::Write,
+            },
+        ]
+    });
+
     let render_hint = |key: &str| {
         html! {
             <div class="tp__mcp-config-view__info tp__config-view-page__info">
@@ -82,6 +104,14 @@ pub fn McpConfigView() -> Html {
             <Card class="tp__config-view__card">
                 { config_field_bool!(mcp_state.form, translate.t(LABEL_ENABLED), enabled) }
                 { config_field_bool!(mcp_state.form, translate.t(LABEL_READ_ONLY), read_only) }
+                { config_field_child!(translate.t(LABEL_PLAYER_TOOLS), "MCP_CONFIG.PLAYER_TOOLS", {
+                    let text = match mcp_state.form.player_tools {
+                        McpPlayerTools::Off => translate.t("LABEL.PLAYER_TOOLS_OFF"),
+                        McpPlayerTools::Read => translate.t("LABEL.PLAYER_TOOLS_READ"),
+                        McpPlayerTools::Write => translate.t("LABEL.PLAYER_TOOLS_WRITE"),
+                    };
+                    html! { <span class="tp__form-field__value">{text}</span> }
+                }) }
                 { config_field_tags!(mcp_state.form, translate.t(LABEL_ALLOWED_ORIGINS), allowed_origins, "MCP_CONFIG.ALLOWED_ORIGINS") }
                 { config_field!(mcp_state.form, translate.t(LABEL_MAX_RESPONSE_BYTES), max_response_bytes) }
             </Card>
@@ -89,10 +119,24 @@ pub fn McpConfigView() -> Html {
     };
 
     let render_edit_mode = || {
+        let form_state_clone = form_state.clone();
         html! {
             <Card class="tp__config-view__card">
                 { edit_field_bool!(form_state, translate.t(LABEL_ENABLED), enabled, McpConfigFormAction::Enabled) }
                 { edit_field_bool!(form_state, translate.t(LABEL_READ_ONLY), read_only, McpConfigFormAction::ReadOnly) }
+                { config_field_child!(translate.t(LABEL_PLAYER_TOOLS), "MCP_CONFIG.PLAYER_TOOLS", {
+                    html! {
+                        <Select
+                            name="player_tools"
+                            multi_select={false}
+                            options={player_tools_options.clone()}
+                            on_select={Callback::from(move |(_name, selections): (String, DropDownSelection)| {
+                                let val = selection_parse_first::<McpPlayerTools>(&selections).unwrap_or_default();
+                                form_state_clone.dispatch(McpConfigFormAction::PlayerTools(val));
+                            })}
+                        />
+                    }
+                }) }
                 { edit_field_list!(form_state, translate.t(LABEL_ALLOWED_ORIGINS), allowed_origins, McpConfigFormAction::AllowedOrigins, translate.t(LABEL_ADD_ORIGIN)) }
                 { edit_field_number_usize_strict!(form_state, translate.t(LABEL_MAX_RESPONSE_BYTES), max_response_bytes, McpConfigFormAction::MaxResponseBytes) }
             </Card>

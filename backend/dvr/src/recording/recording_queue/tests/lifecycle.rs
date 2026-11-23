@@ -111,3 +111,126 @@ async fn pause_active_routes_through_mutate() {
     assert!(active.next_retry_at.is_none());
     assert_eq!(queue.revision.load(Ordering::SeqCst), prior_revision + 1);
 }
+
+#[test]
+fn cleanup_settled_cancelled_enclosings_two_owners_share_materialization() {
+    let mut candidate = PersistedRecordingQueue::default();
+    let file = PathBuf::from("/tmp/shared_recording.ts");
+    let media = "media-ident-shared".to_string();
+
+    // Owner A's enclosing recording: finished, cancelled_by_owner
+    let mut task_a = identified("task-a", &media, RecordingTaskState::Cancelled);
+    task_a.cancelled_by_owner = true;
+    task_a.finished = true;
+    task_a.file_path = file.clone();
+    task_a.recording.owner = RecordingOwner::User(UserId::from("web:alice"));
+    candidate.finished.push(task_a);
+
+    // Attached clip for owner A: finished
+    let mut clip_a = identified("clip-a", &media, RecordingTaskState::Completed);
+    clip_a.finished = true;
+    clip_a.file_path = file.clone();
+    clip_a.recording.owner = RecordingOwner::User(UserId::from("web:alice"));
+    clip_a.clip = Some(tuliprox_repository::recording_repository::RecordingClip {
+        start_ts: 100,
+        end_ts: 200,
+        start_offset: Some(0),
+        end_offset: Some(1000),
+        header_bytes: None,
+    });
+    candidate.finished.push(clip_a);
+
+    // Owner B's non-clip recording: finished, Completed, sharing materialization
+    let mut task_b = identified("task-b", &media, RecordingTaskState::Completed);
+    task_b.cancelled_by_owner = false;
+    task_b.finished = true;
+    task_b.file_path = file.clone();
+    task_b.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+    candidate.finished.push(task_b);
+
+    let action = RecordingQueue::cleanup_settled_cancelled_enclosings(&mut candidate);
+
+    // task_a was removed, but task_b remains, and clip_a remains
+    assert!(candidate.finished.iter().all(|t| t.uuid != "task-a"), "task A should be removed");
+    assert!(candidate.finished.iter().any(|t| t.uuid == "task-b"), "task B must stay");
+    assert!(candidate.finished.iter().any(|t| t.uuid == "clip-a"), "clip A must stay");
+
+    // Because task_b (a non-clip task) still references the file, neither compact nor delete!
+    assert_eq!(action.files_to_delete, Vec::<PathBuf>::new());
+    assert_eq!(action.files_to_compact, Vec::<PathBuf>::new());
+}
+
+#[test]
+fn cleanup_settled_cancelled_enclosings_single_owner_compacts_when_clips_remain() {
+    let mut candidate = PersistedRecordingQueue::default();
+    let file = PathBuf::from("/tmp/single_owner.ts");
+    let media = "media-ident-single".to_string();
+
+    let mut task_a = identified("task-a", &media, RecordingTaskState::Cancelled);
+    task_a.cancelled_by_owner = true;
+    task_a.finished = true;
+    task_a.file_path = file.clone();
+    candidate.finished.push(task_a);
+
+    let mut clip_a = identified("clip-a", &media, RecordingTaskState::Completed);
+    clip_a.finished = true;
+    clip_a.file_path = file.clone();
+    clip_a.clip = Some(tuliprox_repository::recording_repository::RecordingClip {
+        start_ts: 100,
+        end_ts: 200,
+        start_offset: Some(0),
+        end_offset: Some(1000),
+        header_bytes: None,
+    });
+    candidate.finished.push(clip_a);
+
+    let action = RecordingQueue::cleanup_settled_cancelled_enclosings(&mut candidate);
+
+    assert!(candidate.finished.iter().all(|t| t.uuid != "task-a"));
+    assert_eq!(action.files_to_compact, vec![file]);
+    assert_eq!(action.files_to_delete, Vec::<PathBuf>::new());
+}
+
+#[test]
+fn cleanup_settled_cancelled_enclosings_single_owner_deletes_when_no_clips_remain() {
+    let mut candidate = PersistedRecordingQueue::default();
+    let file = PathBuf::from("/tmp/single_owner_delete.ts");
+    let media = "media-ident-delete".to_string();
+
+    let mut task_a = identified("task-a", &media, RecordingTaskState::Cancelled);
+    task_a.cancelled_by_owner = true;
+    task_a.finished = true;
+    task_a.file_path = file.clone();
+    candidate.finished.push(task_a);
+
+    let action = RecordingQueue::cleanup_settled_cancelled_enclosings(&mut candidate);
+
+    assert!(candidate.finished.iter().all(|t| t.uuid != "task-a"));
+    assert_eq!(action.files_to_compact, Vec::<PathBuf>::new());
+    assert_eq!(action.files_to_delete, vec![file]);
+}
+
+#[test]
+fn cleanup_settled_cancelled_enclosings_with_failed_earlier_task_deletes_when_no_clips_remain() {
+    let mut candidate = PersistedRecordingQueue::default();
+    let file = PathBuf::from("/tmp/failed_earlier_delete.ts");
+    let media = "media-ident-failed-earlier".to_string();
+
+    let mut task_failed = identified("task-failed", &media, RecordingTaskState::Failed);
+    task_failed.cancelled_by_owner = false;
+    task_failed.finished = true;
+    task_failed.file_path = file.clone();
+    candidate.finished.push(task_failed);
+
+    let mut task_cancelled = identified("task-cancelled", &media, RecordingTaskState::Cancelled);
+    task_cancelled.cancelled_by_owner = true;
+    task_cancelled.finished = true;
+    task_cancelled.file_path = file.clone();
+    candidate.finished.push(task_cancelled);
+
+    let action = RecordingQueue::cleanup_settled_cancelled_enclosings(&mut candidate);
+
+    assert!(candidate.finished.iter().all(|t| t.uuid != "task-cancelled"));
+    assert_eq!(action.files_to_compact, Vec::<PathBuf>::new());
+    assert_eq!(action.files_to_delete, vec![file]);
+}

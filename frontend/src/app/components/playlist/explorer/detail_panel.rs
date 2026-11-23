@@ -10,7 +10,7 @@ use crate::{
         },
         context::PlaylistExplorerContext,
     },
-    config_field_custom,
+    config_field_child,
     hooks::use_service_context,
     html_if,
     i18n::{use_translation, YewI18n},
@@ -189,16 +189,16 @@ pub fn ExplorerDetailPanel(props: &ExplorerDetailPanelProps) -> Html {
                     { html_if!(edited, {
                         <span class="chip on tp__explorer-edited-chip">{ translate.t("LABEL.EXPLORER_EDITED_BADGE") }</span>
                     })}
-                    { config_field_custom!(translate.t("LABEL.NAME"), item.name.to_string(), Some("PLAYLIST_OVERRIDE.NAME".to_string())) }
-                    { config_field_custom!(translate.t("LABEL.TITLE"), item.title.to_string(), Some("PLAYLIST_OVERRIDE.TITLE".to_string())) }
-                    { config_field_custom!(translate.t("LABEL.GROUP"), item.group.to_string(), Some("PLAYLIST_OVERRIDE.GROUP".to_string())) }
-                    { config_field_custom!(translate.t("LABEL.EXPLORER_EPG_ID_TMDB"), epg_id.to_string(), Some("PLAYLIST_OVERRIDE.EPG_CHANNEL_ID".to_string())) }
-                    { config_field_custom!(translate.t("LABEL.EXPLORER_LOGO_URL"), html! { <span class="tp__explorer-url-value">{ item.logo.to_string() }</span> }, Some("PLAYLIST_OVERRIDE.LOGO".to_string())) }
+                    { config_field_child!(translate.t("LABEL.NAME"), "PLAYLIST_OVERRIDE.NAME", { html! { <span class="tp__form-field__value">{ item.name.to_string() }</span> } }) }
+                    { config_field_child!(translate.t("LABEL.TITLE"), "PLAYLIST_OVERRIDE.TITLE", { html! { <span class="tp__form-field__value">{ item.title.to_string() }</span> } }) }
+                    { config_field_child!(translate.t("LABEL.GROUP"), "PLAYLIST_OVERRIDE.GROUP", { html! { <span class="tp__form-field__value">{ item.group.to_string() }</span> } }) }
+                    { config_field_child!(translate.t("LABEL.EXPLORER_EPG_ID_TMDB"), "PLAYLIST_OVERRIDE.EPG_CHANNEL_ID", { html! { <span class="tp__form-field__value">{ epg_id.to_string() }</span> } }) }
+                    { config_field_child!(translate.t("LABEL.EXPLORER_LOGO_URL"), "PLAYLIST_OVERRIDE.LOGO", { html! { <span class="tp__form-field__value"><span class="tp__explorer-url-value">{ item.logo.to_string() }</span></span> } }) }
 
                     {
                         if let Some(num) = chno {
                             html! {
-                                { config_field_custom!(translate.t("LABEL.CHNO"), num.to_string(), Some("PLAYLIST_OVERRIDE.CHNO".to_string())) }
+                                { config_field_child!(translate.t("LABEL.CHNO"), "PLAYLIST_OVERRIDE.CHNO", { html! { <span class="tp__form-field__value">{ num.to_string() }</span> } }) }
                             }
                         } else {
                             html! {}
@@ -214,21 +214,23 @@ pub fn ExplorerDetailPanel(props: &ExplorerDetailPanelProps) -> Html {
                                 None
                             };
                             html! {
-                                { config_field_custom!(
+                                { config_field_child!(
                                     translate.t("LABEL.PROVIDER_RATING"),
-                                    html! {
-                                        <div class="tp__explorer-rating-value" title={eff_title}>
-                                            <span class="det-rating">{ format!("★ {}", format_float_localized(item.rating, 1, false)) }</span>
-                                            {
-                                                if is_effective {
-                                                    html! { <Chip label={translate.t("LABEL.EFFECTIVE")} class={Some("active".to_string())} /> }
-                                                } else {
-                                                    html! {}
+                                    "PLAYLIST_OVERRIDE.RATING",
+                                    {
+                                        html! {
+                                            <span class="tp__form-field__value"><div class="tp__explorer-rating-value" title={eff_title}>
+                                                <span class="det-rating">{ format!("★ {}", format_float_localized(item.rating, 1, false)) }</span>
+                                                {
+                                                    if is_effective {
+                                                        html! { <Chip label={translate.t("LABEL.EFFECTIVE")} class={Some("active".to_string())} /> }
+                                                    } else {
+                                                        html! {}
+                                                    }
                                                 }
-                                            }
-                                        </div>
-                                    },
-                                    Some("PLAYLIST_OVERRIDE.RATING".to_string())
+                                            </div></span>
+                                        }
+                                    }
                                 ) }
                             }
                         } else {
@@ -249,26 +251,29 @@ pub fn ExplorerDetailPanel(props: &ExplorerDetailPanelProps) -> Html {
                                 format!(" · {} {}", format_number(v as usize), translate.t("LABEL.VOTES"))
                             });
                             html! {
-                                { config_field_custom!(
+                                { config_field_child!(
                                     translate.t("LABEL.IMDB_RATING"),
-                                    html! {
-                                        <div class="tp__explorer-rating-value" title={eff_title}>
-                                            <span class="det-rating">{ rating_str }</span>
-                                            {
-                                                if let Some(v_text) = votes_str {
-                                                    html! { <span class="det-votes">{ v_text }</span> }
-                                                } else {
-                                                    html! {}
+                                    "IMDB_CONFIG.RATING",
+                                    {
+                                        html! {
+                                            <span class="tp__form-field__value"><div class="tp__explorer-rating-value" title={eff_title}>
+                                                <span class="det-rating">{ rating_str }</span>
+                                                {
+                                                    if let Some(v_text) = votes_str {
+                                                        html! { <span class="det-votes">{ v_text }</span> }
+                                                    } else {
+                                                        html! {}
+                                                    }
                                                 }
-                                            }
-                                            {
-                                                if is_effective {
-                                                    html! { <Chip label={translate.t("LABEL.EFFECTIVE")} class={Some("active".to_string())} /> }
-                                                } else {
-                                                    html! {}
+                                                {
+                                                    if is_effective {
+                                                        html! { <Chip label={translate.t("LABEL.EFFECTIVE")} class={Some("active".to_string())} /> }
+                                                    } else {
+                                                        html! {}
+                                                    }
                                                 }
-                                            }
-                                        </div>
+                                            </div></span>
+                                        }
                                     }
                                 ) }
                             }

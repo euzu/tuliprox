@@ -1,8 +1,8 @@
 use super::{
     activate_session_before_stream_open, get_stream_throttle, is_socket_bound_playback_session, is_throttled_stream,
-    mark_response_as_uncompressed, prepare_stream_metering, record_connect_failed_attempt, reentry_suppressed_response,
-    stream_admission_rejected_response, try_unwrap_body, ConnectFailedAttempt, PlaybackRequestClass,
-    SessionActivationRequest,
+    mark_response_as_uncompressed, prepare_stream_metering, record_connect_failed_attempt,
+    release_reservation_and_exhausted_response, stream_admission_rejected_response, try_unwrap_body,
+    ConnectFailedAttempt, PlaybackRequestClass, SessionActivationRequest,
 };
 use crate::{
     api::{
@@ -79,6 +79,190 @@ pub async fn serve_file(file_path: &Path, mime_type: String, cache_control: Opti
     }
 }
 
+/// Refuses a local-file request whose user has no free connection, before any file is opened.
+///
+/// A session that may reopen past the limit continues as `Allowed`, which is the
+/// same decision a fresh request would get.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admit_local_file_connection(
+    fingerprint: &Fingerprint,
+    app_state: &Arc<AppState>,
+    pli: &StreamChannel,
+    req_headers: &HeaderMap,
+    input: &ConfigInput,
+    user: &ProxyUserCredentials,
+    connection_permission: UserConnectionPermission,
+    playback_session_token: Option<&str>,
+) -> Result<UserConnectionPermission, Box<Response<Body>>> {
+    if connection_permission != UserConnectionPermission::Exhausted {
+        return Ok(connection_permission);
+    }
+    let allow_session_reopen = if let Some(session_token) = playback_session_token {
+        user.max_connections > 0
+            && app_state
+                .active_users
+                .connection_permission_for_session(
+                    &user.username,
+                    user.max_connections,
+                    user.soft_connections,
+                    session_token,
+                )
+                .await
+                != UserConnectionPermission::Exhausted
+    } else {
+        false
+    };
+    if allow_session_reopen {
+        return Ok(UserConnectionPermission::Allowed);
+    }
+    record_connect_failed_attempt(ConnectFailedAttempt {
+        app_state,
+        fingerprint,
+        user,
+        stream_channel: pli.clone(),
+        provider_name: input.name.clone(),
+        req_headers,
+        reason: ConnectFailureReason::UserConnectionsExhausted,
+        failure_stage: FailureStage::Admission,
+    });
+    Err(Box::new(
+        create_custom_video_stream_response(
+            &app_state.provider_stream_ctx(),
+            &fingerprint.addr,
+            CustomVideoStreamType::UserConnectionsExhausted,
+        )
+        .into_response(),
+    ))
+}
+
+/// Registers a local-file byte stream with the session, connection and metering state.
+///
+/// The returned stream owns the registration: dropping it releases the user
+/// connection and the active stream. A user that lost the slot meanwhile gets the
+/// exhausted response instead of bytes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn activate_local_file_stream(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    pli: &StreamChannel,
+    req_headers: &HeaderMap,
+    input: &ConfigInput,
+    user: &ProxyUserCredentials,
+    mut connection_permission: UserConnectionPermission,
+    mut connection_kind: crate::api::model::ConnectionKind,
+    playback_session_token: Option<&str>,
+    request_class: Option<PlaybackRequestClass>,
+    stream: crate::api::model::BoxedProviderStream,
+) -> Result<crate::api::model::BoxedProviderStream, Box<Response<Body>>> {
+    let mut grace_mode = None;
+    let socket_bound = is_socket_bound_playback_session(pli.item_type, extract_extension_from_url(&pli.url));
+    if let Some(session_token) = playback_session_token {
+        let activation = activate_session_before_stream_open(
+            app_state,
+            SessionActivationRequest {
+                fingerprint,
+                input,
+                user,
+                session_token,
+                request_class,
+                virtual_id: VirtualId::new(pli.virtual_id),
+                item_type: pli.item_type,
+                stream_url: &pli.url,
+                connection_permission,
+                connection_kind,
+                granted_grace_mode: None,
+                socket_bound,
+            },
+        )
+        .await;
+        grace_mode = activation.grace_mode;
+        connection_permission = activation.admission.permission();
+        connection_kind = activation.admission.kind().unwrap_or(connection_kind);
+
+        if connection_permission == UserConnectionPermission::Exhausted {
+            let response = release_reservation_and_exhausted_response(
+                app_state,
+                user,
+                session_token,
+                activation.placeholder_transition_version,
+                activation.admission.is_reentry_suppressed(),
+                fingerprint,
+            )
+            .await;
+            return Err(Box::new(response));
+        }
+    }
+    let mut grace_period_options = app_state.get_grace_options();
+    if connection_permission != UserConnectionPermission::GracePeriod {
+        grace_period_options.period_millis = 0;
+    }
+    if let Some(resolved_mode) = grace_mode {
+        grace_period_options.hold_stream = matches!(resolved_mode, crate::api::model::GraceMode::Hold);
+    }
+    let resolved_connection_kind = if let Some(session_token) = playback_session_token {
+        app_state
+            .active_users
+            .get_and_update_user_session(&user.username, session_token)
+            .await
+            .and_then(|session| session.connection_kind)
+            .unwrap_or(connection_kind)
+    } else {
+        connection_kind
+    };
+    if let Some(session_token) = playback_session_token {
+        let _ = app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user,
+                session_token,
+                virtual_id: pli.virtual_id,
+                provider: input.name.as_ref(),
+                stream_url: &pli.url,
+                addr: &fingerprint.addr,
+                connection_permission,
+                connection_kind: Some(resolved_connection_kind),
+                socket_bound,
+            })
+            .await;
+    }
+    let metering = prepare_stream_metering(app_state, &pli.url, false, true, false);
+    create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+        stream_details: StreamDetails::from_stream(stream, grace_period_options),
+        app_state,
+        user,
+        connection_permission,
+        connection_kind: resolved_connection_kind,
+        fingerprint,
+        stream_channel: pli.clone(),
+        socket_bound,
+        session_token: playback_session_token,
+        req_headers,
+        meter_uid: metering.meter_uid,
+        meter_stream: metering.meter_stream,
+        group_failover: None,
+    })
+    .await
+    .map_err(|error| Box::new(stream_admission_rejected_response(error, &user.username)))
+}
+
+/// Applies the configured stream throttle to a local byte stream.
+///
+/// Shared by every local-file playback path — the library file itself and a
+/// recording served as Xtream VOD — so both honour the same `throttle_kbps` setting.
+pub(crate) fn apply_stream_throttle(
+    app_state: &Arc<AppState>,
+    item_type: shared::model::PlaylistItemType,
+    stream: crate::api::model::BoxedProviderStream,
+) -> crate::api::model::BoxedProviderStream {
+    let throttle_kbps = usize::try_from(get_stream_throttle(app_state)).unwrap_or_default();
+    if is_throttled_stream(item_type, throttle_kbps) {
+        info!("Stream throttling active: {}", human_readable_kbps(u64::try_from(throttle_kbps).unwrap_or_default()));
+        ThrottledStream::new(stream, throttle_kbps).boxed()
+    } else {
+        stream
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn local_stream_response(
     fingerprint: &Fingerprint,
@@ -103,44 +287,21 @@ pub(crate) async fn local_stream_response(
         trace!("Try to open stream {}", sanitize_sensitive_info(&pli.url));
     }
 
-    let mut connection_permission = connection_permission;
-    let mut grace_mode = None;
-    if connection_permission == UserConnectionPermission::Exhausted {
-        let allow_session_reopen = if let Some(session_token) = playback_session_token {
-            user.max_connections > 0
-                && app_state
-                    .active_users
-                    .connection_permission_for_session(
-                        &user.username,
-                        user.max_connections,
-                        user.soft_connections,
-                        session_token,
-                    )
-                    .await
-                    != UserConnectionPermission::Exhausted
-        } else {
-            false
-        };
-        if !allow_session_reopen {
-            record_connect_failed_attempt(ConnectFailedAttempt {
-                app_state,
-                fingerprint,
-                user,
-                stream_channel: pli.clone(),
-                provider_name: input.name.clone(),
-                req_headers,
-                reason: ConnectFailureReason::UserConnectionsExhausted,
-                failure_stage: FailureStage::Admission,
-            });
-            return create_custom_video_stream_response(
-                &app_state.provider_stream_ctx(),
-                &fingerprint.addr,
-                CustomVideoStreamType::UserConnectionsExhausted,
-            )
-            .into_response();
-        }
-        connection_permission = UserConnectionPermission::Allowed;
-    }
+    let connection_permission = match admit_local_file_connection(
+        fingerprint,
+        app_state,
+        &pli,
+        req_headers,
+        input,
+        user,
+        connection_permission,
+        playback_session_token,
+    )
+    .await
+    {
+        Ok(permission) => permission,
+        Err(response) => return *response,
+    };
 
     let path = PathBuf::from(pli.url.strip_prefix("file://").unwrap_or(&pli.url));
 
@@ -248,112 +409,24 @@ pub(crate) async fn local_stream_response(
 
     let stream =
         ReaderStream::new(file.take(content_length)).map_err(|err| StreamError::Stream(err.to_string())).boxed();
-    let throttle_kbps = usize::try_from(get_stream_throttle(app_state)).unwrap_or_default();
-    let stream = if is_throttled_stream(pli.item_type, throttle_kbps) {
-        info!("Stream throttling active: {}", human_readable_kbps(u64::try_from(throttle_kbps).unwrap_or_default()));
-        ThrottledStream::new(stream, throttle_kbps).boxed()
-    } else {
-        stream
-    };
-    let socket_bound = is_socket_bound_playback_session(pli.item_type, extract_extension_from_url(&pli.url));
-    let mut connection_kind = connection_kind;
-    if let Some(session_token) = playback_session_token {
-        let activation = activate_session_before_stream_open(
-            app_state,
-            SessionActivationRequest {
-                fingerprint,
-                input,
-                user,
-                session_token,
-                request_class,
-                virtual_id: VirtualId::new(pli.virtual_id),
-                item_type: pli.item_type,
-                stream_url: &pli.url,
-                connection_permission,
-                connection_kind,
-                granted_grace_mode: None,
-                socket_bound,
-            },
-        )
-        .await;
-        grace_mode = activation.grace_mode;
-        connection_permission = activation.admission.permission();
-        connection_kind = activation.admission.kind().unwrap_or(connection_kind);
-
-        if connection_permission == UserConnectionPermission::Exhausted {
-            app_state
-                .active_users
-                .release_unbound_session_reservation(
-                    &user.username,
-                    session_token,
-                    activation.placeholder_transition_version,
-                    activation.placeholder_transition_version.is_some(),
-                )
-                .await;
-            if activation.admission.is_reentry_suppressed() {
-                return reentry_suppressed_response();
-            }
-            return create_custom_video_stream_response(
-                &app_state.provider_stream_ctx(),
-                &fingerprint.addr,
-                CustomVideoStreamType::UserConnectionsExhausted,
-            )
-            .into_response();
-        }
-    }
-    let mut grace_period_options = app_state.get_grace_options();
-    if connection_permission != UserConnectionPermission::GracePeriod {
-        grace_period_options.period_millis = 0;
-    }
-    if let Some(resolved_mode) = grace_mode {
-        grace_period_options.hold_stream = matches!(resolved_mode, crate::api::model::GraceMode::Hold);
-    }
-    let resolved_connection_kind = if let Some(session_token) = playback_session_token {
-        app_state
-            .active_users
-            .get_and_update_user_session(&user.username, session_token)
-            .await
-            .and_then(|session| session.connection_kind)
-            .unwrap_or(connection_kind)
-    } else {
-        connection_kind
-    };
-    if let Some(session_token) = playback_session_token {
-        let _ = app_state
-            .active_users
-            .create_user_session(crate::api::model::CreateUserSessionParams {
-                user,
-                session_token,
-                virtual_id: pli.virtual_id,
-                provider: input.name.as_ref(),
-                stream_url: &pli.url,
-                addr: &fingerprint.addr,
-                connection_permission,
-                connection_kind: Some(resolved_connection_kind),
-                socket_bound,
-            })
-            .await;
-    }
-    let metering = prepare_stream_metering(app_state, &pli.url, false, true, false);
-    let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
-        stream_details: StreamDetails::from_stream(stream, grace_period_options),
+    let stream = apply_stream_throttle(app_state, pli.item_type, stream);
+    let stream = match activate_local_file_stream(
         app_state,
+        fingerprint,
+        &pli,
+        req_headers,
+        input,
         user,
         connection_permission,
-        connection_kind: resolved_connection_kind,
-        fingerprint,
-        stream_channel: pli.clone(),
-        socket_bound,
-        session_token: playback_session_token,
-        req_headers,
-        meter_uid: metering.meter_uid,
-        meter_stream: metering.meter_stream,
-        group_failover: None,
-    })
+        connection_kind,
+        playback_session_token,
+        request_class,
+        stream,
+    )
     .await
     {
         Ok(stream) => stream,
-        Err(error) => return stream_admission_rejected_response(error, &user.username),
+        Err(response) => return *response,
     };
 
     let mut response = Response::new(axum::body::Body::from_stream(stream));

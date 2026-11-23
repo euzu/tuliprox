@@ -24,7 +24,7 @@ use crate::{
     auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, PlaybackKind, ProxyUserCredentials},
 };
-use axum::{http::StatusCode, response::IntoResponse};
+use axum::http::StatusCode;
 use log::{debug, warn};
 use shared::model::{PlaylistItemType, StalkerStreamKind, UserConnectionPermission, VirtualId};
 use std::{sync::Arc, time::Duration};
@@ -202,7 +202,8 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
     let Some(connection_kind) = connection_admission.kind() else {
         return false;
     };
-    let (shared_hls_session_owner, reservation_ttl_secs) = if hls_cache_enabled_for_user(app_state, target, user) {
+    let (shared_hls_session_owner, reservation_ttl_secs) = if hls_cache_enabled_for_user(app_state, target, input, user)
+    {
         let origin_source = build_hls_origin_source(input, stream_identity.stream_ref());
         let proxy_session_id = build_proxy_session_id(&origin_source.session_key(), &app_state.get_encrypt_secret());
         let reservation_ttl_secs = match app_state.hls.proxy.sessions().get_by_key(&origin_source.session_key()).await {
@@ -526,7 +527,9 @@ pub(in crate::api::endpoints::hls_api) async fn hls_panel_provisioning_or_status
         fallback_status,
     )
     .await
-    .unwrap_or_else(|| fallback_status.into_response())
+    .unwrap_or_else(|| {
+        crate::api::model::fallback_status_response(fallback_status, CustomVideoStreamType::Provisioning)
+    })
 }
 
 #[derive(Debug, Clone)]

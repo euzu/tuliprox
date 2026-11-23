@@ -1,10 +1,11 @@
 use crate::model::macros;
-use shared::model::McpConfigDto;
+use shared::model::{McpConfigDto, McpPlayerTools};
 
 #[derive(Debug, Clone)]
 pub struct McpConfig {
     pub enabled: bool,
     pub read_only: bool,
+    pub player_tools: McpPlayerTools,
     pub allowed_origins: Vec<String>,
     pub max_response_bytes: usize,
     pub plugin_tools: bool,
@@ -17,6 +18,7 @@ impl From<&McpConfigDto> for McpConfig {
         Self {
             enabled: dto.enabled,
             read_only: dto.read_only,
+            player_tools: dto.player_tools,
             allowed_origins: dto.allowed_origins.clone(),
             max_response_bytes: dto.max_response_bytes,
             plugin_tools: dto.plugin_tools,
@@ -29,6 +31,7 @@ impl From<&McpConfig> for McpConfigDto {
         Self {
             enabled: config.enabled,
             read_only: config.read_only,
+            player_tools: config.player_tools,
             allowed_origins: config.allowed_origins.clone(),
             max_response_bytes: config.max_response_bytes,
             plugin_tools: config.plugin_tools,
@@ -45,6 +48,7 @@ mod tests {
         let dto = McpConfigDto {
             enabled: true,
             read_only: false,
+            player_tools: McpPlayerTools::Write,
             allowed_origins: vec!["https://claude.ai".to_string()],
             max_response_bytes: 4096,
             plugin_tools: true,
@@ -58,6 +62,7 @@ mod tests {
         let config = McpConfig::from(&McpConfigDto::default());
         assert!(!config.enabled);
         assert!(config.read_only);
+        assert_eq!(config.player_tools, McpPlayerTools::Off);
         assert_eq!(config.max_response_bytes, 262_144);
         assert!(!config.plugin_tools);
     }

@@ -220,6 +220,7 @@ async fn save_config_api_proxy_user(
     axum::http::StatusCode::OK.into_response()
 }
 
+#[allow(clippy::too_many_lines)]
 async fn delete_config_api_proxy_user(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Path((target_name, username)): axum::extract::Path<(String, String)>,
@@ -246,6 +247,17 @@ async fn delete_config_api_proxy_user(
         }
     };
     let _settings_guard = app_state.app_config.file_locks.write_lock(&settings_path).await;
+    let progress_path = match tuliprox_repository::watch_progress_repository::watch_progress_path(
+        Path::new(&paths.config_path),
+        &username,
+    ) {
+        Ok(path) => path,
+        Err(err) => {
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
+                .into_response()
+        }
+    };
+    let _progress_guard = app_state.app_config.file_locks.write_lock(&progress_path).await;
     if let Some(old_api_proxy) = app_state.app_config.api_proxy.load().clone() {
         let mut api_proxy = (*old_api_proxy).clone();
         let mut modified = false;
@@ -294,6 +306,31 @@ async fn delete_config_api_proxy_user(
                 return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                     .into_response();
             }
+            if let Err(err) =
+                tuliprox_repository::watch_progress_repository::remove_progress_unlocked(&progress_path).await
+            {
+                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
+                    .into_response();
+            }
+
+            let config = app_state.app_config.config.load();
+            let rule_repo =
+                tuliprox_repository::recording_rule_repository::RecordingRuleRepository::new(&config.storage_dir);
+            let owner_id = shared::model::UserId::api(&username);
+            match rule_repo.delete_by_owner(&owner_id).await {
+                Ok(removed) => {
+                    if removed > 0 {
+                        let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
+                    }
+                }
+                Err(err) => {
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(json!({"error": err.to_string()})),
+                    )
+                        .into_response();
+                }
+            }
 
             app_state.event_manager.send_event(EventMessage::UserLifecycle(UserLifecycleEvent::new(
                 username.as_str().into(),
@@ -321,13 +358,7 @@ pub(in crate::api) async fn terminate_user_session(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Path((username, session_token)): axum::extract::Path<(String, String)>,
 ) -> impl axum::response::IntoResponse {
-    let _transition_guard = app_state.active_users.acquire_playback_transition(&username, &session_token).await;
-    // Only a session that actually existed may end provider state, and only the binding
-    // its token acquired: a stale token must not end a newer playback of the same owner.
-    if app_state.active_users.terminate_session(&username, &session_token).await {
-        app_state.active_provider.terminate_identified_playback_owner(&session_token);
-    }
-    app_state.active_users.mark_session_ended(&session_token).await;
+    crate::api::api_utils::terminate_session_token(&app_state, &username, &session_token).await;
     (axum::http::StatusCode::NO_CONTENT).into_response()
 }
 
@@ -461,6 +492,119 @@ mod tests {
             )
             .await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_user_removes_settings_and_watch_progress_files() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let backup_dir = dir.path().join("backup");
+        std::fs::create_dir_all(&backup_dir)?;
+        let web_ui = WebUiConfigDto {
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "delete-test".to_owned(),
+                secret: "delete-test-secret".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = Config {
+            web_ui: Some((&web_ui).into()),
+            backup_dir: Some(backup_dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let web_auth = config.web_ui.as_ref().unwrap().auth.as_ref().unwrap();
+        let writer =
+            create_jwt_web_user(web_auth, "admin", Permission::UserWrite.into(), 0, UserId::from("web:admin"))?;
+
+        let app_state = create_test_app_state(config);
+        let api_proxy_file = dir.path().join("api-proxy.yml");
+        std::fs::write(&api_proxy_file, b"")?;
+        {
+            let mut paths = (**app_state.app_config.paths.load()).clone();
+            paths.config_path = dir.path().to_string_lossy().into_owned();
+            paths.api_proxy_file_path = api_proxy_file.to_string_lossy().into_owned();
+            app_state.app_config.paths.store(Arc::new(paths));
+        }
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "bob".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        app_state.app_config.set_api_proxy(ApiProxyConfig::from(&api_proxy_dto))?;
+
+        {
+            let mut cfg = (**app_state.app_config.config.load()).clone();
+            cfg.storage_dir = dir.path().to_string_lossy().into_owned();
+            app_state.app_config.config.store(Arc::new(cfg));
+        }
+
+        let settings_owner =
+            tuliprox_repository::user_settings_repository::SettingsOwner::authenticated(&UserId::api("bob"), "bob")?;
+        let settings_path = tuliprox_repository::user_settings_repository::settings_path(dir.path(), &settings_owner)?;
+        let progress_path = tuliprox_repository::watch_progress_repository::watch_progress_path(dir.path(), "bob")?;
+
+        if let Some(parent) = settings_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&settings_path, b"preferences: {}\n")?;
+        std::fs::write(&progress_path, b"[]")?;
+
+        let rule_repo = tuliprox_repository::recording_rule_repository::RecordingRuleRepository::new(dir.path());
+        rule_repo
+            .create(shared::model::recording_rule::RecordingRule {
+                id: "rule-bob".into(),
+                owner_id: UserId::api("bob"),
+                visibility: shared::model::recording_rule::RuleVisibility::Private,
+                enabled: true,
+                source: shared::model::recording_rule::RuleSource::new("main", "42", "input"),
+                channel_id: None,
+                body: shared::model::recording_rule::RuleBody::WeeklyTimeslot {
+                    weekday: 1,
+                    local_start_time: "20:00".to_string(),
+                    duration_secs: 1800,
+                    timezone: "UTC".to_string(),
+                },
+                pre_roll_secs: 0,
+                post_roll_secs: 0,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await?;
+
+        assert!(settings_path.exists());
+        assert!(progress_path.exists());
+        assert_eq!(rule_repo.list().await?.len(), 1);
+
+        let router = v1_api_user_register_with_permissions(Router::new(), &app_state).with_state(app_state.clone());
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/user/main/bob")
+                    .header("Authorization", format!("Bearer {writer}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert!(!settings_path.exists(), "settings file should be removed on user deletion");
+        assert!(!progress_path.exists(), "progress file should be removed on user deletion");
+        assert!(rule_repo.list().await?.is_empty(), "recording rules should be removed on user deletion");
+
+        let api_proxy = app_state.app_config.api_proxy.load();
+        let creds = api_proxy.as_ref().unwrap().user[0].credentials.clone();
+        assert!(creds.is_empty(), "user should be removed from credentials");
+
         Ok(())
     }
 }

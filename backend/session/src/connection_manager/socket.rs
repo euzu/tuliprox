@@ -197,6 +197,16 @@ impl ConnectionManager {
     }
 
     pub async fn kick_connection(&self, addr: &SocketAddr, virtual_id: VirtualId, block_secs: u64) -> bool {
+        self.kick_connection_with_reason(addr, virtual_id, block_secs, shared::model::StreamEndedReason::Kicked).await
+    }
+
+    pub async fn kick_connection_with_reason(
+        &self,
+        addr: &SocketAddr,
+        virtual_id: VirtualId,
+        block_secs: u64,
+        reason: shared::model::StreamEndedReason,
+    ) -> bool {
         debug_if_enabled!(
             "User {} kicked for stream with virtual_id {virtual_id} for {block_secs} seconds with addr {}.",
             self.user_manager.get_username_for_addr(addr).await.unwrap_or_default(),
@@ -205,7 +215,7 @@ impl ConnectionManager {
         if block_secs > 0 {
             self.user_manager.block_user_for_stream(addr, virtual_id, block_secs).await;
         }
-        self.release_connection_as_kicked(addr).await
+        self.release_connection_with_end_reason(addr, reason).await
     }
 
     pub fn register_close_socket(&self, addr: SocketAddr) -> tokio::sync::oneshot::Receiver<DisconnectReason> {

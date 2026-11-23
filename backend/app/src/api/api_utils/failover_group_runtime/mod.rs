@@ -22,10 +22,10 @@ use crate::{
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use futures::Future;
-pub use registry::FailoverSwitchRegistry;
 #[cfg(test)]
 pub(crate) use registry::ManualSwitchCommand;
 pub(crate) use registry::{DirectSwitchGuard, SharedSwitchGuard, SwitchReceiver, SwitchSender};
+pub use registry::{FailoverSwitchRegistry, SwitchError};
 use shared::model::{
     EventMessage, FailoverGroupPlayback, StreamChannel, StreamMemberInfo, SwitchReason, UserConnectionPermission,
 };
@@ -563,6 +563,9 @@ pub(crate) trait MemberHost {
     fn install_member(&mut self, member: RuntimeMember);
 }
 
+/// The cooldown window between accepted manual failover switch commands.
+pub(crate) const MANUAL_SWITCH_COOLDOWN: std::time::Duration = tuliprox_session::MANUAL_SWITCH_COOLDOWN;
+
 /// The switch state machine of a group playback, shared by its direct and shared hosts.
 pub(crate) struct GroupSwitcher {
     driver: GroupFailoverDriver,
@@ -570,8 +573,9 @@ pub(crate) struct GroupSwitcher {
     switch: Option<(SwitchFuture, SwitchReason)>,
     manual_switch_rx: SwitchReceiver,
     manual_switch_tx: SwitchSender,
-    manual_respondent: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    manual_respondent: Option<tokio::sync::oneshot::Sender<Result<(), SwitchError>>>,
     manual_target_index: Option<usize>,
+    last_manual_switch: Option<tokio::time::Instant>,
 }
 
 impl GroupSwitcher {
@@ -584,6 +588,7 @@ impl GroupSwitcher {
             manual_switch_tx,
             manual_respondent: None,
             manual_target_index: None,
+            last_manual_switch: None,
         }
     }
 
@@ -593,22 +598,32 @@ impl GroupSwitcher {
     pub(crate) fn is_switching(&self) -> bool { self.switch.is_some() }
 
     /// Polls the member body of `host`, switching members underneath it when it fails.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn poll_member(&mut self, host: &mut impl MemberHost, cx: &mut Context<'_>) -> GroupPoll {
         while let Poll::Ready(Some(cmd)) = self.manual_switch_rx.poll_recv(cx) {
             if self.is_switching() {
-                let _ = cmd.respondent.send(Err("Switch already in progress".to_string()));
+                let _ = cmd.respondent.send(Err(SwitchError::InProgress));
                 continue;
             }
             let target_member_vid = cmd.target_member_vid;
             let target_index =
                 self.driver.ctx.group.members.iter().position(|m| m.member_vid.get() == target_member_vid);
             let Some(target_index) = target_index else {
-                let _ = cmd.respondent.send(Err("Target member not found in group".to_string()));
+                let _ = cmd.respondent.send(Err(SwitchError::MemberNotFound));
                 continue;
             };
             if target_index == self.driver.current {
                 let _ = cmd.respondent.send(Ok(()));
                 continue;
+            }
+            let now = tokio::time::Instant::now();
+            if let Some(last) = self.last_manual_switch {
+                let elapsed = now.saturating_duration_since(last);
+                if elapsed < MANUAL_SWITCH_COOLDOWN {
+                    let retry_after = MANUAL_SWITCH_COOLDOWN.saturating_sub(elapsed);
+                    let _ = cmd.respondent.send(Err(SwitchError::Cooldown { retry_after }));
+                    continue;
+                }
             }
             let _ = self.start_manual_switch(host, target_index, cmd.respondent);
         }
@@ -635,9 +650,7 @@ impl GroupSwitcher {
                                 if Some(self.driver.current) == target_index {
                                     let _ = resp.send(Ok(()));
                                 } else {
-                                    let _ = resp.send(Err(
-                                        "Failed to open target member; returned to current member".to_string()
-                                    ));
+                                    let _ = resp.send(Err(SwitchError::TargetFailedRestored));
                                 }
                             }
                         }
@@ -647,9 +660,7 @@ impl GroupSwitcher {
                         self.switch = None;
                         if reason == SwitchReason::Manual {
                             if let Some(resp) = self.manual_respondent.take() {
-                                let _ = resp.send(Err(
-                                    "Failed to open target member and failed to restore current member".to_string(),
-                                ));
+                                let _ = resp.send(Err(SwitchError::TargetFailedUnrestored));
                             }
                         }
                         return GroupPoll::Ended(GroupEnd::SwitchFailed { reason });
@@ -715,10 +726,10 @@ impl GroupSwitcher {
         &mut self,
         host: &mut impl MemberHost,
         target_index: usize,
-        respondent: tokio::sync::oneshot::Sender<Result<(), String>>,
+        respondent: tokio::sync::oneshot::Sender<Result<(), SwitchError>>,
     ) -> bool {
         if host.member_preempted() {
-            let _ = respondent.send(Err("Stream member preempted".to_string()));
+            let _ = respondent.send(Err(SwitchError::Preempted));
             return false;
         }
         let now = Instant::now();
@@ -747,6 +758,7 @@ impl GroupSwitcher {
         self.switch = Some((future, SwitchReason::Manual));
         self.manual_target_index = Some(target_index);
         self.manual_respondent = Some(respondent);
+        self.last_manual_switch = Some(tokio::time::Instant::now());
         true
     }
 }

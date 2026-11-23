@@ -3,6 +3,7 @@ use crate::{
         api_utils::{
             admission_failure_response, archive_member_order, blocks_new_playback, coalesce_byte_stream,
             create_m3u_catchup_session_key, create_playback_session_fingerprint, create_session_fingerprint,
+            evaluate_free_join,
             failover_group::{handle_stream_failure_for_group, resolve_playback_source},
             force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
             get_user_target_by_credentials, is_running_playback, is_seekable_media_request, is_session_based_playback,
@@ -15,8 +16,8 @@ use crate::{
         endpoints::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
-                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts, user_allows_entry_content,
-                HlsEntryOutputScope, HlsEntryStreamContext, HlsRequestStage,
+                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts, user_allows_entry_filter,
+                user_allows_entry_output, HlsEntryOutputScope, HlsEntryStreamContext, HlsRequestStage,
             },
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
@@ -170,6 +171,41 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     fingerprint: &Fingerprint,
     req_headers: &axum::http::HeaderMap,
     app_state: &Arc<AppState>,
+    pli: shared::model::M3uPlaylistItem,
+    input: Arc<crate::model::ConfigInput>,
+    stream_ext: Option<&str>,
+    archive_discriminator: Option<&str>,
+    provider_allocation_id: Option<u64>,
+    source: Option<PlaybackSource<'_>>,
+    resolved_target: Option<ResolvedStreamTarget>,
+    join_shared: bool,
+) -> StreamPlaybackOutcome {
+    m3u_api_stream_loaded_dedicated(
+        user,
+        target,
+        fingerprint,
+        req_headers,
+        app_state,
+        pli,
+        input,
+        stream_ext,
+        archive_discriminator,
+        provider_allocation_id,
+        source,
+        resolved_target,
+        join_shared,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(in crate::api) async fn m3u_api_stream_loaded_dedicated(
+    user: Arc<ProxyUserCredentials>,
+    target: Arc<ConfigTarget>,
+    fingerprint: &Fingerprint,
+    req_headers: &axum::http::HeaderMap,
+    app_state: &Arc<AppState>,
     mut pli: shared::model::M3uPlaylistItem,
     input: Arc<crate::model::ConfigInput>,
     stream_ext: Option<&str>,
@@ -177,6 +213,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     provider_allocation_id: Option<u64>,
     source: Option<PlaybackSource<'_>>,
     resolved_target: Option<ResolvedStreamTarget>,
+    join_shared: bool,
+    dedicated: bool,
 ) -> StreamPlaybackOutcome {
     let target_name = &target.name;
     if !target.has_output(TargetType::M3u) {
@@ -188,8 +226,29 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     }
 
     let is_hls_manifest_request = effective_playback_extension(pli.item_type, &pli.url, stream_ext) == Some(HLS_EXT);
+    let virtual_id = pli.virtual_id;
 
-    if !user_allows_entry_content(&user, HlsEntryOutputScope::ItemType(pli.item_type), &pli) {
+    let resolved_target = match resolved_target {
+        Some(target) => target,
+        None => classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, virtual_id).await,
+    };
+
+    let output_allowed = user_allows_entry_output(&user, HlsEntryOutputScope::ItemType(pli.item_type))
+        && if user.t_filter.is_none() {
+            true
+        } else {
+            let filter_item = crate::api::api_utils::failover_group::content_filter_item_for_m3u(
+                &resolved_target,
+                &pli,
+                &app_state.app_config,
+                &app_state.playlists,
+                &target,
+            )
+            .await;
+            filter_item.as_ref().is_some_and(|item| user_allows_entry_filter(&user, item.as_ref()))
+        };
+
+    if !output_allowed {
         if is_hls_manifest_request {
             return StreamPlaybackOutcome::failure(
                 hls_custom_video_manifest_response(
@@ -212,12 +271,6 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             FailureClass::Stream,
         );
     }
-    let virtual_id = pli.virtual_id;
-
-    let resolved_target = match resolved_target {
-        Some(target) => target,
-        None => classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, virtual_id).await,
-    };
     let is_group = source
         .as_ref()
         .map_or_else(|| resolved_target.group().is_some(), |s| matches!(s, PlaybackSource::Group { .. }));
@@ -485,7 +538,13 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         virtual_id.get(),
         session_url.as_ref(),
     );
-    if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
+    let may_free_join =
+        evaluate_free_join(app_state, &user, connection_permission, is_stream_share_enabled(pli.item_type, &target))
+            .await;
+    if connection_permission == UserConnectionPermission::Exhausted
+        && !allow_exhausted_shared_reconnect
+        && !may_free_join
+    {
         if connection_admission.is_reentry_suppressed() {
             return StreamPlaybackOutcome::failure(reentry_suppressed_response(), FailureClass::Capacity);
         }
@@ -646,6 +705,9 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         allow_exhausted_shared_reconnect,
         grace_mode,
         preacquired_provider_handle,
+        join_shared,
+        may_free_join,
+        dedicated,
     )
     .await
 }
@@ -883,6 +945,7 @@ async fn m3u_api_stream(
             None,
             None,
             None,
+            false,
         )
         .await
         .into_response();
@@ -937,7 +1000,8 @@ async fn m3u_api_stream(
         (pli, None, input)
     };
     let source = if archive_discriminator.is_some() { None } else { live_group_playback_source(&resolved_target) };
-    m3u_api_stream_loaded(
+    let dedicated = crate::api::api_utils::is_dedicated_requested(raw_query);
+    m3u_api_stream_loaded_dedicated(
         user,
         target,
         fingerprint,
@@ -950,6 +1014,8 @@ async fn m3u_api_stream(
         None,
         source,
         Some(resolved_target),
+        false,
+        dedicated,
     )
     .await
     .into_response()
@@ -1037,7 +1103,8 @@ async fn m3u_api_stream_nested(
         }
     };
     let source = if archive_discriminator.is_some() { None } else { live_group_playback_source(&resolved_target) };
-    m3u_api_stream_loaded(
+    let dedicated = crate::api::api_utils::is_dedicated_requested(raw_query);
+    m3u_api_stream_loaded_dedicated(
         user,
         target,
         fingerprint,
@@ -1050,6 +1117,8 @@ async fn m3u_api_stream_nested(
         None,
         source,
         Some(resolved_target),
+        false,
+        dedicated,
     )
     .await
     .into_response()
@@ -1155,6 +1224,7 @@ async fn m3u_api_catchup(
             None,
             None,
             Some(classified.clone()),
+            false,
         )
         .await;
 
@@ -1845,5 +1915,139 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "nested archive request for group VID must select archive-capable member instead of failing with 400"
         );
+    }
+
+    fn set_m3u_test_user_filter(
+        env: &crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv,
+        filter_expr: Option<&str>,
+    ) {
+        let mut proxy = env.app_state.app_config.api_proxy.load_full().expect("api proxy").as_ref().clone();
+        let mut updated_user = proxy.user[0].credentials[0].as_ref().clone();
+        updated_user.t_filter = filter_expr
+            .map(|expr| std::sync::Arc::new(shared::foundation::get_filter(expr, None).expect("valid filter")));
+        proxy.user[0].credentials = vec![std::sync::Arc::new(updated_user)];
+        env.app_state.app_config.api_proxy.store(Some(std::sync::Arc::new(proxy)));
+    }
+
+    #[tokio::test]
+    async fn m3u_content_filter_hiding_group_entry_denies_member_vid_and_group_vid() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use axum::http::StatusCode;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let member_1_vid = env.group_record.members[1].member_vid.get();
+
+        // Group entry has Group="General". Filter Group != "General" hides the group entry.
+        set_m3u_test_user_filter(&env, Some(r#"Group != "General""#));
+
+        // 1. Member VID request must be denied with the filtered item status (502 ChannelUnavailable).
+        let member_res = env.get_m3u_live(member_1_vid).await;
+        assert_eq!(member_res.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(env.origin_hits("solis"), 0);
+        assert_eq!(env.origin_hits("korath"), 0);
+
+        // 2. Group VID request must also be denied.
+        let group_res = env.get_m3u_live(env.group_vid).await;
+        assert_eq!(group_res.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(env.origin_hits("solis"), 0);
+        assert_eq!(env.origin_hits("korath"), 0);
+    }
+
+    #[tokio::test]
+    async fn m3u_content_filter_allowing_group_entry_serves_member_vid_starting_on_member() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use axum::http::StatusCode;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let member_1_vid = env.group_record.members[1].member_vid.get();
+
+        // Group entry has Group="General". Synthesized member item has Group="zdf hd".
+        // Filter Group="General" matches the group entry but would NOT match the synthesized member item.
+        set_m3u_test_user_filter(&env, Some(r#"Group = "General""#));
+
+        let member_res = env.get_m3u_live(member_1_vid).await;
+        assert_eq!(member_res.status(), StatusCode::OK);
+        assert_eq!(env.origin_hits("korath"), 1, "member VID must start on member 1 (korath)");
+        assert_eq!(env.origin_hits("solis"), 0);
+    }
+
+    #[tokio::test]
+    async fn m3u_content_filter_hls_member_vid_checks_group_entry() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use axum::http::StatusCode;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().build().await;
+        let member_1_vid = env.group_record.members[1].member_vid.get();
+
+        // 1. Filter hiding group entry denies member VID HLS request with 403 FORBIDDEN.
+        set_m3u_test_user_filter(&env, Some(r#"Group != "General""#));
+        let denied_hls = env.get(&format!("/m3u-stream/live/viewer/secret/{member_1_vid}.m3u8")).await;
+        assert_eq!(denied_hls.status(), StatusCode::FORBIDDEN);
+
+        // 2. Filter allowing group entry serves member VID HLS request with 200 OK.
+        set_m3u_test_user_filter(&env, Some(r#"Group = "General""#));
+        let allowed_hls = env.get(&format!("/m3u-stream/live/viewer/secret/{member_1_vid}.m3u8")).await;
+        assert_eq!(allowed_hls.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn m3u_content_filter_none_serves_member_vid() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use axum::http::StatusCode;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let member_1_vid = env.group_record.members[1].member_vid.get();
+
+        // User without filter
+        set_m3u_test_user_filter(&env, None);
+
+        let member_res = env.get_m3u_live(member_1_vid).await;
+        assert_eq!(member_res.status(), StatusCode::OK);
+        assert_eq!(env.origin_hits("korath"), 1, "member VID must start on member 1 (korath)");
+        assert_eq!(env.origin_hits("solis"), 0);
+    }
+
+    fn set_m3u_test_user_output_clusters(
+        env: &crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv,
+        clusters: ClusterFlags,
+    ) {
+        let mut proxy = env.app_state.app_config.api_proxy.load_full().expect("api proxy").as_ref().clone();
+        let mut updated_user = proxy.user[0].credentials[0].as_ref().clone();
+        updated_user.output_clusters = clusters;
+        proxy.user[0].credentials = vec![std::sync::Arc::new(updated_user)];
+        env.app_state.app_config.api_proxy.store(Some(std::sync::Arc::new(proxy)));
+    }
+
+    #[tokio::test]
+    async fn m3u_member_vid_catchup_refused_when_catchup_output_not_allowed() {
+        use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+        use axum::http::StatusCode;
+
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+            .with_member_archives(&[Some(7), Some(7)])
+            .with_member_catchup_modes(&[Some("default"), Some("default")])
+            .m3u("solis")
+            .m3u("korath")
+            .build()
+            .await;
+        let member_1_vid = env.group_record.members[1].member_vid.get();
+
+        // 1. User allowed only Live output (Catchup output NOT allowed)
+        set_m3u_test_user_output_clusters(&env, ClusterFlags::Live);
+
+        let catchup_res =
+            env.get(&format!("/m3u-stream/live/viewer/secret/{member_1_vid}.ts?utc=1700000000&duration=3600")).await;
+        assert_eq!(catchup_res.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(env.origin_hits("solis"), 0);
+        assert_eq!(env.origin_hits("korath"), 0);
+
+        // 2. User allowed Catchup/Vod output
+        set_m3u_test_user_output_clusters(&env, ClusterFlags::Live | ClusterFlags::Vod);
+
+        let catchup_res2 =
+            env.get(&format!("/m3u-stream/live/viewer/secret/{member_1_vid}.ts?utc=1700000000&duration=3600")).await;
+        assert_eq!(catchup_res2.status(), StatusCode::OK);
+        assert_eq!(env.origin_hits("korath"), 1);
+        assert_eq!(env.origin_hits("solis"), 0);
     }
 }

@@ -1,0 +1,80 @@
+schema_version: 1
+name: player-joinable-shared-no-new-provider-slot
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: true
+    share_live_mpeg_ts: true
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: player-joinable-shared-no-new-provider-slot
+actors:
+  - id: viewer-a
+    agent: local
+    username: viewer-a
+    user_agent: tuliprox-testkit/viewer-a
+    client_ip: { mode: forwarded, value: 10.30.0.10 }
+  - id: viewer-b
+    agent: local
+    username: viewer-b
+    user_agent: tuliprox-testkit/viewer-b
+    client_ip: { mode: forwarded, value: 10.30.0.11 }
+channels:
+  channel-x: { origin_marker: 17, protocol: m3u }
+steps:
+  - command_id: start-viewer-a
+    start:
+      actor: viewer-a
+      playback_id: playback-a
+      session_group: group-a
+      channel: channel-x
+    await: { valid_frames: 3 }
+    assert_runtime:
+      active_users: 1
+      active_user_connections: 1
+      active_streams: 1
+      provider_connections: 1
+  - command_id: get-joinable-viewer-b
+    api_request:
+      actor: viewer-b
+      method: GET
+      path: /api/v1/me/streams/joinable
+      expect_status: 200
+      assert_body_contains: "Test channel 17"
+  - command_id: start-viewer-b
+    start:
+      actor: viewer-b
+      playback_id: playback-b
+      session_group: group-b
+      channel: channel-x
+    await: { valid_frames: 3 }
+    assert_runtime:
+      active_users: 2
+      active_user_connections: 2
+      active_streams: 2
+      distinct_shared_streams: 1
+      provider_connections: 1
+  - command_id: stop-viewer-a
+    stop: { playback_id: playback-a }
+  - command_id: stop-viewer-b
+    stop: { playback_id: playback-b }
+    assert_runtime:
+      active_users: 0
+      active_user_connections: 0
+      provider_connections: 0
+policy_contract:
+  user_access_control: true
+  player_api: true
+  provider_max_connections: 1
+  users:
+    viewer-a:
+      max_connections: 1
+    viewer-b:
+      max_connections: 1
+      player_features:
+        joinable_streams: true
+  admission_strategies: []

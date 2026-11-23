@@ -55,6 +55,8 @@ pub struct ProxyUserCredentialsDto {
     /// Filter DSL restricting visible content; AND-combined with the plan filter.
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_features: Option<crate::model::PlayerFeaturesDto>,
 }
 
 impl ProxyUserCredentialsDto {
@@ -74,6 +76,12 @@ impl ProxyUserCredentialsDto {
         if let Some(filter) = &self.filter {
             crate::foundation::get_filter(filter, templates)
                 .map_err(|err| TuliproxError::ProxyUser(format!("Invalid filter for user {}: {err}", self.username)))?;
+        }
+        if let Some(features) = &mut self.player_features {
+            features.prepare()?;
+            if features.is_empty() {
+                self.player_features = None;
+            }
         }
         Ok(())
     }
@@ -103,6 +111,9 @@ impl ProxyUserCredentialsDto {
         }
         if self.password.is_empty() {
             return Err(TuliproxError::ProxyUser("Password required".to_string()));
+        }
+        if let Some(features) = &self.player_features {
+            features.validate()?;
         }
         Ok(())
     }
@@ -160,6 +171,7 @@ impl Default for ProxyUserCredentialsDto {
             network_access: None,
             plan: None,
             filter: None,
+            player_features: None,
         }
     }
 }
@@ -309,5 +321,31 @@ mod tests {
                 .as_ref()
                 .is_some_and(|networks| networks.iter().any(|n| n == "192.168.1.0/24")));
         }
+    }
+
+    #[test]
+    fn prepare_rejects_zero_numeric_player_features() {
+        let mut user = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            player_features: Some(crate::model::PlayerFeaturesDto {
+                recording_quota: Some(crate::model::ByteSize::new("0")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(user.prepare().is_err());
+
+        user.player_features =
+            Some(crate::model::PlayerFeaturesDto { max_concurrent_recordings: Some(0), ..Default::default() });
+        assert!(user.prepare().is_err());
+
+        user.player_features =
+            Some(crate::model::PlayerFeaturesDto { max_recording_rules: Some(0), ..Default::default() });
+        assert!(user.prepare().is_err());
+
+        user.player_features =
+            Some(crate::model::PlayerFeaturesDto { max_free_shared_joins: Some(0), ..Default::default() });
+        assert!(user.prepare().is_err());
     }
 }

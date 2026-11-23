@@ -470,6 +470,7 @@ async fn serial_transfers_start_the_next_worker_without_waiting_for_a_tick() -> 
         task.uuid = format!("transfer-{index}");
         task.state = RecordingTaskState::Queued;
         task.recording.source.virtual_id = (42 + index).to_string();
+        task.recording.source.provider_id = Some((42 + index).to_string());
         task.file_dir = dir.path().to_path_buf();
         task.file_path = dir.path().join(format!("transfer-{index}.mp4"));
         queue.queue.lock().await.push_back(task);

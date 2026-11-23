@@ -5,7 +5,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::Path,
     time::Duration,
@@ -38,7 +38,7 @@ pub struct AgentsConfig {
     pub required: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyContract {
     pub user_access_control: bool,
@@ -70,6 +70,12 @@ pub struct PolicyContract {
     pub provider_pool: Vec<ProviderPoolAccount>,
     #[serde(default)]
     pub expected_provider_slots: Option<usize>,
+    #[serde(default)]
+    pub player_api: Option<bool>,
+    #[serde(default)]
+    pub user_ui_enabled: Option<bool>,
+    #[serde(default)]
+    pub player_api_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -81,12 +87,33 @@ pub struct ProviderPoolAccount {
     pub priority: Option<i16>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct UserPlayerFeatures {
+    #[serde(default)]
+    pub api_enabled: Option<bool>,
+    #[serde(default)]
+    pub source_switch: Option<bool>,
+    #[serde(default)]
+    pub joinable_streams: Option<bool>,
+    #[serde(default)]
+    pub free_shared_joins: Option<bool>,
+    #[serde(default)]
+    pub max_free_shared_joins: Option<u32>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserPolicy {
     pub max_connections: usize,
     #[serde(default)]
     pub soft_connections: usize,
+    #[serde(default)]
+    pub filter: Option<String>,
+    #[serde(default)]
+    pub ui_enabled: Option<bool>,
+    #[serde(default)]
+    pub player_features: Option<UserPlayerFeatures>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -336,6 +363,8 @@ pub struct Step {
     #[serde(default)]
     pub pause_millis: Option<u64>,
     #[serde(default)]
+    pub await_origin: Option<AwaitOrigin>,
+    #[serde(default)]
     pub expect: ExpectedPlayback,
     pub start: Option<Start>,
     #[serde(default)]
@@ -352,6 +381,12 @@ pub struct Step {
     pub assert_runtime: Option<RuntimeAssertions>,
     #[serde(default)]
     pub origin_fault: Option<OriginFaultStep>,
+    #[serde(default)]
+    pub api_request: Option<ApiRequestStep>,
+    #[serde(default)]
+    pub assert_headers: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub assert_manifest_contains: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -422,7 +457,7 @@ pub struct AwaitCondition {
     pub valid_frames: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AssertOrigin {
     #[serde(default)]
@@ -467,6 +502,41 @@ pub struct AssertOrigin {
     pub stalker_raw_command_markers: Option<Vec<u32>>,
 }
 
+impl AssertOrigin {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.max_active_tcp.is_none()
+            && self.max_active_body.is_none()
+            && self.active_body.is_none()
+            && self.no_evictions.is_none()
+            && self.no_limit_rejections.is_none()
+            && self.latest_request_account.is_none()
+            && self.latest_segment_account.is_none()
+            && self.segment_failure_before_handoff_from.is_none()
+            && self.stalker_handshakes_at_least.is_none()
+            && self.stalker_create_links_at_least.is_none()
+            && self.stalker_token_refusals_at_least.is_none()
+            && self.stalker_create_link_markers.is_none()
+            && self.stalker_descriptor_markers.is_none()
+            && self.stalker_raw_command_markers.is_none()
+    }
+}
+
+/// A wait step that polls the emulated origin until all configured conditions
+/// are met or `timeout_millis` expires.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AwaitOrigin {
+    #[serde(default)]
+    pub timeout_millis: Option<u64>,
+    #[serde(flatten)]
+    pub condition: AssertOrigin,
+}
+
+impl AwaitOrigin {
+    pub const DEFAULT_TIMEOUT_MILLIS: u64 = 20_000;
+}
+
 /// Per-step assertions against the SUT runtime status (`/api/v1/status`).
 ///
 /// These verify the user-side accounting the operator sees in the Web UI, so a
@@ -486,6 +556,31 @@ pub struct RuntimeAssertions {
     /// viewers play proves they joined one shared session.
     #[serde(default)]
     pub distinct_shared_streams: Option<usize>,
+    #[serde(default)]
+    pub provider_connections: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiRequestStep {
+    pub actor: String,
+    pub method: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub body: Option<serde_json::Value>,
+    #[serde(default)]
+    pub member_index: Option<usize>,
+    #[serde(default)]
+    pub expect_status: Option<u16>,
+    #[serde(default)]
+    pub assert_body_contains: Option<String>,
+    #[serde(default)]
+    pub assert_headers: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub playback_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -525,6 +620,10 @@ pub struct Start {
     pub user_agent: Option<String>,
     #[serde(default)]
     pub vod_object: Option<String>,
+    #[serde(default)]
+    pub member_index: Option<usize>,
+    #[serde(default)]
+    pub assert_headers: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -632,12 +731,36 @@ impl Scenario {
                     || step.await_condition.is_some()
                     || step.assert_origin.is_some()
                     || step.assert_runtime.is_some()
+                    || step.await_origin.is_some()
                 {
                     return Err(TestkitError::Configuration(
                         "pause_millis cannot be combined with playback expectations or checks".to_owned(),
                     ));
                 }
                 continue;
+            }
+            if let Some(await_origin) = &step.await_origin {
+                validate_await_origin_step(step, await_origin)?;
+                continue;
+            }
+            if let Some(api_req) = &step.api_request {
+                if step.start.is_some() || step.stop.is_some() {
+                    return Err(TestkitError::Configuration(
+                        "api_request cannot be combined with start or stop".to_owned(),
+                    ));
+                }
+                if !actor_ids.contains(api_req.actor.as_str()) {
+                    return Err(TestkitError::Configuration(format!("unknown actor {}", api_req.actor)));
+                }
+                if api_req.path.is_none() && api_req.url.is_none() {
+                    return Err(TestkitError::Configuration("api_request requires path or url".to_owned()));
+                }
+                continue;
+            }
+            if step.await_origin.is_some() {
+                return Err(TestkitError::Configuration(
+                    "await_origin cannot be combined with start or stop".to_owned(),
+                ));
             }
             if step.start.is_some() == step.stop.is_some() {
                 return Err(TestkitError::Configuration(
@@ -859,6 +982,7 @@ fn validate_origin_fault_step(step: &Step) -> Result<(), TestkitError> {
         return Ok(());
     };
     if step.pause_millis.is_some()
+        || step.await_origin.is_some()
         || step.start.is_some()
         || step.stop.is_some()
         || step.repeat.is_some()
@@ -884,6 +1008,39 @@ fn validate_origin_fault_step(step: &Step) -> Result<(), TestkitError> {
         if clear_id.is_empty() {
             return Err(TestkitError::Configuration("origin_fault clear requires a non-empty id".to_owned()));
         }
+    }
+    Ok(())
+}
+
+fn validate_await_origin_step(step: &Step, await_origin: &AwaitOrigin) -> Result<(), TestkitError> {
+    const MAX_TIMEOUT_MILLIS: u64 = 300_000;
+    if step.start.is_some()
+        || step.stop.is_some()
+        || step.repeat.is_some()
+        || step.pause_millis.is_some()
+        || step.origin_fault.is_some()
+        || step.api_request.is_some()
+        || step.await_frames.is_some()
+        || step.await_condition.is_some()
+        || step.assert_origin.is_some()
+        || step.assert_runtime.is_some()
+        || step.assert_headers.is_some()
+        || step.assert_manifest_contains.is_some()
+        || !step.expect.is_streaming()
+    {
+        return Err(TestkitError::Configuration(
+            "await_origin cannot be combined with playback steps, expectations or checks".to_owned(),
+        ));
+    }
+    if let Some(timeout_millis) = await_origin.timeout_millis {
+        if timeout_millis == 0 || timeout_millis > MAX_TIMEOUT_MILLIS {
+            return Err(TestkitError::Configuration(format!(
+                "timeout_millis must be between 1 and {MAX_TIMEOUT_MILLIS}"
+            )));
+        }
+    }
+    if await_origin.condition.is_empty() {
+        return Err(TestkitError::Configuration("await_origin requires at least one condition to wait for".to_owned()));
     }
     Ok(())
 }
@@ -921,6 +1078,17 @@ fn expand_steps(steps: &[Step], prefix: &str, expanded: &mut Vec<Step>) -> Resul
             expanded.push(child);
             continue;
         }
+        if step.api_request.is_some() {
+            if step.start.is_some() || step.stop.is_some() || step.repeat.is_some() {
+                return Err(TestkitError::Configuration(
+                    "api_request cannot be combined with start, stop or repeat".to_owned(),
+                ));
+            }
+            let mut child = step.clone();
+            child.command_id = format!("{prefix}{}", step.command_id);
+            expanded.push(child);
+            continue;
+        }
         if let Some(pause_millis) = step.pause_millis {
             if step.start.is_some() || step.stop.is_some() || step.repeat.is_some() {
                 return Err(TestkitError::Configuration(
@@ -932,6 +1100,13 @@ fn expand_steps(steps: &[Step], prefix: &str, expanded: &mut Vec<Step>) -> Resul
                     "pause_millis must be between 1 and {MAX_PAUSE_MILLIS}"
                 )));
             }
+            let mut child = step.clone();
+            child.command_id = format!("{prefix}{}", step.command_id);
+            expanded.push(child);
+            continue;
+        }
+        if let Some(await_origin) = &step.await_origin {
+            validate_await_origin_step(step, await_origin)?;
             let mut child = step.clone();
             child.command_id = format!("{prefix}{}", step.command_id);
             expanded.push(child);
@@ -1045,6 +1220,7 @@ steps:
                 .map(|number| Step {
                     command_id: number.to_string(),
                     pause_millis: None,
+                    await_origin: None,
                     expect: ExpectedPlayback::Streaming,
                     start: Some(Start {
                         actor: "a".to_owned(),
@@ -1061,6 +1237,9 @@ steps:
                     assert_origin: None,
                     assert_runtime: None,
                     origin_fault: None,
+                    api_request: None,
+                    assert_headers: None,
+                    assert_manifest_contains: None,
                 })
                 .collect(),
         };
@@ -1121,6 +1300,7 @@ steps:
             "{ command_id: wait, pause_millis: 10, await: {} }",
             "{ command_id: wait, pause_millis: 10, assert_origin: {} }",
             "{ command_id: wait, pause_millis: 10, assert_runtime: {} }",
+            "{ command_id: wait, pause_millis: 10, await_origin: { latest_segment_account: input-b } }",
         ] {
             let yaml = format!(
                 "schema_version: 1\nname: pause-invalid\ntuliprox: {{ base_url: http://example.invalid, execution_mode: existing_instance }}\nactors: [{{ id: a, agent: local }}]\nsteps: [{invalid_step}]\n"
@@ -1179,6 +1359,69 @@ steps:
             let scenario: Scenario = serde_saphyr::from_str(&yaml).unwrap();
             assert!(scenario.validate().is_err(), "{invalid_step}");
         }
+    }
+
+    #[test]
+    fn await_origin_step_parses_and_validates() {
+        let scenario: Scenario = serde_saphyr::from_str(
+            r"
+schema_version: 1
+name: await-origin-validation
+tuliprox: { base_url: http://example.invalid, execution_mode: existing_instance }
+actors: [{ id: a, agent: local }]
+steps:
+  - command_id: wait-for-origin
+    await_origin:
+      latest_segment_account: input-b
+      timeout_millis: 15000
+",
+        )
+        .unwrap();
+        assert!(scenario.validate().is_ok());
+        let expanded = scenario.expanded_steps().unwrap();
+        assert_eq!(expanded.len(), 1);
+        let await_origin = expanded[0].await_origin.as_ref().unwrap();
+        assert_eq!(await_origin.timeout_millis, Some(15_000));
+        assert_eq!(await_origin.condition.latest_segment_account.as_deref(), Some("input-b"));
+    }
+
+    #[test]
+    fn await_origin_step_rejects_invalid_combinations_and_values() {
+        for invalid_step in [
+            "{ command_id: wait, await_origin: {} }",
+            "{ command_id: wait, await_origin: { timeout_millis: 0, latest_segment_account: input-b } }",
+            "{ command_id: wait, await_origin: { timeout_millis: 300001, latest_segment_account: input-b } }",
+            "{ command_id: wait, await_origin: { latest_segment_account: input-b }, stop: { playback_id: missing } }",
+            "{ command_id: wait, await_origin: { latest_segment_account: input-b }, expect: rejected }",
+            "{ command_id: wait, await_origin: { latest_segment_account: input-b }, pause_millis: 10 }",
+            "{ command_id: wait, await_origin: { latest_segment_account: input-b }, await_frames: 1 }",
+            "{ command_id: wait, await_origin: { latest_segment_account: input-b }, assert_origin: {} }",
+            "{ command_id: wait, await_origin: { latest_segment_account: input-b }, assert_runtime: {} }",
+        ] {
+            let yaml = format!(
+                "schema_version: 1\nname: await-origin-invalid\ntuliprox: {{ base_url: http://example.invalid, execution_mode: existing_instance }}\nactors: [{{ id: a, agent: local }}]\nsteps: [{invalid_step}]\n"
+            );
+            let scenario: Result<Scenario, _> = serde_saphyr::from_str(&yaml);
+            if let Ok(scenario) = scenario {
+                assert!(scenario.validate().is_err(), "expected validation error for {invalid_step}");
+            }
+        }
+    }
+
+    #[test]
+    fn await_origin_step_rejects_unknown_fields() {
+        let yaml = r"
+schema_version: 1
+name: await-origin-unknown
+tuliprox: { base_url: http://example.invalid, execution_mode: existing_instance }
+actors: [{ id: a, agent: local }]
+steps:
+  - command_id: wait
+    await_origin:
+      nonexistent_field: true
+";
+        let scenario: Result<Scenario, _> = serde_saphyr::from_str(yaml);
+        assert!(scenario.is_err());
     }
 
     #[test]
@@ -1446,21 +1689,12 @@ tuliprox:
     fn failover_groups_fixture_rejects_provider_pool() -> Result<(), TestkitError> {
         let mut scenario = failover_scenario("  failover_groups: { inputs: [input-a, input-b] }")?;
         scenario.policy_contract = Some(PolicyContract {
-            user_access_control: false,
-            users: HashMap::new(),
-            admission_strategies: None,
-            recent_eviction_reentry_ttl_ms: None,
-            hls_session_ttl_secs: None,
-            provider_affinity_ttl_secs: None,
-            hls_wrap_media_playlist: None,
-            grace: None,
-            provider_max_connections: None,
             provider_pool: vec![ProviderPoolAccount {
                 name: "account-a".to_owned(),
                 max_connections: 1,
                 priority: None,
             }],
-            expected_provider_slots: None,
+            ..Default::default()
         });
         assert!(scenario.validate().is_err());
         Ok(())

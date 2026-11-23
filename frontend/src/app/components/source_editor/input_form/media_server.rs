@@ -9,7 +9,7 @@ use crate::{
         input::Input, number_input::NumberInput, selection_parse_first, Card, DropDownOption, DropDownSelection,
         HideContent, Select, TitledCard, ToggleSwitch,
     },
-    config_field_child, config_field_custom,
+    config_field_child,
     i18n::{use_translation, YewI18n},
 };
 use shared::model::{ConfigInputDto, InputType, MediaServerInputConfigDto};
@@ -198,7 +198,9 @@ pub(super) fn MediaServerInputForm(props: &MediaServerInputFormProps) -> Html {
             }
         })
     } else {
-        config_field_custom!(translate.t(LABEL_MEDIA_SERVER), translate.t(media_server_flavor_label_key(input_type)))
+        config_field_child!(translate.t(LABEL_MEDIA_SERVER), "INPUT_FORM.MEDIA_SERVER_FLAVOR", {
+            html! { <span class="tp__form-field__value">{translate.t(media_server_flavor_label_key(input_type))}</span> }
+        })
     };
 
     let lead = html! {
@@ -286,8 +288,8 @@ pub(super) fn MediaServerSettingsForm(props: &MediaServerSettingsFormProps) -> H
                     <Card class="tp__config-view__card">
                         <TitledCard title={translate.t(LABEL_CATALOG_OPTIONS)}>
                             <div class="tp__config-view__cols-2">
-                                { config_field_custom!(translate.t(LABEL_PAGE_SIZE), page_size.to_string()) }
-                                { config_field_custom!(translate.t(LABEL_REQUEST_DELAY_MS), request_delay_ms.to_string()) }
+                                { config_field_child!(translate.t(LABEL_PAGE_SIZE), "MEDIA_SERVER.PAGE_SIZE", { html! { <span class="tp__form-field__value">{page_size.to_string()}</span> } }) }
+                                { config_field_child!(translate.t(LABEL_REQUEST_DELAY_MS), "MEDIA_SERVER.REQUEST_DELAY_MS", { html! { <span class="tp__form-field__value">{request_delay_ms.to_string()}</span> } }) }
                             </div>
                             if visible.include_media_sources {
                                 <div class="tp__config-view__cols-2">

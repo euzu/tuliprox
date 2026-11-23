@@ -13,14 +13,68 @@ pub struct RecordingSourceInput {
     pub virtual_id: String,
     pub cluster: XtreamCluster,
     pub input_name: String,
+    pub provider_id: Option<String>,
+    pub is_group: bool,
 }
 
 impl RecordingSourceInput {
+    pub fn new(target_id: impl Into<String>, virtual_id: impl Into<String>, input_name: impl Into<String>) -> Self {
+        Self {
+            target_id: target_id.into(),
+            virtual_id: virtual_id.into(),
+            cluster: XtreamCluster::Live,
+            input_name: input_name.into(),
+            provider_id: None,
+            is_group: false,
+        }
+    }
+
+    pub fn with_cluster(mut self, cluster: XtreamCluster) -> Self {
+        self.cluster = cluster;
+        self
+    }
+
+    pub fn with_provider_id(mut self, provider_id: Option<String>) -> Self {
+        self.provider_id = provider_id;
+        self
+    }
+
+    pub fn with_is_group(mut self, is_group: bool) -> Self {
+        self.is_group = is_group;
+        self
+    }
+
     pub fn validate(&self) -> Result<(), ServiceError> {
         if self.target_id.trim().is_empty() || self.virtual_id.trim().is_empty() || self.input_name.trim().is_empty() {
             return Err(ServiceError::InvalidSource);
         }
         Ok(())
+    }
+}
+
+impl From<&shared::model::recording::RecordingSource> for RecordingSourceInput {
+    fn from(source: &shared::model::recording::RecordingSource) -> Self {
+        Self {
+            target_id: source.target_id.clone(),
+            virtual_id: source.virtual_id.clone(),
+            cluster: source.cluster,
+            input_name: source.input_name.clone(),
+            provider_id: None,
+            is_group: false,
+        }
+    }
+}
+
+impl From<shared::model::recording::RecordingSource> for RecordingSourceInput {
+    fn from(source: shared::model::recording::RecordingSource) -> Self {
+        Self {
+            target_id: source.target_id,
+            virtual_id: source.virtual_id,
+            cluster: source.cluster,
+            input_name: source.input_name,
+            provider_id: None,
+            is_group: false,
+        }
     }
 }
 
@@ -102,4 +156,33 @@ pub struct EditRecordingPatch {
     pub program_title: Option<String>,
     pub channel_id: Option<String>,
     pub channel_name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::recording::RecordingSource;
+
+    #[test]
+    fn client_supplied_provider_id_and_is_group_are_ignored() {
+        let json = serde_json::json!({
+            "target_id": "target-1",
+            "virtual_id": "42",
+            "input_name": "input-1",
+            "cluster": "Live",
+            "provider_id": "client-provided-id",
+            "is_group": true
+        });
+        let client_source: RecordingSource = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(client_source.provider_id.as_deref(), Some("client-provided-id"));
+        assert!(client_source.is_group);
+
+        let input_from_ref = RecordingSourceInput::from(&client_source);
+        assert_eq!(input_from_ref.provider_id, None);
+        assert!(!input_from_ref.is_group);
+
+        let input_from_val = RecordingSourceInput::from(client_source);
+        assert_eq!(input_from_val.provider_id, None);
+        assert!(!input_from_val.is_group);
+    }
 }

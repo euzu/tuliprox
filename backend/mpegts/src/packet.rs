@@ -4,6 +4,9 @@
 use bytes::Bytes;
 
 pub const TS_PACKET_SIZE: usize = 188;
+
+/// Length of the standard MPEG-TS PAT+PMT header prepended to virtual clips.
+pub const CLIP_HEADER_LEN: usize = 2 * TS_PACKET_SIZE;
 pub const TS_SYNC_BYTE: u8 = 0x47;
 pub(crate) const NULL_PID: u16 = 0x1FFF;
 /// PCR flag in the adaptation field flags.
@@ -52,7 +55,7 @@ pub fn ts_sync_offset(buf: &[u8]) -> Option<usize> { find_sync(buf, 0..TS_PACKET
 pub(crate) fn pid_from_bytes(high: u8, low: u8) -> u16 { (u16::from(high & 0x1F) << 8) | u16::from(low) }
 
 #[must_use]
-pub(crate) fn ts_packet_pid(packet: &[u8]) -> u16 { pid_from_bytes(packet[1], packet[2]) }
+pub fn ts_packet_pid(packet: &[u8]) -> u16 { pid_from_bytes(packet[1], packet[2]) }
 
 /// CRC-32/MPEG-2 of PSI sections: polynomial 0x04C11DB7, initial value 0xFFFFFFFF, no reflection,
 /// no final xor. A section including its CRC yields 0.
@@ -173,7 +176,104 @@ pub(crate) fn es_has_keyframe(stream_type: u8, data: &[u8]) -> bool {
     false
 }
 
-pub(crate) fn is_video_stream_type(stream_type: u8) -> bool { matches!(stream_type, 0x01 | 0x02 | 0x1B | 0x24) }
+#[must_use]
+pub fn is_video_stream_type(stream_type: u8) -> bool { matches!(stream_type, 0x01 | 0x02 | 0x10 | 0x1B | 0x24 | 0x42) }
+
+/// Program stream metadata extracted from PAT and PMT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TsProgramInfo {
+    pub pmt_pid: u16,
+    pub video_pid: u16,
+    pub video_stream_type: u8,
+    pub pat_offset: usize,
+    pub pmt_offset: usize,
+}
+
+/// Scan a buffer from the start of an MPEG-TS stream for PAT and PMT packets.
+#[must_use]
+pub fn parse_pat_pmt_metadata(data: &[u8]) -> Option<TsProgramInfo> {
+    let sync = ts_sync_offset(data)?;
+    let mut pmt_pid: Option<u16> = None;
+    let mut pat_offset: Option<usize> = None;
+
+    for offset in (sync..data.len()).step_by(TS_PACKET_SIZE) {
+        if offset + TS_PACKET_SIZE > data.len() {
+            break;
+        }
+        let packet = &data[offset..offset + TS_PACKET_SIZE];
+        let view = TsPacket(packet);
+        let pid = view.pid();
+
+        if pid == 0 && pat_offset.is_none() {
+            let payload = view.payload();
+            if let Some(bounds) = single_packet_section(payload) {
+                let section = &payload[bounds];
+                if section.first() == Some(&0) {
+                    let entries = section.get(8..section.len().saturating_sub(4)).unwrap_or(&[]);
+                    for entry in entries.as_chunks::<4>().0 {
+                        let program = u16::from_be_bytes([entry[0], entry[1]]);
+                        let pmt = pid_from_bytes(entry[2], entry[3]);
+                        if program != 0 {
+                            pmt_pid = Some(pmt);
+                            pat_offset = Some(offset);
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if let Some(target_pmt_pid) = pmt_pid {
+            if pid == target_pmt_pid {
+                let payload = view.payload();
+                if let Some(bounds) = single_packet_section(payload) {
+                    let section = &payload[bounds];
+                    if section.first() == Some(&2) && section.len() >= 12 {
+                        let entries = section.get(8..section.len().saturating_sub(4)).unwrap_or(&[]);
+                        if entries.len() >= 4 {
+                            let info_len = (usize::from(entries[2] & 0x0F) << 8) | usize::from(entries[3]);
+                            let mut streams = entries.get(4 + info_len..).unwrap_or(&[]);
+                            while streams.len() >= 5 {
+                                let stream_type = streams[0];
+                                let es_pid = pid_from_bytes(streams[1], streams[2]);
+                                let es_info_len = (usize::from(streams[3] & 0x0F) << 8) | usize::from(streams[4]);
+                                if is_video_stream_type(stream_type) {
+                                    return Some(TsProgramInfo {
+                                        pmt_pid: target_pmt_pid,
+                                        video_pid: es_pid,
+                                        video_stream_type: stream_type,
+                                        pat_offset: pat_offset?,
+                                        pmt_offset: offset,
+                                    });
+                                }
+                                streams = streams.get(5 + es_info_len..).unwrap_or(&[]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Scan a buffer of TS packets for the first packet on `video_pid` starting with an IDR.
+#[must_use]
+pub fn find_idr_packet_offset(data: &[u8], video_pid: u16, video_stream_type: u8) -> Option<usize> {
+    let sync = ts_sync_offset(data)?;
+    for offset in (sync..data.len()).step_by(TS_PACKET_SIZE) {
+        if offset + TS_PACKET_SIZE > data.len() {
+            break;
+        }
+        let packet = &data[offset..offset + TS_PACKET_SIZE];
+        let view = TsPacket(packet);
+        if view.pid() == video_pid && view.payload_unit_start() {
+            let payload = view.payload();
+            if is_idr_start(video_stream_type, payload) {
+                return Some(offset);
+            }
+        }
+    }
+    None
+}
 
 #[cfg(test)]
 mod tests {

@@ -6,6 +6,8 @@ use crate::{
         recording_queue::{mutate_optional, QueueMutationError, RecordingQueue, RecordingTaskState},
     },
 };
+use shared::model::RecordingMetadata;
+use std::sync::Arc;
 use tuliprox_core::model::RecordingConfig;
 
 pub(super) fn classify_download_open_error(url: &reqwest::Url, err: &reqwest::Error) -> DownloadExecutionResult {
@@ -73,7 +75,7 @@ pub(super) async fn requeue_active_download_for_retry(
 
 pub(super) enum RetryCommit {
     Waiting { delay_secs: u64, attempts: u8 },
-    Failed(RecordingNotificationPlan),
+    Failed { notification: RecordingNotificationPlan, metadata: Option<Arc<RecordingMetadata>> },
 }
 
 pub(super) async fn prepare_active_retry(
@@ -81,6 +83,7 @@ pub(super) async fn prepare_active_retry(
     uuid: &str,
     download_cfg: &RecordingConfig,
     cause: &str,
+    clone_metadata: bool,
 ) -> Result<Option<RetryCommit>, QueueMutationError> {
     mutate_optional(download_queue, |candidate| {
         let Some(active) = candidate.active.iter_mut().find(|active| active.uuid == uuid) else {
@@ -108,11 +111,12 @@ pub(super) async fn prepare_active_retry(
             failed.state = RecordingTaskState::Failed;
             failed.error = Some(error.clone());
             failed.recording.reserved_bytes = 0;
+            let metadata = if clone_metadata { Some(Arc::new(failed.recording.clone())) } else { None };
             let notification =
                 mark_recording_metadata_notification(&mut failed.recording, LifecycleEvent::Failed, Some(error));
             candidate.finished.push(failed);
             crate::recording::recording_queue::promote_from_queue(candidate);
-            return Ok(Some(RetryCommit::Failed(notification)));
+            return Ok(Some(RetryCommit::Failed { notification, metadata }));
         }
 
         let delay_secs = compute_download_retry_backoff_secs(attempts, download_cfg);

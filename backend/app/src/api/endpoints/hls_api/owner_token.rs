@@ -74,10 +74,11 @@ pub(in crate::api) fn append_user_session_provider_headers(
 pub(in crate::api) fn hls_media_playlist_wrap_enabled(
     app_state: &Arc<AppState>,
     target: &ConfigTarget,
+    input: &ConfigInput,
     user: &ProxyUserCredentials,
 ) -> bool {
     app_state.app_config.config.load().get_hls_wrap_media_playlist()
-        && !hls_cache_enabled_for_user(app_state, target, user)
+        && !hls_cache_enabled_for_user(app_state, target, input, user)
 }
 
 pub(in crate::api) struct HlsMediaPlaylistWrap<'a> {
@@ -165,11 +166,30 @@ pub(in crate::api) fn user_allows_entry_content<T>(
 where
     for<'a> shared::model::PlaylistItem: From<&'a T>,
 {
-    let output_allowed = match scope {
+    user_allows_entry_output(user, scope) && user_allows_entry_filter(user, item)
+}
+
+/// Whether the user's output clusters allow this entry scope.
+pub(in crate::api) fn user_allows_entry_output(user: &ProxyUserCredentials, scope: HlsEntryOutputScope) -> bool {
+    match scope {
         HlsEntryOutputScope::ItemType(item_type) => user.allows_item_type(item_type),
         HlsEntryOutputScope::LiveCluster => user.allows_cluster(XtreamCluster::Live),
-    };
-    output_allowed && (user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(item)))
+    }
+}
+
+/// Whether the user's content filter allows `item`.
+pub(in crate::api) fn user_allows_entry_filter<T>(user: &ProxyUserCredentials, item: &T) -> bool
+where
+    for<'a> shared::model::PlaylistItem: From<&'a T>,
+{
+    user_allows_playlist_filter(user, &shared::model::PlaylistItem::from(item))
+}
+
+pub(in crate::api) fn user_allows_playlist_filter(
+    user: &ProxyUserCredentials,
+    item: &shared::model::PlaylistItem,
+) -> bool {
+    user.t_filter.is_none() || user.allows_content(item)
 }
 
 /// Checks that a sealed session token belongs to the requesting user, `virtual_id` and user agent.
@@ -234,20 +254,43 @@ async fn hls_recreate_content_allowed(
         shared::model::VirtualId::new(virtual_id),
     )
     .await;
-    if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } = classified {
-        if target.has_output(TargetType::Xtream) {
-            let item = tuliprox_repository::target_stream_item::member_to_xtream_item(&group, index);
-            let scope = if is_catchup {
-                HlsEntryOutputScope::LiveCluster
-            } else {
-                HlsEntryOutputScope::ItemType(item.item_type)
-            };
-            return Some(user_allows_entry_content(user, scope, &item));
-        }
-        let item = tuliprox_repository::target_stream_item::member_to_m3u_item(&group, index);
+    if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { ref group, index } = classified {
+        // A member VID is not a playlist row: the content filter judges the group's entry, the output scope the
+        // member that plays.
+        let member_item_type = group.members.get(index).map_or(shared::model::PlaylistItemType::Live, |m| m.item_type);
         let scope =
-            if is_catchup { HlsEntryOutputScope::LiveCluster } else { HlsEntryOutputScope::ItemType(item.item_type) };
-        return Some(user_allows_entry_content(user, scope, &item));
+            if is_catchup { HlsEntryOutputScope::LiveCluster } else { HlsEntryOutputScope::ItemType(member_item_type) };
+        if !user_allows_entry_output(user, scope) {
+            return Some(false);
+        }
+        if user.t_filter.is_none() {
+            return Some(true);
+        }
+        let is_allowed = if target.has_output(TargetType::Xtream) {
+            let item = tuliprox_repository::target_stream_item::member_to_xtream_item(group, index);
+            let group_entry = crate::api::api_utils::failover_group::content_filter_item_for_xtream(
+                &classified,
+                &item,
+                &app_state.app_config,
+                &app_state.playlists,
+                target,
+                None,
+            )
+            .await;
+            group_entry.is_some_and(|entry| user_allows_entry_filter(user, entry.as_ref()))
+        } else {
+            let item = tuliprox_repository::target_stream_item::member_to_m3u_item(group, index);
+            let group_entry = crate::api::api_utils::failover_group::content_filter_item_for_m3u(
+                &classified,
+                &item,
+                &app_state.app_config,
+                &app_state.playlists,
+                target,
+            )
+            .await;
+            group_entry.is_some_and(|entry| user_allows_entry_filter(user, entry.as_ref()))
+        };
+        return Some(is_allowed);
     }
     None
 }
@@ -287,7 +330,7 @@ pub(super) async fn recreate_hls_session_from_token(
             }
             _ => false,
         };
-    if hls_cache_enabled_for_user(app_state, target, user) || !hint_matches {
+    if hls_cache_enabled_for_user(app_state, target, input, user) || !hint_matches {
         return StatusCode::BAD_REQUEST.into_response();
     }
     // Only an expired session comes back; an evicted, kicked or terminated one stays ended,
@@ -377,4 +420,62 @@ pub(super) async fn recreate_hls_session_from_token(
     )
     .await
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{api::api_utils::tests::group_playback_support::GroupPlaybackEnv, model::TargetOutput};
+
+    #[tokio::test]
+    async fn hls_recreate_content_allowed_member_vid_with_filter_hiding_group_entry_returns_false() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().build().await;
+        let member_vid = env.group_record.members[0].member_vid.get();
+
+        let mut user = (*env.app_state.app_config.get_user_credentials("viewer").expect("viewer exists")).clone();
+        let filter = shared::foundation::get_filter(r#"Group != "General""#, None).expect("valid filter");
+        user.t_filter = Some(Arc::new(filter));
+
+        let allowed = hls_recreate_content_allowed(&env.app_state, &user, &env.target, member_vid, false).await;
+        assert_eq!(allowed, Some(false));
+    }
+
+    #[tokio::test]
+    async fn hls_recreate_content_allowed_member_vid_with_filter_allowing_group_entry_returns_true() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().build().await;
+        let member_vid = env.group_record.members[0].member_vid.get();
+
+        let mut user = (*env.app_state.app_config.get_user_credentials("viewer").expect("viewer exists")).clone();
+        // Group entry has Group="General". Synthesized member row has Group="zdf hd".
+        // Filter Group="General" matches group entry but not member row.
+        let filter = shared::foundation::get_filter(r#"Group = "General""#, None).expect("valid filter");
+        user.t_filter = Some(Arc::new(filter));
+
+        let allowed = hls_recreate_content_allowed(&env.app_state, &user, &env.target, member_vid, false).await;
+        assert_eq!(allowed, Some(true));
+    }
+
+    #[tokio::test]
+    async fn hls_recreate_content_allowed_m3u_member_vid_evaluates_filter_against_group_entry() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().build().await;
+        let member_vid = env.group_record.members[0].member_vid.get();
+
+        let mut m3u_target = (*env.target).clone();
+        m3u_target.output.retain(|o| matches!(o, TargetOutput::M3u(_)));
+        let m3u_target = Arc::new(m3u_target);
+
+        let mut user = (*env.app_state.app_config.get_user_credentials("viewer").expect("viewer exists")).clone();
+
+        // 1. Filter hiding group entry returns Some(false)
+        let filter_hide = shared::foundation::get_filter(r#"Group != "General""#, None).expect("valid filter");
+        user.t_filter = Some(Arc::new(filter_hide));
+        let denied = hls_recreate_content_allowed(&env.app_state, &user, &m3u_target, member_vid, false).await;
+        assert_eq!(denied, Some(false));
+
+        // 2. Filter allowing group entry returns Some(true)
+        let filter_allow = shared::foundation::get_filter(r#"Group = "General""#, None).expect("valid filter");
+        user.t_filter = Some(Arc::new(filter_allow));
+        let allowed = hls_recreate_content_allowed(&env.app_state, &user, &m3u_target, member_vid, false).await;
+        assert_eq!(allowed, Some(true));
+    }
 }

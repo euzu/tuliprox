@@ -1,6 +1,6 @@
 use crate::{
     app::components::{Card, TextButton},
-    config_field, config_field_bool, config_field_custom, edit_field_bool, edit_field_number_i16, edit_field_text,
+    config_field, config_field_bool, config_field_child, edit_field_bool, edit_field_number_i16, edit_field_text,
     generate_form_reducer,
     i18n::use_translation,
 };
@@ -60,7 +60,7 @@ pub fn EpgSourceItemForm(props: &EpgSourceItemFormProps) -> Html {
         <Card class="tp__config-view__card tp__item-form">
             if props.readonly {
                 { config_field!(form_state.form, translate.t(LABEL_EPG_SOURCE_URL), url) }
-                { config_field_custom!(translate.t(LABEL_EPG_PRIORITY), form_state.form.priority.to_string()) }
+                { config_field_child!(translate.t(LABEL_EPG_PRIORITY), "EPG_SOURCE.PRIORITY", { html! { <span class="tp__form-field__value">{form_state.form.priority.to_string()}</span> } }) }
                 { config_field_bool!(form_state.form, translate.t(LABEL_EPG_LOGO_OVERRIDE), logo_override) }
             } else {
                 { edit_field_text!(form_state, translate.t(LABEL_EPG_SOURCE_URL), url, EpgSourceFormAction::Url) }

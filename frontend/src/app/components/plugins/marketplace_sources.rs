@@ -151,7 +151,7 @@ fn SourceDialog(props: &SourceDialogProps) -> Html {
                 <p><span class="tp__plugins__muted">{ translate.t("LABEL.ID") }{ ": " }</span><code>{ source.id.clone() }</code></p>
                 <p><span class="tp__plugins__muted">{ translate.t("LABEL.NAME") }{ ": " }</span>{ source.name.clone() }</p>
             }
-            <Input name="source_url" label={translate.t("LABEL.URL")} value={(*url).clone()} on_change={on_url}
+            <Input name="source_url" field_id={Some("PLUGIN_MARKETPLACE.SOURCE_URL".to_string())} label={translate.t("LABEL.URL")} value={(*url).clone()} on_change={on_url}
                 placeholder={Some("https://example.com/marketplace.json".to_owned())} required=true />
             if editing {
                 <label class="tp__plugins__source-enabled">

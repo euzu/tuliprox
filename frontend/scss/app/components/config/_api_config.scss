@@ -174,6 +174,24 @@
   &__message {
     grid-column: 1 / -1;
   }
+
+  &__section {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-micro);
+    margin-top: var(--gap-small);
+    padding-top: var(--padding-small);
+    border-top: 1px solid var(--card-border-color);
+  }
+
+  &__section-title {
+    font-weight: bold;
+  }
+
+  &__section-hint {
+    color: var(--theme-brand-text-muted);
+  }
 }
 
 @media (max-width: 860px) {

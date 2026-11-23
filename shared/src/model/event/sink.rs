@@ -22,6 +22,8 @@ pub trait EventSink: Send + Sync {
     /// closed channel are all normal and none of them are the emitter's
     /// problem.
     fn emit(&self, event: EventMessage);
+    /// Returns true if the sink has active receivers interested in events.
+    fn has_event_receivers(&self) -> bool { true }
     /// Forward a confirmed account response to the runtime provider manager.
     /// Sinks without a provider runtime deliberately ignore the observation.
     fn observe_provider_account(
@@ -54,10 +56,12 @@ pub struct NoopSink;
 
 impl EventSink for NoopSink {
     fn emit(&self, _event: EventMessage) {}
+    fn has_event_receivers(&self) -> bool { false }
 }
 
 impl<T: EventSink + ?Sized> EventSink for Arc<T> {
     fn emit(&self, event: EventMessage) { (**self).emit(event); }
+    fn has_event_receivers(&self) -> bool { (**self).has_event_receivers() }
     fn observe_provider_account(
         &self,
         name: Arc<str>,
@@ -81,6 +85,7 @@ impl<T: EventSink + ?Sized> EventSink for Arc<T> {
 
 impl<T: EventSink> EventSink for &T {
     fn emit(&self, event: EventMessage) { (**self).emit(event); }
+    fn has_event_receivers(&self) -> bool { (**self).has_event_receivers() }
     fn observe_provider_account(
         &self,
         name: Arc<str>,

@@ -35,6 +35,8 @@ mod admission_request_classification;
 mod admission_session_admission;
 mod admission_strategy_chain;
 
+mod recording_shared_stream_rides;
+mod stream_responses_free_shared_joins;
 mod stream_responses_provider_capacity;
 mod stream_responses_provider_fallback;
 mod stream_responses_response_headers;

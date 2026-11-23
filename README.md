@@ -47,17 +47,20 @@ Tuliprox is built for more than playlist conversion. It is designed to become th
   guards, hot reloads, audit events, and optional runtime watchdog support are built in.
 - **Keep the stack small** — Rust, a single application, embedded storage, and no mandatory external database.
 - **Stay in control of your data** — self-hosted configuration, metadata, user management, recordings, and operational state.
+- **Integrate custom IPTV players** — dedicated player APIs give external apps source switching, personal DVR, stream management,
+  and joinable stream discovery under user content filters.
 
 ## 🚀 At a Glance
 
 | Area           | What Tuliprox gives you                                                                                      |
-|----------------|--------------------------------------------------------------------------------------------------------------|
+|:---------------|:-------------------------------------------------------------------------------------------------------------|
 | **Web UI**     | Setup wizard, editors for every setting, dashboard, playlist explorer, live logs, stream and QoS views       |
 | **Inputs**     | Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, Silo, local libraries, staged sources, plugins     |
 | **Outputs**    | M3U/M3U8, Xtream Codes API, HDHomeRun, STRM                                                                  |
 | **Processing** | Filtering, mapping DSL, sorting, templates, EPG matching, metadata enrichment, curation                      |
 | **Streaming**  | Reverse proxy, redirects, shared MPEG-TS/HLS, HLS cache/prefetch, catchup proxying, live failover groups     |
 | **Users**      | Multi-user gateway, plans, connection limits, priorities, output clusters, category access, network policies |
+| **Player API** | User `/api/v1/me` routes, dedicated switches, source switching, split, progress, events, DVR, rules          |
 | **Plugins**    | Sandboxed WebAssembly plugins, marketplace, SDK, custom inputs, media servers, outputs, UI panels, MCP tools |
 | **AI**         | Optional MCP server for AI assistants, read-only by default, with the REST API's permissions                 |
 | **Operations** | REST API, scheduler, health/readiness probes, notifications, QoS, stream history, DVR, watchdog              |
@@ -518,7 +521,43 @@ or CLI when manual control is needed.
 
 **Benefit:** local files and provider content can live in one catalog instead of separate client libraries and workflows.
 
-### 20. Operations and Deployment
+### 20. Dedicated Player API & Client Integration
+
+Bring advanced gateway capabilities directly to external IPTV players (Android TV, mobile, desktop) using personal
+tokens with Xtream login credentials:
+
+- **Caller stream management (`/api/v1/me/streams`)**: list active streams with protocol, uptime, and user agent; stop own
+  playback on remote devices to instantly free connection slots.
+- **Failover source switching (MPEG-TS & live HLS)**: query available failover group sources and manually switch running streams
+  under the open response without reconnecting.
+- **Joinable shared streams & free shared joins**: discover running shared streams to watch without consuming extra provider
+  slots, including compatible single-source streams started by other targets; optionally permit free shared joins beyond user
+  connection limits.
+- **Dedicated stream split**: split an own shared MPEG-TS stream into a dedicated provider connection with a single call and
+  a reconnect URL, without reserving capacity up front.
+- **Fallback diagnostics & CORS exposure**: `X-Tuliprox-Fallback` response header and exposed CORS headers inform players of
+  stream preemption, capacity limits, or channel unavailability.
+- **Personal DVR for API users**: plan- and user-configurable DVR tiers (`none`, `read`, `private`, `shared`), personal quotas,
+  concurrency limits, deduplicated captures over running shared streams, and virtual MPEG-TS clips with automatic compaction.
+- **Recurring recording rules**: create, edit, and delete weekly timeslot rules with a per-user limit
+  (`max_recording_rules`), scheduled and re-validated per occurrence.
+- **Resume watching**: per-user watch progress for movies, episodes, and recordings with automatic `watched` detection and a
+  small REST surface for client-side resume and history views.
+- **Live event stream**: a personal JSON WebSocket with stream-ended, failover-switch, recording-finished, connection-denied,
+  and resync events, authenticated by the player token.
+- **Player AI tools (MCP)**: optional assistant tools (`mcp.player_tools`) for searching visible channels, checking EPG guides,
+  hands-free recording scheduling, recurring rules, failover switching, and stream splitting.
+- **Recordings in any Xtream player**: completed recordings appear as a `Recordings` VOD category and play through the normal
+  movie URL with seeking, so players need no extra API.
+- **Source quality**: failover source lists show a redacted health state, resolution, codec, bitrate and QoS score per source.
+- **Developer specification**: a guide with examples ([Player & Integration API](docs/src/player-api.md)) and an OpenAPI 3.1
+  file ([tuliprox-integration-api.openapi.yaml](docs/src/api/tuliprox-integration-api.openapi.yaml)) for building products on
+  these interfaces.
+
+**Benefit:** external IPTV players can offer premium gateway features — such as manual source selection and personal DVR — without
+requiring full administrative privileges or exposing provider details.
+
+### 21. Operations and Deployment
 
 - Alpine and Scratch Docker images
 - Docker Compose templates for Traefik, CrowdSec, Gluetun/SOCKS5, iptv-org/epg, and Tuliprox

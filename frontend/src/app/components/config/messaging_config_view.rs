@@ -10,8 +10,8 @@ use crate::{
         },
         ConfigContext,
     },
-    config_field, config_field_bool, config_field_bool_empty, config_field_child, config_field_custom,
-    config_field_empty, config_field_hide, config_field_optional, config_field_tags, edit_field_bool, edit_field_list,
+    config_field, config_field_bool, config_field_bool_empty, config_field_child, config_field_empty,
+    config_field_hide, config_field_optional, config_field_tags, edit_field_bool, edit_field_list,
     edit_field_number_f64, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
@@ -244,22 +244,31 @@ pub fn MessagingConfigView() -> Html {
         });
     }
 
-    let render_templates_view = |templates: &std::collections::HashMap<String, String>| {
-        if templates.is_empty() {
-            html! {}
-        } else {
-            let template_fields = templates
-                .iter()
-                .map(|(kind, template)| config_field_custom!(translate.t(&event_label_key(kind)), template.clone()))
-                .collect::<Html>();
-            html! {
-                <div class="tp__messaging-config__templates-view">
-                    <h3>{translate.t("LABEL.TEMPLATES")}</h3>
-                    { template_fields }
-                </div>
+    let render_templates_view =
+        |provider_prefix: &'static str, templates: &std::collections::HashMap<String, String>| {
+            if templates.is_empty() {
+                html! {}
+            } else {
+                let template_fields = templates
+                    .iter()
+                    .map(|(kind, template)| {
+                        config_field_child!(
+                            translate.t(&event_label_key(kind)),
+                            format!("{provider_prefix}.TEMPLATES"),
+                            {
+                                html! { <span class="tp__form-field__value">{template.clone()}</span> }
+                            }
+                        )
+                    })
+                    .collect::<Html>();
+                html! {
+                    <div class="tp__messaging-config__templates-view">
+                        <h3>{translate.t("LABEL.TEMPLATES")}</h3>
+                        { template_fields }
+                    </div>
+                }
             }
-        }
-    };
+        };
 
     let render_telegram = |telegram: Option<&TelegramMessagingConfigDto>| match telegram {
         Some(entry) => html! {
@@ -268,7 +277,7 @@ pub fn MessagingConfigView() -> Html {
               { config_field_hide!(entry, translate.t(LABEL_BOT_TOKEN), bot_token) }
               { config_field_tags!(entry, translate.t(LABEL_CHAT_IDS), chat_ids, "MESSAGING_CONFIG.TELEGRAM_CHAT_IDS") }
              { config_field_bool!(entry, translate.t(LABEL_MARKDOWN), markdown) }
-             { render_templates_view(&entry.templates) }
+             { render_templates_view("TELEGRAM_CONFIG", &entry.templates) }
           </Card>
         },
         None => html! {
@@ -288,7 +297,7 @@ pub fn MessagingConfigView() -> Html {
               { config_field!(entry, translate.t(LABEL_URL), url) }
               { config_field_optional!(entry, translate.t(LABEL_METHOD), method) }
               { config_field_tags!(entry, translate.t(LABEL_HEADERS), headers, "MESSAGING_CONFIG.REST_HEADERS") }
-              { render_templates_view(&entry.templates) }
+              { render_templates_view("REST_MESSAGING_CONFIG", &entry.templates) }
           </Card>
         },
         None => html! {
@@ -304,7 +313,7 @@ pub fn MessagingConfigView() -> Html {
           <Card class="tp__config-view__card">
               <h1>{translate.t(LABEL_DISCORD)}</h1>
               { config_field_hide!(entry, translate.t(LABEL_WEBHOOK_URL), url) }
-              { render_templates_view(&entry.templates) }
+              { render_templates_view("DISCORD_MESSAGING_CONFIG", &entry.templates) }
           </Card>
         },
         None => html! {
@@ -391,7 +400,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("TELEGRAM_CONFIG.TEMPLATES.{}", event_label_suffix(&kind)))}
+                        field_id={Some("TELEGRAM_CONFIG.TEMPLATES".to_string())}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -417,7 +426,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", event_label_suffix(&kind)))}
+                        field_id={Some("REST_MESSAGING_CONFIG.TEMPLATES".to_string())}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -443,7 +452,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", event_label_suffix(&kind)))}
+                        field_id={Some("DISCORD_MESSAGING_CONFIG.TEMPLATES".to_string())}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {

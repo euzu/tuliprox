@@ -312,7 +312,8 @@
       "SESSION_IDLE_TIMEOUT": "Idle time before unused HLS sessions are removed.",
       "STRIP_MODE": "How the initial playlist lags behind live edge.",
       "STRIP_VALUE": "Gap value in segments or seconds.",
-      "MIN_ORIGIN_TARGET_DURATION_SECS": "Oturum başlangıcında ve gerçek yeniden doğrulamada, hedef süresi bu minimumun altındaysa uygun bir origin arar. Yapılandırılmış manifest kurtarma burst düzeyini kullanır (kapalı: tek aday). Uygun origin bulunamazsa geçerli oynatma devam eder. Varsayılan: 0 (devre dışı)."
+      "MIN_ORIGIN_TARGET_DURATION_SECS": "Oturum başlangıcında ve gerçek yeniden doğrulamada, hedef süresi bu minimumun altındaysa uygun bir origin arar. Yapılandırılmış manifest kurtarma burst düzeyini kullanır (kapalı: tek aday). Uygun origin bulunamazsa geçerli oynatma devam eder. Varsayılan: 0 (devre dışı).",
+      "STARTUP_MODE": "HLS yayını için başlangıç stratejisi (`conservative`, `first_ready`, `progressive` veya `optimistic`). İlk parçaların indirme tamamlanmadan oynatılmaya başlanıp başlanmayacağını belirler."
     },
     "CONFIG_API": {
       "HOST": "Host where the tuliprox API listens. Default: 0.0.0.0",
@@ -329,12 +330,15 @@
       "PRIORITY": "The order of processing. Lower numbers mean higher priority (e.g. -1 is higher than 0).",
       "SEQUENTIAL_GROUP": "Optional process-wide group ID. Inputs with the same ID are refreshed one after another when parallel processing is enabled.",
       "URL": "Input source URL. Supported schemes:\n\n```http(s)://\nfile://\nprovider://<provider>/...\nbatch://...(auto-switches m3u/xtream to batch types).```\n\nFor m3u_batch/xtream_batch only local CSV sources are allowed (batch://...).",
-      "USERNAME": "Login username for this account or service."
+      "USERNAME": "Login username for this account or service.",
+      "PERSIST": "İndirilen ham sağlayıcı oynatma listesini yerel diske kaydetmek için isteğe bağlı yol şablonu (örn. `./playlist_{}.m3u`). `{}` yer tutucusu geçerli zaman damgasıyla değiştirilir.",
+      "PLAYBACK_PROVIDER": "Eşlemeler tarafından oluşturulan `provider://` oynatma URL'lerini çözümlemek için kullanılan genel sağlayıcı profilinin adı. Bağımsız oynatma listeleri için CDN failover sağlar. Boş bırakılırsa hiçbir oynatma sağlayıcısı profili eklenmez."
     },
     "STALKER_INPUT_CONFIG": {
       "AUTH_MODE": "Authentication identity to use. Auto accepts either a MAC address or username/password; the explicit modes require the identity they name.",
       "MAG_PRESET": "Predefined MAG device profile used for portal headers and identity defaults.",
-      "ENDPOINT_PREFERENCE": "Preferred Stalker portal endpoint. Auto tries the compatible endpoint candidates."
+      "ENDPOINT_PREFERENCE": "Preferred Stalker portal endpoint. Auto tries the compatible endpoint candidates.",
+      "CATALOG_MAX_PAGES": "Güncellemeler sırasında Stalker portalına yapılan katalog sayfalandırma isteklerinin maksimum sayısını sınırlar. Varsayılan: `4096`. Çok büyük portallarda zaman aşımlarını önlemeye yardımcı olur."
     },
     "STALKER_DEVICE_PROFILE": {
       "MAC_ADDRESS": "Portal device MAC address. Required by auto without credentials, mac_only, and mac_plus_credentials.",
@@ -390,7 +394,11 @@
       "FLUSSONIC_HLS_AUDIO_TRACKS": "Labels fragmented-MP4 HLS objects below Flussonic tracks-a<N> paths as audio/mp4 when the provider sends no specific Content-Type. Enable only for Flussonic sources.",
       "XTREAM_SKIP_LIVE": "If true, the live section of the Xtream provider is skipped during update.",
       "XTREAM_SKIP_SERIES": "If true, the series section of the Xtream provider is skipped during update.",
-      "XTREAM_SKIP_VOD": "If true, the VOD section of the Xtream provider is skipped during update."
+      "XTREAM_SKIP_VOD": "If true, the VOD section of the Xtream provider is skipped during update.",
+      "SKIP_LIVE": "Etkinleştirildiğinde, Xtream veya Stalker alımı sırasında bu giriş kaynağından canlı televizyon kanallarını atlar. Varsayılan: `false`.",
+      "SKIP_VOD": "Etkinleştirildiğinde, Xtream veya Stalker alımı sırasında bu giriş kaynağından isteğe bağlı videoları (VOD) atlar. Varsayılan: `false`.",
+      "SKIP_SERIES": "Etkinleştirildiğinde, Xtream veya Stalker alımı sırasında bu giriş kaynağından televizyon dizilerini ve bölümlerini atlar. Varsayılan: `false`.",
+      "STALKER_BULK_EPG": "Oynatma listesi yenilemesi sırasında canlı kanallar için elektronik program rehberi (EPG) verilerinin toplu olarak getirilmesini sağlar. Varsayılan: `false`. Desteklenen Stalker portallarında EPG alımını hızlandırır."
     },
     "CONFIG_TARGET": {
       "ENABLED": "If disabled, the processing for this target output is skipped.",
@@ -400,7 +408,10 @@
       "WATCH": "List of group patterns to monitor. Each pattern is a regular expression matched against the group name (e.g. ^Sport.* or (?i)event). Each entry reports channel changes, new groups and/or removed groups. Notifications are sent via configured messaging."
     },
     "CONFIG_TARGET_OPTIONS": {
-      "SHARE_LIVE_STREAMS": "Enables live stream sharing. The master toggle sets HLS and MPEG-TS together; each format can also be changed separately."
+      "SHARE_LIVE_STREAMS": "Enables live stream sharing. The master toggle sets HLS and MPEG-TS together; each format can also be changed separately.",
+      "FAILOVER_GROUPS": "Bu hedef için akış failover grubu davranışını ve kanal eşleştirme kurallarını yapılandırır. Tanımlandığında genel failover ayarlarını geçersiz kılar.",
+      "IGNORE_LOGO": "Etkinleştirildiğinde, oluşturulan M3U oynatma listelerindeki `tvg-logo` ve `tvg-logo-small` özniteliklerini yok sayar. Varsayılan: `false`.",
+      "REMOVE_DUPLICATES": "Eşleme ve filtrelemeden önce her giriş için eski dönüşüm öncesi akış tekilleştirmesini etkinleştirir. Yalnızca yinelenen kaynak kimliklerinin ilk örneğini korur. Varsayılan: `false`."
     },
     "EPG_OUTPUT_OPTIONS": {
       "CLEAR_INVALID_IDS": "Clears EPG IDs that do not match the processed EPG data. Playlist entries are not removed.",
@@ -539,7 +550,14 @@
       "UPDATE_QUALITY": "Minimum accepted cluster update quality in percent. A value of 0 disables the quality check.",
       "URL": "Source URL for this input.",
       "SERIES_SOURCE": "Source selector for the Series cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
-      "VOD_SOURCE": "Source selector for the VOD cluster when staged input is enabled (`default`, `staged`, `input`, `skip`)."
+      "VOD_SOURCE": "Source selector for the VOD cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
+      "EPG_SMART_MATCH": "`tvg-id` içermeyen oynatma listesi kanallarını kanal adlarına ve öneklerine göre EPG rehber verileriyle bağlamak için otomatik eşleştirme kurallarını yapılandırır.",
+      "MEDIA_SERVER_FLAVOR": "Medya sunucusu yazılımı türünü belirtir: `Jellyfin`, `Emby`, `Plex` veya `Silo`.",
+      "PLUGIN_ID": "Bu giriş kaynağını sağlayan kurulu eklentinin tanımlayıcısını belirtir.",
+      "PROBE_FILTER": "Medya bilgisi için hangi akışların yoklanacağını kısıtlayan filtre ifadesi. Uygun tüm akışları yoklamak için boş bırakın.",
+      "RESOLVE_FILTER": "Hangi akış URL'lerinin önceden çözümleneceğini kısıtlayan filtre ifadesi. Çözümlemeyi tüm uygun akışlara uygulamak için boş bırakın.",
+      "STAGED_TYPE": "Aşamalı giriş tarafından beklenen oynatma listesi biçimini seçer: `M3U` (varsayılan) veya `Xtream`.",
+      "STALKER_ALIAS_OVERRIDE": "Bu özel Stalker takma adı için portal kimlik doğrulamasını, donanım MAG ön ayarını veya API tercihlerini geçersiz kılar."
     },
     "MEDIA_SERVER": {
       "ACCOUNT_TOKEN": "Optional account token used by media-server integrations that require an account-scoped authentication token.",
@@ -656,7 +674,8 @@
       "PLUGIN_NONE": "Çıktı oluşturan yüklü bir eklenti yok. Önce Eklentiler altından bir tane yükleyip etkinleştirin.",
       "PLUGIN_REQUIRED": "Bu çıktıyı oluşturan eklentiyi seçin.",
       "FILENAME": "Hedef dizinindeki dosya adı. Yol içermeyen yalın bir ad; boş olduğunda <plugin>.out.",
-      "FILTER": "Hangi öğelerin bu çıktıya ulaşacağını seçen filtre ifadesi. Eklenti işlemeden önce uygulanır."
+      "FILTER": "Hangi öğelerin bu çıktıya ulaşacağını seçen filtre ifadesi. Eklenti işlemeden önce uygulanır.",
+      "PLUGIN_ID": "Bu hedef çıktı biçimini oluşturan kurulu eklentinin tanımlayıcısını belirtir."
     },
     "OUTPUT_STRM_FORM": {
       "EXPORT_STYLE": "The naming convention used for generating .strm files (e.g. kodi, plex, jellyfin).",
@@ -664,7 +683,9 @@
     },
     "OUTPUT_XTREAM_FORM": {
       "FILTER": "Filter expression used to specify which items should be included in the Xtream output.",
-      "TRAKT_LISTS": "Associates Trakt.tv lists to synchronize with this Xtream target output."
+      "TRAKT_LISTS": "Associates Trakt.tv lists to synchronize with this Xtream target output.",
+      "TRAKT_CATALOG_SELECTION": "Xtream çıktısının sağlayıcının `full` kataloğunu mu (varsayılan) yoksa yalnızca Trakt listeleri ve sıralamalarıyla `curated` (seçilmiş) öğeleri mi sunacağını denetler.",
+      "TRAKT_CHARTS": "Katalog öğelerini filtrelemek veya bunları Xtream çıktısına kategori olarak dahil etmek için Trakt trend veya popüler sıralamalarını yapılandırır."
     },
     "PLAYLIST_EPG_SOURCE_SELECTOR": {
       "URL": "Source URL used to download EPG data."
@@ -677,7 +698,8 @@
     "PROVIDER_DNS": {
       "ENABLED": "Enables DNS/IP-connect behavior for this provider.",
       "KEEP_VHOST": "If enabled, keeps the original hostname in the Host header while connecting by resolved IP.",
-      "REFRESH_SECS": "DNS refresh interval in seconds for provider hostnames (minimum effective value is 10)."
+      "REFRESH_SECS": "DNS refresh interval in seconds for provider hostnames (minimum effective value is 10).",
+      "MAX_ADDRS": "Ana bilgisayar adı başına saklanacak maksimum çözümlenmiş IP adresi sayısı. Sınırsız olması için boş bırakın."
     },
     "PUSHOVER_MESSAGING_CONFIG": {
       "TOKEN": "Pushover application API token.",
@@ -729,7 +751,19 @@
       "STATUS": "The active or disabled state of the user proxy credential.",
       "TOKEN": "Unique API token that can be used instead of username/password.",
       "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true).",
-      "PRIORITY": "Connection priority assigned to this user proxy context. Default = 0, lowest priority = 127, highest priority = -128."
+      "PLAYER_API_ENABLED": "Bu kullanıcı için Player API erişimini (/api/v1/me/*, MCP oynatıcı araçları) etkinleştirir veya devre dışı bırakır. Ayarlanmazsa plandan miras alınır veya Web UI erişimini (ui_enabled) takip eder.",
+      "PRIORITY": "Connection priority assigned to this user proxy context. Default = 0, lowest priority = 127, highest priority = -128.",
+      "USERNAME": "Bu kullanıcının oynatma listeleri, yayınlar, Xtream API ve Player API için giriş adı. Benzersiz olmalıdır ve kullanıcı oluşturulduktan sonra değiştirilemez.",
+      "PLAYER_SOURCE_SWITCH": "Oynatıcının çalışan bir yayının failover kaynaklarını listelemesine ve elle başka bir kaynağa geçmesine veya ayırmasına izin verir.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir.",
+      "PLAYER_JOINABLE_STREAMS": "Oynatıcının katılabileceği çalışan paylaşımlı yayınları, diğer hedeflerin uyumlu yayınları dahil, listelemesine izin verir.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir.",
+      "PLAYER_RECORDING": "Oynatıcının DVR seviyesi.\n\n`none` = erişim yok. `read` = kayıtları oynatma, indirme ve anlık görüntü. `private` = ayrıca kendi kayıtlarını oluşturma ve yönetme. `shared` = ayrıca diğer kullanıcıların görebileceği kayıtlar oluşturma. Her seviye bir öncekini içerir.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir.",
+      "PLAYER_RECORDING_QUOTA": "Özel kayıtlar için disk kotası, örneğin `20GB` veya `500MB` (kabul edilen birimler: B, KB, MB, GB, TB).\n\n`video.recording.quota.per_user` içindeki bir giriş önceliklidir. Değer yoksa `video.recording.quota.default_private` geçerlidir; o da boşsa sınır yoktur. `0` kullanılamaz.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir.",
+      "PLAYER_MAX_CONCURRENT_RECORDINGS": "Ön ve son pay dahil aynı anda çalışabilecek en fazla kayıt sayısı. Mevcut bir kayda bağlanan kayıtlar yer kaplamaz. Boş = sınır yok. `0` kullanılamaz.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir.",
+      "PLAYER_MAX_RECORDING_RULES": "En fazla kayıt kuralı sayısı (dizi ve haftalık kurallar). Yalnızca `private` veya `shared` kayıt seviyesinde geçerlidir. Varsayılan: 10. `0` kullanılamaz.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir.",
+      "PLAYER_FREE_SHARED_JOINS": "Tüm kendi bağlantıları dolu olsa bile çalışan paylaşımlı bir yayına katılmaya izin verir. Katılım ek bir sağlayıcı bağlantısı kullanmaz.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir.",
+      "PLAYER_MAX_FREE_SHARED_JOINS": "Aynı anda en fazla ücretsiz paylaşımlı katılım sayısı. Varsayılan: 1. `0` kullanılamaz.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir.",
+      "PLAYER_WATCH_PROGRESS": "Oynatıcının film ve bölümlerin oynatma konumunu kaydetmesine ve oradan devam etmesine izin verir.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir.",
+      "PLAYER_EVENT_STREAM": "Oynatıcıya yayın, failover ve kayıt değişikliklerini bildiren kişisel olay akışına (WebSocket) izin verir.\n\nDevral = değeri plandan al; plan yoksa yerleşik varsayılan geçerlidir."
     },
     "USER_PLAN": {
       "NAME": "Unique plan name. Users reference it via their Plan field to inherit these settings.",
@@ -738,7 +772,18 @@
       "SOFT_CONNECTIONS": "Additional preemptible provider slots inherited by plan members whose own value is 0/unset.",
       "FILTER": "Filter DSL expression restricting the content visible to plan members. Combined with a member's own filter using AND, so it can only narrow, never widen.",
       "TRIAL": "Optional trial window with a unit, e.g. 24h, 7d, 30d. When set, users newly created on this plan without their own expiry get an automatic trial expiry and Trial status. Applied only at user creation; enforcement requires user_access_control. Leave empty for no trial.",
-      "COMMENT": "Optional free-form description of this plan."
+      "PLAYER_API_ENABLED": "Plan üyeleri için Player API erişimini (/api/v1/me/*, MCP oynatıcı araçları) etkinleştirir veya devre dışı bırakır. Ayarlanmazsa Web UI erişimini (ui_enabled) takip eder.",
+      "COMMENT": "Optional free-form description of this plan.",
+      "SOURCE_SWITCH": "Oynatıcının çalışan bir yayının failover kaynaklarını listelemesine ve elle başka bir kaynağa geçmesine veya ayırmasına izin verir.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır.",
+      "JOINABLE_STREAMS": "Oynatıcının katılabileceği çalışan paylaşımlı yayınları, diğer hedeflerin uyumlu yayınları dahil, listelemesine izin verir.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır.",
+      "RECORDING": "Oynatıcının DVR seviyesi.\n\n`none` = erişim yok. `read` = kayıtları oynatma, indirme ve anlık görüntü. `private` = ayrıca kendi kayıtlarını oluşturma ve yönetme. `shared` = ayrıca diğer kullanıcıların görebileceği kayıtlar oluşturma. Her seviye bir öncekini içerir.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır.",
+      "RECORDING_QUOTA": "Özel kayıtlar için disk kotası, örneğin `20GB` veya `500MB` (kabul edilen birimler: B, KB, MB, GB, TB).\n\n`video.recording.quota.per_user` içindeki bir giriş önceliklidir. Değer yoksa `video.recording.quota.default_private` geçerlidir; o da boşsa sınır yoktur. `0` kullanılamaz.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır.",
+      "MAX_CONCURRENT_RECORDINGS": "Ön ve son pay dahil aynı anda çalışabilecek en fazla kayıt sayısı. Mevcut bir kayda bağlanan kayıtlar yer kaplamaz. Boş = sınır yok. `0` kullanılamaz.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır.",
+      "MAX_RECORDING_RULES": "En fazla kayıt kuralı sayısı (dizi ve haftalık kurallar). Yalnızca `private` veya `shared` kayıt seviyesinde geçerlidir. Varsayılan: 10. `0` kullanılamaz.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır.",
+      "FREE_SHARED_JOINS": "Tüm kendi bağlantıları dolu olsa bile çalışan paylaşımlı bir yayına katılmaya izin verir. Katılım ek bir sağlayıcı bağlantısı kullanmaz.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır.",
+      "MAX_FREE_SHARED_JOINS": "Aynı anda en fazla ücretsiz paylaşımlı katılım sayısı. Varsayılan: 1. `0` kullanılamaz.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır.",
+      "WATCH_PROGRESS": "Oynatıcının film ve bölümlerin oynatma konumunu kaydetmesine ve oradan devam etmesine izin verir.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır.",
+      "EVENT_STREAM": "Oynatıcıya yayın, failover ve kayıt değişikliklerini bildiren kişisel olay akışına (WebSocket) izin verir.\n\nBu plandaki kendi değeri olmayan kullanıcılar bu ayarı devralır."
     },
     "RATE_LIMIT_CONFIG": {
       "BURST_SIZE": "Defines the initial number of available connections before throttling applies (e.g. 10).",
@@ -823,14 +868,16 @@
       "STRM_PROPS": "List of Kodi stream properties (e.g. inputstream=...) to include in .strm files.",
       "UNDERSCORE_WHITESPACE": "If enabled, replaces all spaces with underscores in filenames and paths.",
       "USE_METADATA": "If enabled, STRM filenames prefer the media metadata name. Otherwise, the target's processed title is used; it remains the fallback when metadata has no name.",
-      "USERNAME": "The user whose credentials will be embedded in the .strm URLs."
+      "USERNAME": "The user whose credentials will be embedded in the .strm URLs.",
+      "FLAT": "Etkinleştirildiğinde, dizi ve sezon klasörlerini korurken kategori klasörlerini atlayarak daha düz bir dizin yapısı oluşturur. Eşleşen TMDb kimliklerine sahip filmleri paylaşılan bir klasörde tekilleştirir. Varsayılan: `false`."
     },
     "TARGET_FORM": {
       "BOUQUETS": "Opens this target's bouquet editor. A whitelist keeps only selected groups; a blacklist excludes selected groups. Changes take effect with the next playlist update.",
       "PERSIST_FILTER": "Optional final filter applied after EPG processing and all mappings, immediately before persistence.",
       "FILTER": "Global filter expression applied to the target before creating explicit outputs.",
       "FORCE_REDIRECT": "Forces streams directly to the proxy or the provider instead of resolving individually.",
-      "PROCESSING_ORDER": "Determines the priority or the sequence in which target channels are matched and listed."
+      "PROCESSING_ORDER": "Determines the priority or the sequence in which target channels are matched and listed.",
+      "FAILOVER_GROUPS_LINK": "Bu hedefe ait kanallara göre önceden filtrelenmiş failover grupları yönetim görünümünü açar."
     },
     "TELEGRAM_CONFIG": {
       "BOT_TOKEN": "Telegram Bot API token. Obtain this from @BotFather.",
@@ -857,28 +904,22 @@
       "URL": "IMDb puan veri kümesinin indirme kaynağı.\n\nBoş değer varsayılan URL'yi kullanır: `https://datasets.imdbws.com/title.ratings.tsv.gz`.",
       "MIN_VOTES": "Daha az oya sahip IMDb puanları yok sayılır.\n\n`0` tüm puanları korur.\n\nVarsayılan `1000` değeri yalnızca birkaç oyu olan bilinmeyen başlıkları eler.",
       "RATING_SOURCE": "Geçerli puanı seçer: `imdb_then_provider`, `min_votes` eşiğini geçen IMDb puanını, aksi halde sağlayıcı puanını kullanır. `imdb` yalnızca IMDb puanlarını kullanır. `provider` sağlayıcı puanını korur.",
-      "REPLACE_RATING": "Geçerli puanı Xtream çıktı alanlarına (`rating` ve `rating_5based`) yazar.\n\nKapalıyken Xtream yanıtları olduğu gibi kalır."
+      "REPLACE_RATING": "Geçerli puanı Xtream çıktı alanlarına (`rating` ve `rating_5based`) yazar.\n\nKapalıyken Xtream yanıtları olduğu gibi kalır.",
+      "RATING": "Bu içerik için eşleşen güncel IMDb kullanıcı puanını ve toplam oy sayısını gösterir."
     },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "The category name used in the playlist for items from this Trakt list.",
       "FUZZY_MATCH_THRESHOLD": "Similarity threshold for matching Trakt items to provider streams (0-100).",
       "LIST_SLUG": "The slug (part of URL) of the Trakt list to fetch.",
-      "USER": "The Trakt username who owns the list."
+      "USER": "The Trakt username who owns the list.",
+      "CREATE_XTREAM_CATEGORY": "Etkinleştirildiğinde, bu Trakt listesinden eşleşen öğeleri içeren özel bir Xtream kategorisi oluşturur. Varsayılan: `true`. Devre dışı bırakıldığında, liste yalnızca katalog seçimi için kullanılır.",
+      "TMDB_ONLY": "Etkinleştirildiğinde, oynatma listesi öğelerini yalnızca TMDb kimliğine göre eşleştirir ve benzerlik tabanlı başlık eşleştirmesini atlar. Varsayılan: `false`."
     },
     "TRAKT_LIST_FORM": {
       "TRAKT_CONTENT_TYPE": "Specifies whether to fetch 'movies' or 'shows' from the assigned Trakt list."
     },
     "VIDEO_CONFIG": {
-      "DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT": "Random jitter added to download retry delays.\n\nA value of 20 means delays vary by about ±20%. This helps avoid retry spikes when many downloads fail at the same time.\n\nMust stay between 0 and 95.",
-      "DOWNLOAD_RETRY_MAX_ATTEMPTS": "Maximum number of transient retry attempts before a transfer is marked as failed.\n\nThis applies to downloads and live recordings after transient startup or transport failures.\n\nMust be at least 1.",
-      "DOWNLOAD_RETRY_BACKOFF_INITIAL": "Initial wait time in seconds after the first transient download failure.\n\nLater retries grow from this base using the configured multiplier.",
-      "DOWNLOAD_RETRY_BACKOFF_MULTIPLIER": "Multiplier applied to each subsequent transient retry delay.\n\nExample: initial 3 and multiplier 3.0 yields about 3s, 9s, 27s until the max delay is reached.",
-      "DOWNLOAD_RETRY_BACKOFF_MAX": "Maximum retry delay in seconds.\n\nOnce exponential growth reaches this value, later retries stay capped here.",
       "EXTENSIONS": "List of valid video file extensions (e.g. mp4, avi, mkv). Streams ending in these are classified as video VODs.",
-      "HEADERS": "Custom HTTP headers applied to video download requests (e.g. User-Agent).",
-      "MAX_BACKGROUND_PER_PROVIDER": "Maximum number of background-priority transfers allowed per provider before additional background jobs wait.\n\nSet to 0 to disable this limit.",
-      "RECORDING_FILENAME_TEMPLATE": "Template used for recording filenames. Supported placeholders: {channel}, {program_title}, {start_time}, {end_time}, {episode}, and {owner}.",
-      "RESERVE_SLOTS_FOR_USERS": "Keeps this many provider slots free for normal user streaming before background downloads are allowed to consume them.\n\nSet to 0 to disable reserved headroom.",
       "WEB_SEARCH": "Template URL for external web search (e.g. IMDb). {} is replaced by the title."
     },
     "DIRECTORY": "The destination directory for recorded video files.",
@@ -901,6 +942,7 @@
       "PATH": "Optional path prefix (e.g. /ui) for reverse proxy integration.",
       "PLAYER_SERVER": "Optional server override used specifically for the built-in web player.",
       "USER_UI_ENABLED": "Enables or disables the simplified bouquet editor for standard users.",
+      "PLAYER_API_ENABLED": "Player-API'yi (/api/v1/me/*) genel olarak etkinleştirir veya devre dışı bırakır. Ayarlanmazsa Kullanıcı Arayüzü ayarını takip eder.",
       "COMBINE_VIEWS_STATS_STREAMS": "If set, the Stats and Streams views are combined into a single view.",
       "LANDING_PAGE": "The default view shown when loading the Web UI.",
       "STREAM_INFO": "Controls which stream information fields are visible in the stream display.",
@@ -980,7 +1022,8 @@
       "ALLOWED_ORIGINS": "İstek ana bilgisayarına ek olarak kabul edilen `Origin` değerleri, örn. `https://claude.ai`. `Host` başlığını yeniden yazan bir ters proxy arkasında gereklidir.",
       "ENABLED": "MCP uç noktasını `{web_ui_path}/mcp` adresinde sunar, böylece yapay zeka asistanları bu örneği sorgulayabilir. Yeniden başlatma gerektirir.",
       "MAX_RESPONSE_BYTES": "Bu bayt sayısından büyük araç sonuçları kesilir. Minimum 1024, varsayılan 262144.",
-      "READ_ONLY": "Durumu değiştiren araçları gizler ve reddeder. Web UI kimlik doğrulaması devre dışıysa salt okunur olmaya zorlanır."
+      "READ_ONLY": "Durumu değiştiren araçları gizler ve reddeder. Web UI kimlik doğrulaması devre dışıysa salt okunur olmaya zorlanır.",
+      "PLAYER_TOOLS": "Oynatma listesi proxy API kullanıcıları için MCP araçlarını etkinleştirir. Kapalı araçları devre dışı bırakır; Salt okunur inceleme araçları sunar; Yazma ayrıca kayıtları ve yayınları yönetmeye izin verir."
     },
     "HLS_ORIGIN_TELEMETRY_CONFIG": {
       "ENABLED": "Origin aktarım telemetrisini etkinleştirir. Mevcut origin isteklerini ölçer ve sağlayıcıya ek istek göndermez.",
@@ -1010,6 +1053,139 @@
       "DIRECTOR": "Film veya dizinin yönetmeni veya yaratıcısı.",
       "RELEASE_DATE": "YYYY-MM-DD formatında resmi yayın tarihi.",
       "RATING": "0.0 ile 10.0 arasında eleştirmen veya kullanıcı puanı."
+    },
+    "RECORDING_QUOTA_CONFIG": {
+      "DEFAULT_PRIVATE": "Her kullanıcının özel kayıtları için varsayılan disk kotası, örneğin `20GB` veya `500MB` (birimler: B, KB, MB, GB, TB). Ne `per_user` ne de kullanıcının `player_features.recording_quota` değeri ayarlıysa kullanılır. Boş = sınır yok. `0` kullanılamaz.",
+      "PER_USER": "Bir kullanıcı için kota: anahtar kullanıcı kimliğidir (Web UI kullanıcıları için `web:<kullanıcıadı>`, oynatma listesi/API kullanıcıları için `api:<kullanıcıadı>`), değer `50GB` gibi bir boyuttur. `player_features.recording_quota` ve `default_private` değerlerinden önceliklidir. `0` kullanılamaz.",
+      "SHARED": "Tüm paylaşımlı kayıtların ortak disk kotası, örneğin `500GB`. Boş = sınır yok. `0` kullanılamaz."
+    },
+    "RECORDING_CONFIG": {
+      "CONTAINER_FORMAT": "Kaydedilen medya dosyaları için video kapsayıcı biçimi (`mpegts`, `matroska` veya `mp4`). Varsayılan değer `mpegts` olup, tamamlanmamış dosyalar oynatılabildiği için yayın kesintilerine karşı dayanıklıdır.",
+      "DEFAULT_POST_ROLL_SECS": "Programın bitiş saatinden sonra kayda devam edilecek varsayılan süre (saniye). Canlı yayınlardaki sarkmaları yakalamak için kullanılır.",
+      "DEFAULT_PRE_ROLL_SECS": "Programın başlangıç saatinden önce kayda başlanacak varsayılan süre (saniye). Kural veya görev bazında geçersiz kılınabilir.",
+      "DIRECTORY": "Tüm kayıtların kök dizini. Göreli yol tuliprox ana dizinine göre çözülür; boş bırakılırsa oradaki `recordings` kullanılır. Kayıtlar varken dizin değiştirilemez.",
+      "ENABLED": "Dijital video kaydedici (DVR) özelliğinin ana anahtarı. Devre dışı bırakıldığında denetleyiciler durdurulur; zamanlanmış kayıtlar ve temizleme işlemleri çalışmaz.",
+      "EPISODE_PATTERN": "Kanal, başlık veya dizi adı olmayan kayıtlar için regex. Klasörler etkinse dosya adı `episode` adlı grubun önünden, desende bu grup yoksa tüm eşleşmenin önünden kesilir; kalan kısım klasör adı olur. Varsayılan desen `S01E02`, `1x02`, `Season 1 Episode 2` ve `Episode 2` biçimlerini tanır. Geçersiz bir regex yapılandırmayı reddeder.",
+      "FALLBACK_BYTES_PER_MINUTE": "Yayın üst verileri henüz bilinmiyorken disk alanı ihtiyacını hesaplamak için kullanılan tahmini bit hızı (dakika başına bayt).",
+      "FILENAME_TEMPLATE": "Template used for recording filenames. Supported placeholders: {channel}, {program_title}, {start_time}, {end_time}, {episode}, and {owner}.",
+      "HEADERS": "Custom HTTP headers applied to video download requests (e.g. User-Agent).",
+      "MAX_BACKGROUND_PER_PROVIDER": "Maximum number of background-priority transfers allowed per provider before additional background jobs wait.\n\nSet to 0 to disable this limit.",
+      "MAX_POST_ROLL_SECS": "Kayıt sonrası ek süre için saniye cinsinden üst sınır (varsayılan `1800`, maksimum `1800`). Bu değeri aşan istekler reddedilir.",
+      "MAX_PRE_ROLL_SECS": "Kayıt öncesi ek süre için saniye cinsinden üst sınır (varsayılan `900`, maksimum `900`). Bu değeri aşan istekler reddedilir.",
+      "ORGANIZE_INTO_DIRECTORIES": "Etkinse kayıtlar alt klasörlere kaydedilir: canlı ve VOD için `<group>/<file>`, dizi bölümleri için `<group>/<series>/<file>`. Playlist grubu yoksa canlı yayın kanal adını, VOD başlığı kullanır. Devre dışıysa tüm dosyalar doğrudan kayıt dizinine kaydedilir.",
+      "PRIORITY": "Arka plan kayıt görevlerine atanan temel öncelik (`-128` ile `127` arası). Düşük sayılar, sağlayıcı bağlantılarında daha yüksek öncelik sağlar. Varsayılan değer `0`'dır.",
+      "RESERVE_SLOTS_FOR_USERS": "Keeps this many provider slots free for normal user streaming before background downloads are allowed to consume them.\n\nSet to 0 to disable reserved headroom.",
+      "RETRY_BACKOFF_INITIAL_SECS": "Initial wait time in seconds after the first transient download failure.\n\nLater retries grow from this base using the configured multiplier.",
+      "RETRY_BACKOFF_JITTER_PERCENT": "Random jitter added to download retry delays.\n\nA value of 20 means delays vary by about ±20%. This helps avoid retry spikes when many downloads fail at the same time.\n\nMust stay between 0 and 95.",
+      "RETRY_BACKOFF_MAX_SECS": "Maximum retry delay in seconds.\n\nOnce exponential growth reaches this value, later retries stay capped here.",
+      "RETRY_BACKOFF_MULTIPLIER": "Multiplier applied to each subsequent transient retry delay.\n\nExample: initial 3 and multiplier 3.0 yields about 3s, 9s, 27s until the max delay is reached.",
+      "RETRY_MAX_ATTEMPTS": "Maximum number of transient retry attempts before a transfer is marked as failed.\n\nThis applies to downloads and live recordings after transient startup or transport failures.\n\nMust be at least 1.",
+      "TIMEZONE": "Kayıt çizelgeleri ve zaman aralığı kurallarını değerlendirmek için kullanılan IANA saat dilimi (örneğin `UTC` veya `Europe/Istanbul`). Varsayılan değer `UTC`'dir."
+    },
+    "RECORDING_DISK_CONFIG": {
+      "HIGH_WATER_PERCENT": "Kayıt dosya sisteminde temizliğin başladığı kullanılan disk yüzdesi (`0` ile `100` arası): kullanım alt sınıra inene kadar en eski tamamlanmış kayıtlar silinir. Disk kullanımına göre temizlik iki sınırı da gerektirir; boş = kapalı.",
+      "LOW_WATER_PERCENT": "Bir temizlik geçişinin durduğu kullanılan disk yüzdesi. Üst sınırdan küçük olmalıdır. Disk kullanımına göre temizlik iki sınırı da gerektirir; boş = kapalı.",
+      "CLEANUP_INTERVAL_SECS": "Disk alanı kullanım kontrolleri arasındaki süre aralığı (saniye).",
+      "SAFETY_BYTES": "Kayıt depolama biriminde her zaman boş tutulması gereken minimum disk alanı (bayt)."
+    },
+    "RECORDING_RETENTION_CONFIG": {
+      "KEEP_LAST_PER_CHANNEL": "Kanal başına saklanacak maksimum tamamlanmış kayıt sayısı. Yeni kayıtlar bittikçe en eskiler silinir.",
+      "DELETE_AFTER_DAYS": "Kayıt dosyalarının otomatik silinmeden önce saklanacağı maksimum gün sayısı.",
+      "SWEEP_INTERVAL_SECS": "Süresi dolan kayıtları temizleme denetimleri arasındaki süre aralığı (saniye)."
+    },
+    "RECORDING_NOTIFICATION_CONFIG": {
+      "OUTBOX_BUFFER": "Giden kayıt bildirimleri için bellek içi kuyruk arabelleği boyutu.",
+      "MAX_ATTEMPTS": "Bir bildirimin teslim edilemeyenlere taşınmasından önceki teslim denemesi sayısı. En az `1`, varsayılan `6`.",
+      "BACKOFF_INITIAL_SECS": "Başarısız bir bildirim iletimini yeniden denemeden önceki ilk bekleme süresi (saniye).",
+      "BACKOFF_MAX_SECS": "Bildirim denemeleri arasındaki maksimum bekleme süresi (saniye)."
+    },
+    "THUMBNAIL_CONFIG": {
+      "ENABLED": "Medya kütüphanesi taramaları sırasında video önizleme küçük resimlerinin otomatik oluşturulmasını etkinleştirir (varsayılan `false`).",
+      "WIDTH": "Oluşturulan önizleme küçük resimlerinin piksel genişliği (varsayılan `320`).",
+      "HEIGHT": "Oluşturulan önizleme küçük resimlerinin piksel yüksekliği (varsayılan `180`)."
+    },
+    "PANEL_API_CONFIG": {
+      "URL": "Sağlayıcının bayi paneli API'sinin temel uç noktası.",
+      "API_KEY": "Panel API'si için bayi yönetici anahtarınız.",
+      "PROVISION_TIMEOUT": "Yeni oluşturulan bir hesap denetlenirken, başlatma veya güncelleme devam etmeden önce beklenecek en uzun süre (saniye). Varsayılan: `65`.",
+      "PROBE_INTERVAL": "Yeni oluşturulan bir hesabın kullanılabilir olması beklenirken iki denetim arasındaki saniye. `0`'dan büyük olmalıdır. Varsayılan: `15`.",
+      "PROVISION_COOLDOWN": "Sağlayıcı hesabı hazırlamayı bitirirken 5XX hatalarını önlemek için başarılı bir denetimden sonra ek bekleme (saniye). Varsayılan: `0`.",
+      "PROVISION_OFFSET": "Bir hesabın süresi dolmadan önceki yenileme aralığı; isteğe bağlı `s`, `m`, `h` veya `d` sonekli bir sayı (örneğin `12h` veya `2d`). Şimdiki zaman artı bu süre bitiş tarihini geçerse tuliprox `client_renew` çağırır (yoksa `client_new`). Boş = erken yenileme yok.",
+      "ALIAS_POOL_MIN": "Tutulacak en az hesap sayısı; bir sayı veya `auto`. `auto`, bu girdinin hedeflerine atanmış etkin tuliprox kullanıcılarının (Active veya Trial, süresi dolmamış) sayısını kullanır. Varsayılan: `1`.",
+      "ALIAS_POOL_MAX": "Takma ad hesap sayısının üst sınırı; bir sayı veya `auto`. `auto` ile denetim, kullanıcılar eklendiğinde veya güncellendiğinde çalışır. Varsayılan: `1`."
+    },
+    "PLUGIN_MARKETPLACE": {
+      "SOURCE_URL": "Eklenti deposu pazar yeri bildirimini (`marketplace.json`) gösteren HTTPS bağlantı adresi."
+    },
+    "PLUGIN_CONFIG": {
+      "BOOT_UPDATE_BUDGET": "Sistem açılışında eklenti güncellemelerini denetlemek ve uygulamak için ayrılan maksimum süre (örneğin `30s` veya `1m`)."
+    },
+    "USER_FORM": {
+      "USERNAME": "Kullanıcı hesabı için benzersiz kullanıcı adı. Web arayüzü ve API erişiminde kullanılır.",
+      "PASSWORD": "Kullanıcı hesabı şifresi. En az `8` karakter olmalıdır. Mevcut şifreyi korumak için düzenleme sırasında boş bırakın.",
+      "CONFIRM_PASSWORD": "Şifrenin doğruluğunu onaylamak için şifreyi tekrar girin.",
+      "GROUPS": "Kullanıcının erişebileceği özellikleri ve yönetim izinlerini belirleyen grup üyelikleri."
+    },
+    "GROUP_FORM": {
+      "NAME": "İzin grubunu tanımlayan benzersiz grup adı."
+    },
+    "RECORDING_FORM": {
+      "PROGRAM_START": "Kaydedilecek programın planlanan başlangıç tarihi ve saati.",
+      "PROGRAM_END": "Kaydedilecek programın planlanan bitiş tarihi ve saati.",
+      "DURATION_MINUTES": "Ön ve son ek süreler hariç, kaydın dakika cinsinden toplam süresi.",
+      "PRE_ROLL_SECS": "Planlanan program başlangıcından önce kayda eklenecek erken başlama payı (saniye).",
+      "POST_ROLL_SECS": "Planlanan program bitişinden sonra kayda eklenecek uzatma payı (saniye)."
+    },
+    "RULE_FORM": {
+      "INPUT_NAME": "Bu kayıt kuralına akış sağlayan giriş kaynağının adı.",
+      "TARGET_ID": "Kanal eşleştirmesini ve çıktı biçimini belirleyen hedef çalma listesi yapılandırması.",
+      "VIRTUAL_ID": "Hedef çalma listesi içinde bu kayıt kuralıyla ilişkilendirilmiş sanal kanal kimliği.",
+      "CHANNEL_ID": "Bu kural için EPG kılavuzunu eşleştirmede kullanılan kanal kimliği.",
+      "KIND": "Kural türü: `NewEpisode` yeni dizi bölümlerini kaydeder; `WeeklyTimeslot` ise haftalık yinelenen belirli bir zaman aralığını kaydeder.",
+      "WEEKDAY": "Haftalık yinelenen kayıt için gün seçimi (Pazartesi = `1` ile Pazar = `7` arası).",
+      "START_TIME": "Haftalık yayının başladığı yerel saat (24 saatlik `HH:MM` biçiminde).",
+      "DURATION_SECS": "Planlanan yayının ek süreler hariç saniye cinsinden süresi.",
+      "TIMEZONE": "Yerel yayın saat dilimini hesaplamak için kullanılan IANA saat dilimi.",
+      "SERIES_ID": "EPG verilerinde dizi bölümlerini tespit edip kaydetmek için kullanılan kararlı dizi kimliği.",
+      "TITLE_PATTERN": "EPG verisinde dizi kimliği bulunmadığında program başlığıyla eşleştirilecek metin. Eşleştirme normalleştirilmiş başlık karşılaştırmasıyla yapılır (düzenli ifadeler desteklenmez).",
+      "EXCLUDE_REPEAT": "Etkinleştirildiğinde, EPG kılavuzunda tekrar olarak işaretlenmiş yayınlar kaydedilmez.",
+      "PRE_ROLL": "Program başlamadan önce kayda eklenecek erken başlama süresi (saniye).",
+      "POST_ROLL": "Program bittikten sonra kayda eklenecek uzatma süresi (saniye).",
+      "VISIBILITY": "Kayıtların erişim görünürlüğü: Yetkili tüm kullanıcılar için `shared` (paylaşımlı) veya yalnızca kural sahibi için `private` (özel).",
+      "ENABLED": "Bu kayıt kuralının zamanlayıcı tarafından aktif olarak değerlendirilip değerlendirilmeyeceğini belirler."
+    },
+    "STREAM_HISTORY": {
+      "FROM": "Yayın oturumu geçmiş kayıtlarını filtrelemek için başlangıç tarihi.",
+      "TO": "Yayın oturumu geçmiş kayıtlarını filtrelemek için bitiş tarihi."
+    },
+    "SETUP": {
+      "USERNAME": "Tuliprox ilk kurulumunda yönetim için oluşturulacak ilk yönetici kullanıcı adı.",
+      "PASSWORD": "İlk kurulum sırasında belirlenen yönetici hesabı şifresi. En az `8` karakter olmalıdır.",
+      "PASSWORD_REPEAT": "Doğrulamak için yönetici şifresini tekrar girin."
+    },
+    "CURATION_CONFIG": {
+      "ENABLED": "Yapılandırılmış Trakt veya TMDB kaynaklarını kullanarak bu hedef için katalog kürasyon kurallarını etkinleştirir. Devre dışı bırakıldığında, oynatma listeleri katalog kürasyonu veya filtrelemesi olmadan oluşturulur. Varsayılan: `true`.",
+      "CURATION": "Bu hedef için etkin kürasyon politikasını, katalog seçim modunu ve yapılandırılmış Trakt veya TMDB kaynaklarını özetler."
+    },
+    "TRAKT_API_CONFIG": {
+      "API_KEY": "Trakt API'sine yapılan isteklerin kimliğini doğrulamak için kullanılan Trakt API istemci kimliği (Client ID).",
+      "URL": "Trakt API'si için temel URL. Varsayılan: `https://api.trakt.tv`.",
+      "USER_AGENT": "Trakt API istekleriyle gönderilen özel HTTP User-Agent başlığı. Varsayılan: `VLC/3.0.16 LibVLC/3.0.16`.",
+      "VERSION": "Trakt API başlıklarında gönderilen API sürüm dizesi. Varsayılan: `2`."
+    },
+    "TRAKT_CHART_CONFIG": {
+      "CATEGORY_NAME": "Xtream çıktısında bu Trakt sıralaması için özel kategori görüntüleme adı. `create_xtream_category` etkinleştirildiğinde zorunludur; yalnızca seçim amaçlı sıralamalarda kullanılmaz.",
+      "CREATE_XTREAM_CATEGORY": "Etkinleştirildiğinde, bu Trakt sıralamasından eşleşen medya öğelerini içeren özel bir Xtream kategorisi oluşturur. Varsayılan: `true`. Devre dışı bırakıldığında, sıralama yalnızca katalog seçimi için kullanılır.",
+      "FUZZY_MATCH_THRESHOLD": "`tmdb_only` devre dışı bırakıldığında, Trakt sıralamasındaki başlıkları oynatma listesi öğeleriyle eşleştirmek için gereken minimum benzerlik yüzdesi (0-100). Varsayılan: `80`.",
+      "TMDB_ONLY": "Etkinleştirildiğinde, oynatma listesi öğelerini yalnızca TMDb kimliğine göre eşleştirir ve benzerlik tabanlı başlık eşleştirmesini atlar. Varsayılan: `false`."
+    },
+    "TRAKT_CHART_FORM": {
+      "TRAKT_CHART_KIND": "Sıralamanın `Movies` (varsayılan) mı yoksa `Shows` mu takip edeceğini seçer.",
+      "TRAKT_CHART_TYPE": "Trakt sıralama metriğini seçer: `Trending` (varsayılan, şu anda izlenen öğeler) veya `Popular` (tüm zamanların popüler başlıkları)."
+    },
+    "TRAKT_CONFIG": {
+      "ENABLED": "Bu Xtream çıktısı için Trakt entegrasyonunu etkinleştirir. Trakt listelerini ve sıralamalarını kullanarak kategorileri zenginleştirmeye ve katalogları filtrelemeye olanak tanır. Varsayılan: `true`.",
+      "INCLUDE_XTREAM_BASE_CATEGORIES": "Etkinleştirildiğinde, sağlayıcının standart VOD ve dizi kategorilerini Trakt kategorilerinin yanında Xtream çıktısına dahil eder. Varsayılan: `true`."
     }
   },
   "HINT": {
@@ -1334,6 +1510,7 @@
     "FIRMWARE_VERSION": "Firmware Version",
     "FLAT": "Flat",
     "FOLLOW_SYMLINKS": "Sembolik bağlantıları takip et",
+    "FOLLOW_USER_UI": "Kullanıcı arayüzünü takip eder",
     "FORCE_REDIRECT": "Force redirect",
     "FORMAT": "Format",
     "FORMATS": "Formats",
@@ -1742,6 +1919,22 @@
     "RBAC_WRITE": "Write",
     "RECONNECT": "Reconnect",
     "RECORDING": "Recording",
+    "PLAYER_FEATURES": "Oynatıcı özellikleri",
+    "PLAYER_FEATURES_HINT": "Özellikler, Player API erişimi (player_features.api_enabled, ayarlanmadığında ui_enabled geçerlidir) olan çalma listesi kullanıcıları için geçerlidir.",
+    "SOURCE_SWITCH": "Kaynak değiştirme",
+    "JOINABLE_STREAMS": "Katılınabilir yayınlar",
+    "FREE_SHARED_JOINS": "Ücretsiz paylaşılan katılımlar",
+    "MAX_FREE_SHARED_JOINS": "Maksimum ücretsiz paylaşılan katılım",
+    "MAX_CONCURRENT_RECORDINGS": "Maksimum eşzamanlı kayıt",
+    "MAX_RECORDING_RULES": "Maksimum kayıt kuralı",
+    "WATCH_PROGRESS": "İzleme ilerlemesi",
+    "EVENT_STREAM": "Olay akışı",
+    "PLAYER_RECORDING_QUOTA": "Kayıt kotası",
+    "INHERIT": "Plandan devral",
+    "PLAYER_RECORDING_NONE": "Yok",
+    "PLAYER_RECORDING_READ": "Okuma",
+    "PLAYER_RECORDING_PRIVATE": "Özel",
+    "PLAYER_RECORDING_SHARED": "Paylaşılan",
     "RECORDING_ACTION_CANCEL": "Cancel",
     "RECORDING_ACTION_DELETE": "Delete",
     "RECORDING_ACTION_REMOVE_ENTRY": "Remove entry (keep file)",
@@ -1758,7 +1951,7 @@
     "RECORDING_CLEANUP_INTERVAL_SECS": "Disk cleanup interval (seconds)",
     "RECORDING_DEFAULT_POST_ROLL_SECS": "Default post-roll (seconds)",
     "RECORDING_DEFAULT_PRE_ROLL_SECS": "Default pre-roll (seconds)",
-    "RECORDING_DEFAULT_PRIVATE_BYTES": "Default private quota (bytes)",
+    "RECORDING_DEFAULT_PRIVATE_BYTES": "Varsayılan özel kota (ör. 20GB, 500MB; B, KB, MB, GB, TB)",
     "RECORDING_DELETE_AFTER_DAYS": "Delete after (days)",
     "RECORDING_ENABLED": "Recording enabled",
     "RECORDING_FALLBACK_BYTES_PER_MINUTE": "Fallback bytes per minute",
@@ -1783,14 +1976,14 @@
     "RECORDING_OUTBOX_BUFFER": "Notification outbox buffer",
     "RECORDING_PADDING": "Padding",
     "RECORDING_PER_USER_BYTES": "Per-user quotas",
-    "RECORDING_QUOTA_BYTES": "Bytes",
+    "RECORDING_QUOTA_BYTES": "Boyut (ör. 20GB, 500MB; B, KB, MB, GB, TB)",
     "RECORDING_QUOTA_PRIVATE": "Private quota",
     "RECORDING_QUOTA_SHARED": "Shared quota",
     "RECORDING_QUOTA_USER": "User",
     "RECORDING_QUOTAS": "Quotas",
     "RECORDING_RETENTION_DISK": "Retention and disk",
     "RECORDING_SAFETY_BYTES": "Disk safety reserve (bytes)",
-    "RECORDING_SHARED_BYTES": "Shared quota (bytes)",
+    "RECORDING_SHARED_BYTES": "Paylaşılan kota (ör. 20GB, 500MB; B, KB, MB, GB, TB)",
     "RECORDING_SWEEP_INTERVAL_SECS": "Retention sweep interval (seconds)",
     "RECORDING_RULE_COLUMN_ENABLED": "Enabled",
     "RECORDING_RULE_COLUMN_SCHEDULE": "Schedule",
@@ -2092,6 +2285,7 @@
     "USER_STATUS_TRIAL": "Trial",
     "USER_UI": "User UI",
     "USER_UI_ENABLED": "User-UI Enabled",
+    "PLAYER_API_ENABLED": "Player-API Etkin",
     "COMBINE_VIEWS_STATS_STREAMS": "Combine Stats & Streams",
     "USE_MEMORY_CACHE": "Mem-Cache",
     "USE_OUTPUT": "Use output",
@@ -2566,7 +2760,11 @@
     "EFFECTIVE": "etkili",
     "RATING_TOOLTIP_IMDB": "IMDb {rating} · {votes} oy",
     "RATING_TOOLTIP_PROVIDER": "Sağlayıcı {rating}",
-    "VOTES": "oy"
+    "VOTES": "oy",
+    "PLAYER_TOOLS": "Oynatıcı araçları",
+    "PLAYER_TOOLS_OFF": "Kapalı",
+    "PLAYER_TOOLS_READ": "Salt okunur",
+    "PLAYER_TOOLS_WRITE": "Okuma ve Yazma"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -2641,7 +2839,6 @@
       "NO_SEARCH_MATCHES": "No channel matches the search."
     },
     "RECORDING": {
-      "INVALID_QUOTA": "Quota values must be non-negative whole numbers of bytes.",
       "INVALID_RANGE": "The value is outside the allowed range.",
       "INVALID_UNSIGNED": "Enter a non-negative whole number.",
       "NO_TARGET": "Select a target playlist before recording.",
@@ -2670,6 +2867,8 @@
         "PERSISTENCE_FAILED": "The change could not be saved. Try again.",
         "NETWORK": "The server could not be reached. Check your connection.",
         "OTHER": "The recording request failed.",
+        "SOURCE_RECORDING_FAILED": "Kaynak kayıt başarısız oldu.",
+        "SOURCE_GAP": "Kaynak kayıtta istenen zaman aralığında bir boşluk var.",
         "DISABLED": "Recording is disabled. Enable it under Configuration > Video > Download > Recording enabled."
       },
       "TASK_CANCELLED": "Recording cancelled.",
@@ -2688,7 +2887,8 @@
       "CONFIRM_RESTART_FROM_BEGINNING": "The provider does not support partial downloads. Start this recording again from the beginning? The saved partial download will be discarded.",
       "CONFIRM_CANCEL": "Do you really want to stop this recording?",
       "CONFIRM_REMOVE": "Remove this entry from the list? The saved file will be kept.",
-      "CONFIRM_DELETE_FILE": "Delete this recording and its saved file?"
+      "CONFIRM_DELETE_FILE": "Delete this recording and its saved file?",
+      "INVALID_QUOTA_USER": "Kullanıcı api:<kullanıcıadı> veya web:<kullanıcıadı> olarak yazılmalıdır."
     },
     "RBAC": {
       "ADMIN_HINT": "User is Admin — additional groups have no effect.",
@@ -2859,6 +3059,8 @@
     "TARGET_NOT_EXISTS": "Target does not exist",
     "USER_DELETED": "User successfully deleted",
     "VALIDATION": {
+      "BYTE_SIZE_INVALID": "0'dan büyük bir boyut girin, örneğin 20GB veya 500MB.",
+      "PLAYER_FEATURES_NUMBER_GREATER_THAN_ZERO": "Değer 0'dan büyük olmalıdır.",
       "NETWORK_ACCESS_COUNTRIES": "Enter one 2-letter ISO country code per entry, for example DE.",
       "NETWORK_ACCESS_NETWORKS": "Enter one CIDR per entry, for example 192.168.0.0/16 or 2001:db8::/32.",
       "REQUIRED": "This field is required."

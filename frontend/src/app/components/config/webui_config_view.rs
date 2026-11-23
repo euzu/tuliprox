@@ -1,18 +1,19 @@
 use crate::{
     app::{
         components::{
+            build_tri_state_options,
             config::{
                 config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 use_emit_mapped, HasFormData,
             },
-            AppIcon, Card, Chip, DropDownOption, DropDownSelection, Select,
+            parse_tri_state_selection, AppIcon, Card, Chip, DropDownOption, DropDownSelection, Select,
         },
         context::ConfigContext,
     },
-    config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional,
-    edit_field_bool, edit_field_list_option, edit_field_number, edit_field_number_u64, edit_field_text,
-    edit_field_text_option, generate_form_reducer, html_if,
+    config_field, config_field_bool, config_field_child, config_field_hide, config_field_optional, edit_field_bool,
+    edit_field_list_option, edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option,
+    generate_form_reducer, html_if,
     i18n::use_translation,
     use_default_form_reducer,
 };
@@ -33,6 +34,7 @@ const LABEL_GROUPFILE: &str = "LABEL.GROUPFILE";
 const LABEL_PLAYER_SERVER: &str = "LABEL.PLAYER_SERVER";
 const LABEL_KICK_DURATION: &str = "LABEL.KICK_DURATION";
 const LABEL_USER_UI_ENABLED: &str = "LABEL.USER_UI_ENABLED";
+const LABEL_PLAYER_API_ENABLED: &str = "LABEL.PLAYER_API_ENABLED";
 const LABEL_CONTENT_SECURITY_POLICY: &str = "LABEL.CONTENT_SECURITY_POLICY";
 const LABEL_CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES: &str = "LABEL.CUSTOM_ATTRIBUTES";
 const LABEL_PATH: &str = "LABEL.PATH";
@@ -58,6 +60,7 @@ generate_form_reducer!(
     fields {
         Enabled => enabled: bool,
         UserUiEnabled => user_ui_enabled: bool,
+        PlayerApiEnabled => player_api_enabled: Option<bool>,
         Path => path: Option<String>,
         PlayerServer => player_server: Option<String>,
         KickSecs => kick_secs: u64,
@@ -134,6 +137,16 @@ pub fn WebUiConfigView() -> Html {
         }));
         options
     });
+
+    let player_api_options =
+        use_memo((webui_state.data().player_api_enabled, translate.clone()), |(player_api_enabled, translate)| {
+            build_tri_state_options(
+                *player_api_enabled,
+                &translate.t("LABEL.FOLLOW_USER_UI"),
+                &translate.t("LABEL.ENABLED"),
+                &translate.t("LABEL.DISABLED"),
+            )
+        });
 
     // Notify parent when form changes
     {
@@ -212,14 +225,23 @@ pub fn WebUiConfigView() -> Html {
         <>
             <Card class="tp__config-view__card">
             { config_field_bool!(webui_state.form, translate.t(LABEL_ENABLED), enabled) }
-            { config_field_custom!(translate.t(LABEL_LANDING_PAGE), {
-                if let Some(landing_page) = webui_state.form.landing_page {
+            { config_field_child!(translate.t(LABEL_LANDING_PAGE), "WEB_UI_CONFIG.LANDING_PAGE", {
+                let text = if let Some(landing_page) = webui_state.form.landing_page {
                     translate.t(&format!("LABEL.VIEW_TYPE_{}", landing_page.to_string().to_uppercase()))
                 } else {
                     translate.t("LABEL.LAST_PAGE")
-                }
+                };
+                html! { <span class="tp__form-field__value">{text}</span> }
             }) }
             { config_field_bool!(webui_state.form, translate.t(LABEL_USER_UI_ENABLED), user_ui_enabled) }
+            { config_field_child!(translate.t(LABEL_PLAYER_API_ENABLED), "WEB_UI_CONFIG.PLAYER_API_ENABLED", {
+                let text = match webui_state.form.player_api_enabled {
+                    None => translate.t("LABEL.FOLLOW_USER_UI"),
+                    Some(true) => translate.t("LABEL.ENABLED"),
+                    Some(false) => translate.t("LABEL.DISABLED"),
+                };
+                html! { <span class="tp__form-field__value">{text}</span> }
+            }) }
             { config_field_bool!(webui_state.form, translate.t(LABEL_COMBINE_VIEWS_STATS_STREAMS), combine_views_stats_streams) }
             { config_field_optional!(webui_state.form, translate.t(LABEL_PATH), path) }
             { config_field_optional!(webui_state.form, translate.t(LABEL_PLAYER_SERVER), player_server) }
@@ -303,6 +325,20 @@ pub fn WebUiConfigView() -> Html {
                     />
                 }})}
                 { edit_field_bool!(webui_state, translate.t(LABEL_USER_UI_ENABLED), user_ui_enabled, WebUiConfigFormAction::UserUiEnabled) }
+                { config_field_child!(translate.t(LABEL_PLAYER_API_ENABLED), "WEB_UI_CONFIG.PLAYER_API_ENABLED", {
+                    let webui_state_clone = webui_state.clone();
+                    html! {
+                        <Select
+                            name="player_api_enabled"
+                            multi_select={false}
+                            on_select={Callback::from(move |(_name, selections): (String, DropDownSelection)| {
+                                let val = parse_tri_state_selection(&selections);
+                                webui_state_clone.dispatch(WebUiConfigFormAction::PlayerApiEnabled(val));
+                            })}
+                            options={player_api_options.clone()}
+                        />
+                    }
+                }) }
                 { edit_field_bool!(webui_state, translate.t(LABEL_COMBINE_VIEWS_STATS_STREAMS), combine_views_stats_streams, WebUiConfigFormAction::CombineViewsStatsStreams) }
                 { edit_field_text_option!(webui_state, translate.t(LABEL_PATH), path, WebUiConfigFormAction::Path) }
                 { edit_field_text_option!(webui_state, translate.t(LABEL_PLAYER_SERVER), player_server, WebUiConfigFormAction::PlayerServer) }

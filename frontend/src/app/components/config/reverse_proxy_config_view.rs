@@ -19,10 +19,9 @@ use crate::{
         },
         context::ConfigContext,
     },
-    config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional,
-    edit_field_bool, edit_field_byte_size_option, edit_field_list, edit_field_number, edit_field_number_f64,
-    edit_field_number_u16, edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option,
-    generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_hide, config_field_optional, edit_field_bool,
+    edit_field_byte_size_option, edit_field_list, edit_field_number, edit_field_number_f64, edit_field_number_u16,
+    edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::{use_translation, YewI18n},
 };
 use shared::{
@@ -1482,9 +1481,10 @@ pub fn ReverseProxyConfigView() -> Html {
                 { config_field!(resource_retry_state.form, translate.t(LABEL_MAX_ATTEMPTS), max_attempts) }
                 { config_field!(resource_retry_state.form, translate.t(LABEL_BACKOFF_MILLIS), backoff_millis) }
                 {
-                    config_field_custom!(
+                    config_field_child!(
                         translate.t(LABEL_BACKOFF_MULTIPLIER),
-                        format_float_localized(resource_retry_state.form.backoff_multiplier, 4, true)
+                        "RESOURCE_RETRY_CONFIG.BACKOFF_MULTIPLIER",
+                        { html! { <span class="tp__form-field__value">{format_float_localized(resource_retry_state.form.backoff_multiplier, 4, true)}</span> } }
                     )
                 }
                 { config_field_child!(translate.t(LABEL_FAILOVER_REDIRECT_PATTERNS), "REVERSE_PROXY_CONFIG.FAILOVER_REDIRECT_PATTERNS", {
@@ -1509,7 +1509,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { edit_field_number!(resource_retry_state, translate.t(LABEL_MAX_ATTEMPTS), max_attempts, ResourceRetryConfigFormAction::MaxAttempts) }
                 { edit_field_number_u64!(resource_retry_state, translate.t(LABEL_BACKOFF_MILLIS), backoff_millis, ResourceRetryConfigFormAction::BackoffMillis) }
                 { edit_field_number_f64!(resource_retry_state, translate.t(LABEL_BACKOFF_MULTIPLIER), backoff_multiplier, ResourceRetryConfigFormAction::BackoffMultiplier) }
-                { edit_field_list!(failover_patterns_state, translate.t(LABEL_FAILOVER_REDIRECT_PATTERNS), patterns, FailoverPatternsFormAction::Patterns, translate.t(LABEL_ADD_PATTERN)) }
+                { edit_field_list!(failover_patterns_state, translate.t(LABEL_FAILOVER_REDIRECT_PATTERNS), patterns, FailoverPatternsFormAction::Patterns, translate.t(LABEL_ADD_PATTERN), "REVERSE_PROXY_CONFIG.FAILOVER_REDIRECT_PATTERNS") }
             </Card>
         }
     };
@@ -1526,7 +1526,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { config_field_bool!(disabled_header_state.form, translate.t(LABEL_REFERER_HEADER), referer_header) }
                 { config_field_bool!(disabled_header_state.form, translate.t(LABEL_X_HEADER), x_header) }
                 { config_field_bool!(disabled_header_state.form, translate.t(LABEL_CF_HEADER), cloudflare_header) }
-                { config_field_custom!(translate.t(LABEL_CUSTOM_HEADERS), custom_headers) }
+                { config_field_child!(translate.t(LABEL_CUSTOM_HEADERS), "REVERSE_PROXY_DISABLED_HEADER_CONFIG.CUSTOM_HEADER", { html! { <span class="tp__form-field__value">{custom_headers}</span> } }) }
             </Card>
         }
     };

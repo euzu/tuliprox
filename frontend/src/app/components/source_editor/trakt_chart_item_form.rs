@@ -1,7 +1,7 @@
 use crate::{
     app::components::{build_options, select::Select, selection_parse_first, Card, DropDownSelection, TextButton},
-    config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
-    edit_field_number_u8, edit_field_text_option, generate_form_reducer,
+    config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_number_u8,
+    edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{TraktChartConfigDto, TraktChartKind, TraktChartType};
@@ -106,14 +106,26 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
     html! {
         <Card class="tp__config-view__card tp__item-form">
             if props.readonly {
-                { config_field_custom!(translate.t(LABEL_TRAKT_CHART_KIND), translate.t(trakt_chart_kind_label_key(form_state.form.kind))) }
-                { config_field_custom!(translate.t(LABEL_TRAKT_CHART_TYPE), translate.t(trakt_chart_type_label_key(form_state.form.chart))) }
+                { config_field_child!(
+                    translate.t(LABEL_TRAKT_CHART_KIND),
+                    "TRAKT_CHART_FORM.TRAKT_CHART_KIND",
+                    { html! { <span class="tp__form-field__value">{translate.t(trakt_chart_kind_label_key(form_state.form.kind))}</span> } }
+                ) }
+                { config_field_child!(
+                    translate.t(LABEL_TRAKT_CHART_TYPE),
+                    "TRAKT_CHART_FORM.TRAKT_CHART_TYPE",
+                    { html! { <span class="tp__form-field__value">{translate.t(trakt_chart_type_label_key(form_state.form.chart))}</span> } }
+                ) }
                 { config_field_bool!(form_state.form, translate.t(LABEL_TRAKT_CREATE_XTREAM_CATEGORY), create_xtream_category) }
                 if form_state.form.create_xtream_category {
                     { config_field_optional!(form_state.form, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name) }
                 }
                 { config_field_bool!(form_state.form, translate.t(LABEL_TRAKT_TMDB_ONLY), tmdb_only) }
-                { config_field_custom!(translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD), form_state.form.fuzzy_match_threshold.to_string()) }
+                { config_field_child!(
+                    translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD),
+                    "TRAKT_CHART_CONFIG.FUZZY_MATCH_THRESHOLD",
+                    { html! { <span class="tp__form-field__value">{form_state.form.fuzzy_match_threshold.to_string()}</span> } }
+                ) }
             } else {
                 { config_field_child!(translate.t(LABEL_TRAKT_CHART_KIND), "TRAKT_CHART_FORM.TRAKT_CHART_KIND", {
                     let form_state_kind = form_state.clone();

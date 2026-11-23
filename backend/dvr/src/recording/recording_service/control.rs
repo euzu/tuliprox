@@ -50,7 +50,7 @@ impl RecordingService {
                 }
             }
         }
-        mutate(&self.recordings, |candidate| {
+        let worker_to_stop = mutate(&self.recordings, |candidate| {
             let Some(task) = remove_inactive_recording(candidate, uuid) else {
                 return Err(QueueMutationError::UnknownRecording);
             };
@@ -59,16 +59,28 @@ impl RecordingService {
             if !matches!(authorize(claims, &owner_id, RecordingAction::Cancel, &subject), RecordingDecision::Allow) {
                 return Err(QueueMutationError::Forbidden);
             }
+            let media = task.media_identity.clone();
             let mut cancelled = task;
             cancelled.state = RecordingTaskState::Cancelled;
             cancelled.finished = true;
             cancelled.error = Some("cancelled".to_string());
             cancelled.recording.reserved_bytes = 0;
             candidate.finished.push(cancelled);
-            Ok(())
+            let worker = crate::recording::recording_queue::RecordingQueue::update_cancelled_enclosing_stop_time(
+                candidate, &media,
+            );
+            let actions =
+                crate::recording::recording_queue::RecordingQueue::cleanup_settled_cancelled_enclosings(candidate);
+            Ok((worker, actions))
         })
         .await
-        .map_err(|e| map_queue_error(&e))
+        .map_err(|e| map_queue_error(&e))?;
+        if let Some(worker_uuid) = worker_to_stop.0 {
+            self.recordings.stop_worker_early(&worker_uuid).await;
+        }
+        crate::recording::recording_deletion::apply_cancelled_enclosing_action(&self.recordings, worker_to_stop.1)
+            .await;
+        Ok(())
     }
 
     /// Cancel future inactive recordings that were materialized from a
@@ -293,6 +305,7 @@ pub(super) fn map_queue_error(err: &QueueMutationError) -> ServiceError {
         QueueMutationError::InvalidInterval => ServiceError::InvalidInterval,
         QueueMutationError::PaddingLimitExceeded => ServiceError::PaddingLimitExceeded,
         QueueMutationError::QuotaExceeded => ServiceError::QuotaExceeded,
+        QueueMutationError::ConcurrencyExceeded => ServiceError::ConcurrencyExceeded,
         QueueMutationError::Duplicate => ServiceError::Duplicate,
         QueueMutationError::InvalidPath => ServiceError::InvalidPath,
         QueueMutationError::DiskFull => ServiceError::DiskFull,

@@ -2,6 +2,15 @@ use super::{
     group_playback_support::{ts_fixture, GroupPlaybackEnv},
     support::FakeOriginMode,
 };
+use crate::{
+    api::endpoints::v1_api_playlist::{playlist_recording_stream, RecordingStreamQuery},
+    auth::create_access_token,
+};
+use axum::{
+    extract::{Path as AxumPath, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 use shared::{model::AdmissionStrategy, utils::Internable};
 use std::{net::SocketAddr, sync::Arc};
 use tuliprox_session::failover_group::CircuitView;
@@ -407,4 +416,46 @@ async fn failed_m3u_client_group_stream_records_one_member_failure() {
     assert_eq!(res.status(), 200);
 
     assert_eq!(env.circuit("solis"), CircuitView::Counting(1));
+}
+
+#[tokio::test]
+async fn recording_request_with_preacquired_handle_resolves_to_single_and_opens_no_second_handle() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).max_connections("solis", 1).build().await;
+
+    // Acquire download connection on solis. With max_connections=1, solis is now fully saturated.
+    let input_name = "solis".intern();
+    let reserved = env
+        .app_state
+        .active_provider
+        .acquire_connection_for_download(&input_name, 0)
+        .expect("pre-acquired download connection");
+    let alloc_id = reserved.allocation_id;
+
+    // Request recording stream on the group VID with provider_allocation_id
+    let token =
+        create_access_token(&env.app_state.app_config.access_token_secret, 60, crate::auth::scope::INTERNAL_PLAYER);
+    let fingerprint =
+        crate::api::api_utils::tests::support::create_test_fingerprint("127.0.0.1:55331".parse().unwrap());
+
+    let response = playlist_recording_stream(
+        fingerprint,
+        AxumPath((token, "live".to_string(), env.group_vid)),
+        Query(RecordingStreamQuery {
+            target_name: env.target.name.clone(),
+            input_name: "solis".to_string(),
+            provider_allocation_id: Some(alloc_id),
+            join_shared: None,
+            priority: Some(0),
+        }),
+        State(Arc::clone(&env.app_state)),
+        HeaderMap::new(),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    // Provider connection count for solis must be exactly 1 (the claimed pre-acquired handle, no second handle opened)
+    assert_eq!(env.app_state.active_provider.get_provider_connections_count(), 1);
+    assert_eq!(env.origin_hits("solis"), 1);
+    assert_eq!(env.origin_hits("korath"), 0);
 }

@@ -6,6 +6,7 @@
 //! adapts its connection managers to it, and tests supply a stand-in.
 
 use futures::future::BoxFuture;
+use shared::model::XtreamCluster;
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tuliprox_core::model::ProviderHandle;
@@ -37,6 +38,17 @@ pub trait RecordingCapacityPort: Send + Sync {
 
     /// Whether the input is in maintenance; a recording on it must not start.
     fn is_input_in_maintenance(&self, input_name: &str) -> bool;
+
+    /// Checks whether an existing shared stream is running and available to join.
+    fn shared_stream_available<'a>(
+        &'a self,
+        _target_name: &'a str,
+        _input_name: &'a str,
+        _virtual_id: u32,
+        _cluster: XtreamCluster,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(std::future::ready(false))
+    }
 }
 
 #[cfg(test)]

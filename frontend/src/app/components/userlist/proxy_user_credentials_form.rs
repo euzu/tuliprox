@@ -1,18 +1,21 @@
 use crate::{
     app::{
         components::{
+            build_recording_options, build_tri_state_options,
             config::HasFormData,
             input::Input,
+            parse_optional_input, parse_positive_byte_size, parse_tri_state_selection, parse_user_recording_level,
+            recording_level_label,
             select::Select,
             selection_first_owned, selection_parse_first,
             userlist::{page::UserlistPage, proxy_type_input::ProxyTypeInput, ProxyTypeView},
             ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption, DropDownSelection, FilterInput, NoSubmitForm,
-            Tag, TextButton, UserStatus,
+            Tag, TextButton, UserStatus, MSG_BYTE_SIZE_INVALID,
         },
         ConfigContext, TargetUser,
     },
-    config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_list_option,
-    edit_field_number, edit_field_number_i8, edit_field_number_u16, edit_field_text_option, generate_form_reducer,
+    config_field_child, edit_field_bool, edit_field_date, edit_field_list_option, edit_field_number,
+    edit_field_number_i8, edit_field_number_u16, edit_field_text_option, generate_form_reducer,
     hooks::{use_clipboard_copy, use_service_context},
     html_if,
     i18n::use_translation,
@@ -20,7 +23,7 @@ use crate::{
 use chrono::{Duration, Utc};
 use shared::model::{
     permission::Permission, ApiProxyServerInfoDto, ClusterFlags, ConfigTargetDto, CredentialGenerationDto,
-    NetworkAccessDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, UserPlanDto,
+    NetworkAccessDto, PlayerFeaturesDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, UserPlanDto,
 };
 use std::{cell::Cell, net::IpAddr, rc::Rc};
 use strum::IntoEnumIterator;
@@ -34,10 +37,22 @@ struct UserFormFieldErrors {
     username: Option<String>,
     password: Option<String>,
     target: Option<String>,
+    recording_quota: Option<String>,
+    max_concurrent_recordings: Option<String>,
+    max_recording_rules: Option<String>,
+    max_free_shared_joins: Option<String>,
 }
 
 impl UserFormFieldErrors {
-    fn has_errors(&self) -> bool { self.username.is_some() || self.password.is_some() || self.target.is_some() }
+    fn has_errors(&self) -> bool {
+        self.username.is_some()
+            || self.password.is_some()
+            || self.target.is_some()
+            || self.recording_quota.is_some()
+            || self.max_concurrent_recordings.is_some()
+            || self.max_recording_rules.is_some()
+            || self.max_free_shared_joins.is_some()
+    }
 }
 
 /// Credential values auto-filled into a new-user form. The stored values let the
@@ -118,6 +133,76 @@ fn plan_hint_html(
     }
 }
 
+enum PlayerFeatureControl {
+    Select {
+        field_id: &'static str,
+        name: &'static str,
+        options: Rc<Vec<DropDownOption>>,
+        on_select: Callback<(String, DropDownSelection)>,
+    },
+    Input {
+        field_id: &'static str,
+        name: &'static str,
+        value: String,
+        error: Option<String>,
+        on_change: Callback<String>,
+        input_type: Option<&'static str>,
+    },
+}
+
+fn plan_feature_hint<T>(
+    plan_val: Option<T>,
+    user_val: Option<T>,
+    to_label: impl Fn(T) -> String,
+) -> Option<(String, bool)> {
+    plan_val.map(|plan| (to_label(plan), user_val.is_none()))
+}
+
+fn render_player_feature_field(
+    label: String,
+    plan_hint: Option<(String, bool)>,
+    control: PlayerFeatureControl,
+    t: &impl Fn(&str) -> String,
+) -> Html {
+    let hint_html = plan_hint.map_or_else(Html::default, |(plan_label, inherited)| {
+        plan_hint_html(inherited, "LABEL.PLAN_INHERITED", "LABEL.PLAN_OVERRIDE", plan_label, t)
+    });
+    match control {
+        PlayerFeatureControl::Select { field_id, name, options, on_select } => {
+            config_field_child!(label, field_id, {
+                html! {
+                    <div>
+                        <Select
+                            name={name}
+                            multi_select={false}
+                            on_select={on_select}
+                            options={options}
+                        />
+                        { hint_html }
+                    </div>
+                }
+            })
+        }
+        PlayerFeatureControl::Input { field_id, name, value, error, on_change, input_type } => {
+            html! {
+                <div class="tp__form-field tp__form-field__text">
+                    <Input
+                        label={label}
+                        name={name}
+                        field_id={Some(field_id.to_string())}
+                        placeholder={t("LABEL.INHERIT")}
+                        input_type={input_type.unwrap_or("number")}
+                        error={error}
+                        value={value}
+                        on_change={on_change}
+                    />
+                    { hint_html }
+                </div>
+            }
+        }
+    }
+}
+
 fn normalize_country_entry(input: &str) -> Result<String, &'static str> {
     let normalized = input.trim().to_ascii_uppercase();
     if normalized.len() == 2 && normalized.chars().all(|ch| ch.is_ascii_alphabetic()) {
@@ -184,6 +269,16 @@ fn validate_network_access(countries: &[String], networks: &[String]) -> Result<
     Ok(())
 }
 
+fn update_user_player_features<F>(form_state: &UseReducerHandle<UserFormState>, update_fn: F)
+where
+    F: FnOnce(&mut PlayerFeaturesDto),
+{
+    let mut features = form_state.data().player_features.clone().unwrap_or_default();
+    update_fn(&mut features);
+    let opt = if features.is_empty() { None } else { Some(features) };
+    form_state.dispatch(UserFormAction::PlayerFeatures(opt));
+}
+
 generate_form_reducer!(
     state: UserFormState { form: ProxyUserCredentialsDto },
     action_name: UserFormAction,
@@ -206,6 +301,7 @@ generate_form_reducer!(
         SoftConnections => soft_connections: u16,
         Priority => priority: i8,
         SoftPriority => soft_priority: i8,
+        PlayerFeatures => player_features: Option<PlayerFeaturesDto>,
     }
 );
 
@@ -452,6 +548,22 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 if data.password.trim().is_empty() {
                     errors.password = Some(translate_clone.t("MESSAGES.VALIDATION.REQUIRED"));
                 }
+                if let Some(features) = data.player_features.as_ref() {
+                    let err_msg = translate_clone.t("MESSAGES.VALIDATION.PLAYER_FEATURES_NUMBER_GREATER_THAN_ZERO");
+                    if features.recording_quota.as_ref().is_some_and(|q| parse_positive_byte_size(q.as_str()).is_err())
+                    {
+                        errors.recording_quota = Some(translate_clone.t(MSG_BYTE_SIZE_INVALID));
+                    }
+                    if features.max_concurrent_recordings == Some(0) {
+                        errors.max_concurrent_recordings = Some(err_msg.clone());
+                    }
+                    if features.max_recording_rules == Some(0) {
+                        errors.max_recording_rules = Some(err_msg.clone());
+                    }
+                    if features.max_free_shared_joins == Some(0) {
+                        errors.max_free_shared_joins = Some(err_msg);
+                    }
+                }
             }
             let has_errors = errors.has_errors();
             field_errors.set(errors);
@@ -488,6 +600,15 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                             return;
                         }
                     };
+                    if let Some(features) = &mut user.player_features {
+                        if let Err(err) = features.prepare() {
+                            services.toastr.error(err.to_string());
+                            return;
+                        }
+                        if features.is_empty() {
+                            user.player_features = None;
+                        }
+                    }
                     if let Err(err) = user.validate() {
                         services.toastr.error(err.to_string());
                     } else {
@@ -555,6 +676,131 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             copy_to_clipboard.emit(text);
         })
     };
+
+    let form_state_source = form_state.clone();
+    let on_select_source_switch = Callback::from(move |(_, selections): (String, DropDownSelection)| {
+        let val = parse_tri_state_selection(&selections);
+        update_user_player_features(&form_state_source, move |f| {
+            f.source_switch = val;
+        });
+    });
+
+    let form_state_joinable = form_state.clone();
+    let on_select_joinable_streams = Callback::from(move |(_, selections): (String, DropDownSelection)| {
+        let val = parse_tri_state_selection(&selections);
+        update_user_player_features(&form_state_joinable, move |f| {
+            f.joinable_streams = val;
+        });
+    });
+
+    let form_state_recording = form_state.clone();
+    let on_select_recording = Callback::from(move |(_, selections): (String, DropDownSelection)| {
+        let val = parse_user_recording_level(selection_first_owned(selections).as_deref());
+        update_user_player_features(&form_state_recording, move |f| {
+            f.recording = val;
+        });
+    });
+
+    let form_state_quota = form_state.clone();
+    let on_change_recording_quota = Callback::from(move |val: String| {
+        let quota = (!val.trim().is_empty()).then(|| shared::model::ByteSize::new(val.trim()));
+        update_user_player_features(&form_state_quota, move |f| {
+            f.recording_quota = quota;
+        });
+    });
+
+    let form_state_max_rec = form_state.clone();
+    let on_change_max_concurrent = Callback::from(move |val: String| {
+        let max_rec = parse_optional_input::<u32>(&val).ok().flatten();
+        update_user_player_features(&form_state_max_rec, move |f| {
+            f.max_concurrent_recordings = max_rec;
+        });
+    });
+
+    let form_state_free_joins = form_state.clone();
+    let on_select_free_shared_joins = Callback::from(move |(_, selections): (String, DropDownSelection)| {
+        let val = parse_tri_state_selection(&selections);
+        update_user_player_features(&form_state_free_joins, move |f| {
+            f.free_shared_joins = val;
+        });
+    });
+
+    let form_state_max_rules = form_state.clone();
+    let on_change_max_recording_rules = Callback::from(move |val: String| {
+        let max_rules = parse_optional_input::<u32>(&val).ok().flatten();
+        update_user_player_features(&form_state_max_rules, move |f| {
+            f.max_recording_rules = max_rules;
+        });
+    });
+
+    let form_state_max_joins = form_state.clone();
+    let on_change_max_free_joins = Callback::from(move |val: String| {
+        let max_joins = parse_optional_input::<u32>(&val).ok().flatten();
+        update_user_player_features(&form_state_max_joins, move |f| {
+            f.max_free_shared_joins = max_joins;
+        });
+    });
+
+    let form_state_watch_progress = form_state.clone();
+    let on_select_watch_progress = Callback::from(move |(_, selections): (String, DropDownSelection)| {
+        let val = parse_tri_state_selection(&selections);
+        update_user_player_features(&form_state_watch_progress, move |f| {
+            f.watch_progress = val;
+        });
+    });
+
+    let form_state_api_enabled = form_state.clone();
+    let on_select_api_enabled = Callback::from(move |(_, selections): (String, DropDownSelection)| {
+        let val = parse_tri_state_selection(&selections);
+        update_user_player_features(&form_state_api_enabled, move |f| {
+            f.api_enabled = val;
+        });
+    });
+
+    let form_state_event_stream = form_state.clone();
+    let on_select_event_stream = Callback::from(move |(_, selections): (String, DropDownSelection)| {
+        let val = parse_tri_state_selection(&selections);
+        update_user_player_features(&form_state_event_stream, move |f| {
+            f.event_stream = val;
+        });
+    });
+
+    let api_enabled_options = use_memo(
+        (form_state.data().player_features.as_ref().and_then(|f| f.api_enabled), translate.clone()),
+        |(val, t)| build_tri_state_options(*val, &t.t("LABEL.INHERIT"), &t.t("LABEL.ENABLED"), &t.t("LABEL.DISABLED")),
+    );
+
+    let source_switch_options = use_memo(
+        (form_state.data().player_features.as_ref().and_then(|f| f.source_switch), translate.clone()),
+        |(val, t)| build_tri_state_options(*val, &t.t("LABEL.INHERIT"), &t.t("LABEL.ENABLED"), &t.t("LABEL.DISABLED")),
+    );
+
+    let joinable_streams_options = use_memo(
+        (form_state.data().player_features.as_ref().and_then(|f| f.joinable_streams), translate.clone()),
+        |(val, t)| build_tri_state_options(*val, &t.t("LABEL.INHERIT"), &t.t("LABEL.ENABLED"), &t.t("LABEL.DISABLED")),
+    );
+
+    let free_shared_joins_options = use_memo(
+        (form_state.data().player_features.as_ref().and_then(|f| f.free_shared_joins), translate.clone()),
+        |(val, t)| build_tri_state_options(*val, &t.t("LABEL.INHERIT"), &t.t("LABEL.ENABLED"), &t.t("LABEL.DISABLED")),
+    );
+
+    let watch_progress_options = use_memo(
+        (form_state.data().player_features.as_ref().and_then(|f| f.watch_progress), translate.clone()),
+        |(val, t)| build_tri_state_options(*val, &t.t("LABEL.INHERIT"), &t.t("LABEL.ENABLED"), &t.t("LABEL.DISABLED")),
+    );
+
+    let event_stream_options = use_memo(
+        (form_state.data().player_features.as_ref().and_then(|f| f.event_stream), translate.clone()),
+        |(val, t)| build_tri_state_options(*val, &t.t("LABEL.INHERIT"), &t.t("LABEL.ENABLED"), &t.t("LABEL.DISABLED")),
+    );
+
+    let user_recording_options = use_memo(
+        (form_state.data().player_features.as_ref().and_then(|f| f.recording), translate.clone()),
+        |(val, t)| build_recording_options(*val, true, |k| t.t(k)),
+    );
+    let plan_features = active_plan.and_then(|p| p.player_features.as_ref());
+    let user_features = form_state.data().player_features.as_ref();
     html! {
         <div class="tp__proxy-user-credentials-form tp__form-page">
           <div class="tp__proxy-user-credentials-form__body tp__form-page__body">
@@ -606,13 +852,16 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             }})}
             <NoSubmitForm>
             { if *update {
-                  config_field_custom!(translate.t("LABEL.USERNAME"), form_state.data().username.clone())
+                  config_field_child!(translate.t("LABEL.USERNAME"), "PROXY_USER_CREDENTIALS.USERNAME", {
+                      html! { <span class="tp__form-field__value">{ form_state.data().username.clone() }</span> }
+                  })
                 } else {
                   html! {
                     <div class="tp__form-field tp__form-field__text">
                         <Input
                             label={translate.t("LABEL.USERNAME")}
                             name="username"
+                            field_id={Some("PROXY_USER_CREDENTIALS.USERNAME".to_string())}
                             autocomplete={true}
                             required={true}
                             error={field_errors.username.clone()}
@@ -632,6 +881,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         <Input
                             label={translate.t("LABEL.PASSWORD")}
                             name="password"
+                            field_id={Some("PROXY_USER_CREDENTIALS.PASSWORD".to_string())}
                             hidden={true}
                             autocomplete={false}
                             required={true}
@@ -830,11 +1080,161 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             { edit_field_number_i8!(form_state, translate.t("LABEL.SOFT_PRIORITY"), soft_priority, UserFormAction::SoftPriority) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_TIMESHIFT"), epg_timeshift, UserFormAction::EpgTimeshift) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_REQUEST_TIMESHIFT"), epg_request_timeshift, UserFormAction::EpgRequestTimeshift) }
-            { edit_field_bool!(form_state,  translate.t("LABEL.USER_UI_ENABLED"), ui_enabled, UserFormAction::UiEnabled) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.COMMENT"), comment, UserFormAction::Comment) }
             { edit_field_list_option!(allowed_countries, translate.t("LABEL.ALLOWED_COUNTRIES"), "PROXY_USER_CREDENTIALS.NETWORK_ACCESS_COUNTRIES", translate.t("LABEL.ADD_COUNTRY"), create_country_tag) }
             { edit_field_list_option!(allowed_networks, translate.t("LABEL.ALLOWED_NETWORKS"), "PROXY_USER_CREDENTIALS.NETWORK_ACCESS_NETWORKS", translate.t("LABEL.ADD_NETWORK"), create_network_tag) }
-
+            { edit_field_bool!(form_state,  translate.t("LABEL.USER_UI_ENABLED"), ui_enabled, UserFormAction::UiEnabled) }
+            <div class="tp__proxy-user-credentials-form__section-divider">
+                <h3>{ translate.t("LABEL.PLAYER_FEATURES") }</h3>
+                <p>{ translate.t("LABEL.PLAYER_FEATURES_HINT") }</p>
+            </div>
+            { render_player_feature_field(
+                translate.t("LABEL.PLAYER_API_ENABLED"),
+                plan_feature_hint(plan_features.and_then(|f| f.api_enabled), user_features.and_then(|f| f.api_enabled), |v| {
+                    translate.t(if v { "LABEL.ENABLED" } else { "LABEL.DISABLED" })
+                }),
+                PlayerFeatureControl::Select {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_API_ENABLED",
+                    name: "player_api_enabled",
+                    options: api_enabled_options.clone(),
+                    on_select: on_select_api_enabled.clone(),
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.SOURCE_SWITCH"),
+                plan_feature_hint(plan_features.and_then(|f| f.source_switch), user_features.and_then(|f| f.source_switch), |v| {
+                    translate.t(if v { "LABEL.ENABLED" } else { "LABEL.DISABLED" })
+                }),
+                PlayerFeatureControl::Select {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_SOURCE_SWITCH",
+                    name: "player_source_switch",
+                    options: source_switch_options.clone(),
+                    on_select: on_select_source_switch.clone(),
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.JOINABLE_STREAMS"),
+                plan_feature_hint(plan_features.and_then(|f| f.joinable_streams), user_features.and_then(|f| f.joinable_streams), |v| {
+                    translate.t(if v { "LABEL.ENABLED" } else { "LABEL.DISABLED" })
+                }),
+                PlayerFeatureControl::Select {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_JOINABLE_STREAMS",
+                    name: "player_joinable_streams",
+                    options: joinable_streams_options.clone(),
+                    on_select: on_select_joinable_streams.clone(),
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.RECORDING"),
+                plan_feature_hint(plan_features.and_then(|f| f.recording), user_features.and_then(|f| f.recording), |v| {
+                    recording_level_label(v, |k| translate.t(k))
+                }),
+                PlayerFeatureControl::Select {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_RECORDING",
+                    name: "player_recording",
+                    options: user_recording_options.clone(),
+                    on_select: on_select_recording.clone(),
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.PLAYER_RECORDING_QUOTA"),
+                plan_feature_hint(
+                    plan_features.and_then(|f| f.recording_quota.as_ref()),
+                    user_features.and_then(|f| f.recording_quota.as_ref()),
+                    |v| v.as_str().to_string(),
+                ),
+                PlayerFeatureControl::Input {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_RECORDING_QUOTA",
+                    name: "player_recording_quota",
+                    value: user_features.and_then(|f| f.recording_quota.as_ref()).map_or_else(String::new, |v| v.as_str().to_string()),
+                    error: field_errors.recording_quota.clone(),
+                    on_change: on_change_recording_quota.clone(),
+                    input_type: Some("text"),
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.MAX_CONCURRENT_RECORDINGS"),
+                plan_feature_hint(plan_features.and_then(|f| f.max_concurrent_recordings), user_features.and_then(|f| f.max_concurrent_recordings), |v| v.to_string()),
+                PlayerFeatureControl::Input {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_MAX_CONCURRENT_RECORDINGS",
+                    name: "player_max_concurrent_recordings",
+                    value: user_features.and_then(|f| f.max_concurrent_recordings).map_or_else(String::new, |v| v.to_string()),
+                    error: field_errors.max_concurrent_recordings.clone(),
+                    on_change: on_change_max_concurrent.clone(),
+                    input_type: None,
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.MAX_RECORDING_RULES"),
+                plan_feature_hint(plan_features.and_then(|f| f.max_recording_rules), user_features.and_then(|f| f.max_recording_rules), |v| v.to_string()),
+                PlayerFeatureControl::Input {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_MAX_RECORDING_RULES",
+                    name: "player_max_recording_rules",
+                    value: user_features.and_then(|f| f.max_recording_rules).map_or_else(String::new, |v| v.to_string()),
+                    error: field_errors.max_recording_rules.clone(),
+                    on_change: on_change_max_recording_rules.clone(),
+                    input_type: None,
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.FREE_SHARED_JOINS"),
+                plan_feature_hint(plan_features.and_then(|f| f.free_shared_joins), user_features.and_then(|f| f.free_shared_joins), |v| {
+                    translate.t(if v { "LABEL.ENABLED" } else { "LABEL.DISABLED" })
+                }),
+                PlayerFeatureControl::Select {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_FREE_SHARED_JOINS",
+                    name: "player_free_shared_joins",
+                    options: free_shared_joins_options.clone(),
+                    on_select: on_select_free_shared_joins.clone(),
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.MAX_FREE_SHARED_JOINS"),
+                plan_feature_hint(plan_features.and_then(|f| f.max_free_shared_joins), user_features.and_then(|f| f.max_free_shared_joins), |v| v.to_string()),
+                PlayerFeatureControl::Input {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_MAX_FREE_SHARED_JOINS",
+                    name: "player_max_free_shared_joins",
+                    value: user_features.and_then(|f| f.max_free_shared_joins).map_or_else(String::new, |v| v.to_string()),
+                    error: field_errors.max_free_shared_joins.clone(),
+                    on_change: on_change_max_free_joins.clone(),
+                    input_type: None,
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.WATCH_PROGRESS"),
+                plan_feature_hint(plan_features.and_then(|f| f.watch_progress), user_features.and_then(|f| f.watch_progress), |v| {
+                    translate.t(if v { "LABEL.ENABLED" } else { "LABEL.DISABLED" })
+                }),
+                PlayerFeatureControl::Select {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_WATCH_PROGRESS",
+                    name: "player_watch_progress",
+                    options: watch_progress_options.clone(),
+                    on_select: on_select_watch_progress.clone(),
+                },
+                &|k| translate.t(k),
+            ) }
+            { render_player_feature_field(
+                translate.t("LABEL.EVENT_STREAM"),
+                plan_feature_hint(plan_features.and_then(|f| f.event_stream), user_features.and_then(|f| f.event_stream), |v| {
+                    translate.t(if v { "LABEL.ENABLED" } else { "LABEL.DISABLED" })
+                }),
+                PlayerFeatureControl::Select {
+                    field_id: "PROXY_USER_CREDENTIALS.PLAYER_EVENT_STREAM",
+                    name: "player_event_stream",
+                    options: event_stream_options.clone(),
+                    on_select: on_select_event_stream.clone(),
+                },
+                &|k| translate.t(k),
+            ) }
           </div>
           <div class="tp__proxy-user-credentials-form__toolbar tp__form-page__toolbar">
              <TextButton class="secondary" name="cancel_user"
@@ -859,6 +1259,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::model::PlayerRecordingLevel;
 
     #[test]
     fn create_draft_begins_once_per_edit_view() {
@@ -971,5 +1372,76 @@ mod tests {
     #[test]
     fn normalize_network_entry_rejects_invalid_prefix_range() {
         assert_eq!(normalize_network_entry("192.168.0.0/33"), Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS"));
+    }
+
+    #[test]
+    fn user_recording_options_handles_all_variants() {
+        let none_opts = build_recording_options(None, true, ToString::to_string);
+        assert_eq!(none_opts.len(), 5);
+        assert!(none_opts[0].selected);
+        assert_eq!(none_opts[0].id, "");
+
+        let shared_opts = build_recording_options(Some(PlayerRecordingLevel::Shared), true, ToString::to_string);
+        assert!(!shared_opts[0].selected);
+        assert!(shared_opts.iter().find(|o| o.id == "shared").unwrap().selected);
+
+        let read_opts = build_recording_options(Some(PlayerRecordingLevel::Read), true, ToString::to_string);
+        assert!(read_opts.iter().find(|o| o.id == "read").unwrap().selected);
+
+        let priv_opts = build_recording_options(Some(PlayerRecordingLevel::Private), true, ToString::to_string);
+        assert!(priv_opts.iter().find(|o| o.id == "private").unwrap().selected);
+
+        let rec_none_opts = build_recording_options(Some(PlayerRecordingLevel::None), true, ToString::to_string);
+        assert!(rec_none_opts.iter().find(|o| o.id == "none").unwrap().selected);
+    }
+
+    #[test]
+    fn user_player_features_validation_rejects_zero() {
+        let invalid_quota = PlayerFeaturesDto {
+            recording_quota: Some(shared::model::ByteSize::new("0")),
+            ..PlayerFeaturesDto::default()
+        };
+        assert!(invalid_quota.validate().is_err());
+
+        let invalid_max_rec = PlayerFeaturesDto { max_concurrent_recordings: Some(0), ..PlayerFeaturesDto::default() };
+        assert!(invalid_max_rec.validate().is_err());
+
+        let invalid_max_rules = PlayerFeaturesDto { max_recording_rules: Some(0), ..PlayerFeaturesDto::default() };
+        assert!(invalid_max_rules.validate().is_err());
+
+        let invalid_max_joins = PlayerFeaturesDto { max_free_shared_joins: Some(0), ..PlayerFeaturesDto::default() };
+        assert!(invalid_max_joins.validate().is_err());
+
+        let valid = PlayerFeaturesDto {
+            recording_quota: Some(shared::model::ByteSize::new("1024")),
+            max_concurrent_recordings: Some(2),
+            max_free_shared_joins: Some(1),
+            ..PlayerFeaturesDto::default()
+        };
+        assert!(valid.validate().is_ok());
+    }
+
+    #[test]
+    fn user_player_features_empty_cleared_on_prepare() {
+        let mut user = ProxyUserCredentialsDto {
+            username: "testuser".to_string(),
+            password: "testpass".to_string(),
+            player_features: Some(PlayerFeaturesDto::default()),
+            ..ProxyUserCredentialsDto::default()
+        };
+        assert!(user.prepare().is_ok());
+        assert!(user.player_features.is_none());
+    }
+
+    #[test]
+    fn user_player_features_api_enabled_retained() {
+        let mut user = ProxyUserCredentialsDto {
+            username: "testuser".to_string(),
+            password: "testpass".to_string(),
+            player_features: Some(PlayerFeaturesDto { api_enabled: Some(true), ..Default::default() }),
+            ..ProxyUserCredentialsDto::default()
+        };
+        assert!(user.prepare().is_ok());
+        assert_eq!(user.player_features.unwrap().api_enabled, Some(true));
     }
 }

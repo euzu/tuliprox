@@ -8,7 +8,7 @@ use crate::{
         create_jwt_admin, create_jwt_api_user, create_jwt_web_user, validate_password_version, verify_password,
         verify_token, AuthBearer,
     },
-    model::WebAuthConfig,
+    model::{ProxyUserCredentials, WebAuthConfig},
 };
 use axum::{body::Body, http::Request, response::IntoResponse};
 use base64::Engine;
@@ -31,7 +31,7 @@ fn no_web_auth_token() -> impl axum::response::IntoResponse + Send {
     axum::Json(TokenResponse { token: TOKEN_NO_AUTH.to_string(), username: "admin".to_string() }).into_response()
 }
 
-fn api_user_can_access_web_ui(ui_enabled: bool) -> bool { ui_enabled }
+fn api_user_can_authenticate(user: &ProxyUserCredentials) -> bool { user.ui_enabled || user.player_api_enabled() }
 
 /// Publish one authentication decision.
 ///
@@ -56,7 +56,7 @@ fn too_many_attempts(retry_after: std::time::Duration) -> axum::response::Respon
 ///
 /// `Rejected` means "these are not valid credentials for this branch, try the
 /// next one"; `Refused` is a decided answer the caller must return as-is,
-/// which is what keeps a `ui_enabled: false` API user from silently falling
+/// which is what keeps an API user without Web UI or player API access from falling
 /// through to the generic 401.
 enum SignInAttempt {
     Issued(String),
@@ -97,7 +97,8 @@ fn web_user_sign_in(web_auth: &WebAuthConfig, username: &str, password: &str) ->
     token_result.map_or(SignInAttempt::Rejected, SignInAttempt::Issued)
 }
 
-/// Sign in against the proxy API-user credentials.
+/// Sign in against the proxy API-user credentials. A token is issued when the
+/// user may use the Web UI or the player API; each route checks its own class.
 fn api_user_sign_in(
     app_state: &Arc<AppState>,
     web_auth: &WebAuthConfig,
@@ -110,9 +111,9 @@ fn api_user_sign_in(
     if !crate::auth::constant_time_eq(credentials.password.as_bytes(), password.as_bytes()) {
         return SignInAttempt::Rejected;
     }
-    if !api_user_can_access_web_ui(credentials.ui_enabled) {
+    if !api_user_can_authenticate(&credentials) {
         // A decided answer, not a rejection: the credentials were correct and
-        // this principal is still not allowed into the Web UI.
+        // this principal is still allowed into neither Web UI nor Player API.
         return SignInAttempt::Refused(axum::http::StatusCode::FORBIDDEN.into_response());
     }
     create_jwt_api_user(web_auth, username, UserId::api(&credentials.username))
@@ -263,7 +264,7 @@ async fn token_refresh(
                     let Some(user) = app_state.app_config.get_user_credentials(username) else {
                         return axum::http::StatusCode::UNAUTHORIZED.into_response();
                     };
-                    if !user.ui_enabled {
+                    if !api_user_can_authenticate(&user) {
                         return axum::http::StatusCode::FORBIDDEN.into_response();
                     }
                     if let Ok(token) = create_jwt_api_user(web_auth, username, UserId::api(&user.username)) {
@@ -569,14 +570,26 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
 
 #[cfg(test)]
 mod tests {
-    use super::api_user_can_access_web_ui;
+    use super::{api_user_can_authenticate, api_user_sign_in, index_register_without_path};
+    use crate::{
+        api::model::create_test_app_state,
+        auth::create_jwt_api_user,
+        model::{ApiProxyConfig, Config, ProxyUserCredentials},
+    };
     use axum::{
-        body::Body,
-        http::{Method, Request, StatusCode},
+        body::{to_bytes, Body},
+        http::{header, Method, Request, StatusCode},
         routing::{get, post},
         Router,
     };
-    use shared::utils::concat_path_leading_slash;
+    use shared::{
+        model::{
+            ApiProxyConfigDto, PlayerFeaturesDto, ProxyUserCredentialsDto, TargetUserDto, TokenResponse, UserId,
+            WebAuthConfigDto, WebUiConfigDto,
+        },
+        utils::concat_path_leading_slash,
+    };
+    use std::{path::Path, sync::Arc};
     use tower::ServiceExt;
 
     fn auth_with_user(username: &str, password: &str) -> crate::model::WebAuthConfig {
@@ -611,16 +624,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rejects_api_user_when_ui_is_disabled() {
-        assert!(!api_user_can_access_web_ui(false));
-    }
-
-    #[test]
-    fn allows_api_user_when_ui_is_enabled() {
-        assert!(api_user_can_access_web_ui(true));
-    }
-
     #[tokio::test]
     async fn auth_route_remains_reachable_when_web_ui_uses_sub_path() {
         let web_ui_path = "tuli";
@@ -636,5 +639,133 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_api_user_can_authenticate_predicate() {
+        let make_user = |ui_enabled: bool, api_enabled: Option<bool>| {
+            let mut u = ProxyUserCredentials::default();
+            u.ui_enabled = ui_enabled;
+            u.player_features = tuliprox_core::model::PlayerFeatures { api_enabled, ..Default::default() };
+            u
+        };
+
+        // Player-only user: ui_enabled: false, api_enabled: Some(true) -> true
+        assert!(api_user_can_authenticate(&make_user(false, Some(true))));
+        // Web-UI user: ui_enabled: true, api_enabled: Some(false) -> true
+        assert!(api_user_can_authenticate(&make_user(true, Some(false))));
+        // Both off: ui_enabled: false, api_enabled: Some(false) -> false
+        assert!(!api_user_can_authenticate(&make_user(false, Some(false))));
+        // Both off by default: ui_enabled: false, api_enabled: None -> false
+        assert!(!api_user_can_authenticate(&make_user(false, None)));
+        // Default on: ui_enabled: true, api_enabled: None -> true
+        assert!(api_user_can_authenticate(&make_user(true, None)));
+    }
+
+    #[tokio::test]
+    async fn token_login_and_refresh_player_only_and_both_off() {
+        let web_ui_dto = WebUiConfigDto {
+            enabled: true,
+            user_ui_enabled: true,
+            player_api_enabled: Some(true),
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                secret: "test_secret_at_least_32_characters_long_for_hs256".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = Config { web_ui: Some((&web_ui_dto).into()), ..Default::default() };
+        let app_state = create_test_app_state(config);
+
+        let api_proxy_dto = ApiProxyConfigDto {
+            user: vec![TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![
+                    ProxyUserCredentialsDto {
+                        username: "player_only".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: false,
+                        player_features: Some(PlayerFeaturesDto { api_enabled: Some(true), ..Default::default() }),
+                        ..Default::default()
+                    },
+                    ProxyUserCredentialsDto {
+                        username: "both_off".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: false,
+                        player_features: Some(PlayerFeaturesDto { api_enabled: Some(false), ..Default::default() }),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = ApiProxyConfig::from(&api_proxy_dto);
+        for tu in &mut api_proxy.user {
+            for cred in &mut tu.credentials {
+                Arc::make_mut(cred).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        app_state.app_config.set_api_proxy(api_proxy).unwrap();
+
+        let web_auth = app_state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
+
+        // 1. Direct function test for api_user_sign_in
+        let sign_in_player = api_user_sign_in(&app_state, &web_auth, "player_only", "pass");
+        assert!(matches!(sign_in_player, super::SignInAttempt::Issued(_)));
+
+        let sign_in_both_off = api_user_sign_in(&app_state, &web_auth, "both_off", "pass");
+        assert!(matches!(sign_in_both_off, super::SignInAttempt::Refused(_)));
+
+        // 2. HTTP POST /auth/token route test
+        let router = index_register_without_path(Path::new("dummy")).with_state(app_state.clone());
+
+        let mut req_player = Request::builder()
+            .method(Method::POST)
+            .uri("/auth/token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"username":"player_only","password":"pass"}"#))
+            .unwrap();
+        req_player
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let resp_player = router.clone().oneshot(req_player).await.unwrap();
+        assert_eq!(resp_player.status(), StatusCode::OK);
+        let body_bytes = to_bytes(resp_player.into_body(), 65536).await.unwrap();
+        let token_resp: TokenResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(token_resp.username, "player_only");
+        let player_token = token_resp.token;
+
+        let mut req_both_off = Request::builder()
+            .method(Method::POST)
+            .uri("/auth/token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"username":"both_off","password":"pass"}"#))
+            .unwrap();
+        req_both_off
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let resp_both_off = router.clone().oneshot(req_both_off).await.unwrap();
+        assert_eq!(resp_both_off.status(), StatusCode::FORBIDDEN);
+
+        // 3. HTTP POST /auth/refresh route test
+        let req_refresh_player = Request::builder()
+            .method(Method::POST)
+            .uri("/auth/refresh")
+            .header(header::AUTHORIZATION, format!("Bearer {player_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_refresh = router.clone().oneshot(req_refresh_player).await.unwrap();
+        assert_eq!(resp_refresh.status(), StatusCode::OK);
+
+        let both_off_token = create_jwt_api_user(&web_auth, "both_off", UserId::api("both_off")).unwrap();
+        let req_refresh_both_off = Request::builder()
+            .method(Method::POST)
+            .uri("/auth/refresh")
+            .header(header::AUTHORIZATION, format!("Bearer {both_off_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_refresh_both_off = router.oneshot(req_refresh_both_off).await.unwrap();
+        assert_eq!(resp_refresh_both_off.status(), StatusCode::FORBIDDEN);
     }
 }

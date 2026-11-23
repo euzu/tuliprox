@@ -7,7 +7,7 @@
 //! - The **container** version is the B+Tree storage format (1, 2 or 3).
 //!   It decides how to open the file at all.
 //! - The **value** version is the positional layout of the record inside
-//!   (V1 through V7). It decides how to read a record once the file is open.
+//!   (V1 through V8). It decides how to read a record once the file is open.
 //!
 //! Any container may hold any value version, so the supported matrix is all
 //! 21 combinations. Neither axis can be inferred from the other.
@@ -42,7 +42,7 @@ pub(crate) const SUPPORTED_CONTAINER_VERSIONS: [u16; 3] = [1, 2, 3];
 /// in several cases, so trying oldest first would match a truncated read of
 /// a newer record and silently drop its trailing fields.
 #[cfg(test)]
-pub(crate) const SUPPORTED_VALUE_VERSIONS: [u8; 7] = [7, 6, 5, 4, 3, 2, 1];
+pub(crate) const SUPPORTED_VALUE_VERSIONS: [u8; 8] = [8, 7, 6, 5, 4, 3, 2, 1];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -369,10 +369,77 @@ impl StoredApiUserV7 {
     pub(crate) fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v6(&StoredApiUserV6::from_v1(v1)) }
 }
 
-// The persisted credentials and the V7 layout carry the same 21 fields, so a
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredApiUserV8 {
+    pub target: String,
+    pub username: String,
+    pub password: String,
+    pub token: Option<String>,
+    pub proxy: ProxyType,
+    pub server: Option<String>,
+    pub epg_timeshift: Option<String>,
+    pub epg_request_timeshift: Option<String>,
+    pub created_at: Option<i64>,
+    pub exp_date: Option<i64>,
+    pub max_connections: Option<u32>,
+    pub status: Option<ProxyUserStatus>,
+    pub output_clusters: ClusterFlags,
+    pub ui_enabled: bool,
+    pub comment: Option<String>,
+    pub priority: Option<i8>,
+    pub soft_connections: Option<u16>,
+    pub soft_priority: Option<i8>,
+    pub network_access: Option<NetworkAccessDto>,
+    pub plan: Option<String>,
+    pub filter: Option<String>,
+    #[serde(with = "crate::user_repository::named_player_features")]
+    pub player_features: Option<shared::model::PlayerFeaturesDto>,
+}
+
+impl StoredApiUserV8 {
+    pub(crate) fn from_v7(v7: StoredApiUserV7) -> Self {
+        Self {
+            target: v7.target,
+            username: v7.username,
+            password: v7.password,
+            token: v7.token,
+            proxy: v7.proxy,
+            server: v7.server,
+            epg_timeshift: v7.epg_timeshift,
+            epg_request_timeshift: v7.epg_request_timeshift,
+            created_at: v7.created_at,
+            exp_date: v7.exp_date,
+            status: v7.status,
+            max_connections: v7.max_connections,
+            output_clusters: v7.output_clusters,
+            ui_enabled: v7.ui_enabled,
+            comment: v7.comment,
+            priority: v7.priority,
+            soft_connections: v7.soft_connections,
+            soft_priority: v7.soft_priority,
+            network_access: v7.network_access,
+            plan: v7.plan,
+            filter: v7.filter,
+            player_features: None,
+        }
+    }
+
+    pub(crate) fn from_v5(v5: &StoredApiUserV5) -> Self { Self::from_v7(StoredApiUserV7::from_v5(v5)) }
+
+    pub(crate) fn from_v4(v4: &StoredApiUserV4) -> Self { Self::from_v7(StoredApiUserV7::from_v4(v4)) }
+
+    pub(crate) fn from_v3(v3: &StoredApiUserV3) -> Self { Self::from_v7(StoredApiUserV7::from_v3(v3)) }
+
+    pub(crate) fn from_v2(v2: &StoredApiUserV2) -> Self { Self::from_v7(StoredApiUserV7::from_v2(v2)) }
+
+    pub(crate) fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v7(StoredApiUserV7::from_v1(v1)) }
+}
+
+// The persisted credentials and the V8 layout carry the same 22 fields, so a
 // recovery snapshot converts without a `MessagePack` round trip.
-impl From<&StoredProxyUserCredentials> for StoredApiUserV7 {
-    /// Copies all 21 stored fields; both types share the V7 layout.
+impl From<&StoredProxyUserCredentials> for StoredApiUserV8 {
+    /// Copies all 22 stored fields; both types share the V8 layout.
     fn from(stored: &StoredProxyUserCredentials) -> Self {
         Self {
             target: stored.target.clone(),
@@ -396,6 +463,7 @@ impl From<&StoredProxyUserCredentials> for StoredApiUserV7 {
             network_access: stored.network_access.clone(),
             plan: stored.plan.clone(),
             filter: stored.filter.clone(),
+            player_features: stored.player_features.clone(),
         }
     }
 }
@@ -407,8 +475,8 @@ impl From<&StoredProxyUserCredentials> for StoredApiUserV7 {
 /// recovery history can resolve that case automatically.
 #[derive(Debug)]
 pub(crate) enum UserRecordDecode {
-    Complete(StoredApiUserV7),
-    Ambiguous { user: StoredApiUserV7, value: String },
+    Complete(StoredApiUserV8),
+    Ambiguous { user: StoredApiUserV8, value: String },
 }
 
 /// Decodes any historical positional layout, reporting a single unnamed trailing string as ambiguous instead of guessing.
@@ -419,27 +487,31 @@ pub(crate) fn classify_user_record(value: Value) -> io::Result<UserRecordDecode>
     match fields.len() {
         13 => {
             return decode_record(Value::Array(fields))
-                .map(|user| UserRecordDecode::Complete(StoredApiUserV7::from_v1(&user)))
+                .map(|user| UserRecordDecode::Complete(StoredApiUserV8::from_v1(&user)))
         }
         14 => {
             return decode_record(Value::Array(fields))
-                .map(|user| UserRecordDecode::Complete(StoredApiUserV7::from_v2(&user)))
+                .map(|user| UserRecordDecode::Complete(StoredApiUserV8::from_v2(&user)))
         }
         15 => {
             return decode_record(Value::Array(fields))
-                .map(|user| UserRecordDecode::Complete(StoredApiUserV7::from_v3(&user)))
+                .map(|user| UserRecordDecode::Complete(StoredApiUserV8::from_v3(&user)))
         }
         17 => {
             return decode_record(Value::Array(fields))
-                .map(|user| UserRecordDecode::Complete(StoredApiUserV7::from_v4(&user)))
+                .map(|user| UserRecordDecode::Complete(StoredApiUserV8::from_v4(&user)))
         }
         18..=20 => {}
-        21 => return decode_record(Value::Array(fields)).map(UserRecordDecode::Complete),
+        21 => {
+            return decode_record(Value::Array(fields))
+                .map(|user: StoredApiUserV7| UserRecordDecode::Complete(StoredApiUserV8::from_v7(user)))
+        }
+        22 => return decode_record(Value::Array(fields)).map(UserRecordDecode::Complete),
         _ => return Err(invalid("stored user record has an unsupported field count")),
     }
     let trailing = fields.split_off(18);
     let base: StoredApiUserV5 = decode_record(Value::Array(fields))?;
-    let mut user = StoredApiUserV7::from_v5(&base);
+    let mut user = StoredApiUserV8::from_v5(&base);
     match trailing.as_slice() {
         [] | [Value::Null] => {}
         [Value::String(value)] => {
@@ -459,8 +531,8 @@ pub(crate) fn classify_user_record(value: Value) -> io::Result<UserRecordDecode>
     Ok(UserRecordDecode::Complete(user))
 }
 
-/// Decodes a stored record into V7, failing on an ambiguous compact layout.
-pub(crate) fn decode_user_record(value: Value) -> io::Result<StoredApiUserV7> {
+/// Decodes a stored record into V8, failing on an ambiguous compact layout.
+pub(crate) fn decode_user_record(value: Value) -> io::Result<StoredApiUserV8> {
     match classify_user_record(value)? {
         UserRecordDecode::Complete(user) => Ok(user),
         UserRecordDecode::Ambiguous { .. } => Err(ambiguous_user_record()),
@@ -516,6 +588,66 @@ pub(crate) struct ApiUserRecovery {
     pub network_access: Option<NetworkAccessDto>,
     pub plan: Option<String>,
     pub filter: Option<String>,
+    #[serde(default)]
+    pub player_features: Option<shared::model::PlayerFeaturesDto>,
+}
+
+impl From<&StoredApiUserV8> for ApiUserRecovery {
+    fn from(v8: &StoredApiUserV8) -> Self {
+        Self {
+            target: v8.target.clone(),
+            username: v8.username.clone(),
+            password: v8.password.clone(),
+            token: v8.token.clone(),
+            proxy: v8.proxy,
+            server: v8.server.clone(),
+            epg_timeshift: v8.epg_timeshift.clone(),
+            epg_request_timeshift: v8.epg_request_timeshift.clone(),
+            created_at: v8.created_at,
+            exp_date: v8.exp_date,
+            max_connections: v8.max_connections,
+            status: v8.status,
+            output_clusters: v8.output_clusters,
+            ui_enabled: v8.ui_enabled,
+            comment: v8.comment.clone(),
+            priority: v8.priority,
+            soft_connections: v8.soft_connections,
+            soft_priority: v8.soft_priority,
+            network_access: v8.network_access.clone(),
+            plan: v8.plan.clone(),
+            filter: v8.filter.clone(),
+            player_features: v8.player_features.clone(),
+        }
+    }
+}
+
+impl From<&ApiUserRecovery> for StoredApiUserV8 {
+    fn from(recovery: &ApiUserRecovery) -> Self {
+        Self {
+            target: recovery.target.clone(),
+            username: recovery.username.clone(),
+            password: recovery.password.clone(),
+            token: recovery.token.clone(),
+            proxy: recovery.proxy,
+            server: recovery.server.clone(),
+            epg_timeshift: recovery.epg_timeshift.clone(),
+            epg_request_timeshift: recovery.epg_request_timeshift.clone(),
+            created_at: recovery.created_at,
+            exp_date: recovery.exp_date,
+            max_connections: recovery.max_connections,
+            status: recovery.status,
+            output_clusters: recovery.output_clusters,
+            ui_enabled: recovery.ui_enabled,
+            comment: recovery.comment.clone(),
+            priority: recovery.priority,
+            soft_connections: recovery.soft_connections,
+            soft_priority: recovery.soft_priority,
+            network_access: recovery.network_access.clone(),
+            plan: recovery.plan.clone(),
+            filter: recovery.filter.clone(),
+            player_features: recovery.player_features.clone(),
+        }
+    }
 }
 
 impl From<&StoredApiUserV7> for ApiUserRecovery {
@@ -542,6 +674,7 @@ impl From<&StoredApiUserV7> for ApiUserRecovery {
             network_access: v7.network_access.clone(),
             plan: v7.plan.clone(),
             filter: v7.filter.clone(),
+            player_features: None,
         }
     }
 }
@@ -570,6 +703,7 @@ impl From<&StoredProxyUserCredentials> for ApiUserRecovery {
             network_access: stored.network_access.clone(),
             plan: stored.plan.clone(),
             filter: stored.filter.clone(),
+            player_features: stored.player_features.clone(),
         }
     }
 }
@@ -598,6 +732,7 @@ impl From<&ApiUserRecovery> for StoredProxyUserCredentials {
             network_access: recovery.network_access.clone(),
             plan: recovery.plan.clone(),
             filter: recovery.filter.clone(),
+            player_features: recovery.player_features.clone(),
         }
     }
 }
@@ -806,10 +941,11 @@ pub(crate) mod test_fixtures {
 mod tests {
     use super::{
         classify_user_record, ApiUserRecovery, StoredApiUserV1, StoredApiUserV2, StoredApiUserV3, StoredApiUserV4,
-        StoredApiUserV5, StoredApiUserV7, UserRecordDecode, SUPPORTED_CONTAINER_VERSIONS, SUPPORTED_VALUE_VERSIONS,
+        StoredApiUserV5, StoredApiUserV7, StoredApiUserV8, UserRecordDecode, SUPPORTED_CONTAINER_VERSIONS,
+        SUPPORTED_VALUE_VERSIONS,
     };
     use serde_json::Value;
-    use shared::model::{ClusterFlags, NetworkAccessDto, ProxyType};
+    use shared::model::{ClusterFlags, NetworkAccessDto, PlayerFeaturesDto, PlayerRecordingLevel, ProxyType};
 
     fn user_to_value_array<T: serde::Serialize>(user: &T) -> Vec<Value> {
         let bytes = rmp_serde::to_vec(user).expect("serialize with rmp_serde");
@@ -858,11 +994,11 @@ mod tests {
     }
 
     #[test]
-    fn the_supported_matrix_is_twenty_one_cases() {
+    fn the_supported_matrix_is_twenty_four_cases() {
         // Container version and value version are independent axes: any
         // container can hold any value layout, so the importer has to cover
         // the product, not the diagonal.
-        assert_eq!(SUPPORTED_CONTAINER_VERSIONS.len() * SUPPORTED_VALUE_VERSIONS.len(), 21);
+        assert_eq!(SUPPORTED_CONTAINER_VERSIONS.len() * SUPPORTED_VALUE_VERSIONS.len(), 24);
     }
 
     #[test]
@@ -878,23 +1014,24 @@ mod tests {
     #[test]
     fn the_oldest_layout_climbs_to_the_newest_without_losing_a_field() {
         let v1 = v1();
-        let v7 = StoredApiUserV7::from_v1(&v1);
+        let v8 = StoredApiUserV8::from_v1(&v1);
 
-        assert_eq!(v7.target, v1.target);
-        assert_eq!(v7.username, v1.username);
-        assert_eq!(v7.password, v1.password);
-        assert_eq!(v7.token, v1.token);
-        assert_eq!(v7.epg_timeshift, v1.epg_timeshift);
-        assert_eq!(v7.created_at, v1.created_at);
-        assert_eq!(v7.exp_date, v1.exp_date);
-        assert_eq!(v7.max_connections, v1.max_connections);
-        assert_eq!(v7.ui_enabled, v1.ui_enabled);
-        assert_eq!(v7.comment, v1.comment);
+        assert_eq!(v8.target, v1.target);
+        assert_eq!(v8.username, v1.username);
+        assert_eq!(v8.password, v1.password);
+        assert_eq!(v8.token, v1.token);
+        assert_eq!(v8.epg_timeshift, v1.epg_timeshift);
+        assert_eq!(v8.created_at, v1.created_at);
+        assert_eq!(v8.exp_date, v1.exp_date);
+        assert_eq!(v8.max_connections, v1.max_connections);
+        assert_eq!(v8.ui_enabled, v1.ui_enabled);
+        assert_eq!(v8.comment, v1.comment);
         // Fields V1 never had take the documented defaults rather than
         // anything derived from the user.
-        assert_eq!(v7.output_clusters, ClusterFlags::all());
-        assert_eq!(v7.plan, None);
-        assert_eq!(v7.filter, None);
+        assert_eq!(v8.output_clusters, ClusterFlags::all());
+        assert_eq!(v8.plan, None);
+        assert_eq!(v8.filter, None);
+        assert_eq!(v8.player_features, None);
     }
 
     #[test]
@@ -902,7 +1039,7 @@ mod tests {
         // This is the whole reason it exists beside the positional layouts:
         // a later change to the credential shape must be a migration, not a
         // reinterpretation of bytes.
-        let recovery = ApiUserRecovery::from(&StoredApiUserV7::from_v1(&v1()));
+        let recovery = ApiUserRecovery::from(&StoredApiUserV8::from_v1(&v1()));
         let encoded = serde_json::to_string(&recovery).expect("serialize");
 
         for field in ["\"target\"", "\"username\"", "\"proxy\"", "\"output_clusters\"", "\"ui_enabled\""] {
@@ -912,7 +1049,7 @@ mod tests {
 
     #[test]
     fn the_normalized_record_round_trips() {
-        let recovery = ApiUserRecovery::from(&StoredApiUserV7::from_v1(&v1()));
+        let recovery = ApiUserRecovery::from(&StoredApiUserV8::from_v1(&v1()));
         let encoded = serde_json::to_string(&recovery).expect("serialize");
         let decoded: ApiUserRecovery = serde_json::from_str(&encoded).expect("deserialize");
         assert_eq!(decoded, recovery);
@@ -932,17 +1069,32 @@ mod tests {
         v7_record.plan = Some("gold".to_string());
         v7_record.filter = Some("Group ~ \"DE.*\"".to_string());
 
+        let features_dto = PlayerFeaturesDto {
+            source_switch: Some(true),
+            joinable_streams: Some(true),
+            recording: Some(PlayerRecordingLevel::Private),
+            recording_quota: Some(shared::model::ByteSize::new("10GB")),
+            max_concurrent_recordings: Some(1),
+            free_shared_joins: Some(true),
+            max_free_shared_joins: Some(1),
+            ..Default::default()
+        };
+        let mut v8_record = StoredApiUserV8::from_v7(v7_record.clone());
+        v8_record.player_features = Some(features_dto.clone());
+
         let arr_13 = user_to_value_array(&v1_record);
         let arr_14 = user_to_value_array(&v2_record);
         let arr_15 = user_to_value_array(&v3_record);
         let arr_17 = user_to_value_array(&v4_record);
         let arr_21 = user_to_value_array(&v7_record);
+        let arr_22 = user_to_value_array(&v8_record);
 
         assert_eq!(arr_13.len(), 13);
         assert_eq!(arr_14.len(), 14);
         assert_eq!(arr_15.len(), 15);
         assert_eq!(arr_17.len(), 17);
         assert_eq!(arr_21.len(), 21);
+        assert_eq!(arr_22.len(), 22);
 
         assert!(matches!(classify_user_record(Value::Array(arr_13)), Ok(UserRecordDecode::Complete(_))));
         assert!(matches!(classify_user_record(Value::Array(arr_14)), Ok(UserRecordDecode::Complete(_))));
@@ -950,11 +1102,21 @@ mod tests {
         assert!(matches!(classify_user_record(Value::Array(arr_17)), Ok(UserRecordDecode::Complete(_))));
         match classify_user_record(Value::Array(arr_21)) {
             Ok(UserRecordDecode::Complete(user)) => {
+                assert_eq!(user.network_access, Some(network_dto.clone()));
+                assert_eq!(user.plan.as_deref(), Some("gold"));
+                assert_eq!(user.filter.as_deref(), Some("Group ~ \"DE.*\""));
+                assert_eq!(user.player_features, None);
+            }
+            other => panic!("expected Complete for 21 fields, got {other:?}"),
+        }
+        match classify_user_record(Value::Array(arr_22)) {
+            Ok(UserRecordDecode::Complete(user)) => {
                 assert_eq!(user.network_access, Some(network_dto));
                 assert_eq!(user.plan.as_deref(), Some("gold"));
                 assert_eq!(user.filter.as_deref(), Some("Group ~ \"DE.*\""));
+                assert_eq!(user.player_features, Some(features_dto));
             }
-            other => panic!("expected Complete for 21 fields, got {other:?}"),
+            other => panic!("expected Complete for 22 fields, got {other:?}"),
         }
     }
 
@@ -1056,8 +1218,8 @@ mod tests {
             classify_user_record(Value::Array(arr_20_null_string)).expect_err("20 fields [Null, String] must fail");
         assert!(!err.to_string().contains(&password), "error message leaked password: {err}");
 
-        // Unsupported counts (12, 16, 22) -> Err
-        for count in [12, 16, 22] {
+        // Unsupported counts (12, 16, 23) -> Err
+        for count in [12, 16, 23] {
             let mut fields = arr_18_base.clone();
             fields.resize(count, Value::Null);
             let err = classify_user_record(Value::Array(fields)).expect_err("unsupported count must fail");
@@ -1089,7 +1251,7 @@ mod tests {
 mod matrix {
     use super::{
         StoredApiUserV1, StoredApiUserV2, StoredApiUserV3, StoredApiUserV4, StoredApiUserV5, StoredApiUserV6,
-        StoredApiUserV7, SUPPORTED_CONTAINER_VERSIONS, SUPPORTED_VALUE_VERSIONS,
+        StoredApiUserV7, StoredApiUserV8, SUPPORTED_CONTAINER_VERSIONS, SUPPORTED_VALUE_VERSIONS,
     };
     use crate::{startup_migration, storage_const};
     use serde::Serialize;
@@ -1188,10 +1350,26 @@ mod matrix {
         }
     }
 
+    fn v8() -> StoredApiUserV8 {
+        StoredApiUserV8 {
+            player_features: Some(shared::model::PlayerFeaturesDto {
+                source_switch: Some(true),
+                joinable_streams: Some(true),
+                recording: Some(shared::model::PlayerRecordingLevel::Private),
+                recording_quota: Some(shared::model::ByteSize::new("10GB")),
+                max_concurrent_recordings: Some(1),
+                free_shared_joins: Some(true),
+                max_free_shared_joins: Some(1),
+                ..Default::default()
+            }),
+            ..StoredApiUserV8::from_v7(v7())
+        }
+    }
+
     /// Shared with the future-chain rehearsal, which needs a fully populated
     /// current record without a `Default` impl existing for one.
     pub(super) fn current_credentials() -> crate::user_repository::StoredProxyUserCredentials {
-        crate::user_repository::StoredProxyUserCredentials::from(&super::ApiUserRecovery::from(&v7()))
+        crate::user_repository::StoredProxyUserCredentials::from(&super::ApiUserRecovery::from(&v8()))
     }
 
     /// Writes the database the way the code at `container_version` would have.
@@ -1230,6 +1408,7 @@ mod matrix {
             5 => write_container(path, container_version, v5()),
             6 => write_container(path, container_version, v6()),
             7 => write_container(path, container_version, v7()),
+            8 => write_container(path, container_version, v8()),
             other => panic!("unsupported value version {other}"),
         }
     }
@@ -1248,7 +1427,7 @@ mod matrix {
         Ok(Case { _dir: dir, db_path, guard_path })
     }
 
-    /// Every one of the 21 combinations must end up readable as the current
+    /// Every one of the 24 combinations must end up readable as the current
     /// layout, with the fields that version actually carried preserved.
     #[test]
     fn api_user_recovery_matrix_every_container_and_value_version_imports() -> io::Result<()> {
@@ -1262,7 +1441,7 @@ mod matrix {
                     failures.push(format!("{label}: import failed: {error}"));
                     continue;
                 }
-                let Ok(tree) = crate::BPlusTree::<String, StoredApiUserV7>::load(&case.db_path) else {
+                let Ok(tree) = crate::BPlusTree::<String, StoredApiUserV8>::load(&case.db_path) else {
                     failures.push(format!("{label}: not readable as the current layout after import"));
                     continue;
                 };
@@ -1424,7 +1603,7 @@ mod matrix {
     /// the documented default for layouts that predate output clusters.
     #[test]
     fn api_user_recovery_matrix_layouts_without_clusters_default_to_all() {
-        assert_eq!(StoredApiUserV7::from_v2(&v2()).output_clusters, ClusterFlags::all());
+        assert_eq!(StoredApiUserV8::from_v2(&v2()).output_clusters, ClusterFlags::all());
     }
 
     /// Legacy data reaches normalized recovery before anything can mutate it.

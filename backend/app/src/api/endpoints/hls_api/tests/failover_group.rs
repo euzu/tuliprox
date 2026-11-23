@@ -2499,3 +2499,301 @@ async fn legacy_manifest_failure_switch_in_flight_answers_502_without_reloading_
     assert_eq!(env.active_session_vids("viewer").await, sessions_before, "the retry must not terminate the session");
     assert_eq!(env.bound_member_input("viewer").await, "solis", "the switch owner keeps the binding");
 }
+
+/// Cache session with one user: manual switch to member 2 -> binding is member 2, next manifest
+/// contains `EXT-X-DISCONTINUITY`, no member failure recorded, automatic budget unchanged.
+#[tokio::test]
+async fn cache_session_one_user_manual_switch_discontinuity_no_failure_budget_unchanged() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    let first = env.get(&variant_uri).await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    let runtime = session.read().await.origin_account_runtime.clone().expect("origin runtime");
+
+    assert_eq!(session.read().await.origin_source.input_name.as_ref(), "solis");
+    assert!(env.origin_hits("solis") > 0);
+    assert_eq!(env.origin_hits("korath"), 0);
+
+    // Initial failure state on solis: closed
+    assert!(matches!(env.circuit("solis"), CircuitView::Closed));
+
+    // Request manual member switch to member 1 ("korath")
+    runtime.request_member_handoff(&session, 1).await.expect("manual switch succeeds");
+
+    // Binding is member 2 ("korath")
+    assert_eq!(session.read().await.origin_source.input_name.as_ref(), "korath");
+    assert_eq!(session.read().await.origin_account_binding.as_ref().map(|b| b.input_name.as_ref()), Some("korath"));
+    wait_for_bound_member(&session, "korath").await;
+
+    // Next manifest contains EXT-X-DISCONTINUITY
+    let mut switched = env.get(&variant_uri).await;
+    for _ in 0..50 {
+        if switched.status() == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        switched = env.get(&variant_uri).await;
+    }
+    assert_eq!(switched.status(), StatusCode::OK);
+    let switched_body = body_text(switched).await;
+    assert!(
+        switched_body.lines().any(|l| l == "#EXT-X-DISCONTINUITY"),
+        "switched manifest must contain discontinuity: {switched_body}"
+    );
+
+    // No member failure recorded on solis
+    assert!(matches!(env.circuit("solis"), CircuitView::Closed));
+
+    // Automatic budget is unchanged: notify unhealthy now triggers normal automatic failover back to solis
+    runtime.notify_member_unhealthy(&session, HlsMemberUnhealthyReason::ManifestFailure);
+    wait_for_bound_member(&session, "solis").await;
+    assert_eq!(session.read().await.origin_source.input_name.as_ref(), "solis");
+}
+
+/// Cache session with one user: manual switch to unavailable target member B fails to open,
+/// returns `Err(HlsManualSwitchError::Failed(_))` while falling back to healthy member A,
+/// playback remains playable with 200 media playlist, bound member is not B, and no failure
+/// is recorded for A.
+#[tokio::test]
+async fn cache_session_one_user_manual_switch_target_unavailable_falls_back_playable() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::Status(500))
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    let first = env.get(&variant_uri).await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    let runtime = session.read().await.origin_account_runtime.clone().expect("origin runtime");
+
+    assert_eq!(session.read().await.origin_source.input_name.as_ref(), "solis");
+    assert!(env.origin_hits("solis") > 0);
+    assert_eq!(env.origin_hits("korath"), 0);
+
+    // Initial failure state on solis: closed
+    assert!(matches!(env.circuit("solis"), CircuitView::Closed));
+
+    // Request manual member switch to member 1 ("korath", target B), which fails with HTTP 500
+    let err = runtime
+        .request_member_handoff(&session, 1)
+        .await
+        .expect_err("manual switch to unavailable target member must fail");
+    assert_eq!(
+        err,
+        tuliprox_hls::api::HlsManualSwitchError::Failed(
+            "target member unavailable; playback continued on another member".to_string()
+        )
+    );
+
+    // Playback continues on healthy member: following manifest request returns 200 with media playlist content
+    wait_for_bound_member(&session, "solis").await;
+    wait_for_member_handoff_idle(&runtime).await;
+
+    let mut following = env.get(&variant_uri).await;
+    for _ in 0..50 {
+        if following.status() == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        following = env.get(&variant_uri).await;
+    }
+    assert_eq!(following.status(), StatusCode::OK);
+    let following_body = body_text(following).await;
+    assert!(
+        following_body.lines().any(|l| l.starts_with("#EXTINF:")),
+        "following manifest must contain media playlist content: {following_body}"
+    );
+    assert!(!following_body.contains("#EXT-X-ENDLIST"), "media playlist must not be terminal");
+
+    // Bound member is not B ("korath"), but member A ("solis")
+    assert_ne!(session.read().await.origin_source.input_name.as_ref(), "korath");
+    assert_eq!(session.read().await.origin_source.input_name.as_ref(), "solis");
+    assert_ne!(session.read().await.origin_account_binding.as_ref().map(|b| b.input_name.as_ref()), Some("korath"));
+    assert_eq!(session.read().await.origin_account_binding.as_ref().map(|b| b.input_name.as_ref()), Some("solis"));
+
+    // No member failure was recorded for member A ("solis")
+    assert!(matches!(env.circuit("solis"), CircuitView::Closed));
+}
+
+/// Cache session with two user sessions: read-only user session count reflects both leases.
+#[tokio::test]
+async fn cache_session_two_user_sessions_manual_switch_refused() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .build()
+        .await;
+
+    // First user starts playback
+    let master1 = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri1 = first_segment_url(&master1);
+    assert_eq!(env.get(&variant_uri1).await.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    let proxy_session_id = session.read().await.proxy_session_id.clone();
+
+    let now_ms = tuliprox_core::utils::current_time_millis();
+    let count1 = env
+        .app_state
+        .hls
+        .proxy
+        .non_terminal_user_session_tokens_for_proxy_session(&proxy_session_id, now_ms)
+        .await
+        .len();
+    assert_eq!(count1, 1);
+
+    // Second user starts playback on the same cache session
+    let master2_res = env.get_hls_manifest_from(env.group_vid, 12346).await;
+    assert_eq!(master2_res.status(), StatusCode::OK);
+    let master2 = GroupPlaybackEnv::response_text(master2_res).await;
+    let variant_uri2 = first_segment_url(&master2);
+    assert_eq!(env.get(&variant_uri2).await.status(), StatusCode::OK);
+
+    let count2 = env
+        .app_state
+        .hls
+        .proxy
+        .non_terminal_user_session_tokens_for_proxy_session(&proxy_session_id, now_ms)
+        .await
+        .len();
+    assert_eq!(count2, 2);
+}
+
+/// Manual switch while automatic handoff in flight -> `InProgress`; within 2 s after a manual switch -> `Cooldown` (paused tokio time).
+#[tokio::test]
+async fn cache_session_manual_switch_in_flight_and_cooldown_paused_time() {
+    tokio::time::pause();
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls_cache()
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    assert_eq!(env.get(&variant_uri).await.status(), StatusCode::OK);
+
+    let group_key = HlsSessionKey::for_group(env.target.id, env.group_vid);
+    let session = env.app_state.hls.proxy.sessions().get_by_key(&group_key).await.expect("group session");
+    let runtime = session.read().await.origin_account_runtime.clone().expect("origin runtime");
+
+    // Hold the prepare lock so the automatic handoff remains in flight
+    let prepare_lock = Arc::clone(&session.read().await.origin_account_prepare_lock);
+    let prepare_guard = prepare_lock.lock().await;
+
+    runtime.notify_member_unhealthy(&session, HlsMemberUnhealthyReason::ManifestFailure);
+
+    // Wait until in-flight flag is active
+    let mut in_flight = false;
+    for _ in 0..100 {
+        if runtime.member_handoff_pending() {
+            in_flight = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(in_flight, "automatic handoff must be in flight");
+
+    // Manual switch while automatic handoff is in flight must fail with InProgress
+    let err = runtime.request_member_handoff(&session, 1).await.expect_err("in-flight switch must fail");
+    assert!(matches!(err, tuliprox_hls::api::HlsManualSwitchError::InProgress));
+
+    // Release lock and wait for automatic handoff to complete
+    drop(prepare_guard);
+    wait_for_bound_member(&session, "korath").await;
+    wait_for_member_handoff_idle(&runtime).await;
+
+    // Now execute a manual switch to member 0 ("solis")
+    runtime.request_member_handoff(&session, 0).await.expect("manual switch to solis succeeds");
+    assert_eq!(session.read().await.origin_source.input_name.as_ref(), "solis");
+
+    // A second manual switch within 2s cooldown must return Cooldown with retry_after <= 2s
+    let cooldown_err = runtime.request_member_handoff(&session, 1).await.expect_err("cooldown switch must fail");
+    match cooldown_err {
+        tuliprox_hls::api::HlsManualSwitchError::Cooldown { retry_after } => {
+            assert!(retry_after <= Duration::from_secs(2));
+            assert!(retry_after > Duration::ZERO);
+        }
+        other => panic!("expected Cooldown, got {other:?}"),
+    }
+
+    // Advance tokio paused time past the 2s cooldown
+    tokio::time::advance(Duration::from_millis(2100)).await;
+
+    // Now manual switch succeeds
+    runtime.request_member_handoff(&session, 1).await.expect("manual switch after cooldown succeeds");
+    assert_eq!(session.read().await.origin_source.input_name.as_ref(), "korath");
+}
+
+/// Legacy session: manual switch -> next manifest served from member 2 with continuous media sequence (rebase).
+#[tokio::test]
+async fn legacy_session_manual_switch_rebases_sequence_continuously() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .hls()
+        .origin_mode("solis", FakeOriginMode::HlsAdvancing)
+        .origin_mode("korath", FakeOriginMode::HlsAdvancingFrom(5000))
+        .build()
+        .await;
+
+    let master = env.get_hls_manifest_text(env.group_vid).await;
+    let variant_uri = first_segment_url(&master);
+    let first = env.get(&variant_uri).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = body_text(first).await;
+    let first_seq = media_sequence(&first_body);
+    assert_eq!(env.bound_member_input("viewer").await, "solis");
+
+    let token = session_token_from_variant(&env, &variant_uri);
+    let user_session = env.app_state.active_users.get_and_update_user_session("viewer", &token).await.expect("session");
+    let target = env.app_state.app_config.get_target_by_id(env.target.id).expect("target");
+    let user = env.app_state.app_config.get_user_credentials("viewer").expect("user");
+    let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-viewer".to_string(), "127.0.0.1".to_string(), addr);
+
+    let outcome = crate::api::endpoints::hls_api::manual_switch_legacy_hls_group_session(
+        &env.app_state,
+        &fingerprint,
+        &user,
+        &target,
+        &HeaderMap::new(),
+        Arc::clone(&env.group_record),
+        &user_session,
+        &token,
+        1,
+    )
+    .await;
+    assert!(matches!(outcome, crate::api::endpoints::hls_api::LegacySwitchOutcome::Committed));
+
+    // Next manifest poll serves member 2 ("korath") with rebased monotonic sequence and discontinuity
+    let switched = env.get(&variant_uri).await;
+    assert_eq!(switched.status(), StatusCode::OK);
+    let switched_body = body_text(switched).await;
+    let switched_seq = media_sequence(&switched_body);
+
+    assert_eq!(env.bound_member_input("viewer").await, "korath");
+    assert!(
+        switched_body.lines().any(|line| line == "#EXT-X-DISCONTINUITY"),
+        "switched manifest must contain discontinuity: {switched_body}"
+    );
+    assert!(switched_seq >= first_seq, "media sequence must advance monotonically: {first_seq} -> {switched_seq}");
+}

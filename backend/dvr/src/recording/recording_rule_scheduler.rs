@@ -209,7 +209,51 @@ pub fn spawn_recording_rule_scheduler<E: EventSink + Clone + 'static>(
     });
 }
 
-async fn materialize_due_rules<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> Result<(), String> {
+fn resolve_candidate_api_user<E: EventSink + Clone + 'static>(
+    ctx: &RecordingCtx<E>,
+    candidate: &MaterializationCandidate,
+) -> Option<std::sync::Arc<tuliprox_core::model::ProxyUserCredentials>> {
+    let username = candidate.rule_owner_id.api_username()?;
+    let Some((user, target)) = ctx.app_config.get_target_for_username(&username) else {
+        debug!("Skipping rule materialization for {}: API user not found", candidate.rule_owner_id);
+        return None;
+    };
+    if user.status.is_some_and(|status| !status.is_usable()) || user.permission_denied(&ctx.app_config) {
+        debug!("Skipping rule materialization for {}: API user disabled or permission denied", candidate.rule_owner_id);
+        return None;
+    }
+    let level_ok = match candidate.rule_visibility {
+        RuleVisibility::Private => matches!(
+            user.player_features.recording,
+            shared::model::PlayerRecordingLevel::Private | shared::model::PlayerRecordingLevel::Shared
+        ),
+        RuleVisibility::Shared => matches!(user.player_features.recording, shared::model::PlayerRecordingLevel::Shared),
+    };
+    if !level_ok {
+        debug!(
+            "Skipping rule materialization for {}: recording level {:?} insufficient for {:?} rule",
+            candidate.rule_owner_id, user.player_features.recording, candidate.rule_visibility
+        );
+        return None;
+    }
+    if !ctx.app_config.sources.load().target_ref_is(&target, &candidate.source.target_id) {
+        debug!(
+            "Skipping rule materialization for {}: rule target {} is no longer user target",
+            candidate.rule_owner_id, candidate.source.target_id
+        );
+        return None;
+    }
+    Some(user)
+}
+
+pub(crate) async fn materialize_due_rules<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> Result<(), String> {
+    materialize_due_rules_at(ctx, Utc::now().timestamp()).await
+}
+
+pub(crate) async fn materialize_due_rules_at<E: EventSink + Clone + 'static>(
+    ctx: &RecordingCtx<E>,
+    now: i64,
+) -> Result<(), String> {
     // `recording.enabled: false` has to stop the scheduler too. Without
     // this the routes refuse every request while this loop keeps quietly
     // materializing tasks the worker will then run — the worst of both
@@ -234,20 +278,28 @@ async fn materialize_due_rules<E: EventSink + Clone + 'static>(ctx: &RecordingCt
     // is indistinguishable from a rule that matched no programmes.
     let epg_programmes: &[EpgProgramme] = &[];
     warn_about_inert_new_episode_rules(&file.rules, epg_programmes);
-    let candidates =
-        plan_materializations(&file.rules, epg_programmes, &tasks, &file.tombstones, Utc::now().timestamp(), None);
+    let candidates = plan_materializations(&file.rules, epg_programmes, &tasks, &file.tombstones, now, None);
     if candidates.is_empty() {
         return Ok(());
     }
     let service = RecordingService::from_ctx(ctx);
     for candidate in candidates {
-        let claims = scheduler_claims(candidate.rule_owner_id.clone(), candidate.rule_visibility);
+        let claims = if candidate.rule_owner_id.is_api() {
+            let Some(user) = resolve_candidate_api_user(ctx, &candidate) else {
+                continue;
+            };
+            tuliprox_core::model::api_user_claims(&user)
+        } else {
+            scheduler_claims(candidate.rule_owner_id.clone(), candidate.rule_visibility)
+        };
         let input = CreateRecordingInput {
             source: RecordingSourceInput {
                 target_id: candidate.source.target_id,
                 virtual_id: candidate.source.virtual_id,
                 cluster: XtreamCluster::Live,
                 input_name: candidate.source.input_name,
+                provider_id: candidate.source.provider_id,
+                is_group: candidate.source.is_group,
             },
             program_title: candidate.programme_title,
             program_start: candidate.programme_start,
@@ -343,6 +395,9 @@ fn scheduler_claims(owner_id: shared::model::UserId, visibility: RuleVisibility)
     let mut permissions = PermissionSet::new();
     permissions.set(Permission::RecordingCreate);
     permissions.set(Permission::RecordingManage);
+    if visibility == RuleVisibility::Shared {
+        permissions.set(Permission::RecordingShare);
+    }
     let roles = if visibility == RuleVisibility::Shared { RoleSet::ADMIN } else { RoleSet::new() };
     let now = Utc::now().timestamp();
     Claims {
@@ -369,6 +424,7 @@ mod tests {
         },
         utils::Internable,
     };
+    use std::sync::Arc;
 
     fn user() -> UserId { UserId::from("web:alice") }
     fn source() -> RuleSource { RuleSource::new("tgt", "virt", "input") }
@@ -515,5 +571,383 @@ mod tests {
         let out = plan_materializations(&[rule], &[], &[], &TombstoneSet::default(), 0, None);
 
         assert_eq!(out.len(), 0);
+    }
+
+    fn test_ctx(
+        dir: &std::path::Path,
+        api_proxy_dto: &shared::model::ApiProxyConfigDto,
+    ) -> RecordingCtx<shared::model::NoopSink> {
+        let mut rec_cfg = tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+            enabled: true,
+            ..Default::default()
+        });
+        rec_cfg.directory = dir.to_string_lossy().into_owned();
+
+        let mut config = tuliprox_core::model::Config {
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(rec_cfg),
+            }),
+            ..tuliprox_core::model::Config::default()
+        };
+        config.storage_dir = dir.to_string_lossy().into_owned();
+
+        let input = std::sync::Arc::new(tuliprox_core::model::ConfigInput {
+            id: 7,
+            name: "input".into(),
+            ..Default::default()
+        });
+        let target = std::sync::Arc::new(tuliprox_core::model::ConfigTarget {
+            id: 11,
+            managed_channels: Vec::new(),
+            enabled: true,
+            name: "tgt".to_string(),
+            options: None,
+            sort: None,
+            filter: tuliprox_core::model::StagedFilter::default(),
+            output: vec![],
+            rename: None,
+            mapping_ids: None,
+            mapping: std::sync::Arc::default(),
+            favourites: None,
+            processing_order: shared::model::ProcessingOrder::default(),
+            curation: None,
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        let sources = tuliprox_core::model::SourcesConfig {
+            inputs: vec![std::sync::Arc::clone(&input)],
+            sources: vec![tuliprox_core::model::ConfigSource { inputs: vec!["input".into()], targets: vec![target] }],
+            ..tuliprox_core::model::SourcesConfig::default()
+        };
+
+        let app_config = std::sync::Arc::new(tuliprox_core::model::AppConfig {
+            config: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(config)),
+            sources: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(sources)),
+            hdhomerun: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
+            plugins: std::sync::Arc::default(),
+            api_proxy: std::sync::Arc::new(arc_swap::ArcSwapOption::new(Some(std::sync::Arc::new(
+                tuliprox_core::model::ApiProxyConfig::from(api_proxy_dto),
+            )))),
+            file_locks: std::sync::Arc::new(tuliprox_core::utils::FileLockManager::default()),
+            paths: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(shared::model::ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                failover_file_path: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: std::sync::Arc::new(tuliprox_core::model::MediaToolCapabilities::default()),
+            failover: std::sync::Arc::default(),
+        });
+
+        RecordingCtx {
+            app_config,
+            recordings: std::sync::Arc::new(crate::recording::recording_queue::RecordingQueue::new()),
+            events: shared::model::NoopSink,
+            http_clients: std::sync::Arc::new(tuliprox_core::model::HttpClients::default()),
+            recording_capacity: crate::recording_capacity::stub::StubCapacity::with_room(),
+        }
+    }
+
+    fn upcoming_weekly_rule(owner: UserId, now_utc: DateTime<Utc>) -> RecordingRule {
+        use chrono::Datelike;
+        let start_utc = now_utc + chrono::Duration::minutes(5);
+        let weekday = u8::try_from(start_utc.weekday().number_from_monday()).unwrap_or(1);
+        let local_start_time = start_utc.format("%H:%M").to_string();
+
+        RecordingRule {
+            id: "r-api-1".into(),
+            owner_id: owner,
+            visibility: RuleVisibility::Private,
+            enabled: true,
+            source: RuleSource::new("tgt", "42", "input"),
+            channel_id: Some("ch-1".into()),
+            body: RuleBody::WeeklyTimeslot { weekday, local_start_time, duration_secs: 1800, timezone: "UTC".into() },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_skips_api_owner_when_downgraded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = RecordingRuleRepository::new(dir.path());
+        let now = chrono::Utc::now();
+        repo.create(upcoming_weekly_rule(UserId::api("alice"), now)).await.expect("save rule");
+
+        // Alice is downgraded to Read
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "tgt".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Read),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let ctx = test_ctx(dir.path(), &api_proxy_dto);
+        assert!(materialize_due_rules_at(&ctx, now.timestamp()).await.is_ok());
+
+        let tasks = reconcilable_tasks(&ctx).await;
+        assert_eq!(tasks.len(), 0, "downgraded API user rule must not materialize");
+    }
+
+    #[tokio::test]
+    async fn scheduler_skips_api_owner_when_disabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = RecordingRuleRepository::new(dir.path());
+        let now = chrono::Utc::now();
+        repo.create(upcoming_weekly_rule(UserId::api("alice"), now)).await.expect("save rule");
+
+        // Alice is disabled
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "tgt".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    status: Some(shared::model::ProxyUserStatus::Disabled),
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Private),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let ctx = test_ctx(dir.path(), &api_proxy_dto);
+        assert!(materialize_due_rules_at(&ctx, now.timestamp()).await.is_ok());
+
+        let tasks = reconcilable_tasks(&ctx).await;
+        assert_eq!(tasks.len(), 0, "disabled API user rule must not materialize");
+    }
+
+    #[tokio::test]
+    async fn scheduler_materializes_task_owned_by_api_user() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = RecordingRuleRepository::new(dir.path());
+        let now = chrono::Utc::now();
+        repo.create(upcoming_weekly_rule(UserId::api("alice"), now)).await.expect("save rule");
+
+        // Alice has Private recording level and is active
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "tgt".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Private),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let ctx = test_ctx(dir.path(), &api_proxy_dto);
+        assert!(materialize_due_rules_at(&ctx, now.timestamp()).await.is_ok());
+
+        let tasks = reconcilable_tasks(&ctx).await;
+        assert_eq!(tasks.len(), 1, "active API user rule should materialize");
+
+        let scheduled = ctx.recordings.scheduled.read().await;
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].recording.owner_id(), &UserId::api("alice"));
+    }
+
+    #[tokio::test]
+    async fn scheduler_skips_shared_rule_when_user_downgraded_to_private_but_materializes_private_rule() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = RecordingRuleRepository::new(dir.path());
+        let now = chrono::Utc::now();
+        let mut shared_rule = upcoming_weekly_rule(UserId::api("alice"), now);
+        shared_rule.id = "r-shared".into();
+        shared_rule.visibility = RuleVisibility::Shared;
+        repo.create(shared_rule).await.expect("save shared rule");
+
+        let mut private_rule = upcoming_weekly_rule(UserId::api("alice"), now);
+        private_rule.id = "r-private".into();
+        private_rule.visibility = RuleVisibility::Private;
+        repo.create(private_rule).await.expect("save private rule");
+
+        // Alice has only Private recording level (downgraded from Shared)
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "tgt".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Private),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let ctx = test_ctx(dir.path(), &api_proxy_dto);
+        assert!(materialize_due_rules_at(&ctx, now.timestamp()).await.is_ok());
+
+        let tasks = reconcilable_tasks(&ctx).await;
+        assert_eq!(tasks.len(), 1, "only private rule should materialize for user with Private level");
+
+        let scheduled = ctx.recordings.scheduled.read().await;
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].recording.visibility, RecordingVisibility::Private);
+        assert_eq!(scheduled[0].recording.provenance.rule_id.as_deref(), Some("r-private"));
+    }
+
+    #[test]
+    fn api_user_claims_never_receives_admin_role() {
+        let mut user = tuliprox_core::model::ProxyUserCredentials::default();
+        user.username = "alice".to_string();
+        user.player_features.recording = shared::model::PlayerRecordingLevel::Shared;
+        let claims = tuliprox_core::model::api_user_claims(&user);
+        assert!(!claims.is_admin(), "API user claims must never receive ADMIN role even with shared recording");
+        assert_eq!(claims.roles, RoleSet::new());
+    }
+
+    #[tokio::test]
+    async fn scheduler_shared_rule_charged_to_shared_quota_like_one_off() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = RecordingRuleRepository::new(dir.path());
+        let now = chrono::Utc::now();
+        let mut shared_rule = upcoming_weekly_rule(UserId::api("alice"), now);
+        shared_rule.id = "r-shared-quota".into();
+        shared_rule.visibility = RuleVisibility::Shared;
+        repo.create(shared_rule).await.expect("save shared rule");
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "tgt".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Shared),
+                        max_concurrent_recordings: Some(2),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        // 1. Quota too small: shared quota limit 100 bytes is exceeded
+        let ctx = test_ctx(dir.path(), &api_proxy_dto);
+        let mut rec_cfg = tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+            enabled: true,
+            quota: Some(shared::model::RecordingQuotaConfigDto {
+                shared: Some(shared::model::ByteSize::new("100")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        rec_cfg.directory = dir.path().to_string_lossy().into_owned();
+        let mut cfg = (**ctx.app_config.config.load()).clone();
+        cfg.video.as_mut().unwrap().recording = Some(rec_cfg);
+        ctx.app_config.config.store(Arc::new(cfg));
+
+        assert!(materialize_due_rules_at(&ctx, now.timestamp()).await.is_ok());
+        let tasks = reconcilable_tasks(&ctx).await;
+        assert_eq!(tasks.len(), 0, "shared rule must not materialize when shared quota is exceeded");
+
+        // Verify one-off shared recording also fails with QuotaExceeded
+        let service = RecordingService::from_ctx(&ctx);
+        let (user, _) = ctx.app_config.get_target_for_username("alice").unwrap();
+        let claims = tuliprox_core::model::api_user_claims(&user);
+        assert!(!claims.is_admin());
+        let input = CreateRecordingInput {
+            source: RecordingSourceInput {
+                target_id: "tgt".to_string(),
+                virtual_id: "42".to_string(),
+                cluster: XtreamCluster::Live,
+                input_name: "input".to_string(),
+                provider_id: None,
+                is_group: false,
+            },
+            program_title: "One-off".to_string(),
+            program_start: now.timestamp() + 300,
+            program_end: now.timestamp() + 2100,
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            visibility: RecordingVisibility::Shared,
+            channel_id: Some("ch-1".to_string()),
+            channel_name: None,
+            group: None,
+            provenance: RecordingProvenance::default(),
+            epg: None,
+        };
+        let one_off_res = service.create_recording(&claims, &input).await;
+        assert!(one_off_res.is_err(), "one-off shared recording must fail when quota exceeded");
+        assert_eq!(one_off_res.unwrap_err().code(), "recording_quota_exceeded");
+
+        // 2. Room in shared quota: 50GB
+        let mut rec_cfg_room = tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+            enabled: true,
+            quota: Some(shared::model::RecordingQuotaConfigDto {
+                shared: Some(shared::model::ByteSize::new("50GB")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        rec_cfg_room.directory = dir.path().to_string_lossy().into_owned();
+        let mut cfg_room = (**ctx.app_config.config.load()).clone();
+        cfg_room.video.as_mut().unwrap().recording = Some(rec_cfg_room);
+        ctx.app_config.config.store(Arc::new(cfg_room));
+
+        assert!(materialize_due_rules_at(&ctx, now.timestamp()).await.is_ok());
+        let tasks_after = reconcilable_tasks(&ctx).await;
+        assert_eq!(tasks_after.len(), 1, "materialized shared rule is admitted when quota allows");
+        {
+            let scheduled = ctx.recordings.scheduled.read().await;
+            assert_eq!(scheduled[0].recording.visibility, RecordingVisibility::Shared);
+            assert_eq!(scheduled[0].recording.owner_id(), &UserId::api("alice"));
+        }
+
+        // And one-off with different source or idempotency
+        let mut input_one_off = input.clone();
+        input_one_off.source.virtual_id = "43".to_string();
+        let one_off_success = service.create_recording(&claims, &input_one_off).await;
+        assert!(
+            one_off_success.is_ok(),
+            "one-off shared recording succeeds when quota allows: {:?}",
+            one_off_success.err()
+        );
+        assert_eq!(one_off_success.unwrap().visibility, RecordingVisibility::Shared);
     }
 }

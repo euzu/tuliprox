@@ -1,13 +1,11 @@
 use super::{hls_ctx::HlsCtx, HlsSession, HlsSessionHandle, HlsSessionKey, ProxySessionId};
 use log::debug;
 use shared::utils::sanitize_sensitive_info;
-use std::{
-    fmt,
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, Instant},
+use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::{
+    sync::Notify,
+    time::{timeout, Instant},
 };
-use tokio::{sync::Notify, time::timeout};
 use tuliprox_core::model::{
     is_input_expired, PlaybackKind, PlaybackRequestId, ProviderAllocation, ProviderBindingTag, ProviderHandle,
 };
@@ -15,6 +13,7 @@ use tuliprox_session::{CleanupEvent, ConnectionKind, PlaybackLeaseRef};
 
 const HLS_ACCOUNT_OVERLAP_FALLBACK_TARGET_DURATION_MS: u64 = 15_000;
 const HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK: Duration = Duration::from_millis(25);
+const HLS_ORIGIN_ACCOUNT_IO_SUPERSEDED_DRAIN_WAIT: Duration = Duration::from_secs(5);
 
 /// Stable source metadata for one shared live-HLS session.
 ///
@@ -269,6 +268,7 @@ impl Drop for HlsOriginAccountIoLeaseGuard {
             if let Some((handle, permit)) = self.lease.take_resource() {
                 permit.send(CleanupEvent::ReleaseProviderHandle { handle: Some(handle) });
             }
+            self.lease.notify.notify_waiters();
         }
     }
 }
@@ -1027,15 +1027,28 @@ async fn reserve_hls_origin_account_io_slot(
     binding: &HlsOriginAccountBinding,
     wait_deadline: Option<Instant>,
 ) -> Result<HlsOriginAccountIoSlot, HlsBoundAccountAcquireErrorKind> {
+    let mut superseded_drain_deadline: Option<Instant> = None;
     loop {
+        let lock_deadline = match (wait_deadline, superseded_drain_deadline) {
+            (Some(wait), Some(drain)) => Some(wait.min(drain)),
+            (Some(wait), None) => Some(wait),
+            (None, Some(drain)) => Some(drain),
+            (None, None) => None,
+        };
         let reserve = async {
             let mut session = session.write().await;
             try_reserve_hls_origin_account_io_slot(&mut session, binding)
         };
-        let outcome = match wait_deadline {
-            Some(deadline) => timeout(deadline.saturating_duration_since(Instant::now()), reserve)
-                .await
-                .map_err(|_| HlsBoundAccountAcquireErrorKind::WaitTimedOut)?,
+        let outcome = match lock_deadline {
+            Some(deadline) => {
+                if let Ok(outcome) = timeout(deadline.saturating_duration_since(Instant::now()), reserve).await {
+                    outcome
+                } else if superseded_drain_deadline.is_some_and(|drain| Instant::now() >= drain) {
+                    return Err(HlsBoundAccountAcquireErrorKind::ReservedForOther);
+                } else {
+                    return Err(HlsBoundAccountAcquireErrorKind::WaitTimedOut);
+                }
+            }
             None => reserve.await,
         };
         match outcome {
@@ -1063,6 +1076,24 @@ async fn reserve_hls_origin_account_io_slot(
                     }
                 }
             }
+            HlsOriginAccountIoReserveOutcome::WaitSuperseded(notify) => {
+                let drain_deadline = *superseded_drain_deadline.get_or_insert_with(|| {
+                    let cap = Instant::now() + HLS_ORIGIN_ACCOUNT_IO_SUPERSEDED_DRAIN_WAIT;
+                    match wait_deadline {
+                        Some(deadline) => deadline.min(cap),
+                        None => cap,
+                    }
+                });
+                let now = Instant::now();
+                if now >= drain_deadline {
+                    return Err(HlsBoundAccountAcquireErrorKind::ReservedForOther);
+                }
+                let wait_for = drain_deadline.saturating_duration_since(now).min(HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK);
+                tokio::select! {
+                    () = notify.notified() => {}
+                    () = tokio::time::sleep(wait_for) => {}
+                }
+            }
             HlsOriginAccountIoReserveOutcome::ReservedForOther => {
                 return Err(HlsBoundAccountAcquireErrorKind::ReservedForOther);
             }
@@ -1073,15 +1104,18 @@ async fn reserve_hls_origin_account_io_slot(
     }
 }
 
+#[derive(Debug)]
 enum HlsOriginAccountIoSlot {
     Joined(Arc<HlsOriginAccountIoLease>),
     Acquire(Arc<HlsOriginAccountIoLease>),
 }
 
+#[derive(Debug)]
 enum HlsOriginAccountIoReserveOutcome {
     Joined(Arc<HlsOriginAccountIoLease>),
     Acquire(Arc<HlsOriginAccountIoLease>),
     Wait(Arc<Notify>),
+    WaitSuperseded(Arc<Notify>),
     ReservedForOther,
     Unavailable,
 }
@@ -1107,18 +1141,22 @@ fn try_reserve_hls_origin_account_io_slot(
             }
         }
         Some(lease) if lease.is_active_or_acquiring() => {
-            debug!(
-                "HLS origin admission rejected: reason=ReservedForOther conflict=io-binding requested_account={} requested_owner={} requested_generation={} blocking_account={} blocking_owner={} blocking_generation={} active_io_count={} acquiring={}",
-                sanitize_sensitive_info(binding.account_name.as_ref()),
-                sanitize_sensitive_info(&binding.session_owner),
-                binding.generation,
-                sanitize_sensitive_info(lease.account_name.as_ref()),
-                sanitize_sensitive_info(&lease.session_owner),
-                lease.generation,
-                lease.active_io_count.load(std::sync::atomic::Ordering::Acquire),
-                lease.acquiring.load(std::sync::atomic::Ordering::Acquire),
-            );
-            HlsOriginAccountIoReserveOutcome::ReservedForOther
+            if lease.session_owner == binding.session_owner && lease.generation < binding.generation {
+                HlsOriginAccountIoReserveOutcome::WaitSuperseded(Arc::clone(&lease.notify))
+            } else {
+                debug!(
+                    "HLS origin admission rejected: reason=ReservedForOther conflict=io-binding requested_account={} requested_owner={} requested_generation={} blocking_account={} blocking_owner={} blocking_generation={} active_io_count={} acquiring={}",
+                    sanitize_sensitive_info(binding.account_name.as_ref()),
+                    sanitize_sensitive_info(&binding.session_owner),
+                    binding.generation,
+                    sanitize_sensitive_info(lease.account_name.as_ref()),
+                    sanitize_sensitive_info(&lease.session_owner),
+                    lease.generation,
+                    lease.active_io_count.load(std::sync::atomic::Ordering::Acquire),
+                    lease.acquiring.load(std::sync::atomic::Ordering::Acquire),
+                );
+                HlsOriginAccountIoReserveOutcome::ReservedForOther
+            }
         }
         _ => {
             let lease = Arc::new(HlsOriginAccountIoLease::acquiring(binding));
@@ -1326,6 +1364,7 @@ pub async fn finish_hls_origin_account_io(
             origin_io.ctx.connection_manager.release_provider_handle(Some(provider_handle));
             drop(cleanup_permit);
         }
+        guard.lease.notify.notify_waiters();
     }
 
     if let Some(current) = session.origin_account_binding.as_mut().filter(|current| {
@@ -1356,11 +1395,11 @@ mod tests {
     use super::{
         build_hls_origin_session_owner, classify_account_binding_protection, reserve_hls_origin_account_io_slot,
         HlsAccountBindingProtection, HlsAccountOverlapTiming, HlsBoundAccountAcquireErrorKind, HlsOriginAccountBinding,
-        HlsOriginAccountBindingMode, HlsOriginAccountIoLease, HlsOriginAccountIoSlot, HlsOriginAccountRebindState,
-        HlsOriginSource, HlsOriginSourceKind,
+        HlsOriginAccountBindingMode, HlsOriginAccountIoLease, HlsOriginAccountIoReserveOutcome, HlsOriginAccountIoSlot,
+        HlsOriginAccountRebindState, HlsOriginSource, HlsOriginSourceKind, HLS_ORIGIN_ACCOUNT_IO_SUPERSEDED_DRAIN_WAIT,
     };
     use crate::{build_proxy_session_id, HlsSession, HlsSessionKey, ProxySessionId};
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     #[tokio::test]
     async fn hard_manifest_failure_releases_unstarted_binding_and_preserves_protected_work() {
@@ -1541,11 +1580,11 @@ mod tests {
     }
 
     #[test]
-    fn active_origin_io_lease_cannot_be_replaced_by_another_generation() {
+    fn active_origin_io_lease_waits_for_superseded_older_generation() {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "generation-conflict"), b"secret", 1_000);
         let binding =
             HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
-        let conflicting = HlsOriginAccountBinding::rebound(
+        let newer = HlsOriginAccountBinding::rebound(
             Arc::clone(&binding.input_name),
             Arc::clone(&binding.account_name),
             binding.session_owner.clone(),
@@ -1555,12 +1594,145 @@ mod tests {
         let lease = Arc::new(HlsOriginAccountIoLease::active_for_test(&binding, 1));
         session.origin_account_io_lease = Some(Arc::clone(&lease));
 
+        let outcome = super::try_reserve_hls_origin_account_io_slot(&mut session, &newer);
+        assert!(
+            matches!(outcome, HlsOriginAccountIoReserveOutcome::WaitSuperseded(ref notify) if Arc::ptr_eq(notify, &lease.notify)),
+            "newer generation of same owner must yield WaitSuperseded with lease notify, got {outcome:?}"
+        );
+        assert!(session.origin_account_io_lease.as_ref().is_some_and(|current| Arc::ptr_eq(current, &lease)));
+        assert_eq!(lease.active_io_count.load(std::sync::atomic::Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn active_origin_io_lease_cannot_be_replaced_by_foreign_or_stale_owner() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "foreign-conflict"), b"secret", 1_000);
+        let binding = HlsOriginAccountBinding::rebound(
+            Arc::from("input"),
+            Arc::from("account"),
+            build_hls_origin_session_owner(&session.proxy_session_id),
+            2,
+            1_000,
+        );
+        let foreign = HlsOriginAccountBinding::rebound(
+            Arc::clone(&binding.input_name),
+            Arc::clone(&binding.account_name),
+            "hls-cache:foreign".to_string(),
+            binding.generation + 1,
+            1_001,
+        );
+        let stale = HlsOriginAccountBinding::rebound(
+            Arc::clone(&binding.input_name),
+            Arc::clone(&binding.account_name),
+            binding.session_owner.clone(),
+            1,
+            1_001,
+        );
+        let diff_account_same_gen = HlsOriginAccountBinding::rebound(
+            Arc::clone(&binding.input_name),
+            Arc::from("other-account"),
+            binding.session_owner.clone(),
+            2,
+            1_001,
+        );
+        let lease = Arc::new(HlsOriginAccountIoLease::active_for_test(&binding, 1));
+        session.origin_account_io_lease = Some(Arc::clone(&lease));
+
         assert!(matches!(
-            super::try_reserve_hls_origin_account_io_slot(&mut session, &conflicting),
-            super::HlsOriginAccountIoReserveOutcome::ReservedForOther
+            super::try_reserve_hls_origin_account_io_slot(&mut session, &foreign),
+            HlsOriginAccountIoReserveOutcome::ReservedForOther
+        ));
+        assert!(matches!(
+            super::try_reserve_hls_origin_account_io_slot(&mut session, &stale),
+            HlsOriginAccountIoReserveOutcome::ReservedForOther
+        ));
+        assert!(matches!(
+            super::try_reserve_hls_origin_account_io_slot(&mut session, &diff_account_same_gen),
+            HlsOriginAccountIoReserveOutcome::ReservedForOther
         ));
         assert!(session.origin_account_io_lease.as_ref().is_some_and(|current| Arc::ptr_eq(current, &lease)));
         assert_eq!(lease.active_io_count.load(std::sync::atomic::Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn superseded_origin_io_reservation_waits_and_acquires_on_drain() {
+        tokio::time::pause();
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "superseded-drain"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        let newer = HlsOriginAccountBinding::rebound(
+            Arc::clone(&binding.input_name),
+            Arc::clone(&binding.account_name),
+            binding.session_owner.clone(),
+            binding.generation + 1,
+            1_001,
+        );
+        let old_lease = Arc::new(HlsOriginAccountIoLease::active_for_test(&binding, 1));
+        let old_guard = super::HlsOriginAccountIoLeaseGuard::new(binding.clone(), Arc::clone(&old_lease));
+        session.origin_account_io_lease = Some(Arc::clone(&old_lease));
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+
+        let waiting_session = Arc::clone(&session);
+        let waiting_binding = newer.clone();
+        let waiter =
+            tokio::spawn(
+                async move { reserve_hls_origin_account_io_slot(&waiting_session, &waiting_binding, None).await },
+            );
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "waiter must wait while superseded lease is active");
+
+        // Older IO finishes and drops its guard, notifying waiters and draining active count.
+        drop(old_guard);
+
+        tokio::task::yield_now().await;
+        let slot = waiter.await.expect("controlled waiter task").expect("reservation must succeed");
+        let HlsOriginAccountIoSlot::Acquire(new_lease) = slot else {
+            panic!("expected Acquire slot, got joined");
+        };
+        assert_eq!(new_lease.generation, newer.generation);
+        assert_eq!(new_lease.account_name, newer.account_name);
+        assert_eq!(new_lease.session_owner, newer.session_owner);
+        assert!(new_lease.acquiring.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(new_lease.active_io_count.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        let state = session.read().await;
+        assert!(state.origin_account_io_lease.as_ref().is_some_and(|lease| Arc::ptr_eq(lease, &new_lease)));
+    }
+
+    #[tokio::test]
+    async fn superseded_origin_io_reservation_times_out_with_reserved_for_other() {
+        tokio::time::pause();
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "superseded-timeout"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        let newer = HlsOriginAccountBinding::rebound(
+            Arc::clone(&binding.input_name),
+            Arc::clone(&binding.account_name),
+            binding.session_owner.clone(),
+            binding.generation + 1,
+            1_001,
+        );
+        let old_lease = Arc::new(HlsOriginAccountIoLease::active_for_test(&binding, 1));
+        session.origin_account_io_lease = Some(Arc::clone(&old_lease));
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+
+        let waiting_session = Arc::clone(&session);
+        let waiting_binding = newer.clone();
+        let waiter =
+            tokio::spawn(
+                async move { reserve_hls_origin_account_io_slot(&waiting_session, &waiting_binding, None).await },
+            );
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "waiter must wait while older lease is active");
+
+        // Verify the waiter does not hold the session write lock while waiting.
+        {
+            let lock_check = session.try_write();
+            assert!(lock_check.is_ok(), "session write lock must not be held across wait");
+        }
+
+        tokio::time::advance(HLS_ORIGIN_ACCOUNT_IO_SUPERSEDED_DRAIN_WAIT + Duration::from_millis(50)).await;
+        let result = waiter.await.expect("controlled waiter task");
+        assert_eq!(result.err(), Some(HlsBoundAccountAcquireErrorKind::ReservedForOther));
     }
 
     #[test]

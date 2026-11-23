@@ -826,9 +826,9 @@ pub fn PanelConfigView() -> Html {
                     } else if *config_view_ctx.edit_mode {
                         html! {
                             <>
-                                <Input name="panel_url" label={Some(translate.t(LABEL_URL))} value={url_val} on_change={Some(on_url)} placeholder={Some("https://panel.example.tld/api.php".to_string())}/>
+                                <Input name="panel_url" field_id={Some("PANEL_API_CONFIG.URL".to_string())} label={Some(translate.t(LABEL_URL))} value={url_val} on_change={Some(on_url)} placeholder={Some("https://panel.example.tld/api.php".to_string())}/>
                                 <NoSubmitForm>
-                                    <Input name="panel_api_key" label={Some(translate.t(LABEL_API_KEY))} value={api_key_val.to_string()} hidden={true} on_change={Some(on_api_key)} placeholder={Some("...".to_string())}/>
+                                    <Input name="panel_api_key" field_id={Some("PANEL_API_CONFIG.API_KEY".to_string())} label={Some(translate.t(LABEL_API_KEY))} value={api_key_val.to_string()} hidden={true} on_change={Some(on_api_key)} placeholder={Some("...".to_string())}/>
                                 </NoSubmitForm>
                                 <div class="tp__panel-api-config-view__section">
                                     <div class="tp__panel-api-config-view__section-header">
@@ -837,21 +837,25 @@ pub fn PanelConfigView() -> Html {
                                     <div class="tp__panel-api-config-view__params">
                                         <div class="tp__panel-api-config-view__param-row">
                                             <Input name="panel_provision_timeout"
+                                                field_id={Some("PANEL_API_CONFIG.PROVISION_TIMEOUT".to_string())}
                                                 label={Some(translate.t(LABEL_PANEL_PROVISION_TIMEOUT))}
                                                 value={provisioning_timeout_val.clone()}
                                                 on_change={Some(on_provision_timeout)}
                                                 placeholder={Some("60".to_string())}/>
                                             <Input name="panel_probe_interval"
+                                                field_id={Some("PANEL_API_CONFIG.PROBE_INTERVAL".to_string())}
                                                 label={Some(translate.t(LABEL_PANEL_PROBE_INTERVAL))}
                                                 value={provisioning_probe_interval_val.clone()}
                                                 on_change={Some(on_probe_interval)}
                                                 placeholder={Some("5".to_string())}/>
                                             <Input name="panel_provision_cooldown"
+                                                field_id={Some("PANEL_API_CONFIG.PROVISION_COOLDOWN".to_string())}
                                                 label={Some(translate.t(LABEL_PANEL_PROVISION_COOLDOWN))}
                                                 value={provisioning_cooldown_val.clone()}
                                                 on_change={Some(on_provision_cooldown)}
                                                 placeholder={Some("0".to_string())}/>
                                             <Input name="panel_provision_offset"
+                                                field_id={Some("PANEL_API_CONFIG.PROVISION_OFFSET".to_string())}
                                                 label={Some(translate.t(LABEL_PANEL_PROVISION_OFFSET))}
                                                 value={provisioning_offset_val.clone()}
                                                 on_change={Some(on_provision_offset)}
@@ -874,11 +878,13 @@ pub fn PanelConfigView() -> Html {
                                     <div class="tp__panel-api-config-view__params">
                                         <div class="tp__panel-api-config-view__param-row">
                                             <Input name="panel_alias_pool_min"
+                                                field_id={Some("PANEL_API_CONFIG.ALIAS_POOL_MIN".to_string())}
                                                 label={Some(translate.t(LABEL_PANEL_ALIAS_POOL_MIN))}
                                                 value={alias_pool_min_val.clone()}
                                                 on_change={Some(on_alias_pool_min)}
                                                 placeholder={Some("auto|<number>".to_string())}/>
                                                 <Input name="panel_alias_pool_max"
+                                                    field_id={Some("PANEL_API_CONFIG.ALIAS_POOL_MAX".to_string())}
                                                     label={Some(translate.t(LABEL_PANEL_ALIAS_POOL_MAX))}
                                                     value={alias_pool_max_val.clone()}
                                                     on_change={Some(on_alias_pool_max)}

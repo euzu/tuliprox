@@ -1,0 +1,66 @@
+schema_version: 1
+name: player-provider-exhausted-fallback-header
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: false
+    share_live_mpeg_ts: false
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: player-provider-exhausted-fallback-header
+actors:
+  - id: viewer-a
+    agent: local
+    username: viewer-a
+    user_agent: tuliprox-testkit/viewer-a
+    client_ip: { mode: forwarded, value: 10.30.0.10 }
+  - id: viewer-c
+    agent: local
+    username: viewer-c
+    user_agent: tuliprox-testkit/viewer-c
+    client_ip: { mode: forwarded, value: 10.30.0.12 }
+channels:
+  channel-x: { origin_marker: 17, protocol: m3u }
+  channel-y: { origin_marker: 18, protocol: m3u }
+steps:
+  - command_id: start-viewer-a
+    start:
+      actor: viewer-a
+      playback_id: playback-a
+      session_group: group-a
+      channel: channel-x
+    await: { valid_frames: 3 }
+    assert_runtime:
+      active_users: 1
+      active_user_connections: 1
+      provider_connections: 1
+  - command_id: request-viewer-c-exhausted
+    expect: rejected
+    start:
+      actor: viewer-c
+      playback_id: playback-c
+      session_group: group-c
+      channel: channel-y
+      assert_headers:
+        x-tuliprox-fallback: provider_connections_exhausted
+        cache-control: no-store
+  - command_id: stop-viewer-a
+    stop: { playback_id: playback-a }
+    assert_runtime:
+      active_users: 0
+      active_user_connections: 0
+      provider_connections: 0
+policy_contract:
+  user_access_control: true
+  player_api: true
+  provider_max_connections: 1
+  users:
+    viewer-a:
+      max_connections: 1
+    viewer-c:
+      max_connections: 1
+  admission_strategies: []

@@ -856,12 +856,14 @@ pub fn StreamHistoryView(props: &StreamHistoryViewProps) -> Html {
                 <div class="tp__stream-history__date-range">
                     <DateInput
                         name="from"
+                        field_id={Some("STREAM_HISTORY.FROM".to_string())}
                         label={Some(translate.t("LABEL.STREAM_HISTORY_FROM"))}
                         value={*from_date}
                         on_change={Some(handle_from_change)}
                     />
                     <DateInput
                         name="to"
+                        field_id={Some("STREAM_HISTORY.TO".to_string())}
                         label={Some(translate.t("LABEL.STREAM_HISTORY_TO"))}
                         value={*to_date}
                         on_change={Some(handle_to_change)}

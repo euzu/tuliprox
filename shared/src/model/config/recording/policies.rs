@@ -8,6 +8,7 @@ use super::{
         is_default_recording_retention_sweep_interval_secs, is_zero_u32_opt, is_zero_u64_opt, is_zero_u8_opt,
     },
 };
+use crate::model::ByteSize;
 use std::collections::HashMap;
 
 /// Container the recorder muxes into. MPEG-TS is the default; operators
@@ -149,16 +150,122 @@ impl RecordingDiskConfigDto {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingQuotaConfigDto {
-    #[serde(default, skip_serializing_if = "is_zero_u64_opt")]
-    pub default_private_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_private: Option<ByteSize>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub per_user_bytes: HashMap<String, u64>,
-    #[serde(default, skip_serializing_if = "is_zero_u64_opt")]
-    pub shared_bytes: Option<u64>,
+    pub per_user: HashMap<String, ByteSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<ByteSize>,
 }
 
 impl RecordingQuotaConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.default_private_bytes.is_none() && self.per_user_bytes.is_empty() && self.shared_bytes.is_none()
+        self.default_private.is_none() && self.per_user.is_empty() && self.shared.is_none()
+    }
+
+    pub fn validate(&self) -> Result<(), crate::error::TuliproxError> {
+        let check = |key: &str, quota: &ByteSize| {
+            quota.parse_positive(key).map(drop).map_err(crate::error::TuliproxError::ConfigRecording)
+        };
+        if let Some(quota) = &self.default_private {
+            check("video.recording.quota.default_private", quota)?;
+        }
+        for (user, quota) in &self.per_user {
+            crate::model::UserId::validate(user).map_err(|_| {
+                crate::error::TuliproxError::ConfigRecording(format!(
+                    "video.recording.quota.per_user key '{user}' must be a user id such as api:alice or web:alice"
+                ))
+            })?;
+            check(&format!("video.recording.quota.per_user[\"{user}\"]"), quota)?;
+        }
+        if let Some(quota) = &self.shared {
+            check("video.recording.quota.shared", quota)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_quota_config_dto_yaml_resolves_exact_bytes() {
+        let yaml = r#"
+default_private: 20GB
+per_user:
+  "api:alice": 1TB
+shared: 1024
+"#;
+        let dto: RecordingQuotaConfigDto = crate::utils::yaml_from_str(yaml).expect("deserialize valid quota yaml");
+        assert!(dto.validate().is_ok());
+
+        assert_eq!(
+            dto.default_private.as_ref().unwrap().parse_bytes().expect("parse default_private").get(),
+            21_474_836_480
+        );
+        assert_eq!(
+            dto.per_user.get("api:alice").unwrap().parse_bytes().expect("parse alice quota").get(),
+            1_099_511_627_776
+        );
+        assert_eq!(dto.shared.as_ref().unwrap().parse_bytes().expect("parse shared").get(), 1024);
+    }
+
+    #[test]
+    fn recording_quota_config_dto_rejects_per_user_keys_without_namespace() {
+        for key in ["alice", "", "api:../x"] {
+            let dto = RecordingQuotaConfigDto {
+                per_user: [(key.to_string(), ByteSize::new("10GB"))].into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                dto.validate().map_err(|err| err.to_string()).err(),
+                Some(format!(
+                    "config recording error: video.recording.quota.per_user key '{key}' must be a user id such as \
+                     api:alice or web:alice"
+                )),
+                "key {key:?}"
+            );
+        }
+        for key in ["api:alice", "web:bob"] {
+            let dto = RecordingQuotaConfigDto {
+                per_user: [(key.to_string(), ByteSize::new("10GB"))].into(),
+                ..Default::default()
+            };
+            assert!(dto.validate().is_ok(), "key {key:?}");
+        }
+    }
+
+    #[test]
+    fn recording_quota_config_dto_rejects_invalid_and_zero_values() {
+        for bad in ["0", "0GB", "abc"] {
+            let dto_private =
+                RecordingQuotaConfigDto { default_private: Some(ByteSize::new(bad)), ..Default::default() };
+            let err = dto_private.validate().unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("video.recording.quota.default_private") && msg.contains(bad),
+                "expected key name and value in error for default_private {bad}, got: {msg}"
+            );
+
+            let dto_shared = RecordingQuotaConfigDto { shared: Some(ByteSize::new(bad)), ..Default::default() };
+            let err = dto_shared.validate().unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("video.recording.quota.shared") && msg.contains(bad),
+                "expected key name and value in error for shared {bad}, got: {msg}"
+            );
+
+            let dto_user = RecordingQuotaConfigDto {
+                per_user: [("api:alice".to_string(), ByteSize::new(bad))].into(),
+                ..Default::default()
+            };
+            let err = dto_user.validate().unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("video.recording.quota.per_user[\"api:alice\"]") && msg.contains(bad),
+                "expected key name and value in error for per_user {bad}, got: {msg}"
+            );
+        }
     }
 }

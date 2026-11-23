@@ -1,6 +1,6 @@
 use crate::api::{
     api_utils::json_or_bin_response,
-    auth_middleware::{rejection_for, settings_owner, validator_authenticated, VerifiedClaims},
+    auth_middleware::{rejection_for, settings_owner, validator_authenticated, ApiUserAccess, VerifiedClaims},
     model::AppState,
 };
 use axum::{
@@ -42,7 +42,7 @@ fn owner(
     state: &AppState,
     claims: Option<&Extension<VerifiedClaims>>,
 ) -> Result<SettingsOwner, crate::auth::AuthError> {
-    settings_owner(state, claims.map(|c| &c.0 .0))
+    settings_owner(state, claims.map(|c| &c.0 .0), ApiUserAccess::WebUi)
 }
 
 async fn current_owner(
@@ -743,6 +743,55 @@ mod tests {
         assert!(!api_path.exists());
         state.app_config.api_proxy.store(None);
         assert_eq!(router.clone().oneshot(request(&api_token)?).await?.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settings_route_refuses_player_only_user_with_403() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let web_ui = WebUiConfigDto {
+            enabled: true,
+            user_ui_enabled: true,
+            player_api_enabled: Some(true),
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "settings-test".into(),
+                secret: "settings-test-secret".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = Config { web_ui: Some((&web_ui).into()), ..Default::default() };
+        let state = create_test_app_state(config);
+        configure_path(&state, dir.path());
+
+        state.app_config.api_proxy.store(Some(Arc::new(ApiProxyConfig::from(&ApiProxyConfigDto {
+            user: vec![TargetUserDto {
+                target: "default".into(),
+                credentials: vec![ProxyUserCredentialsDto {
+                    username: "Alice".into(),
+                    ui_enabled: false,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        api_enabled: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        }))));
+
+        let web_auth = state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
+        let api_token = create_jwt_api_user(&web_auth, "Alice", UserId::api("Alice"))?;
+
+        let router = user_settings_api_register(&state).with_state(state.clone());
+        let request = Request::builder()
+            .uri("/me/settings")
+            .header(header::AUTHORIZATION, format!("Bearer {api_token}"))
+            .body(Body::empty())?;
+
+        let response = router.oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
         Ok(())
     }
 }

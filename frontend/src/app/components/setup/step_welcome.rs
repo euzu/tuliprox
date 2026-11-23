@@ -65,6 +65,7 @@ pub fn WelcomeStep() -> Html {
                     <NoSubmitForm>
                         <Input
                             name="setup_username"
+                            field_id={Some("SETUP.USERNAME".to_string())}
                             label={Some(translate.t(LABEL_SETUP_WEBUI_USERNAME).clone())}
                             value={(*setup_ctx.setup_username).clone()}
                             on_change={Some({
@@ -74,6 +75,7 @@ pub fn WelcomeStep() -> Html {
                         />
                         <Input
                             name="setup_password"
+                            field_id={Some("SETUP.PASSWORD".to_string())}
                             label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD).clone())}
                             hidden={true}
                             value={(*setup_ctx.setup_password).clone()}
@@ -84,6 +86,7 @@ pub fn WelcomeStep() -> Html {
                         />
                         <Input
                             name="setup_password_repeat"
+                            field_id={Some("SETUP.PASSWORD_REPEAT".to_string())}
                             label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD_REPEAT).clone())}
                             hidden={true}
                             value={(*setup_ctx.setup_password_repeat).clone()}

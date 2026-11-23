@@ -1,0 +1,60 @@
+schema_version: 1
+name: player-member-vid-start-then-failover
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: true
+    share_live_mpeg_ts: false
+    hls_startup_mode: optimistic
+  failover_groups:
+    inputs: [input-a, input-b, input-c]
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: player-member-vid-start-then-failover
+  hls_profile:
+    prefix_delay_millis: 1000
+    window_segments: 6
+    missing_head_segments: 0
+    segment_duration_secs: 2
+    realtime: true
+actors:
+  - id: viewer
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/viewer
+channels:
+  group-channel: { origin_marker: 17, protocol: hls }
+steps:
+  - command_id: start-member-2
+    start:
+      actor: viewer
+      playback_id: playback-1
+      session_group: group-1
+      channel: group-channel
+      member_index: 2
+    await: { valid_frames: 2 }
+    assert_origin:
+      latest_segment_account: input-c
+  - command_id: arm-fault-member-2
+    origin_fault:
+      set:
+        id: c-segment-fault
+        kind: hls_segment_status
+        account: input-c
+        status: 503
+  - command_id: wait-for-failover
+    pause_millis: 25000
+  - command_id: stop-playback
+    stop: { playback_id: playback-1 }
+    assert_origin:
+      segment_failure_before_handoff_from: input-c
+policy_contract:
+  user_access_control: true
+  player_api: true
+  users:
+    viewer: { max_connections: 2 }
+  admission_strategies: []

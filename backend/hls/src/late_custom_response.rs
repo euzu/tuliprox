@@ -46,6 +46,8 @@ impl HlsLateCustomResponsePlan {
 
     pub fn manifest_body(&self) -> &str { &self.standalone.manifest_body }
 
+    pub fn reason(&self) -> crate::runtime_custom_tail::HlsRuntimeCustomTailReason { self.key.reason }
+
     pub(crate) fn segment_bytes(
         &self,
         fingerprint: &str,

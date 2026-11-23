@@ -149,6 +149,8 @@ fn create_test_app_state_with_playlist_updates(
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let loaded_config = app_config.config.load();
     let active_users = Arc::new(ActiveUserManager::new(&loaded_config, &geoip, &event_manager));
+    active_users.set_shared_stream_manager(&shared_stream_manager);
+    shared_stream_manager.set_user_manager(&active_users);
     let cleanup_capacity = loaded_config
         .reverse_proxy
         .as_ref()

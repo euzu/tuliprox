@@ -13,6 +13,7 @@ use url::Url;
 /// Access-token lifetime for a recording execution URL, in seconds.
 const RECORDING_URL_TOKEN_TTL_SECS: u16 = 30;
 
+#[allow(clippy::too_many_arguments)]
 fn build_recording_stream_url(
     base_url: &str,
     access_token: &str,
@@ -21,6 +22,8 @@ fn build_recording_stream_url(
     virtual_id: u32,
     cluster: XtreamCluster,
     provider_allocation_id: Option<u64>,
+    join_shared: bool,
+    priority: Option<i8>,
 ) -> Option<String> {
     let mut url = Url::parse(base_url).ok()?;
     url.path_segments_mut().ok()?.pop_if_empty().extend([
@@ -36,6 +39,12 @@ fn build_recording_stream_url(
     query.append_pair("target_name", target_name).append_pair("input_name", input_name);
     if let Some(allocation_id) = provider_allocation_id {
         query.append_pair("provider_allocation_id", &allocation_id.to_string());
+    }
+    if join_shared {
+        query.append_pair("join_shared", "1");
+    }
+    if let Some(priority) = priority {
+        query.append_pair("priority", &priority.to_string());
     }
     drop(query);
     Some(url.into())
@@ -55,6 +64,7 @@ fn recording_api_base_url(config: &Config) -> Option<Url> {
 /// Build the stable recording URL for a server-resolved source. Stable means
 /// it survives a playlist refresh: it carries the target and input names, not
 /// a runtime id.
+#[allow(clippy::too_many_arguments)]
 pub fn build_stable_recording_url(
     app_config: &AppConfig,
     target_name: &str,
@@ -62,6 +72,8 @@ pub fn build_stable_recording_url(
     virtual_id: u32,
     cluster: XtreamCluster,
     provider_allocation_id: Option<u64>,
+    join_shared: bool,
+    priority: Option<i8>,
 ) -> Option<String> {
     let access_token = create_access_token(
         &app_config.access_token_secret,
@@ -78,6 +90,8 @@ pub fn build_stable_recording_url(
         virtual_id,
         cluster,
         provider_allocation_id,
+        join_shared,
+        priority,
     )
 }
 
@@ -119,6 +133,8 @@ mod tests {
                     42,
                     XtreamCluster::Live,
                     Some(77),
+                    false,
+                    None,
                 )
                 .ok_or("missing stream URL")?;
                 let expected_prefix = prefix.trim_end_matches('/');
@@ -147,6 +163,8 @@ mod tests {
             42,
             XtreamCluster::Video,
             Some(77),
+            false,
+            None,
         )
         .expect("url");
         assert!(url.starts_with("http://localhost:8901/api/v1/playlist/recording/token-1/movie/42?"), "{url}");
@@ -157,6 +175,17 @@ mod tests {
 
     #[test]
     fn recording_stream_url_rejects_an_unparsable_base() {
-        assert!(build_recording_stream_url("not a url", "t", "target", "input", 1, XtreamCluster::Live, None).is_none());
+        assert!(build_recording_stream_url(
+            "not a url",
+            "t",
+            "target",
+            "input",
+            1,
+            XtreamCluster::Live,
+            None,
+            false,
+            None
+        )
+        .is_none());
     }
 }

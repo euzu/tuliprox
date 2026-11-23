@@ -2,8 +2,8 @@ use crate::{
     app::components::{
         config::HasFormData, BlockId, BlockInstance, Card, EditMode, FilterInput, SourceEditorContext, TextButton,
     },
-    config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
-    edit_field_text_option, generate_form_reducer,
+    config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_text_option,
+    generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{M3uTargetOutputDto, TargetOutputDto};
@@ -79,9 +79,10 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
                     { config_field_optional!(output_form_state.form, translate.t(LABEL_FILENAME), filename) }
                     { config_field_bool!(output_form_state.form, translate.t(LABEL_INCLUDE_TYPE_IN_URL), include_type_in_url) }
                     { config_field_bool!(output_form_state.form, translate.t(LABEL_MASK_REDIRECT_URL), mask_redirect_url) }
-                    { config_field_custom!(
+                    { config_field_child!(
                         translate.t(LABEL_FILTER),
-                        output_form_state.form.filter.clone().unwrap_or_default()
+                        "OUTPUT_M3U_FORM.FILTER",
+                        { html! { <span class="tp__form-field__value">{output_form_state.form.filter.clone().unwrap_or_default()}</span> } }
                     ) }
                 </Card>
             }

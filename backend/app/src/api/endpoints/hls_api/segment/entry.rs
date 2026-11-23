@@ -183,7 +183,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
         stream_context.identity().upstream_user_agent(),
     );
 
-    if hls_cache_enabled_for_user(app_state, target, user) {
+    let hls_cache_enabled = hls_cache_enabled_for_user(app_state, target, input, user);
+    if hls_cache_enabled {
         if let Some(group) = entry_group {
             // The shared origin belongs to the selected member, so viewers of the same member share
             // it. The cache path reserves its own provider account; the selection only picks.
@@ -824,7 +825,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             session_token_hint,
             archive_reference,
         );
-        let hls_session_owner = if hls_cache_enabled_for_user(app_state, target, user) {
+        let hls_session_owner = if hls_cache_enabled {
             let session_key = HlsSessionKey::new(input.id, stream_context.stream_ref());
             let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
             Some(build_hls_origin_session_owner(&proxy_session_id))
@@ -983,7 +984,12 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         .await;
                     return StatusCode::SERVICE_UNAVAILABLE.into_response();
                 }
-                LegacySwitchOutcome::RetrySame | LegacySwitchOutcome::GiveUp | LegacySwitchOutcome::Disabled => {}
+                LegacySwitchOutcome::RetrySame
+                | LegacySwitchOutcome::GiveUp
+                | LegacySwitchOutcome::Disabled
+                | LegacySwitchOutcome::Committed
+                | LegacySwitchOutcome::Cooldown { .. }
+                | LegacySwitchOutcome::MemberNotFound => {}
             }
         }
     }
@@ -1181,7 +1187,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             if let (HlsRequestStage::Entry, HlsPlaylistKind::Media, Some(session_token), Some(provider)) =
                 (stage, playlist_kind, session_token.as_deref(), selected_provider_name.as_ref())
             {
-                if hls_media_playlist_wrap_enabled(app_state, target, user) {
+                if hls_media_playlist_wrap_enabled(app_state, target, effective_input, user) {
                     let master = wrap_media_playlist(
                         HlsMediaPlaylistWrap {
                             app_state,
@@ -1241,7 +1247,11 @@ pub(in crate::api) async fn handle_hls_stream_request(
                                 .await;
                                 return StatusCode::BAD_GATEWAY.into_response();
                             }
-                            LegacySwitchOutcome::GiveUp | LegacySwitchOutcome::Disabled => {}
+                            LegacySwitchOutcome::GiveUp
+                            | LegacySwitchOutcome::Disabled
+                            | LegacySwitchOutcome::Committed
+                            | LegacySwitchOutcome::Cooldown { .. }
+                            | LegacySwitchOutcome::MemberNotFound => {}
                         }
                     }
                 }
@@ -1510,89 +1520,121 @@ impl Drop for LegacySwitchSlot<'_> {
 
 /// Result of an attempted legacy group member switch.
 #[derive(Debug)]
-enum LegacySwitchOutcome {
+pub(crate) enum LegacySwitchOutcome {
     Switched(axum::response::Response),
     RetrySame,
     SwitchInFlight,
     GiveUp,
     Disabled,
+    Committed,
+    Cooldown { retry_after: std::time::Duration },
+    MemberNotFound,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LegacySwitchTrigger {
+    Automatic { failed_index: usize, failure_class: FailureClass, record_failure: bool },
+    Manual { target_index: usize },
 }
 
 /// Switches a running legacy HLS group playback to the next member after a hard failure, rebinds
 /// the user session, and serves the new member's manifest (rebased). Returns `GiveUp` when the
 /// switch budget is exhausted or no candidate member can serve.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn switch_legacy_hls_group_member(
+pub(crate) async fn switch_legacy_hls_group_member(
     app_state: &Arc<AppState>,
     fingerprint: &Fingerprint,
     user: &ProxyUserCredentials,
     target: &ConfigTarget,
-    base_url: &str,
+    base_url: Option<&str>,
     req_headers: &HeaderMap,
     group: Arc<FailoverGroupRecord>,
     session: &UserSession,
     session_token: &str,
-    failed_index: usize,
-    failure_class: FailureClass,
-    record_failure: bool,
+    trigger: LegacySwitchTrigger,
     playback: shared::model::FailoverGroupPlayback,
     connection_kind: crate::api::model::ConnectionKind,
 ) -> LegacySwitchOutcome {
-    if !playback.failover.enabled {
-        return LegacySwitchOutcome::Disabled;
-    }
-
     let now = std::time::Instant::now();
 
-    // A one-member group cannot switch; keep the current member and its reservation so the
-    // existing error/terminal response is served without dropping the lease.
-    if group.members.len() <= 1 {
-        if record_failure {
-            if let Some(member) = group.members.first() {
-                record_member_failure(&app_state.member_health, member, None, failure_class);
+    let exclude: Vec<usize> = match trigger {
+        LegacySwitchTrigger::Automatic { failed_index, failure_class, record_failure } => {
+            if !playback.failover.enabled {
+                return LegacySwitchOutcome::Disabled;
+            }
+
+            // A one-member group cannot switch; keep the current member and its reservation so the
+            // existing error/terminal response is served without dropping the lease.
+            if group.members.len() <= 1 {
+                if record_failure {
+                    if let Some(member) = group.members.first() {
+                        record_member_failure(&app_state.member_health, member, None, failure_class);
+                    }
+                }
+                return LegacySwitchOutcome::GiveUp;
+            }
+
+            if record_failure {
+                if let Some(member) = group.members.get(failed_index) {
+                    record_member_failure(&app_state.member_health, member, None, failure_class);
+                }
+            }
+
+            // Start the incident on the stored budget under the session write lock. The request snapshot
+            // supplies the fence and the timeline this request was fetched against, so a concurrent media
+            // commit is never overwritten.
+            let Some(session_binding) = session.member_binding.as_ref() else {
+                return LegacySwitchOutcome::GiveUp;
+            };
+            let Some(decision) = app_state
+                .active_users
+                .update_legacy_failover_state_if_bound(
+                    &user.username,
+                    session_token,
+                    session.identity(),
+                    session_binding,
+                    |_, budget_slot| {
+                        budget_slot.get_or_insert_with(|| FailoverBudget::new(&playback.failover)).on_trigger(
+                            failed_index,
+                            group.members.len(),
+                            now,
+                        )
+                    },
+                )
+                .await
+            else {
+                // The session ended or another request rebound it; that actor owns the switch now.
+                return LegacySwitchOutcome::SwitchInFlight;
+            };
+            match decision {
+                BudgetDecision::GiveUp => return LegacySwitchOutcome::GiveUp,
+                BudgetDecision::RetrySame => return LegacySwitchOutcome::RetrySame,
+                BudgetDecision::Next { exclude } => exclude,
             }
         }
-        return LegacySwitchOutcome::GiveUp;
-    }
-
-    if record_failure {
-        if let Some(member) = group.members.get(failed_index) {
-            record_member_failure(&app_state.member_health, member, None, failure_class);
+        LegacySwitchTrigger::Manual { target_index } => {
+            if target_index >= group.members.len() {
+                return LegacySwitchOutcome::MemberNotFound;
+            }
+            if session.member_binding.as_ref().is_some_and(|b| b.member_index == target_index) {
+                return LegacySwitchOutcome::Committed;
+            }
+            if let Some(last) = session.legacy_rebase.as_ref().and_then(|r| r.last_manual_switch) {
+                let tokio_now = tokio::time::Instant::now();
+                let elapsed = tokio_now.saturating_duration_since(last);
+                if elapsed < crate::api::api_utils::failover_group_runtime::MANUAL_SWITCH_COOLDOWN {
+                    let retry_after =
+                        crate::api::api_utils::failover_group_runtime::MANUAL_SWITCH_COOLDOWN.saturating_sub(elapsed);
+                    return LegacySwitchOutcome::Cooldown { retry_after };
+                }
+            }
+            (0..group.members.len()).filter(|&i| i != target_index).collect()
         }
-    }
+    };
 
-    // Start the incident on the stored budget under the session write lock. The request snapshot
-    // supplies the fence and the timeline this request was fetched against, so a concurrent media
-    // commit is never overwritten.
     let observed_rebase = session.legacy_rebase.as_ref();
-    // Only a bound group session reaches the switch; without a binding there is nothing to fail over.
     let Some(session_binding) = session.member_binding.as_ref() else {
         return LegacySwitchOutcome::GiveUp;
-    };
-    let Some(decision) = app_state
-        .active_users
-        .update_legacy_failover_state_if_bound(
-            &user.username,
-            session_token,
-            session.identity(),
-            session_binding,
-            |_, budget_slot| {
-                budget_slot.get_or_insert_with(|| FailoverBudget::new(&playback.failover)).on_trigger(
-                    failed_index,
-                    group.members.len(),
-                    now,
-                )
-            },
-        )
-        .await
-    else {
-        // The session ended or another request rebound it; that actor owns the switch now.
-        return LegacySwitchOutcome::SwitchInFlight;
-    };
-    let exclude = match decision {
-        BudgetDecision::GiveUp => return LegacySwitchOutcome::GiveUp,
-        BudgetDecision::RetrySame => return LegacySwitchOutcome::RetrySame,
-        BudgetDecision::Next { exclude } => exclude,
     };
 
     // Select the next member, excluding the failed one, and probe its manifest. The new
@@ -1600,7 +1642,10 @@ async fn switch_legacy_hls_group_member(
     // first would drop it with no replacement when no candidate remains.
     let req = GroupSelectionRequest {
         mode: SelectionMode::Live,
-        prefer: None,
+        prefer: match trigger {
+            LegacySwitchTrigger::Automatic { .. } => None,
+            LegacySwitchTrigger::Manual { target_index } => Some(target_index),
+        },
         lease: Some(PlaybackLeaseRef::new(session_token, PlaybackKind::LiveHls)),
         allow_provider_grace: playback.allow_provider_grace,
         bypass_maintenance: user.is_recording_proxy_user(),
@@ -1669,13 +1714,15 @@ async fn switch_legacy_hls_group_member(
             new_binding.clone(),
             Arc::from(member_url.as_str()),
             |budget_slot| {
-                // Count the switch in the same write that publishes the binding, so a lost fence on
-                // the plan update below cannot lose the accounting of a switch that happened.
-                budget_slot.get_or_insert_with(|| FailoverBudget::new(&playback.failover)).on_switched(
-                    resolved.acquired.index,
-                    failed_index,
-                    now,
-                );
+                if let LegacySwitchTrigger::Automatic { failed_index, .. } = trigger {
+                    // Count the switch in the same write that publishes the binding, so a lost fence on
+                    // the plan update below cannot lose the accounting of a switch that happened.
+                    budget_slot.get_or_insert_with(|| FailoverBudget::new(&playback.failover)).on_switched(
+                        resolved.acquired.index,
+                        failed_index,
+                        now,
+                    );
+                }
             },
         )
         .await
@@ -1692,6 +1739,24 @@ async fn switch_legacy_hls_group_member(
         PlaybackKind::LiveHls,
         get_hls_playback_ttl_secs(app_state, PlaybackKind::LiveHls),
     );
+
+    if matches!(trigger, LegacySwitchTrigger::Manual { .. }) {
+        app_state
+            .active_users
+            .update_legacy_failover_state_if_bound(
+                &user.username,
+                session_token,
+                switched_identity,
+                &new_binding,
+                |state, _budget_slot| {
+                    state.last_manual_switch = Some(tokio::time::Instant::now());
+                    LegacyRebasePlan::Serve(None)
+                },
+            )
+            .await;
+        slot.release();
+        return LegacySwitchOutcome::Committed;
+    }
 
     slot.release();
 
@@ -1726,7 +1791,7 @@ async fn switch_legacy_hls_group_member(
     let encrypt_secret = app_state.get_encrypt_secret();
     let rewrite_hls_props = RewriteHlsProps {
         secret: &encrypt_secret,
-        base_url,
+        base_url: base_url.unwrap_or(""),
         content: &content,
         hls_url: response_url,
         target_id: target.id,
@@ -1808,14 +1873,49 @@ async fn try_switch_legacy_hls_member(
         fingerprint,
         user,
         target,
-        base_url,
+        Some(base_url),
         req_headers,
         group,
         session,
         session_token,
-        failed_index,
-        failure_class,
-        record_failure,
+        LegacySwitchTrigger::Automatic { failed_index, failure_class, record_failure },
+        playback,
+        connection_kind,
+    )
+    .await
+}
+
+/// Manually switches a running legacy HLS group session to an explicit target member.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn manual_switch_legacy_hls_group_session(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    user: &ProxyUserCredentials,
+    target: &ConfigTarget,
+    req_headers: &HeaderMap,
+    group: Arc<FailoverGroupRecord>,
+    session: &UserSession,
+    session_token: &str,
+    target_member_index: usize,
+) -> LegacySwitchOutcome {
+    if session.legacy_switch_in_flight.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+        return LegacySwitchOutcome::SwitchInFlight;
+    }
+    let _guard = LegacySwitchGuard { flag: Arc::clone(&session.legacy_switch_in_flight) };
+    let playback = group_playback_settings(app_state, target);
+    let connection_kind = session.connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
+
+    switch_legacy_hls_group_member(
+        app_state,
+        fingerprint,
+        user,
+        target,
+        None,
+        req_headers,
+        group,
+        session,
+        session_token,
+        LegacySwitchTrigger::Manual { target_index: target_member_index },
         playback,
         connection_kind,
     )

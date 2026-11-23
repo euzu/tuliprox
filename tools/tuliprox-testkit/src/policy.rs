@@ -249,16 +249,18 @@ mod tests {
     fn contract() -> PolicyContract {
         PolicyContract {
             user_access_control: true,
-            users: HashMap::from([("alice".to_owned(), UserPolicy { max_connections: 2, soft_connections: 1 })]),
+            users: HashMap::from([(
+                "alice".to_owned(),
+                UserPolicy {
+                    max_connections: 2,
+                    soft_connections: 1,
+                    filter: None,
+                    ui_enabled: None,
+                    player_features: None,
+                },
+            )]),
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpLatest]),
-            recent_eviction_reentry_ttl_ms: None,
-            hls_session_ttl_secs: None,
-            provider_affinity_ttl_secs: None,
-            hls_wrap_media_playlist: None,
-            grace: None,
-            provider_max_connections: None,
-            provider_pool: Vec::new(),
-            expected_provider_slots: None,
+            ..Default::default()
         }
     }
 

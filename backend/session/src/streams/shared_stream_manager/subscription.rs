@@ -83,13 +83,36 @@ impl SharedStreamState {
         self.task_handles.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn register_subscriber_entry(
+        &self,
+        id: SubscriberId,
+        addr: &SocketAddr,
+        cancel_token: CancellationToken,
+        username: &str,
+        session_token: &str,
+        free_join: bool,
+    ) {
+        self.subscribers.write().await.insert(
+            id,
+            SharedSubscriber {
+                addr: *addr,
+                cancel_token,
+                username: Arc::from(username),
+                session_token: Arc::from(session_token),
+                free_join,
+            },
+        );
+    }
+
+    #[cfg(test)]
     pub(super) async fn register_subscriber(
         &self,
         id: SubscriberId,
         addr: &SocketAddr,
         cancel_token: CancellationToken,
     ) {
-        self.subscribers.write().await.insert(id, SharedSubscriber { addr: *addr, cancel_token });
+        self.register_subscriber_entry(id, addr, cancel_token, "test_user", "test_token", false).await;
     }
 
     pub(super) async fn cancel_subscribers(&self) {
@@ -98,7 +121,7 @@ impl SharedStreamState {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub(super) async fn subscribe(
         self: &Arc<Self>,
         addr: &SocketAddr,
@@ -106,6 +129,9 @@ impl SharedStreamState {
         connection_manager: Arc<ConnectionManager>,
         mut pending_cleanup: PendingSharedSubscriberCleanup,
         pending_join: PendingJoinGuard,
+        username: &str,
+        session_token: &str,
+        free_join: bool,
     ) -> (BoxedProviderStream, Option<Arc<str>>, SharedCleanupCapability) {
         let (client_tx, client_rx) = mpsc::channel::<BudgetedChunk>(self.buf_size);
         let cancel_token = CancellationToken::new();
@@ -117,7 +143,8 @@ impl SharedStreamState {
             handles.retain(|h| !h.is_finished());
         }
 
-        self.register_subscriber(subscriber_id, addr, cancel_token.clone()).await;
+        self.register_subscriber_entry(subscriber_id, addr, cancel_token.clone(), username, session_token, free_join)
+            .await;
         pending_join.commit();
         let (start_tx, start_rx) = oneshot::channel();
         let cleanup_manager = Arc::clone(&connection_manager);
@@ -135,6 +162,8 @@ impl SharedStreamState {
         let low_priority_preempted = self.low_priority_preempted.clone();
         let address = *addr;
         let subscriber_started_at = Instant::now();
+
+        let is_recording = username == tuliprox_core::model::RECORDING_PROXY_USERNAME;
 
         let handle = tokio::spawn(async move {
             // Wait for the response to be polled, but respect cancellation/shutdown so a
@@ -292,7 +321,7 @@ impl SharedStreamState {
                     }
 
                     () = &mut idle_check => {
-                        if last_active.elapsed() > timeout_duration {
+                        if !is_recording && last_active.elapsed() > timeout_duration {
                             trace_if_enabled!(
                                 "shared_stream.subscribe: idle_check_fired (inactivity>={}s) for {}",
                                 timeout_duration.as_secs(),
@@ -360,7 +389,11 @@ impl SharedStreamState {
                 permit,
                 request_id,
                 owner,
-                deadline: self.subscriber_max_duration.map(|duration| Box::pin(sleep(duration))),
+                deadline: if username == tuliprox_core::model::RECORDING_PROXY_USERNAME {
+                    None
+                } else {
+                    self.subscriber_max_duration.map(|duration| Box::pin(sleep(duration)))
+                },
                 released: false,
             }
             .boxed(),

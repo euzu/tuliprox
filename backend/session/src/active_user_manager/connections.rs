@@ -479,6 +479,7 @@ impl ActiveUserManager {
             last_logged_user_connection_count: AtomicUsize::new(0),
             cleanup_tx: tokio::sync::OnceCell::new(),
             provider_manager: tokio::sync::OnceCell::new(),
+            shared_stream_manager: tokio::sync::OnceCell::new(),
             transition_gates: Mutex::new(HashMap::new()),
             pending_provider_releases: Mutex::new(HashMap::new()),
             dropped_cleanup_events: AtomicU64::new(0),
@@ -486,6 +487,29 @@ impl ActiveUserManager {
             deferred_wakes: Arc::default(),
             divergence_cache: Mutex::new(LruCache::new(DIVERGENCE_CACHE_CAPACITY)),
             divergence_cooldown_secs: 300,
+            stream_switch_cooldowns: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn check_stream_switch_cooldown(&self, username: &str, stream_uid: u32) -> Result<(), std::time::Duration> {
+        let cooldown = crate::MANUAL_SWITCH_COOLDOWN;
+        if let Ok(mut lock) = self.stream_switch_cooldowns.lock() {
+            let now = tokio::time::Instant::now();
+            lock.retain(|_, instant| now.saturating_duration_since(*instant) < cooldown);
+            if let Some(&last) = lock.get(&(username.to_string(), stream_uid)) {
+                let elapsed = now.saturating_duration_since(last);
+                if elapsed < cooldown {
+                    let retry_after = cooldown.saturating_sub(elapsed);
+                    return Err(retry_after);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn record_stream_switch_cooldown(&self, username: &str, stream_uid: u32) {
+        if let Ok(mut lock) = self.stream_switch_cooldowns.lock() {
+            lock.insert((username.to_string(), stream_uid), tokio::time::Instant::now());
         }
     }
 

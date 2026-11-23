@@ -68,13 +68,19 @@ pub(in crate::api::endpoints::hls_api) fn hls_cache_enabled_for_target(
     hls_cache_configured(app_state) && is_hls_stream_share_enabled(target)
 }
 
-pub(in crate::api::endpoints::hls_api) fn hls_cache_enabled_for_user(
+pub(crate) fn hls_cache_enabled_for_user(
     app_state: &Arc<AppState>,
     target: &ConfigTarget,
+    input: &ConfigInput,
     user: &ProxyUserCredentials,
 ) -> bool {
-    // Recording headers can select different origin content from ordinary playback.
-    !user.is_recording_proxy_user() && hls_cache_enabled_for_target(app_state, target)
+    if !hls_cache_enabled_for_target(app_state, target) {
+        return false;
+    }
+    if !user.is_recording_proxy_user() {
+        return true;
+    }
+    !crate::api::api_utils::recording_headers_differ(&app_state.app_config, input)
 }
 
 /// Session key used by the canonical manifest/segment/resource path for `origin_source`.

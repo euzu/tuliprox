@@ -146,6 +146,9 @@ where
     let Some(result) = op(&mut candidate)? else {
         return Ok(None);
     };
+    // A task created by the mutation gets its VOD id here, inside the same critical
+    // section as the insert, so two concurrent creates cannot share one.
+    let (next_vod_id, _) = candidate.assign_missing_vod_ids();
 
     let records = candidate.to_records();
 
@@ -155,6 +158,7 @@ where
         active: candidate_active,
         finished: candidate_finished,
         revision: _,
+        next_vod_id: _,
     } = candidate;
 
     // 4. Validate every persisted entry into its in-memory form before
@@ -206,6 +210,7 @@ where
     *finished_lock = finished;
     this.prune_idle_workers(&queue_lock, &scheduled_lock, &active_lock);
     this.revision.store(next_revision, Ordering::SeqCst);
+    this.vod_id_counter.store(next_vod_id, Ordering::SeqCst);
     this.queue_changed.notify_one();
     Ok(Some(result))
 }

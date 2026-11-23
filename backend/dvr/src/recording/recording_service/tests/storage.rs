@@ -11,17 +11,36 @@ fn borrowed_media_identity_preserves_persisted_keys() {
     );
     meta.source.target_id = "target".to_string();
     meta.source.virtual_id = "channel".to_string();
+    meta.source.input_name = "input-a".to_string();
+    meta.source.provider_id = Some("stream-1".to_string());
+    meta.source.cluster = XtreamCluster::Live;
     meta.program_start = Some(10);
     meta.program_end = Some(20);
+    meta.pre_roll_secs = 2;
+    meta.post_roll_secs = 3;
     assert_eq!(
         recording_identity_key(&meta, url),
-        r#"{"Programme":{"target_id":"target","virtual_id":"channel","program_start":10,"program_end":20}}"#
+        r#"{"LiveChannel":{"input_name":"input-a","provider_stream_id":"stream-1","padded_start":8,"padded_end":23}}"#
     );
+    meta.source.is_group = true;
+    meta.source.provider_id = None;
+    assert_eq!(
+        recording_identity_key(&meta, url),
+        r#"{"LiveGroup":{"target_id":"target","group_vid":"channel","padded_start":8,"padded_end":23}}"#
+    );
+    meta.source.is_group = false;
+    meta.source.cluster = XtreamCluster::Video;
+    meta.source.provider_id = Some("vod-42".to_string());
+    assert_eq!(
+        recording_identity_key(&meta, url),
+        r#"{"Media":{"input_name":"input-a","cluster":"Video","provider_stream_id":"vod-42"}}"#
+    );
+    // Rule recordings follow the medium rules for file identity:
     meta.provenance.rule_id = Some("rule".to_string());
     meta.provenance.occurrence_key = Some("occurrence".to_string());
     assert_eq!(
         recording_identity_key(&meta, url),
-        r#"{"Occurrence":{"rule_id":"rule","occurrence_key":"occurrence"}}"#
+        r#"{"Media":{"input_name":"input-a","cluster":"Video","provider_stream_id":"vod-42"}}"#
     );
 }
 
@@ -315,4 +334,334 @@ async fn a_recording_with_no_room_on_disk_is_refused() {
 
     assert!(matches!(result, Err(ServiceError::DiskFull)), "got {result:?}");
     assert!(queue.scheduled.read().await.is_empty(), "a refused admission must not leave a recording behind");
+}
+
+#[tokio::test]
+async fn two_users_same_programme_same_padding_share_one_materialization() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_file = dir.path().join("downloads.json");
+    let queue = Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open repo"));
+    let start = chrono::Utc::now().timestamp() + 3_600;
+
+    let mut task_a = persisted_rule_recording("alice-task", None, start);
+    task_a.recording.owner = RecordingOwner::User(UserId::from("web:alice"));
+    task_a.recording.source =
+        RecordingSource::new("target-1", "1", "input-a").with_provider_id(Some("provider-stream-1".to_string()));
+    task_a.recording.pre_roll_secs = 60;
+    task_a.recording.post_roll_secs = 120;
+    task_a.file_path = std::path::PathBuf::from("/tmp/shared.ts");
+    task_a.filename = "shared.ts".to_string();
+    task_a.recording.relative_path = Some("shared.ts".to_string());
+
+    let mut task_b = persisted_rule_recording("bob-task", None, start);
+    task_b.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+    task_b.recording.source =
+        RecordingSource::new("target-1", "1", "input-a").with_provider_id(Some("provider-stream-1".to_string()));
+    task_b.recording.pre_roll_secs = 60;
+    task_b.recording.post_roll_secs = 120;
+    task_b.file_path = std::path::PathBuf::from("/tmp/shared.ts");
+    task_b.filename = "shared.ts".to_string();
+    task_b.recording.relative_path = Some("shared.ts".to_string());
+
+    let task_a = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_a).expect("task a"));
+    let task_b = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_b).expect("task b"));
+    assert_eq!(task_a.media_identity, task_b.media_identity);
+
+    mutate(&queue, |candidate| {
+        candidate.scheduled.push(task_a);
+        candidate.scheduled.push(task_b);
+        Ok(())
+    })
+    .await
+    .expect("mutate");
+
+    let mats = committed_materializations(&queue).await;
+    assert_eq!(mats.len(), 1);
+    assert_eq!(mats[0].reference_count, 2);
+}
+
+#[tokio::test]
+async fn different_padding_produces_two_materializations() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_file = dir.path().join("downloads.json");
+    let queue = Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open repo"));
+    let start = chrono::Utc::now().timestamp() + 3_600;
+
+    let mut task_a = persisted_rule_recording("alice-task", None, start);
+    task_a.recording.owner = RecordingOwner::User(UserId::from("web:alice"));
+    task_a.recording.source =
+        RecordingSource::new("target-1", "1", "input-a").with_provider_id(Some("provider-stream-1".to_string()));
+    task_a.recording.pre_roll_secs = 60;
+    task_a.recording.post_roll_secs = 120;
+
+    let mut task_b = persisted_rule_recording("bob-task", None, start);
+    task_b.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+    task_b.recording.source =
+        RecordingSource::new("target-1", "1", "input-a").with_provider_id(Some("provider-stream-1".to_string()));
+    task_b.recording.pre_roll_secs = 120;
+    task_b.recording.post_roll_secs = 120;
+
+    let task_a = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_a).expect("task a"));
+    let task_b = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_b).expect("task b"));
+    assert_ne!(task_a.media_identity, task_b.media_identity);
+
+    mutate(&queue, |candidate| {
+        candidate.scheduled.push(task_a);
+        candidate.scheduled.push(task_b);
+        Ok(())
+    })
+    .await
+    .expect("mutate");
+
+    let mats = committed_materializations(&queue).await;
+    assert_eq!(mats.len(), 2);
+    assert_eq!(mats[0].reference_count, 1);
+    assert_eq!(mats[1].reference_count, 1);
+}
+
+#[tokio::test]
+async fn same_vod_episode_from_two_targets_and_different_times_shares_materialization() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_file = dir.path().join("downloads.json");
+    let queue = Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open repo"));
+
+    let mut task_target1 = persisted_media("t1", "web:alice", RecordingVisibility::Private, "http://provider/ep1.mkv");
+    task_target1.recording.source = RecordingSource::new("target-alpha", "42", "input-vod")
+        .with_cluster(XtreamCluster::Series)
+        .with_provider_id(Some("vod-stream-99".to_string()));
+    task_target1.recording.scheduled_start = Some(1_700_000_000);
+
+    let mut task_target2 = persisted_media("t2", "web:bob", RecordingVisibility::Private, "http://provider/ep1.mkv");
+    task_target2.recording.source = RecordingSource::new("target-beta", "108", "input-vod")
+        .with_cluster(XtreamCluster::Series)
+        .with_provider_id(Some("vod-stream-99".to_string()));
+    task_target2.recording.scheduled_start = Some(1_700_050_000);
+
+    let t1 = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_target1).expect("task 1"));
+    let t2 = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_target2).expect("task 2"));
+    assert_eq!(t1.media_identity, t2.media_identity);
+
+    mutate(&queue, |candidate| {
+        candidate.queue.push(t1);
+        candidate.queue.push(t2);
+        Ok(())
+    })
+    .await
+    .expect("mutate");
+
+    let mats = committed_materializations(&queue).await;
+    assert_eq!(mats.len(), 1);
+    assert_eq!(mats[0].reference_count, 2);
+}
+
+#[tokio::test]
+async fn group_channel_identity_is_target_bound() {
+    // Group channel recordings: identity is target_id + group_vid + padded window.
+    // Within the same target, two users requesting the group channel share one materialization.
+    // Across different targets, the group identity is target-bound (different target_id),
+    // producing distinct materializations even with identical group vid and window.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_file = dir.path().join("downloads.json");
+    let queue = Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open repo"));
+    let start = chrono::Utc::now().timestamp() + 3_600;
+
+    let mut task_t1_a = persisted_rule_recording("t1-a", None, start);
+    task_t1_a.recording.owner = RecordingOwner::User(UserId::from("web:alice"));
+    task_t1_a.recording.source = RecordingSource::new("target-1", "grp-100", "input-a").with_is_group(true);
+    task_t1_a.file_path = std::path::PathBuf::from("/tmp/t1-shared.ts");
+    task_t1_a.filename = "t1-shared.ts".to_string();
+    task_t1_a.recording.relative_path = Some("t1-shared.ts".to_string());
+
+    let mut task_t1_b = persisted_rule_recording("t1-b", None, start);
+    task_t1_b.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+    task_t1_b.recording.source = RecordingSource::new("target-1", "grp-100", "input-a").with_is_group(true);
+    task_t1_b.file_path = std::path::PathBuf::from("/tmp/t1-shared.ts");
+    task_t1_b.filename = "t1-shared.ts".to_string();
+    task_t1_b.recording.relative_path = Some("t1-shared.ts".to_string());
+
+    let mut task_t2_c = persisted_rule_recording("t2-c", None, start);
+    task_t2_c.recording.owner = RecordingOwner::User(UserId::from("web:charlie"));
+    task_t2_c.recording.source = RecordingSource::new("target-2", "grp-100", "input-a").with_is_group(true);
+    task_t2_c.file_path = std::path::PathBuf::from("/tmp/t2.ts");
+    task_t2_c.filename = "t2.ts".to_string();
+    task_t2_c.recording.relative_path = Some("t2.ts".to_string());
+
+    let t1_a = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_t1_a).expect("t1 a"));
+    let t1_b = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_t1_b).expect("t1 b"));
+    let t2_c = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_t2_c).expect("t2 c"));
+
+    assert_eq!(t1_a.media_identity, t1_b.media_identity, "same target + group vid share identity");
+    assert_ne!(t1_a.media_identity, t2_c.media_identity, "group identity is bound to target");
+
+    mutate(&queue, |candidate| {
+        candidate.scheduled.push(t1_a);
+        candidate.scheduled.push(t1_b);
+        candidate.scheduled.push(t2_c);
+        Ok(())
+    })
+    .await
+    .expect("mutate");
+
+    let mats = committed_materializations(&queue).await;
+    assert_eq!(mats.len(), 2);
+    let target1_mat = mats.iter().find(|m| m.media.source.target_id == "target-1").expect("target 1");
+    let target2_mat = mats.iter().find(|m| m.media.source.target_id == "target-2").expect("target 2");
+    assert_eq!(target1_mat.reference_count, 2);
+    assert_eq!(target2_mat.reference_count, 1);
+}
+
+#[tokio::test]
+async fn rule_occurrence_and_manual_request_share_file_and_duplicate_occurrence_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_file = dir.path().join("downloads.json");
+    let queue = Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open repo"));
+    let start = chrono::Utc::now().timestamp() + 3_600;
+
+    let mut manual = persisted_rule_recording("manual-task", None, start);
+    manual.recording.owner = RecordingOwner::User(UserId::from("web:alice"));
+    manual.recording.source =
+        RecordingSource::new("target-1", "1", "input-a").with_provider_id(Some("stream-300".to_string()));
+    manual.recording.pre_roll_secs = 60;
+    manual.recording.post_roll_secs = 60;
+    manual.file_path = std::path::PathBuf::from("/tmp/manual.ts");
+    manual.filename = "manual.ts".to_string();
+    manual.recording.relative_path = Some("manual.ts".to_string());
+
+    let mut rule_occ = persisted_rule_recording("rule-task-1", Some("rule-1"), start);
+    rule_occ.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+    rule_occ.recording.source =
+        RecordingSource::new("target-1", "1", "input-a").with_provider_id(Some("stream-300".to_string()));
+    rule_occ.recording.pre_roll_secs = 60;
+    rule_occ.recording.post_roll_secs = 60;
+    rule_occ.recording.provenance.occurrence_key = Some("occurrence-2026-11-20".to_string());
+    rule_occ.file_path = std::path::PathBuf::from("/tmp/manual.ts");
+    rule_occ.filename = "manual.ts".to_string();
+    rule_occ.recording.relative_path = Some("manual.ts".to_string());
+
+    let manual_task = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(manual).expect("manual"));
+    let rule_task = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(rule_occ).expect("rule"));
+
+    assert_eq!(manual_task.media_identity, rule_task.media_identity);
+
+    mutate(&queue, |candidate| {
+        candidate.scheduled.push(manual_task);
+        candidate.scheduled.push(rule_task);
+        Ok(())
+    })
+    .await
+    .expect("mutate");
+
+    let mats = committed_materializations(&queue).await;
+    assert_eq!(mats.len(), 1);
+    assert_eq!(mats[0].reference_count, 2);
+
+    let repeat_rule = persisted_rule_recording("rule-task-2", Some("rule-1"), start);
+    let mut repeat_rule = RecordingQueue::from_persisted(repeat_rule).expect("valid");
+    repeat_rule.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+    repeat_rule.recording.provenance.occurrence_key = Some("occurrence-2026-11-20".to_string());
+
+    let candidate_tasks = committed_records(&queue).await;
+    let candidate = PersistedRecordingQueue { scheduled: candidate_tasks, ..Default::default() };
+    assert!(candidate_has_duplicate_recording(&candidate, &repeat_rule));
+}
+
+#[tokio::test]
+async fn edit_split_on_shared_file_and_sole_entry_in_place() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_file = dir.path().join("downloads.json");
+    let queue = Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open repo"));
+    let start = chrono::Utc::now().timestamp() + 3_600;
+
+    let mut task_alice = persisted_rule_recording("alice-entry", None, start);
+    task_alice.recording.owner = RecordingOwner::User(UserId::from("web:alice"));
+    task_alice.recording.source =
+        RecordingSource::new("target-1", "1", "input-a").with_provider_id(Some("stream-1".to_string()));
+    task_alice.file_path = std::path::PathBuf::from("/tmp/shared-show.ts");
+    task_alice.filename = "shared-show.ts".to_string();
+    task_alice.recording.relative_path = Some("shared-show.ts".to_string());
+
+    let mut task_bob = persisted_rule_recording("bob-entry", None, start);
+    task_bob.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+    task_bob.recording.source =
+        RecordingSource::new("target-1", "1", "input-a").with_provider_id(Some("stream-1".to_string()));
+    task_bob.file_path = std::path::PathBuf::from("/tmp/shared-show.ts");
+    task_bob.filename = "shared-show.ts".to_string();
+    task_bob.recording.relative_path = Some("shared-show.ts".to_string());
+
+    let mut task_dave = persisted_rule_recording("dave-entry", None, start);
+    task_dave.recording.owner = RecordingOwner::User(UserId::from("web:dave"));
+    task_dave.recording.source =
+        RecordingSource::new("target-1", "2", "input-a").with_provider_id(Some("stream-2".to_string()));
+    task_dave.file_path = std::path::PathBuf::from("/tmp/dave-show.ts");
+    task_dave.filename = "dave-show.ts".to_string();
+    task_dave.recording.relative_path = Some("dave-show.ts".to_string());
+
+    let t_alice = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_alice).expect("alice"));
+    let t_bob = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_bob).expect("bob"));
+    let t_dave = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task_dave).expect("dave"));
+
+    mutate(&queue, |candidate| {
+        candidate.scheduled.push(t_alice);
+        candidate.scheduled.push(t_bob);
+        candidate.scheduled.push(t_dave);
+        Ok(())
+    })
+    .await
+    .expect("mutate");
+
+    let mats = committed_materializations(&queue).await;
+    assert_eq!(mats.len(), 2);
+    let shared_mat = mats.iter().find(|m| m.reference_count == 2).expect("shared");
+    assert_eq!(shared_mat.filename, "shared-show.ts");
+
+    let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+
+    let patch_alice = EditRecordingPatch { program_end: Some(start + 7_200), ..EditRecordingPatch::default() };
+    service.edit_recording(&editing_claims(), "alice-entry", patch_alice).await.expect("edit alice");
+
+    let mats_after = committed_materializations(&queue).await;
+    assert_eq!(mats_after.len(), 3);
+    let bob_mat = mats_after.iter().find(|m| m.filename == "shared-show.ts").expect("bob mat");
+    assert_eq!(bob_mat.reference_count, 1, "Bob is now sole holder of original materialization");
+
+    let (_, tasks) = queue.committed_snapshot().await;
+    let get_task = |uuid: &str| tasks.iter().find(|t| t.uuid == uuid).cloned().expect("task");
+    let (alice_now, bob_now) = (get_task("alice-entry"), get_task("bob-entry"));
+    assert_eq!(bob_now.file_path, std::path::PathBuf::from("/tmp/shared-show.ts"), "Bob's file is untouched");
+    assert_ne!(alice_now.file_path, bob_now.file_path, "Alice moved to her own file path");
+
+    let patch_dave = EditRecordingPatch { pre_roll_secs: Some(30), ..EditRecordingPatch::default() };
+    service.edit_recording(&dave_claims(), "dave-entry", patch_dave).await.expect("edit dave");
+
+    let (_, tasks_after_dave) = queue.committed_snapshot().await;
+    let dave_now = tasks_after_dave.iter().find(|t| t.uuid == "dave-entry").expect("dave task");
+    assert_eq!(dave_now.file_path, std::path::PathBuf::from("/tmp/dave-show.ts"), "Sole entry is edited in place");
+}
+
+#[tokio::test]
+async fn edit_of_clip_detaches_cleanly_and_clears_clip_metadata() {
+    let start = chrono::Utc::now().timestamp() + 3_600;
+    let bob = upcoming_live("bob-entry", "web:bob", start);
+    let mut alice = upcoming_live("alice-entry", "web:alice", start);
+    // Alice is a clip on Bob's recording
+    alice.clip = Some(tuliprox_repository::recording_repository::RecordingClip {
+        start_ts: start + 60,
+        end_ts: start + 300,
+        start_offset: None,
+        end_offset: None,
+        header_bytes: None,
+    });
+
+    let queue = scheduled_queue(vec![bob, alice]).await;
+    let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+
+    // Alice edits her window so she leaves the shared media
+    let patch_alice = EditRecordingPatch { program_end: Some(start + 7_200), ..EditRecordingPatch::default() };
+    service.edit_recording(&editing_claims(), "alice-entry", patch_alice).await.expect("edit alice");
+
+    let (_, tasks) = queue.committed_snapshot().await;
+    let alice_now = tasks.iter().find(|t| t.uuid == "alice-entry").expect("alice entry");
+    assert!(alice_now.clip.is_none(), "detached clip must have its clip metadata cleared");
+    let bob_now = tasks.iter().find(|t| t.uuid == "bob-entry").expect("bob entry");
+    assert_ne!(alice_now.file_path, bob_now.file_path, "Alice now has her own file path");
 }

@@ -182,8 +182,8 @@ pub mod api {
             HlsOriginSourceKind, HlsOriginStartProtection, HlsOriginWorkClass,
         },
         origin_account_runtime::{
-            HlsMemberHealthPolicy, HlsMemberUnhealthyReason, HlsOriginAccountRuntime, HlsOriginAccountSnapshot,
-            HlsOriginAccountWork, HlsPreparedOriginAccount,
+            HlsManualSwitchError, HlsMemberHealthPolicy, HlsMemberUnhealthyReason, HlsOriginAccountRuntime,
+            HlsOriginAccountSnapshot, HlsOriginAccountWork, HlsPreparedOriginAccount,
         },
         origin_progress::{publication_late_after_ms, HlsOriginPathCondition},
         paths::{HlsMapFile, HlsSegmentFile, TransientResourceFile},

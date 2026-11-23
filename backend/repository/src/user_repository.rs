@@ -17,10 +17,10 @@ use tuliprox_core::{
     utils::{file_exists_async, json_write_documents_to_file},
 };
 
-// V7 (current): added plan and filter. V1-V6 are migrated to V7 at startup
+// V8 (current): added player_features. V1-V7 are migrated to V8 at startup
 // by `startup_migration::migrate_user_db_schema`.
 // MessagePack encodes fields positionally: empty optional fields must retain
-// their slots as nil so runtime writes remain readable as V7 on the next startup.
+// their slots as nil so runtime writes remain readable as V8 on the next startup.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StoredProxyUserCredentials {
     pub target: String,
@@ -47,6 +47,30 @@ pub(crate) struct StoredProxyUserCredentials {
     pub plan: Option<String>,
     #[serde(default)]
     pub filter: Option<String>,
+    #[serde(default, with = "named_player_features")]
+    pub player_features: Option<shared::model::PlayerFeaturesDto>,
+}
+
+/// Stores `player_features` as a keyed map instead of a positional `MessagePack` array.
+///
+/// The DTO skips unset fields when serialized; positionally encoded, a skipped field would
+/// shift every later field into the wrong slot. A keyed map keeps the omission harmless and
+/// lets new fields be added without a schema bump.
+#[allow(clippy::ref_option)]
+pub(crate) mod named_player_features {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use shared::model::PlayerFeaturesDto;
+
+    pub fn serialize<S: Serializer>(value: &Option<PlayerFeaturesDto>, serializer: S) -> Result<S::Ok, S::Error> {
+        value.as_ref().map(serde_json::to_value).transpose().map_err(serde::ser::Error::custom)?.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PlayerFeaturesDto>, D::Error> {
+        Option::<serde_json::Value>::deserialize(deserializer)?
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl StoredProxyUserCredentials {
@@ -74,6 +98,7 @@ impl StoredProxyUserCredentials {
             network_access: proxy.network_access.as_ref().map(Into::into),
             plan: proxy.plan.clone(),
             filter: proxy.filter.clone(),
+            player_features: proxy.raw_player_features.clone(),
         }
     }
 
@@ -114,6 +139,8 @@ impl StoredProxyUserCredentials {
             t_filter: None,
             t_has_unresolved_plan: false,
             t_has_invalid_filter: false,
+            player_features: tuliprox_core::model::PlayerFeatures::default(),
+            raw_player_features: stored.player_features.clone(),
         }
     }
 }
@@ -632,6 +659,8 @@ mod tests {
             t_filter: None,
             t_has_unresolved_plan: false,
             t_has_invalid_filter: false,
+            player_features: tuliprox_core::model::PlayerFeatures::default(),
+            raw_player_features: None,
         }
     }
 
@@ -696,6 +725,93 @@ mod tests {
         assert_eq!(networks.len(), 2);
         assert!(networks.iter().any(|n| n == "10.0.0.0/8"));
         assert!(networks.iter().any(|n| n == "192.168.1.0/24"));
+    }
+
+    #[tokio::test]
+    async fn store_and_load_api_user_preserves_raw_player_features() {
+        let dir = tempdir().expect("tempdir should succeed");
+        let cfg = app_config_from(
+            Config::default(),
+            ConfigPaths {
+                config_path: dir.path().to_string_lossy().to_string(),
+                storage_path: dir.path().to_string_lossy().to_string(),
+                ..empty_paths()
+            },
+            None,
+        );
+
+        let mut cred = ProxyUserCredentials::default();
+        cred.username = "alice".to_string();
+        cred.password = "secret".to_string();
+        cred.raw_player_features = Some(shared::model::PlayerFeaturesDto {
+            source_switch: Some(true),
+            joinable_streams: Some(true),
+            recording: Some(shared::model::PlayerRecordingLevel::Private),
+            recording_quota: Some(shared::model::ByteSize::new("20GB")),
+            max_concurrent_recordings: Some(2),
+            free_shared_joins: Some(true),
+            max_free_shared_joins: Some(3),
+            ..Default::default()
+        });
+
+        let user = TargetUser { target: "main".to_string(), credentials: vec![Arc::new(cred)] };
+
+        store_api_user(&cfg, &[user]).await.expect("user must be stored");
+
+        let loaded = load_api_user(&cfg).await.expect("loading must succeed");
+        let creds = loaded[0].credentials.first().expect("credential must exist");
+        assert_eq!(
+            creds.raw_player_features,
+            Some(shared::model::PlayerFeaturesDto {
+                source_switch: Some(true),
+                joinable_streams: Some(true),
+                recording: Some(shared::model::PlayerRecordingLevel::Private),
+                recording_quota: Some(shared::model::ByteSize::new("20GB")),
+                max_concurrent_recordings: Some(2),
+                free_shared_joins: Some(true),
+                max_free_shared_joins: Some(3),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            creds
+                .raw_player_features
+                .as_ref()
+                .and_then(|f| f.recording_quota.as_ref())
+                .map(shared::model::ByteSize::as_str),
+            Some("20GB")
+        );
+    }
+
+    #[tokio::test]
+    async fn store_and_load_api_user_preserves_api_enabled_false() {
+        let dir = tempdir().expect("tempdir should succeed");
+        let cfg = app_config_from(
+            Config::default(),
+            ConfigPaths {
+                config_path: dir.path().to_string_lossy().to_string(),
+                storage_path: dir.path().to_string_lossy().to_string(),
+                ..empty_paths()
+            },
+            None,
+        );
+
+        let mut cred = ProxyUserCredentials::default();
+        cred.username = "player_test".to_string();
+        cred.password = "secret".to_string();
+        cred.raw_player_features =
+            Some(shared::model::PlayerFeaturesDto { api_enabled: Some(false), ..Default::default() });
+
+        let user = TargetUser { target: "main".to_string(), credentials: vec![Arc::new(cred)] };
+
+        store_api_user(&cfg, &[user]).await.expect("user must be stored");
+
+        let loaded = load_api_user(&cfg).await.expect("loading must succeed");
+        let creds = loaded[0].credentials.first().expect("credential must exist");
+        assert_eq!(
+            creds.raw_player_features,
+            Some(shared::model::PlayerFeaturesDto { api_enabled: Some(false), ..Default::default() })
+        );
     }
 
     /// Startup migration runs before the config is read, so it can only ever

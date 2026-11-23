@@ -234,7 +234,8 @@ const API_STREAM_CHUNK_SIZE: usize = 64 * 1024;
 pub(crate) mod tests;
 
 mod activation;
-mod auth;
+pub(crate) mod auth;
+pub(crate) use auth::recording_headers_differ;
 mod catchup;
 mod clock;
 pub(crate) mod failover_group;
@@ -246,6 +247,7 @@ mod media_server;
 mod metering;
 mod provider_acquire;
 mod provider_urls;
+mod recording_vod;
 mod resource_limiter;
 mod resources;
 mod response;
@@ -288,7 +290,8 @@ use self::{
         prepare_stream_metering, StreamMeteringConfig,
     },
     provider_acquire::{
-        allows_provider_pool_failover, resolve_streaming_strategy_with_provider_handle, split_provider_stream_open,
+        allows_provider_pool_failover, release_reservation_and_exhausted_response,
+        resolve_streaming_strategy_with_provider_handle, split_provider_stream_open,
     },
     provider_urls::{get_redirect_alternative_url, resolve_xtream_vod_provider_url},
     resources::hls_resource_failure_status,
@@ -336,10 +339,16 @@ pub(crate) use self::{
         archive_member_order, group_playback_settings, member_playback_url, resolve_hls_group_entry,
         GroupSelectionRequest, PlaybackSource,
     },
-    local_files::local_stream_response,
+    local_files::{
+        activate_local_file_stream, admit_local_file_connection, apply_stream_throttle, local_stream_response,
+    },
     maintenance::{blocks_new_playback, is_running_playback, maintenance_rejection_response},
-    provider_acquire::{stream_response_with_provider_handle, StreamPlaybackOutcome},
+    provider_acquire::{resolve_target_shared_lookup_key, stream_response_with_provider_handle, StreamPlaybackOutcome},
     provider_urls::{lookup_account_m3u_stream_url, select_provider_stream_url},
+    recording_vod::{
+        recording_vod_applies, recording_vod_documents, recording_vod_info, serve_recording_vod,
+        visible_recording_by_vod_id, AppendRecordingVod,
+    },
     resources::force_hls_resource_response,
     response::admission_failure_response,
     serialization::coalesce_byte_stream,
@@ -350,9 +359,10 @@ pub(crate) use self::{
     stalker::{resolve_initial_stalker_playback_url, resolve_stalker_stream_for_account, stalker_stream_kind},
     strategy::resolve_redirect_location,
     streaming::{
-        get_hls_playback_ttl_secs, plugin_upstream_headers, record_connect_failed_attempt,
-        resolve_request_url_for_logging, resolve_stream_user_agent_index, should_allow_exhausted_shared_reconnect,
-        stream_response,
+        evaluate_free_join, free_join_available, get_hls_playback_ttl_secs, is_dedicated_requested, kick_stream,
+        plugin_upstream_headers, record_connect_failed_attempt, resolve_request_url_for_logging,
+        resolve_stream_user_agent_index, should_allow_exhausted_shared_reconnect, stream_response,
+        terminate_session_token,
     },
 };
 #[cfg(test)]

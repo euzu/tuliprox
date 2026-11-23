@@ -11,8 +11,8 @@ use crate::{
         },
         context::FailoverGroupsNavigation,
     },
-    config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_list_option,
-    edit_field_text, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, edit_field_bool, edit_field_list_option, edit_field_text,
+    generate_form_reducer,
     hooks::use_service_context,
     html_if,
     i18n::use_translation,
@@ -679,19 +679,22 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                         { config_field_bool!(target_form_state.form, translate.t(LABEL_USE_MEMORY_CACHE), use_memory_cache) }
                     </div>
                     { config_field!(target_form_state.form, translate.t(LABEL_NAME), name) }
-                    { config_field_custom!(
+                    { config_field_child!(
                         translate.t(LABEL_FILTER),
-                        target_form_state.form.filter.processing.clone().unwrap_or_default()
+                        "TARGET_FORM.FILTER",
+                        { html! { <span class="tp__form-field__value">{target_form_state.form.filter.processing.clone().unwrap_or_default()}</span> } }
                     ) }
-                    { config_field_custom!(
+                    { config_field_child!(
                         translate.t(LABEL_PERSIST_FILTER),
-                        target_form_state.form.filter.persist.clone().unwrap_or_default()
+                        "TARGET_FORM.PERSIST_FILTER",
+                        { html! { <span class="tp__form-field__value">{target_form_state.form.filter.persist.clone().unwrap_or_default()}</span> } }
                     ) }
                     { render_bouquet_input() }
                     { render_failover_groups_link() }
-                    { config_field_custom!(
+                    { config_field_child!(
                         translate.t(LABEL_PROCESSING_ORDER),
-                        target_form_state.form.processing_order.to_string()
+                        "TARGET_FORM.PROCESSING_ORDER",
+                        { html! { <span class="tp__form-field__value">{target_form_state.form.processing_order.to_string()}</span> } }
                     ) }
                 </Card>
             }
@@ -730,9 +733,10 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         } else {
             html! {
                 <Card class="tp__config-view__card">
-                { config_field_custom!(
+                { config_field_child!(
                     translate.t(LABEL_MAPPING),
-                    target_form_state.form.mapping.as_ref().map_or_else(String::new, |values| values.join(", "))
+                    "CONFIG_TARGET.MAPPING",
+                    { html! { <span class="tp__form-field__value">{target_form_state.form.mapping.as_ref().map_or_else(String::new, |values| values.join(", "))}</span> } }
                 ) }
                 </Card>
             }
@@ -767,12 +771,13 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <Card class="tp__config-view__card">
                     <p>{translate.t("LABEL.CURATION_YAML_NOTICE")}</p>
                     { config_field_bool!(curation, translate.t(LABEL_ENABLED), enabled) }
-                    { config_field_custom!(
+                    { config_field_child!(
                         translate.t("LABEL.CURATION"),
-                        curation_summary(
+                        "CURATION_CONFIG.CURATION",
+                        { html! { <span class="tp__form-field__value">{curation_summary(
                             curation,
                             &translate.t(curation_catalog_selection_label_key(curation.catalog_selection))
-                        )
+                        )}</span> } }
                     ) }
                 </Card>
             }

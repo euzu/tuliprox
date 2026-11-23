@@ -19,6 +19,30 @@ pub enum HlsMemberUnhealthyReason {
     ReservePressure,
 }
 
+/// Errors that can occur during a manual HLS member handoff request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HlsManualSwitchError {
+    Unsupported,
+    InProgress,
+    Cooldown { retry_after: std::time::Duration },
+    MemberNotFound,
+    Failed(String),
+}
+
+impl fmt::Display for HlsManualSwitchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unsupported => write!(f, "Manual member switch is not supported by this runtime"),
+            Self::InProgress => write!(f, "Member handoff already in progress"),
+            Self::Cooldown { .. } => write!(f, "Switch cooldown active"),
+            Self::MemberNotFound => write!(f, "Target member not found in group"),
+            Self::Failed(msg) => write!(f, "Manual member switch failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for HlsManualSwitchError {}
+
 impl HlsMemberUnhealthyReason {
     /// Member-circuit/QoS failure class used for the failing member. All member-health
     /// triggers are stream-level signals, not account or capacity errors.
@@ -131,6 +155,15 @@ pub trait HlsOriginAccountRuntime: Send + Sync + fmt::Debug {
     /// an incident after a healthy period. Called under the session lock: it must be cheap and
     /// non-blocking.
     fn notify_member_progress(&self, _session: &crate::HlsSession) {}
+
+    /// Requests a manual member handoff of a running failover-group session to the target member index.
+    fn request_member_handoff(
+        &self,
+        _session: &HlsSessionHandle,
+        _target_member_index: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), HlsManualSwitchError>> + Send + '_>> {
+        Box::pin(std::future::ready(Err(HlsManualSwitchError::Unsupported)))
+    }
 }
 
 pub(crate) async fn prepare_media_origin(

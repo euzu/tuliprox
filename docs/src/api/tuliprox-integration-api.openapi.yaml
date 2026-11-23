@@ -1,0 +1,4037 @@
+openapi: 3.1.0
+info:
+  title: Tuliprox Integration API
+  version: 3.3.205
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  description: |
+    # Tuliprox Integration API Specification
+
+    The Tuliprox Integration API provides third-party developers (building IPTV player
+    applications, set-top-box frontends, home automation platforms, and AI agents) with
+    direct access to playlist user services, personalized stream orchestration, failover
+    switching, and personal DVR recording.
+
+    ## Scope & Audience
+
+    This specification covers the integration surface available to playlist proxy users
+    authenticated via credentials defined in `api_proxy.yml`.
+
+    ### Covered Scope:
+    1. **Authentication (`/auth/token`, `/auth/refresh`)**: Playlist user credential exchange,
+       Bearer JWT lifecycle, live permissions, and token revocation.
+    2. **Player API (`/api/v1/me/*`)**: User capability discovery, stream inspection, stream
+       termination, failover group source member discovery, manual source switching, split of shared
+       streams into dedicated connections, joinable shared streams (including compatible streams of
+       other targets), personal watch progress, the JSON event WebSocket, and filtered live channel/EPG
+       queries. All `/api/v1/me/*` routes require the effective Player API switches
+       (`web_ui.player_api_enabled`, unset follows `user_ui_enabled`; `player_features.api_enabled`, unset
+       follows `ui_enabled`); otherwise the server returns `403 Forbidden`.
+    3. **User Playlist / Bouquet API (`/api/v1/user/playlist/*`)**: Personalized cluster
+       categories and user bouquet selection. Note: target-wide bouquet management
+       (`/target-bouquets/*`) requires administrative permissions (`playlist.read`/`playlist.write`)
+       and is reserved for administrators.
+    4. **Recordings & Media (`/api/v1/recording/*`, `/api/v1/library/recording/*`)**: Personal
+       DVR preflight, request scheduling, task editing, cancellation, conflict preview, recurring
+       weekly recording rules, and HTTP Range media streaming/downloads.
+    5. **Playback Contracts**: Plain HTTP GET stream URLs for Xtream Codes and M3U playback,
+       together with diagnostic headers (`X-Tuliprox-Fallback`, `X-Tuliprox-Rejection`) and CORS exposure.
+    6. **Model Context Protocol (MCP) & WebSocket**: Described below as protocol guides.
+
+    ### Out of Scope:
+    - Administrator-only endpoints (system configuration, global user management, plugin management,
+      reseller panel API, and administrative failover management) are strictly reserved for operator
+      tooling. For administrative workflows, refer to the [REST API Cookbook](docs/src/rest-api-cookbook.md).
+
+    ---
+
+    ## Model Context Protocol (MCP)
+
+    Tuliprox exposes a Model Context Protocol (MCP) server over a stateless JSON-RPC 2.0 endpoint at
+    `POST {web_ui_path}/mcp`. The server allows AI assistants and agentic clients to inspect and operate
+    the player surface using dedicated tools.
+
+    - **Configuration**: Controlled by `mcp.enabled: true` and `mcp.player_tools: off | read | write`.
+      When `player_tools: off`, player tools are withheld. When `read`, only inspection and search tools
+      are offered. When `write`, recording and stream management tools are also exposed.
+    - **Authentication & RBAC**: Every MCP tool call is dispatched in-process with the caller's Bearer token
+      into the existing REST router. Effective features and live permissions are enforced identically.
+    - **Player Tool Catalog (17 tools)**:
+      1. `me_capabilities`: Discovers caller capabilities, limits, quotas, and active connection counts (no arguments).
+      2. `me_search_channels`: Search visible live channels with query text, group, or limit (`query`, `group`, `limit`).
+      3. `me_get_epg`: Get EPG programme listings for a channel (`vid` [required], `from`, `to`).
+      4. `me_list_streams`: List active playback streams of the caller (no arguments).
+      5. `me_stop_stream`: Terminate an own active stream (`uid` [required]).
+      6. `me_list_sources`: List available failover source members with health status and media quality for a group channel (`vid` [required]).
+      7. `me_switch_source`: Switch an active stream to another failover member (`uid` [required], `member_vid` [required]).
+      8. `me_split_stream`: Split an own shared live MPEG-TS stream into a dedicated connection (`uid` [required]); the returned URL replaces the password with `***`.
+      9. `me_list_joinable`: List joinable running shared streams (no arguments).
+      10. `me_list_recordings`: Internal snapshot dispatch listing user recordings and tasks (no arguments).
+      11. `me_record_program`: Schedule a live recording (`vid` [required], `program_start` [required], `program_end` [required], `title` [required], `visibility`, `pre_roll_secs`, `post_roll_secs`).
+      12. `me_cancel_recording`: Cancel an active or scheduled recording request (`id` [required]).
+      13. `me_delete_recording`: Delete a completed or failed recording request (`id` [required]).
+      14. `me_recording_conflicts`: Preview recording conflict demand (`vid` [required], `program_start` [required], `program_end` [required], `pre_roll_secs`, `post_roll_secs`, `priority`).
+      15. `me_list_rules`: List recurring recording rules visible to the caller (no arguments).
+      16. `me_create_rule`: Create a weekly timeslot rule (`vid` [required], `weekday` [required], `local_start_time` [required], `duration_secs` [required], `timezone`, `visibility`, `pre_roll_secs`, `post_roll_secs`).
+      17. `me_delete_rule`: Delete a recording rule (`id` [required], `future` optional, default `retain`).
+
+    For comprehensive MCP client configuration and tool details, see `docs/src/player-api.md`.
+
+    ---
+
+    ## WebSocket Protocol & One-Shot Recording Snapshot
+
+    The Web UI and external clients connect to the WebSocket endpoint at `GET {web_ui_path}/ws`.
+    All application frames (except the 1-byte protocol version frame) are JSON objects serialized
+    into WebSocket **binary** frames.
+
+    ### Connection & One-Shot Snapshot Flow:
+    1. **Handshake**: The client establishes the WebSocket connection. The server transmits a 1-byte binary frame containing the byte `0x04` (protocol version 4).
+    2. **Authentication**: The client sends a binary frame with `{"Auth": "<jwt_token>"}`. The server validates the token and replies with `"Authorized"`.
+    3. **Snapshot Request**: The client requests a recording snapshot by sending `"RecordingSnapshotRequest"`.
+    4. **Authorization & Response**:
+       - The server evaluates token revocation and live effective permissions. If the user lacks `recording.read`, or if DVR is disabled, the server returns `{"RecordingWsError": {"code": "recording_forbidden"}}` or `{"RecordingWsError": {"code": "recording_disabled"}}`.
+       - If authorized, the server returns an initial snapshot response `{"RecordingSnapshotResponse": {"revision": 12, "available": true, "quota": { ... }, "tasks": [ ... ]}}`.
+    5. **Live Updates**: While connected, the server pushes updated `RecordingSnapshotResponse` frames whenever a recording changes or throttled progress updates fire.
+
+    For full WebSocket message schemas and sequence diagrams, refer to `docs/src/player-api.md`.
+
+    ---
+
+    ## Diagnostic Response Headers & CORS
+
+    When stream admission fails, capacity is exhausted, or a stream is preempted, Tuliprox serves a
+    fallback response (or fallback video slate) carrying diagnostic headers:
+    - `X-Tuliprox-Fallback`: Contains the exact rejection reason (e.g. `channel_unavailable`, `user_connections_exhausted`, `provider_connections_exhausted`, `low_priority_preempted`, `user_account_expired`, `provisioning`, `hls_session_or_lease_expired`, `maintenance`).
+    - `X-Tuliprox-Rejection`: Present with value `admission_rejected` when admission is denied without video.
+    - `Cache-Control: no-store`: Prevents intermediate caches and players from caching transient rejection responses.
+    - **CORS**: `Access-Control-Expose-Headers: X-Tuliprox-Fallback, X-Tuliprox-Rejection` is set on all CORS-enabled responses.
+
+servers:
+  - url: "{baseUrl}{web_ui_path}"
+    description: Tuliprox Server
+    variables:
+      baseUrl:
+        default: http://localhost:8901
+        description: Protocol, hostname, and port of the Tuliprox instance.
+      web_ui_path:
+        default: ""
+        description: Optional Web UI URL prefix (e.g. `/tuli`). Leave empty if mounted at the root.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Authentication
+    description: Playlist user credential verification, Bearer JWT issuance, and token refresh.
+  - name: Player API
+    description: "Personalized playback inspection, failover switching, joinable streams, and filtered playlist channels. Requires the effective Player API switches (`web_ui.player_api_enabled`, unset follows `user_ui_enabled`; `player_features.api_enabled`, unset follows `ui_enabled`)."
+  - name: User Playlist
+    description: User bouquet selection and playlist categories.
+  - name: Recordings
+    description: DVR preflight checks, recording requests, conflict preview, and task management.
+  - name: Recording Media
+    description: HTTP Range media playback, downloads, and thumbnail endpoints.
+  - name: Playback
+    description: Standard plain HTTP GET stream URLs for Xtream Codes and M3U media streaming.
+
+paths:
+  /ws:
+    get:
+      tags:
+        - Recordings
+      operationId: getWebSocketSnapshot
+      summary: WebSocket connection for recording snapshots and live updates
+      description: |
+        WebSocket connection delivering live recording snapshots (`RecordingSnapshotResponse`).
+        After the protocol version handshake (`4`) and authentication (`{"Auth": "<jwt>"}`), the client
+        requests a snapshot with `"RecordingSnapshotRequest"`.
+      responses:
+        '200':
+          description: Recording snapshot response frame (`RecordingSnapshotResponse`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingSnapshotResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /auth/token:
+    post:
+      tags:
+        - Authentication
+      operationId: authenticate
+      summary: Authenticate playlist user or web user
+      description: |
+        Authenticates a playlist user against `api_proxy.yml` credentials (or a web user against `web_ui.auth`)
+        and issues a signed JWT Bearer token.
+
+        **Requirements & Semantics**:
+        - `web_ui.auth.enabled` must be true.
+        - For playlist users: either `ui_enabled` must be true (Web UI access) or the effective
+          `player_features.api_enabled` must be true (Player API access). If neither Web UI nor Player API access
+          is permitted, the server returns `403 Forbidden`. Global switches (`user_ui_enabled` and `player_api_enabled`)
+          are checked per route, not at sign-in.
+        - If credentials are invalid or unknown, returns `401 Unauthorized`.
+        - If sign-in attempts exceed the rate limit, returns `429 Too Many Requests` with a `Retry-After` header.
+        - The token subject is `api:<username>`. Effective permissions are evaluated dynamically from the live
+          configuration on every subsequent request.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCredential'
+            example:
+              username: alice
+              password: secretpassword
+      responses:
+        '200':
+          description: Authentication successful. Returns signed JWT Bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+              example:
+                token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhcGk6YWxpY2UiLCJ1c2VybmFtZSI6ImFsaWNlIn0.example
+                username: alice
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+
+  /auth/refresh:
+    post:
+      tags:
+        - Authentication
+      operationId: refreshToken
+      summary: Refresh JWT token
+      description: |
+        Refreshes an active JWT Bearer token. The caller sends their current token in the `Authorization: Bearer <token>`
+        header. Revoked tokens are rejected with `401 Unauthorized`. If neither `ui_enabled` nor effective
+        `player_features.api_enabled` is true since issuance, returns `403 Forbidden`.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Token refreshed successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+              example:
+                token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhcGk6YWxpY2UiLCJ1c2VybmFtZSI6ImFsaWNlIn0.refreshed
+                username: alice
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /api/v1/me/capabilities:
+    get:
+      tags:
+        - Player API
+      operationId: getMeCapabilities
+      summary: Query effective capabilities and limits
+      description: |
+        Discovers the effective capabilities, feature flags, connection limits, and active connection counts
+        of the authenticated playlist user. Permissions and player features reflect the live configuration
+        immediately.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Effective player capabilities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerCapabilitiesDto'
+              example:
+                source_switch: true
+                joinable_streams: true
+                recording: private
+                recording_quota_bytes: 21474836480
+                max_concurrent_recordings: 1
+                max_recording_rules: 10
+                free_shared_joins: true
+                max_free_shared_joins: 1
+                watch_progress: true
+                event_stream: true
+                stream_split: true
+                effective_permissions:
+                  - recording.read
+                  - recording.create
+                  - recording.manage
+                  - recording.delete
+                max_connections: 2
+                active_connections: 1
+                shared_joins: 0
+                free_shared_joins_in_use: 0
+                share_live_streams: true
+                source_switch_protocols:
+                  - ts
+                  - hls
+                recording_enabled: true
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /api/v1/me/channels:
+    get:
+      tags:
+        - Player API
+      operationId: getMeChannels
+      summary: Search visible live TV channels
+      description: |
+        Lists live TV channels in the caller's target playlist that pass their content filter.
+        Results can be filtered by query text and channel group.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: query
+          in: query
+          required: false
+          description: Search term matched against channel name, title, or group.
+          schema:
+            type: string
+          example: Sports
+        - name: group
+          in: query
+          required: false
+          description: Filter channels by exact category/group name.
+          schema:
+            type: string
+          example: UK Sports
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of channels to return (clamped between 1 and 500, default 50).
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 500
+          example: 20
+      responses:
+        '200':
+          description: List of visible channels matching filter.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserChannelDto'
+              example:
+                - virtual_id: 1001
+                  name: Sports 1 HD
+                  group: Sports
+                  epg_channel_id: sports1.example.com
+                  is_group: true
+                - virtual_id: 1002
+                  name: Sports 2 FHD
+                  group: Sports
+                  epg_channel_id: sports2.example.com
+                  is_group: false
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /api/v1/me/epg:
+    get:
+      tags:
+        - Player API
+      operationId: getMeEpg
+      summary: Query EPG programme listings for a channel
+      description: |
+        Fetches EPG programme listings for one visible live channel by virtual ID (`vid`) within a `[from, to]`
+        time window (maximum 48 hours). The caller's configured EPG timeshift offset is applied to programme times.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: vid
+          in: query
+          required: true
+          description: Virtual ID of the channel.
+          schema:
+            type: integer
+          example: 1001
+        - name: from
+          in: query
+          required: false
+          description: Start of query window as Unix timestamp seconds or RFC 3339 string (defaults to now).
+          schema:
+            type: string
+          example: "1740045600"
+        - name: to
+          in: query
+          required: false
+          description: End of query window as Unix timestamp seconds or RFC 3339 string (maximum 48 hours after `from`).
+          schema:
+            type: string
+          example: "1740052800"
+      responses:
+        '200':
+          description: List of EPG programmes for the channel.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserProgrammeDto'
+              example:
+                - start: "2026-11-20T20:00:00Z"
+                  start_ts: 1740045600
+                  stop: "2026-11-20T22:00:00Z"
+                  stop_ts: 1740052800
+                  title: Premier League Live
+                  desc: Match coverage and post-game analysis.
+                  categories:
+                    - Sports
+                    - Football
+                  is_live: true
+                  is_new: true
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /api/v1/me/streams:
+    get:
+      tags:
+        - Player API
+      operationId: getMeStreams
+      summary: List active playback streams of caller
+      description: |
+        Lists all active playback streams owned by the authenticated playlist user across all client devices.
+        Returns stream metadata, protocol, started timestamp, and member source index if running in a failover group.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of active streams.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserStreamDto'
+              example:
+                - uid: 104
+                  virtual_id: 1001
+                  group_virtual_id: 1001
+                  member_vid: 2001
+                  title: Sports 1 HD
+                  item_type: Live
+                  protocol: ts
+                  shared: false
+                  session_active: true
+                  started_at: 1740045000
+                  user_agent: TiviMate/4.7.0
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /api/v1/me/streams/{uid}:
+    delete:
+      tags:
+        - Player API
+      operationId: deleteMeStream
+      summary: Terminate an own active stream
+      description: |
+        Terminates an active playback stream belonging to the caller and immediately frees their user connection slot.
+        If `uid` does not exist or belongs to another user, returns `404 Not Found`. With
+        `player_features.event_stream: true` the caller's event socket receives `stream_ended` with reason `stopped`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          description: Unique stream identifier.
+          schema:
+            type: integer
+          example: 104
+      responses:
+        '204':
+          description: Stream terminated and connection slot released.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /api/v1/me/streams/joinable:
+    get:
+      tags:
+        - Player API
+      operationId: getMeStreamsJoinable
+      summary: List joinable running shared streams
+      description: |
+        Lists active shared streams that can be watched without consuming an additional upstream provider
+        connection.
+
+        The list contains streams of the caller's own target and compatible single-source streams of **other**
+        targets. A foreign stream is listed only when the caller's target publishes the same provider item (same
+        input and upstream URL), the caller's target shares the protocol, and the caller's content and item-type
+        filters accept the caller-target item. Group streams of foreign targets are never listed, because their
+        group keys are target-scoped. All returned fields (`virtual_id`, `title`, `logo`, `category`) belong to the
+        caller's target.
+
+        **Requirements**:
+        - Requires `player_features.joinable_streams: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+        - Redacts usernames, IP addresses, viewer counts, and foreign target identities.
+        - `requires_free_slot: true` indicates that the caller has exhausted their personal `max_connections` limit
+          and free shared joins are not permitted.
+      security:
+        - bearerAuth: []
+      x-required-feature: joinable_streams
+      responses:
+        '200':
+          description: List of joinable shared streams.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/JoinableStreamDto'
+              example:
+                - virtual_id: 1001
+                  title: Sky Sports Main Event HD
+                  logo: http://example.com/logo.png
+                  category: UK Sports
+                  protocol: ts
+                  requires_free_slot: false
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /api/v1/me/streams/{uid}/failover-members:
+    get:
+      tags:
+        - Player API
+      operationId: getMeStreamFailoverMembers
+      summary: Query failover members for an active stream
+      description: |
+        Returns the redacted failover group member list for an active playback stream owned by the caller.
+        `current: true` indicates the member currently being streamed.
+
+        Each member carries an optional `health` object detailing its operational state
+        (`ok`, `degraded`, `failing`), probe media metrics (resolution tier, video codec, bitrate), rolling QoS
+        scores (24h, 7d), and circuit breaker retry countdown when failing. QoS scores (rolling scores and failure streak)
+        survive a server restart and are restored from storage on startup. In contrast, probe media metrics and circuit
+        breaker state are maintained in memory only and reset on server restart.
+
+        **Requirements**:
+        - Requires `player_features.source_switch: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+        - Redacted: Contains no provider IDs, upstream input names, or internal stream credentials.
+      security:
+        - bearerAuth: []
+      x-required-feature: source_switch
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          description: Unique stream identifier.
+          schema:
+            type: integer
+          example: 104
+      responses:
+        '200':
+          description: Redacted failover members of the running stream.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserFailoverMembersDto'
+              example:
+                group_name: Sports 1
+                current_member_vid: 2001
+                members:
+                  - member_vid: 2001
+                    index: 0
+                    title: Sports 1 HD (1080p Main)
+                    has_archive: true
+                    current: true
+                    health:
+                      state: ok
+                      resolution: P1080
+                      video_codec: H264
+                      bitrate_kbps: 5500
+                      qos_24h: 92
+                      qos_7d: 88
+                  - member_vid: 2002
+                    index: 1
+                    title: Sports 1 HD (720p Backup)
+                    has_archive: false
+                    current: false
+                    health:
+                      state: ok
+        '400':
+          description: Stream is not a failover group stream or not a live stream (`not a failover group stream` or `manual switch only supported for live streams`).
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: not a failover group stream
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Stream not found or foreign stream (`stream not found` or `target not found`).
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: stream not found
+
+  /api/v1/me/streams/{uid}/failover-switch:
+    post:
+      tags:
+        - Player API
+      operationId: postMeStreamFailoverSwitch
+      summary: Switch source member on an active failover stream
+      description: |
+        Manually switches an active MPEG-TS or live HLS failover stream to another member source.
+
+        **Rules & Error Codes**:
+        - Requires `player_features.source_switch: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+        - Shared streams with multiple viewers cannot be switched exclusively (`409 Conflict`, `shared_stream_switch_refused`).
+        - Paralleled switch in progress returns `409 Conflict` (`switch_in_progress`).
+        - Switches within the 2-second cooldown period return `429 Too Many Requests` (`switch_cooldown`) with a `Retry-After` header.
+        - Returns `200 OK` only after the switch has completed and the new binding is published.
+      security:
+        - bearerAuth: []
+      x-required-feature: source_switch
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          description: Unique stream identifier.
+          schema:
+            type: integer
+          example: 104
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StreamFailoverSwitchRequest'
+            example:
+              member_vid: 2002
+      responses:
+        '200':
+          description: Source member switched successfully.
+        '400':
+          description: Member not in failover group (`member not in group`).
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: member not in group
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Switch conflict (`switch_in_progress` or `shared_stream_switch_refused`).
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: shared_stream_switch_refused
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '502':
+          $ref: '#/components/responses/BadGatewayError'
+
+  /api/v1/me/channels/{vid}/failover-members:
+    get:
+      tags:
+        - Player API
+      operationId: getMeChannelFailoverMembers
+      summary: Query failover members for a channel before playback
+      description: |
+        Returns the redacted failover group member list for a channel virtual ID before playback starts.
+        The channel is checked against the caller's target and content filter. If the group channel is hidden
+        by content filters, returns `404 Not Found`.
+
+        Each member carries an optional `health` object detailing its operational state
+        (`ok`, `degraded`, `failing`), probe media metrics (resolution tier, video codec, bitrate), rolling QoS
+        scores (24h, 7d), and circuit breaker retry countdown when failing. QoS scores (rolling scores and failure streak)
+        survive a server restart and are restored from storage on startup. In contrast, probe media metrics and circuit
+        breaker state are maintained in memory only and reset on server restart.
+
+        **Requirements**:
+        - Requires `player_features.source_switch: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+      security:
+        - bearerAuth: []
+      x-required-feature: source_switch
+      parameters:
+        - name: vid
+          in: path
+          required: true
+          description: Virtual ID of the group channel.
+          schema:
+            type: integer
+          example: 1001
+      responses:
+        '200':
+          description: Redacted failover members of the channel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserFailoverMembersDto'
+              example:
+                group_name: Sports 1
+                members:
+                  - member_vid: 2001
+                    index: 0
+                    title: Sports 1 HD (1080p Main)
+                    has_archive: true
+                    current: false
+                    health:
+                      state: ok
+                      resolution: P1080
+                      video_codec: H264
+                      bitrate_kbps: 5500
+                      qos_24h: 92
+                      qos_7d: 88
+                  - member_vid: 2002
+                    index: 1
+                    title: Sports 1 HD (720p Backup)
+                    has_archive: false
+                    current: false
+                    health:
+                      state: ok
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Channel virtual ID not found, not a failover group, or hidden by content filter (empty body).
+
+  /api/v1/me/streams/{uid}/split:
+    post:
+      tags:
+        - Player API
+      operationId: postMeStreamSplit
+      summary: Split an own shared stream into a dedicated connection
+      description: |
+        Splits an active shared live MPEG-TS stream of the caller off into a dedicated provider connection.
+        The server reserves nothing; the response contains the URL the client must open **after** closing
+        the current playback connection. Existing admission rules decide whether the new connection is accepted.
+
+        **Requirements**:
+        - Requires `player_features.source_switch: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+        - The stream must belong to the caller (`404 Not Found` otherwise).
+        - Live MPEG-TS only: catch-up (timeshift), VOD, series, HLS, and DASH return `409 Conflict`
+          (`split_unsupported_protocol`).
+        - The stream must be shared and have more than one viewer (`409 Conflict`, `stream_not_shared`).
+        - The two-second per-stream split cooldown applies (`429 Too Many Requests`, `switch_cooldown`); a failover
+          member switch within two seconds after a split is refused the same way.
+
+        The returned `url` is server-relative. It is `/live/<user>/<pass>/<vid>.ts?dedicated=1` for a target with an
+        Xtream output and `/m3u-stream/live/<user>/<pass>/<vid>.ts?dedicated=1` otherwise. Its `dedicated=1` marker is
+        honoured only for users with `source_switch`; for other users playback joins or registers the shared stream as
+        usual.
+      security:
+        - bearerAuth: []
+      x-required-feature: source_switch
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          description: Unique stream identifier from `GET /api/v1/me/streams`.
+          schema:
+            type: integer
+          example: 104
+      responses:
+        '200':
+          description: Split prepared; reconnect with the returned URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SplitStreamResponse'
+              example:
+                reconnect_required: true
+                url: /live/alice/example-password/1042.ts?dedicated=1
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Stream not found or owned by another user.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: stream not found
+        '409':
+          description: The stream cannot be split in its current state.
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - split_unsupported_protocol
+                  - stream_not_shared
+              example: stream_not_shared
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+
+  /api/v1/me/events:
+    get:
+      tags:
+        - Player API
+      operationId: getMeEvents
+      summary: Personal player event stream (WebSocket)
+      description: |
+        Upgrades to a WebSocket that delivers JSON **text** frames with player events of the caller.
+        This is not the binary `/ws` recording protocol.
+
+        **Authentication**: send `Authorization: Bearer <token>` on the upgrade, or omit the header and
+        send `{"type":"auth","token":"<token>"}` as the first text frame within 5 seconds. Tokens in
+        the query string are not accepted.
+
+        **First frame**: `{"type":"connected","server_time":<unix-seconds>}`.
+
+        **Event frames**:
+        - `{"type":"stream_ended","uid":104,"virtual_id":1042,"reason":"kicked"}` (`kicked`, `preempted`, or `stopped`)
+        - `{"type":"failover_member_switched","group_virtual_id":9001,"from_member_vid":2001,"to_member_vid":2002}` (requires `source_switch`)
+        - `{"type":"recording_finished","id":"<recording-id>","state":"completed"}` (`completed` or `failed`; requires recording level `read` or higher)
+        - `{"type":"connection_denied","max_connections":2}`
+        - `{"type":"resync_required"}` when the client fell behind; refetch REST state
+        - `{"type":"error","code":"unauthorized"}` before a policy close
+
+        The server sends a WebSocket Ping every 30 seconds and closes a socket with code `1008` when the
+        user loses `event_stream`, loses the account, or exceeds the per-user socket limit.
+
+        **Requirements**:
+        - Requires `player_features.event_stream: true`; otherwise the upgrade answers `403` or the
+          in-band auth answers `{"type":"error","code":"feature_disabled"}`.
+        - At most four concurrent sockets per user; the fifth upgrade answers `429`.
+      security:
+        - bearerAuth: []
+        - {}
+      x-required-feature: event_stream
+      responses:
+        '2XX':
+          description: |
+            Successful protocol switch. The concrete status is `101 Switching Protocols`; the frames that
+            follow are described in the `101` response.
+        '101':
+          description: |
+            Switching Protocols. All application frames are JSON text frames as described above.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerEvent'
+              examples:
+                connected:
+                  value:
+                    type: connected
+                    server_time: 1763678400
+                streamEnded:
+                  value:
+                    type: stream_ended
+                    uid: 104
+                    virtual_id: 1042
+                    reason: kicked
+                recordingFinished:
+                  value:
+                    type: recording_finished
+                    id: 3f6a1e0c-7d3a-4b5e-9c1e-0a2b6c8d9e10
+                    state: completed
+                resyncRequired:
+                  value:
+                    type: resync_required
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+
+  /api/v1/me/progress:
+    get:
+      tags:
+        - Player API
+      operationId: getMeProgressList
+      summary: List the caller's watch progress
+      description: |
+        Returns watch progress entries of the caller, newest first.
+
+        **Requirements**:
+        - Requires `player_features.watch_progress: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+      security:
+        - bearerAuth: []
+      x-required-feature: watch_progress
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          description: Filter by media kind.
+          schema:
+            $ref: '#/components/schemas/WatchProgressKind'
+        - name: watched
+          in: query
+          required: false
+          description: Filter by watched state.
+          schema:
+            type: boolean
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of entries. Default `50`, clamped to `1..=200`.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+          example: 50
+      responses:
+        '200':
+          description: Watch progress entries, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WatchProgressEntry'
+              example:
+                - kind: episode
+                  item_id: 4711
+                  position_secs: 1500
+                  duration_secs: 3000
+                  watched: false
+                  series_id: 88
+                  updated_at: 1763678400
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+    delete:
+      tags:
+        - Player API
+      operationId: deleteMeProgressAll
+      summary: Delete all watch progress of the caller
+      description: |
+        Removes every watch progress entry of the caller.
+
+        **Requirements**:
+        - Requires `player_features.watch_progress: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+      security:
+        - bearerAuth: []
+      x-required-feature: watch_progress
+      responses:
+        '204':
+          description: Progress deleted (also when no entry existed).
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /api/v1/me/progress/{kind}/{item_id}:
+    parameters:
+      - name: kind
+        in: path
+        required: true
+        description: Media kind.
+        schema:
+          $ref: '#/components/schemas/WatchProgressKind'
+      - name: item_id
+        in: path
+        required: true
+        description: Xtream stream id the player plays; must be greater than `0`.
+        schema:
+          type: integer
+          minimum: 1
+        example: 4711
+    get:
+      tags:
+        - Player API
+      operationId: getMeProgressOne
+      summary: Read one watch progress entry
+      description: |
+        Returns a single watch progress entry of the caller. Unknown entries answer `404` with an empty body.
+
+        **Requirements**:
+        - Requires `player_features.watch_progress: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+      security:
+        - bearerAuth: []
+      x-required-feature: watch_progress
+      responses:
+        '200':
+          description: The watch progress entry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WatchProgressEntry'
+              example:
+                kind: movie
+                item_id: 42
+                position_secs: 150
+                duration_secs: 300
+                watched: false
+                updated_at: 1763678400
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+    put:
+      tags:
+        - Player API
+      operationId: putMeProgress
+      summary: Create or update one watch progress entry
+      description: |
+        Stores the playback position of one item. Omitted `duration_secs` and `series_id` keep the stored values.
+        `watched` is derived when omitted: an item becomes watched at 90 % of `duration_secs`; otherwise an already
+        watched item stays watched while `position_secs >= 60` and drops back below 60 seconds. An explicit `watched`
+        wins. If the user was deleted while the request was being processed, the answer is `401`.
+
+        **Requirements**:
+        - Requires `player_features.watch_progress: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+      security:
+        - bearerAuth: []
+      x-required-feature: watch_progress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WatchProgressUpdate'
+            example:
+              position_secs: 1500
+              duration_secs: 3000
+              series_id: 88
+      responses:
+        '204':
+          description: Progress stored.
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '413':
+          description: Request body exceeds the 4 KiB limit.
+        '415':
+          description: Missing or wrong `Content-Type`.
+        '422':
+          description: Well-formed JSON with invalid field values.
+    delete:
+      tags:
+        - Player API
+      operationId: deleteMeProgressOne
+      summary: Delete one watch progress entry
+      description: |
+        Removes a single watch progress entry. Answers `204` also when it did not exist.
+
+        **Requirements**:
+        - Requires `player_features.watch_progress: true`. If disabled, returns `403 Forbidden` (`feature_disabled`).
+      security:
+        - bearerAuth: []
+      x-required-feature: watch_progress
+      responses:
+        '204':
+          description: Progress deleted.
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /api/v1/user/playlist/categories:
+    get:
+      tags:
+        - User Playlist
+      operationId: getUserPlaylistCategories
+      summary: Get visible categories for caller's target
+      description: |
+        Retrieves the categories available to the caller for Xtream and M3U playlists based on the user's
+        target and content filters.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Visible playlist categories.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaylistCategoriesDto'
+              example:
+                xtream:
+                  live:
+                    - UK Sports
+                    - UK Entertainment
+                    - US News
+                  vod:
+                    - Action Movies
+                  series:
+                    - Comedy Series
+                m3u:
+                  live:
+                    - UK Sports
+                    - UK Entertainment
+                  vod: []
+                  series: []
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /api/v1/user/playlist/bouquet:
+    get:
+      tags:
+        - User Playlist
+      operationId: getUserPlaylistBouquet
+      summary: Get user bouquet selection
+      description: |
+        Retrieves the caller's personal category filter bouquet selection for Xtream and M3U.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current user bouquet selection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaylistBouquetDto'
+              example:
+                xtream:
+                  live:
+                    - UK Sports
+                  vod: null
+                  series: null
+                m3u:
+                  live:
+                    - UK Sports
+                  vod: null
+                  series: null
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+    post:
+      tags:
+        - User Playlist
+      operationId: saveUserPlaylistBouquet
+      summary: Save user bouquet selection
+      description: |
+        Updates the caller's personal category filter bouquet selection for Xtream and M3U.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaylistBouquetDto'
+            example:
+              xtream:
+                live:
+                  - UK Sports
+                  - UK Entertainment
+                vod: []
+                series: []
+              m3u:
+                live:
+                  - UK Sports
+                vod: []
+                series: []
+      responses:
+        '200':
+          description: Bouquet saved successfully.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/recording/availability:
+    get:
+      tags:
+        - Recordings
+      operationId: getRecordingAvailability
+      summary: Preflight check for DVR availability
+      description: |
+        Preflight check to verify that the DVR subsystem is enabled and accessible.
+        Requires that the caller has any recording permission (`read`, `private`, or `shared`).
+        Returns `204 No Content` if enabled, `501 Not Implemented` if DVR is disabled on the server,
+        or `403 Forbidden` if caller lacks recording features.
+      security:
+        - bearerAuth: []
+      x-required-feature: recording (read, private, or shared)
+      responses:
+        '204':
+          description: DVR subsystem is active and accessible.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /api/v1/recording/requests:
+    post:
+      tags:
+        - Recordings
+      operationId: createRecordingRequest
+      summary: Schedule a recording request
+      description: |
+        Schedules a live TV programme recording or initiates a VOD/Series transfer.
+        Supports idempotent submission via the `Idempotency-Key` HTTP header.
+
+        **Requirements & Constraints**:
+        - Requires `player_features.recording` set to `private` (for private recordings) or `shared` (for shared recordings).
+        - Source channel must belong to the user's target and pass their content filter.
+        - Personal storage quota (`recording_quota`) and concurrent recording limits (`max_concurrent_recordings`)
+          are verified upon admission.
+      security:
+        - bearerAuth: []
+      x-required-feature: recording (private or shared)
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Client-supplied idempotency key preventing duplicate recording creation.
+          schema:
+            type: string
+          example: 9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecordingRequest'
+            example:
+              source:
+                target_id: main
+                virtual_id: "1001"
+                cluster: Live
+                input_name: sat-feed-1
+              program_title: FA Cup Quarter Final
+              program_start: 1740045600
+              program_end: 1740052800
+              pre_roll_secs: 120
+              post_roll_secs: 300
+              visibility: private
+              channel_id: sports1.example.com
+              channel_name: Sports 1 HD
+      responses:
+        '204':
+          description: Recording request scheduled successfully (or idempotent replay).
+        '400':
+          description: Admission rejected due to quota or concurrency limits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                quota_exceeded:
+                  value:
+                    error: recording_quota_exceeded
+                concurrency_exceeded:
+                  value:
+                    error: recording_concurrency_exceeded
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '422':
+          description: Validation failure on recording parameters or source.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: recording_invalid_interval
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /api/v1/recording/requests/{id}:
+    patch:
+      tags:
+        - Recordings
+      operationId: editRecordingRequest
+      summary: Edit a scheduled recording request
+      description: |
+        Modifies padding times or metadata of a pending recording request owned by the caller.
+        Visibility cannot be edited after creation.
+      security:
+        - bearerAuth: []
+      x-required-feature: recording (private or shared)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Recording request identifier.
+          schema:
+            type: string
+          example: req_01j7x8a9bcdef0123456789abc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditRecordingTaskBody'
+            example:
+              pre_roll_secs: 180
+              post_roll_secs: 600
+      responses:
+        '204':
+          description: Recording request updated.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+    delete:
+      tags:
+        - Recordings
+      operationId: removeRecordingRequest
+      summary: Remove a recording request
+      description: |
+        Removes a completed or failed recording request owned by the caller. If no other user's library entry
+        references the physical recording materialization, the underlying file is deleted and disk quota reclaimed.
+      security:
+        - bearerAuth: []
+      x-required-feature: recording (private or shared)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Recording request identifier.
+          schema:
+            type: string
+          example: req_01j7x8a9bcdef0123456789abc
+      responses:
+        '204':
+          description: Recording request removed.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /api/v1/recording/requests/{id}/cancel:
+    post:
+      tags:
+        - Recordings
+      operationId: cancelRecordingRequest
+      summary: Cancel an active or pending recording
+      description: |
+        Cancels an active or pending recording request owned by the caller.
+      security:
+        - bearerAuth: []
+      x-required-feature: recording (private or shared)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Recording request identifier.
+          schema:
+            type: string
+          example: req_01j7x8a9bcdef0123456789abc
+      responses:
+        '204':
+          description: Recording cancelled.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /api/v1/recording/conflicts/preview:
+    post:
+      tags:
+        - Recordings
+      operationId: previewRecordingConflicts
+      summary: Preview recording conflicts and capacity demand
+      description: |
+        Previews potential upstream capacity demand and provider conflicts for a proposed recording time window
+        before scheduling.
+      security:
+        - bearerAuth: []
+      x-required-feature: recording (private or shared)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreviewConflictsBody'
+            example:
+              source:
+                target_name: main
+                virtual_id: "1001"
+                input_name: sat-feed-1
+                channel_id: sports1.example.com
+                channel_name: Sports 1 HD
+              candidate:
+                padded_start: 1740045480
+                padded_end: 1740053100
+                pre_roll_secs: 120
+                post_roll_secs: 300
+                priority: 0
+      responses:
+        '200':
+          description: Conflict preview evaluation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreviewConflictsResponse'
+              example:
+                severity: no_known_conflict
+                provider_scope: sat-provider
+                overlap_segments:
+                  - start: 1740045480
+                    end: 1740053100
+                    peak_demand: 1
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '422':
+          description: Source channel unavailable or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: recording_invalid_source
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /api/v1/recording/rules:
+    get:
+      tags:
+        - Recordings
+      operationId: listRecordingRules
+      summary: List visible recurring recording rules
+      description: |
+        Lists recurring recording rules visible to the caller: own rules always, shared rules of the own target only
+        when the source channel passes the content filter. Every entry carries the queue `revision` observed while
+        the list was assembled.
+
+        Playlist users receive the redacted `UserRecordingRuleResponse` shape: `source` omits `provider_id` and
+        `input_name`, `own` marks the caller's rules, and `owner_id` is present only for own rules.
+
+        **Requirements**:
+        - Requires recording level `read` or higher (`recording.read`). Without it the answer is `403 recording_forbidden`.
+        - Requires the DVR to be enabled (`video.recording.enabled: true`), otherwise `501 recording_disabled`.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Visible recording rules.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserRecordingRuleResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+    post:
+      tags:
+        - Recordings
+      operationId: createRecordingRule
+      summary: Create a recurring weekly recording rule
+      description: |
+        Creates a `weekly_timeslot` rule for a channel of the caller's own target. The source is resolved by the
+        server from `virtual_id`/`channel_id`; a stream URL is never accepted. For playlist users the server also
+        derives `input_name` (a client-supplied value is ignored) and stores `target_id` as the resolved target name.
+        A `new_episode` body is refused with `400 recording_rule_new_episode_unsupported`.
+
+        **Requirements**:
+        - Requires recording level `private` or `shared` (`recording.create` and `recording.manage`).
+        - `visibility: shared` additionally requires `recording.share`.
+        - The owner's rule count must stay below `player_features.max_recording_rules`, otherwise
+          `400 recording_rule_limit_exceeded`.
+        - The DVR must be enabled, otherwise `501 recording_disabled`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecordingRuleRequest'
+            example:
+              virtual_id: "1042"
+              body:
+                kind: weekly_timeslot
+                weekday: 3
+                local_start_time: "20:00"
+                duration_secs: 3600
+                timezone: Europe/Berlin
+              pre_roll_secs: 0
+              post_roll_secs: 60
+              visibility: private
+      responses:
+        '200':
+          description: Rule created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRecordingRuleResponse'
+        '400':
+          description: Invalid rule, source, padding, unsupported body, or rule limit reached.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidSource:
+                  value:
+                    error: recording_invalid_source
+                limitExceeded:
+                  value:
+                    error: recording_rule_limit_exceeded
+                newEpisodeUnsupported:
+                  value:
+                    error: recording_rule_new_episode_unsupported
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /api/v1/recording/rules/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Stable recording rule id.
+        schema:
+          type: string
+        example: rule-1763678400-ab12cd34
+    patch:
+      tags:
+        - Recordings
+      operationId: editRecordingRule
+      summary: Edit an own recording rule
+      description: |
+        Changes the editable fields of a rule. Source, owner, and target are immutable. A `private`-only user cannot
+        promote a rule to `shared` (`403 recording_shared_not_administrator`).
+
+        **Requirements**:
+        - Requires recording level `private` or `shared`; shared rules additionally require `recording.share`.
+        - Only the owner may edit a rule; foreign rules answer `403 recording_rule_not_owner`.
+        - The DVR must be enabled, otherwise `501 recording_disabled`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditRecordingRuleRequest'
+            example:
+              pre_roll_secs: 120
+              enabled: false
+      responses:
+        '200':
+          description: Rule updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRecordingRuleResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Rule id does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: recording_rule_unknown
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+    delete:
+      tags:
+        - Recordings
+      operationId: deleteRecordingRule
+      summary: Delete an own recording rule
+      description: |
+        Deletes a rule. `future=retain` keeps already scheduled occurrences; `future=cancel` cancels upcoming
+        inactive occurrences before removing the rule. The parameter is required on the REST route; the MCP tool
+        `me_delete_rule` defaults it to `retain`.
+
+        **Requirements**:
+        - Requires recording level `private` or `shared`; shared rules additionally require `recording.share`.
+        - Only the owner may delete a rule; foreign rules answer `403 recording_rule_not_owner`.
+        - The DVR must be enabled, otherwise `501 recording_disabled`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: future
+          in: query
+          required: true
+          description: How to treat already scheduled occurrences.
+          schema:
+            type: string
+            enum:
+              - retain
+              - cancel
+          example: retain
+      responses:
+        '204':
+          description: Rule deleted.
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Rule id does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: recording_rule_unknown
+        '500':
+          description: Rule store failure, including a partial operation after future recordings were cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                persistenceFailed:
+                  value:
+                    error: recording_persistence_failed
+                partialOperation:
+                  value:
+                    error: recording_rule_partial_operation
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /api/v1/library/recording/playback/{uuid}:
+    get:
+      tags:
+        - Recording Media
+      operationId: playbackRecording
+      summary: Stream completed recording media (HTTP Range supported)
+      description: |
+        Streams completed recorded media for a library entry. Supports single-range HTTP requests
+        (`Range: bytes=start-end`).
+        Enforces visibility rules: private recordings are accessible only to the owner; shared recordings
+        require `recording.read` and that the source channel is within the user's target and content filter.
+      security:
+        - bearerAuth: []
+      x-required-feature: recording (read, private, or shared)
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          description: Recording library entry UUID.
+          schema:
+            type: string
+          example: 01j7x8a9bcdef0123456789abc
+        - name: Range
+          in: header
+          required: false
+          description: HTTP byte range request (e.g. `bytes=0-1048575` or `bytes=1048576-`).
+          schema:
+            type: string
+          example: bytes=0-1048575
+      responses:
+        '200':
+          description: Full media stream.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: application/octet-stream
+            Accept-Ranges:
+              schema:
+                type: string
+                example: bytes
+            Content-Length:
+              schema:
+                type: integer
+                example: 524288000
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Partial media content matching requested byte range.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: application/octet-stream
+            Accept-Ranges:
+              schema:
+                type: string
+                example: bytes
+            Content-Range:
+              schema:
+                type: string
+                example: bytes 0-1048575/524288000
+            Content-Length:
+              schema:
+                type: integer
+                example: 1048576
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '416':
+          description: Requested byte range cannot be satisfied.
+          headers:
+            Content-Range:
+              schema:
+                type: string
+                example: bytes */524288000
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /api/v1/library/recording/download/{uuid}:
+    get:
+      tags:
+        - Recording Media
+      operationId: downloadRecording
+      summary: Download completed recording media file
+      description: |
+        Downloads completed recorded media as an attachment. Identical to the playback route but sets
+        `Content-Disposition: attachment; filename="..."` with ASCII fallback and UTF-8 RFC 6266 filename encoding.
+      security:
+        - bearerAuth: []
+      x-required-feature: recording (read, private, or shared)
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          description: Recording library entry UUID.
+          schema:
+            type: string
+          example: 01j7x8a9bcdef0123456789abc
+        - name: Range
+          in: header
+          required: false
+          description: HTTP byte range request.
+          schema:
+            type: string
+          example: bytes=0-1048575
+      responses:
+        '200':
+          description: Media file attachment download.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: attachment; filename="Premier_League.ts"; filename*=UTF-8''Premier_League.ts
+            Content-Type:
+              schema:
+                type: string
+                example: application/octet-stream
+            Accept-Ranges:
+              schema:
+                type: string
+                example: bytes
+            Content-Length:
+              schema:
+                type: integer
+                example: 524288000
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Partial media download.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: attachment; filename="Premier_League.ts"
+            Content-Range:
+              schema:
+                type: string
+                example: bytes 0-1048575/524288000
+            Content-Length:
+              schema:
+                type: integer
+                example: 1048576
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '416':
+          description: Requested byte range cannot be satisfied.
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /api/v1/library/recording/thumbnail/{uuid}:
+    get:
+      tags:
+        - Recording Media
+      operationId: thumbnailRecording
+      summary: Get thumbnail for recorded media
+      description: |
+        Checks authentication and recording visibility for a thumbnail request.
+        When generated, returns image binary data; currently returns `404 Not Found` (video scanner thumbnail generation lands in a later release).
+      security:
+        - bearerAuth: []
+      x-required-feature: recording (read, private, or shared)
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          description: Recording library entry UUID.
+          schema:
+            type: string
+          example: 01j7x8a9bcdef0123456789abc
+      responses:
+        '200':
+          description: JPEG or PNG thumbnail image binary data.
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Thumbnail not found or not yet generated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: recording_not_found
+        '501':
+          $ref: '#/components/responses/RecordingDisabledError'
+
+  /live/{username}/{password}/{stream_id}:
+    get:
+      tags:
+        - Playback
+      security: []
+      operationId: getXtreamLiveStream
+      summary: Xtream Codes live stream playback
+      description: |
+        Streams MPEG-TS video for a live channel. If `stream_id` matches a failover member VID,
+        playback starts specifically on that member. On failure or capacity exhaustion, returns
+        a fallback video or status code with diagnostic headers (`X-Tuliprox-Fallback`, `Cache-Control: no-store`).
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+          example: alice
+        - name: password
+          in: path
+          required: true
+          schema:
+            type: string
+          example: secretpassword
+        - name: stream_id
+          in: path
+          required: true
+          description: Virtual ID or member VID, optionally ending in `.ts`.
+          schema:
+            type: string
+          example: "1001.ts"
+      responses:
+        '200':
+          description: MPEG-TS video stream (or fallback video slate).
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: video/mp2t
+            X-Tuliprox-Fallback:
+              $ref: '#/components/headers/X-Tuliprox-Fallback'
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            video/mp2t:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '502':
+          description: Admission rejected or provider failure without fallback video.
+          headers:
+            X-Tuliprox-Fallback:
+              $ref: '#/components/headers/X-Tuliprox-Fallback'
+            X-Tuliprox-Rejection:
+              $ref: '#/components/headers/X-Tuliprox-Rejection'
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+
+  /movie/{username}/{password}/{stream_id}:
+    get:
+      tags:
+        - Playback
+      security: []
+      operationId: getXtreamMovieStream
+      summary: Xtream Codes VOD movie stream playback
+      description: |
+        Streams VOD movie media in its native container format, or serves completed DVR recordings
+        published under synthetic VOD stream IDs (Feature F2).
+
+        **Recordings in Xtream VOD**:
+        - Prerequisites: Global DVR enabled (`video.recording.enabled: true`), API proxy user
+          (`api_proxy.yml`), recording level `read`, `private`, or `shared`, `video` cluster permitted, and
+          target has Xtream output. The `skip_vod` input flag does not hide recordings.
+        - Collision precedence: Target playlist items always take precedence. If a playlist item matches
+          `stream_id`, it is streamed. Recordings are consulted only when no playlist item matches.
+        - ID threshold: Only stream IDs `>= 1000000000` are looked up as recordings.
+        - Lookup and fallback behavior: An invisible or unknown recording ID answers like any unknown movie ID
+          (the normal fallback response, e.g. `X-Tuliprox-Fallback: channel_unavailable`), NOT a bare 404. If a recording's
+          file was removed externally, it remains listed until the queue notices; playback then answers like an unknown movie ID.
+        - Completed recordings only: Only completed recordings are served. Scheduled, running, paused, cancelling, failed,
+          or cancelled tasks are neither listed nor playable.
+        - Visibility rules: Private recordings are served only to their owner. Shared recordings require matching
+          target and passing channel content filters. Invisible or foreign recordings answer like an unknown movie ID.
+        - HTTP Range requests: Fully supported (`Range: bytes=START-END`, `bytes=START-`, `bytes=-N`), returning
+          `206 Partial Content` with `Content-Range`, `Content-Length`, and `Accept-Ranges: bytes`, or
+          `416 Range Not Satisfiable`.
+        - `Content-Type`: Derived from the container extension (e.g. `video/mp2t` for `.ts`, `video/mp4` for `.mp4`,
+          `video/x-matroska` for `.mkv`).
+        - Connection accounting & throttling: Counts as one user connection like a library file, occupying one of the user's
+          `max_connections` slots for the duration of playback. Recording playback records no provider for the session
+          (it plays from local storage) and does not consume an upstream provider connection slot.
+          When `max_connections` is exhausted, returns `502 Bad Gateway` (or custom fallback video) with
+          `X-Tuliprox-Rejection: admission_rejected` and `X-Tuliprox-Fallback: user_connections_exhausted`.
+          When stream throttling is configured (`throttle_kbps`), playback is throttled like library files.
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+          example: alice
+        - name: password
+          in: path
+          required: true
+          schema:
+            type: string
+          example: secretpassword
+        - name: stream_id
+          in: path
+          required: true
+          description: Movie or completed recording stream identifier with container extension (e.g. `5001.mp4`, `1000000000.ts`).
+          schema:
+            type: string
+          example: 1000000000.ts
+        - name: Range
+          in: header
+          required: false
+          description: Standard RFC 7233 byte-range request (e.g. `bytes=0-1048575`).
+          schema:
+            type: string
+          example: bytes=0-1048575
+      responses:
+        '200':
+          description: Full VOD media or recording stream.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: video/mp2t
+            Accept-Ranges:
+              schema:
+                type: string
+                example: bytes
+          content:
+            video/mp2t:
+              schema:
+                type: string
+                format: binary
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Partial content response for HTTP Range request on VOD or recording media.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: video/mp2t
+            Content-Range:
+              schema:
+                type: string
+                example: bytes 0-1048575/524288000
+            Content-Length:
+              schema:
+                type: integer
+                example: 1048576
+            Accept-Ranges:
+              schema:
+                type: string
+                example: bytes
+          content:
+            video/mp2t:
+              schema:
+                type: string
+                format: binary
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Stream ID not found or playlist item absent (when fallback response is disabled). Note that invisible or unknown recording IDs answer with the normal fallback response instead of a bare 404.
+        '416':
+          description: Requested Range Not Satisfiable.
+          headers:
+            Content-Range:
+              schema:
+                type: string
+                example: bytes */524288000
+        '502':
+          description: Admission rejected (e.g. user connection limit exhausted) or provider failure.
+          headers:
+            X-Tuliprox-Fallback:
+              $ref: '#/components/headers/X-Tuliprox-Fallback'
+            X-Tuliprox-Rejection:
+              $ref: '#/components/headers/X-Tuliprox-Rejection'
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+
+  /series/{username}/{password}/{stream_id}:
+    get:
+      tags:
+        - Playback
+      security: []
+      operationId: getXtreamSeriesStream
+      summary: Xtream Codes series episode stream playback
+      description: |
+        Streams series episode media in its native container format.
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+          example: alice
+        - name: password
+          in: path
+          required: true
+          schema:
+            type: string
+          example: secretpassword
+        - name: stream_id
+          in: path
+          required: true
+          description: Series episode stream identifier with extension (e.g. `7001.mkv`).
+          schema:
+            type: string
+          example: 7001.mkv
+      responses:
+        '200':
+          description: Series episode media stream.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '502':
+          $ref: '#/components/responses/BadGatewayError'
+
+  /m3u-stream/live/{username}/{password}/{stream_id}:
+    get:
+      tags:
+        - Playback
+      security: []
+      operationId: getM3uLiveStream
+      summary: M3U live stream playback (TS or HLS)
+      description: |
+        Streams live media via M3U routing. If `stream_id` ends in `.m3u8`, serves an HLS manifest;
+        if `.ts`, streams MPEG-TS. Diagnostic headers (`X-Tuliprox-Fallback`) are attached to fallback responses.
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+          example: alice
+        - name: password
+          in: path
+          required: true
+          schema:
+            type: string
+          example: secretpassword
+        - name: stream_id
+          in: path
+          required: true
+          description: Stream identifier with `.ts` or `.m3u8` extension.
+          schema:
+            type: string
+          example: 1001.ts
+      responses:
+        '200':
+          description: Live media stream or HLS manifest.
+          headers:
+            X-Tuliprox-Fallback:
+              $ref: '#/components/headers/X-Tuliprox-Fallback'
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '502':
+          description: Admission rejected or provider failure.
+          headers:
+            X-Tuliprox-Fallback:
+              $ref: '#/components/headers/X-Tuliprox-Fallback'
+            X-Tuliprox-Rejection:
+              $ref: '#/components/headers/X-Tuliprox-Rejection'
+
+  /m3u-stream/movie/{username}/{password}/{stream_id}:
+    get:
+      tags:
+        - Playback
+      security: []
+      operationId: getM3uMovieStream
+      summary: M3U VOD movie stream playback
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+          example: alice
+        - name: password
+          in: path
+          required: true
+          schema:
+            type: string
+          example: secretpassword
+        - name: stream_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: 5001.mp4
+      responses:
+        '200':
+          description: VOD media stream.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '502':
+          $ref: '#/components/responses/BadGatewayError'
+
+  /m3u-stream/series/{username}/{password}/{stream_id}:
+    get:
+      tags:
+        - Playback
+      security: []
+      operationId: getM3uSeriesStream
+      summary: M3U series episode stream playback
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+          example: alice
+        - name: password
+          in: path
+          required: true
+          schema:
+            type: string
+          example: secretpassword
+        - name: stream_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: 7001.mkv
+      responses:
+        '200':
+          description: Series episode media stream.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '502':
+          $ref: '#/components/responses/BadGatewayError'
+
+  /get.php:
+    get:
+      tags:
+        - Playback
+      security: []
+      operationId: getM3uPlaylist
+      summary: Download M3U / M3U Plus playlist
+      description: |
+        Generates and serves the caller's personalized M3U playlist based on target settings, user bouquet,
+        and content filters.
+      parameters:
+        - name: username
+          in: query
+          required: true
+          schema:
+            type: string
+          example: alice
+        - name: password
+          in: query
+          required: true
+          schema:
+            type: string
+          example: secretpassword
+        - name: type
+          in: query
+          required: false
+          description: Playlist format (e.g. `m3u_plus`).
+          schema:
+            type: string
+          example: m3u_plus
+        - name: output
+          in: query
+          required: false
+          description: Preferred stream protocol/format (`ts` or `m3u8`).
+          schema:
+            type: string
+          example: ts
+      responses:
+        '200':
+          description: Generated M3U playlist file.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: application/x-mpegurl
+          content:
+            application/x-mpegurl:
+              schema:
+                type: string
+                example: |
+                  #EXTM3U
+                  #EXTINF:-1 tvg-id="sports1.example.com" tvg-name="Sports 1 HD" group-title="Sports",Sports 1 HD
+                  http://localhost:8901/live/alice/secretpassword/1001.ts
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /player_api.php:
+    get:
+      tags:
+        - Playback
+      security: []
+      operationId: getXtreamPlayerApi
+      summary: Xtream Codes API metadata and handshake
+      description: |
+        Emulates the Xtream Codes `player_api.php` protocol.
+        Without an `action` parameter, returns user authentication and server info.
+        With `action`, returns live streams, VOD streams, series, categories, VOD info, or EPG listings.
+
+        **Recordings in Xtream VOD (Feature F2)**:
+        - Prerequisites: Global DVR enabled (`video.recording.enabled: true`), API proxy user
+          (`api_proxy.yml`), recording level `read`, `private`, or `shared`, `video` cluster permitted, and
+          target has Xtream output. The `skip_vod` input flag does not hide recordings.
+        - "Recordings category" collision: If the provider publishes a VOD category with ID `2000000000`, the provider
+          wins in both `get_vod_categories` and `get_vod_streams` and no recordings are served.
+        - Synthetic category `2000000000` (`Recordings`): Injected into `get_vod_categories` when no collision occurs.
+        - `get_vod_streams?category_id=2000000000`: Fast path that returns only completed visible recordings
+          without scanning the target playlist (unless provider defines category `2000000000`).
+        - `get_vod_streams` without `category_id`: Completed visible recordings are appended at the end of the VOD
+          playlist (unless category `2000000000` collides with a provider category).
+        - `get_vod_info`: Info lookup for `vod_id`. Playlist items always take precedence on collision; completed
+          recordings are consulted only when no playlist item matches and `vod_id >= 1000000000`. For invisible or unknown
+          recording IDs, `get_vod_info` answers the normal empty info. In the recording info response, `duration` is `HH:MM:SS`
+          (e.g. `"01:00:00"`), `duration_secs` is the number of seconds as a string (e.g. `"3600"`), and `added` is the Unix time
+          of the recording completion as a string (e.g. `"1700000000"`).
+        - Completed recordings only: Only recordings with state `completed` are listed. A recording whose file was removed
+          externally is still listed until the queue notices; playback then answers like an unknown ID. Scheduled, running,
+          failed, or cancelled tasks are neither listed nor playable.
+        - Stable stream IDs: Assigned sequentially starting at `1000000000`, persisted with the task, and never reused. Only IDs `>= 1000000000`
+          are looked up as recordings.
+        - Playback fallback, connection accounting & throttling: An invisible or unknown recording ID answers like any unknown
+          movie ID (the normal fallback response, e.g. `X-Tuliprox-Fallback: channel_unavailable`), NOT a bare 404. Recording
+          playback counts as one user connection like a library file against `max_connections`, but records no provider for
+          the session (it plays from local storage) and consumes 0 provider connections. Playback is throttled like library
+          files when throttling is configured.
+      parameters:
+        - name: username
+          in: query
+          required: true
+          schema:
+            type: string
+          example: alice
+        - name: password
+          in: query
+          required: true
+          schema:
+            type: string
+          example: secretpassword
+        - name: action
+          in: query
+          required: false
+          description: Xtream action query parameter.
+          schema:
+            type: string
+            enum:
+              - get_account_info
+              - get_live_categories
+              - get_live_streams
+              - get_vod_categories
+              - get_vod_streams
+              - get_series_categories
+              - get_series
+              - get_series_info
+              - get_vod_info
+              - get_epg
+              - get_short_epg
+              - get_simple_data_table
+          example: get_live_categories
+        - name: category_id
+          in: query
+          required: false
+          description: Category ID to filter streams (e.g. `2000000000` for completed recordings).
+          schema:
+            type: string
+          example: "2000000000"
+        - name: vod_id
+          in: query
+          required: false
+          description: VOD movie or completed recording stream ID for `get_vod_info`.
+          schema:
+            type: string
+          example: "1000000000"
+      responses:
+        '200':
+          description: JSON object or array matching requested Xtream Codes action.
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                user_info:
+                  username: alice
+                  status: Active
+                  auth: 1
+                server_info:
+                  url: localhost
+                  port: 8901
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JSON Web Token (JWT) issued by `POST {web_ui_path}/auth/token`.
+        Include in the HTTP request as `Authorization: Bearer <token>`.
+
+  headers:
+    X-Tuliprox-Fallback:
+      description: |
+        Diagnostic reason explaining why a fallback slate, terminal response, or rejection
+        was returned instead of active upstream provider streaming.
+      schema:
+        type: string
+        enum:
+          - channel_unavailable
+          - user_connections_exhausted
+          - provider_connections_exhausted
+          - low_priority_preempted
+          - user_account_expired
+          - provisioning
+          - hls_session_or_lease_expired
+          - maintenance
+      example: provider_connections_exhausted
+
+    X-Tuliprox-Rejection:
+      description: |
+        Set to `admission_rejected` when stream admission is denied without returning video
+        (e.g. `custom_stream_response_enabled` is false).
+      schema:
+        type: string
+        enum:
+          - admission_rejected
+      example: admission_rejected
+
+    X-Token-Refresh:
+      description: |
+        Indicates that the token's permission schema version is obsolete and must be refreshed.
+      schema:
+        type: string
+        enum:
+          - required
+      example: required
+
+    Retry-After:
+      description: |
+        Minimum wait duration in seconds before retrying the request (e.g. on source switch cooldown or rate limit).
+      schema:
+        type: integer
+        minimum: 1
+      example: 2
+
+  responses:
+    UnauthorizedError:
+      description: Authentication failed, token expired, or missing Bearer token.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer
+        X-Token-Refresh:
+          $ref: '#/components/headers/X-Token-Refresh'
+
+    ForbiddenError:
+      description: "Access forbidden due to disabled Web UI access (`ui_enabled: false` or `user_ui_enabled: false`), disabled Player API access (`api_enabled: false` or `player_api_enabled: false`), or missing feature permissions."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: feature_disabled
+        text/plain:
+          schema:
+            type: string
+          example: feature_disabled
+
+    BadRequestError:
+      description: Invalid request parameters or malformed body.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: invalid_from_timestamp
+        text/plain:
+          schema:
+            type: string
+          example: invalid_from_timestamp
+
+    NotFoundError:
+      description: Requested stream, channel, or recording was not found or is not accessible.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: channel_not_found
+
+    ConflictError:
+      description: Action cannot be performed due to current resource state.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: switch_in_progress
+        text/plain:
+          schema:
+            type: string
+          example: switch_in_progress
+
+    TooManyRequestsError:
+      description: Operation attempted within the mandatory cooldown window or rate limited.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: switch_cooldown
+
+    RecordingDisabledError:
+      description: "DVR subsystem is disabled on the server (`recording.enabled: false`)."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: recording_disabled
+
+    BadGatewayError:
+      description: Upstream provider or stream driver failure.
+      headers:
+        X-Tuliprox-Fallback:
+          $ref: '#/components/headers/X-Tuliprox-Fallback'
+        X-Tuliprox-Rejection:
+          $ref: '#/components/headers/X-Tuliprox-Rejection'
+        Cache-Control:
+          schema:
+            type: string
+            example: no-store
+
+    InternalServerError:
+      description: Server error occurred during processing.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: internal_server_error
+
+  schemas:
+    UserCredential:
+      type: object
+      description: Playlist user or Web UI credentials for authentication.
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          description: Username of the principal.
+          example: alice
+        password:
+          type: string
+          description: Password of the principal.
+          format: password
+          example: secretpassword
+
+    TokenResponse:
+      type: object
+      description: JWT authentication token response.
+      required:
+        - token
+        - username
+      properties:
+        token:
+          type: string
+          description: Signed JSON Web Token (JWT).
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhcGk6YWxpY2UiLCJ1c2VybmFtZSI6ImFsaWNlIn0.example
+        username:
+          type: string
+          description: Authenticated username.
+          example: alice
+
+    PlayerRecordingLevel:
+      type: string
+      description: Effective recording capability tier assigned to the user or plan.
+      enum:
+        - none
+        - read
+        - private
+        - shared
+      example: private
+
+    PlayerCapabilitiesDto:
+      type: object
+      description: Effective capabilities, features, and active limits of the playlist user.
+      required:
+        - source_switch
+        - joinable_streams
+        - recording
+        - free_shared_joins
+        - max_free_shared_joins
+        - watch_progress
+        - event_stream
+        - stream_split
+        - effective_permissions
+        - max_connections
+        - active_connections
+        - shared_joins
+        - free_shared_joins_in_use
+        - share_live_streams
+        - source_switch_protocols
+        - recording_enabled
+      properties:
+        source_switch:
+          type: boolean
+          description: Whether failover source member inspection and manual switching are permitted.
+          example: true
+        joinable_streams:
+          type: boolean
+          description: Whether discovering running shared streams is permitted.
+          example: true
+        recording:
+          $ref: '#/components/schemas/PlayerRecordingLevel'
+        recording_quota_bytes:
+          type: integer
+          format: int64
+          description: Personal recording quota in bytes (omitted when unset).
+          example: 21474836480
+        max_concurrent_recordings:
+          type: integer
+          description: Maximum concurrent recordings permitted (omitted when unset).
+          example: 1
+        max_recording_rules:
+          type: integer
+          description: Maximum active recording rules permitted (omitted when recording is none or read).
+          example: 10
+        free_shared_joins:
+          type: boolean
+          description: Whether the user may join shared streams beyond their connection limit.
+          example: true
+        max_free_shared_joins:
+          type: integer
+          description: Maximum simultaneous free shared stream joins.
+          example: 1
+        watch_progress:
+          type: boolean
+          description: Whether playback progress tracking and retrieval are permitted.
+          example: true
+        event_stream:
+          type: boolean
+          description: Whether real-time user event stream WebSocket is permitted.
+          example: true
+        stream_split:
+          type: boolean
+          description: Whether stream splitting is permitted (mirrors source_switch).
+          example: true
+        effective_permissions:
+          type: array
+          description: List of effective permission names currently held by the caller.
+          items:
+            type: string
+          example:
+            - recording.read
+            - recording.create
+            - recording.manage
+            - recording.delete
+        max_connections:
+          type: integer
+          description: Maximum concurrent playback connections permitted.
+          example: 2
+        active_connections:
+          type: integer
+          description: Count of current active playback connections.
+          example: 1
+        shared_joins:
+          type: integer
+          description: Count of active connections that are joining existing shared streams.
+          example: 0
+        free_shared_joins_in_use:
+          type: integer
+          description: Count of free shared joins currently consumed.
+          example: 0
+        share_live_streams:
+          type: boolean
+          description: Whether live stream sharing is enabled on the caller's target.
+          example: true
+        source_switch_protocols:
+          type: array
+          description: Supported protocols for source member switching.
+          items:
+            type: string
+          example:
+            - ts
+            - hls
+        recording_enabled:
+          type: boolean
+          description: Whether the DVR subsystem is globally enabled on the server.
+          example: true
+
+    SplitStreamResponse:
+      type: object
+      description: Reconnect instruction returned by `POST /api/v1/me/streams/{uid}/split`.
+      required:
+        - reconnect_required
+        - url
+      properties:
+        reconnect_required:
+          type: boolean
+          description: Always `true`; the client must close the old stream and open `url`.
+          example: true
+        url:
+          type: string
+          description: |
+            Server-relative playback URL carrying the `dedicated=1` marker. The Xtream form is
+            `/live/<user>/<pass>/<vid>.ts?dedicated=1`; a target without an Xtream output uses
+            `/m3u-stream/live/<user>/<pass>/<vid>.ts?dedicated=1`. Prepend `scheme://host:port`; playback routes do not
+            use `web_ui_path`.
+          example: /live/alice/example-password/1042.ts?dedicated=1
+
+    WatchProgressKind:
+      type: string
+      description: Media kind tracked by the watch progress API.
+      enum:
+        - movie
+        - episode
+        - recording
+      example: episode
+
+    WatchProgressUpdate:
+      type: object
+      description: Playback position to store for one item.
+      required:
+        - position_secs
+      properties:
+        position_secs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Current playback position in seconds.
+          example: 1500
+        duration_secs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total duration in seconds; enables the automatic `watched` calculation.
+          example: 3000
+        watched:
+          type: boolean
+          description: Explicit watched flag; wins over the automatic calculation.
+          example: false
+        series_id:
+          type: integer
+          description: Series id supplied by the client so episodes can be grouped.
+          example: 88
+
+    WatchProgressEntry:
+      type: object
+      description: Stored watch progress of one media item.
+      required:
+        - kind
+        - item_id
+        - position_secs
+        - watched
+        - updated_at
+      properties:
+        kind:
+          $ref: '#/components/schemas/WatchProgressKind'
+        item_id:
+          type: integer
+          description: Xtream stream id the player plays (movie id, episode id, or recording `vod_id`).
+          example: 4711
+        position_secs:
+          type: integer
+          format: int64
+          description: Last stored playback position in seconds.
+          example: 1500
+        duration_secs:
+          type: integer
+          format: int64
+          description: Total duration in seconds (omitted when unknown).
+          example: 3000
+        watched:
+          type: boolean
+          description: Effective watched state.
+          example: false
+        series_id:
+          type: integer
+          description: Series id supplied by the client (omitted when unset).
+          example: 88
+        updated_at:
+          type: integer
+          format: int64
+          description: Server timestamp of the last write in Unix seconds.
+          example: 1763678400
+
+    PlayerEvent:
+      type: object
+      description: |
+        One JSON text frame of the `/api/v1/me/events` WebSocket. The `type` field selects the variant;
+        fields not belonging to the variant are absent.
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum:
+            - connected
+            - stream_ended
+            - failover_member_switched
+            - recording_finished
+            - connection_denied
+            - resync_required
+            - error
+          description: Event discriminator.
+          example: stream_ended
+        server_time:
+          type: integer
+          format: int64
+          description: Server time in Unix seconds (`connected` only).
+          example: 1763678400
+        uid:
+          type: integer
+          description: Stream uid that ended (`stream_ended` only).
+          example: 104
+        virtual_id:
+          type: integer
+          description: Channel virtual id of the ended stream (`stream_ended` only).
+          example: 1042
+        reason:
+          type: string
+          enum:
+            - kicked
+            - preempted
+            - stopped
+          description: |
+            Why the stream ended (`stream_ended` only): `kicked` (replaced by another device), `preempted` (higher
+            priority or capacity), or `stopped` (the caller ended it with `DELETE /api/v1/me/streams/{uid}`).
+          example: kicked
+        group_virtual_id:
+          type: integer
+          description: Failover group virtual id (`failover_member_switched` only).
+          example: 9001
+        from_member_vid:
+          type: integer
+          description: Previous member virtual id (`failover_member_switched` only).
+          example: 2001
+        to_member_vid:
+          type: integer
+          description: New member virtual id (`failover_member_switched` only).
+          example: 2002
+        id:
+          type: string
+          description: Recording request id (`recording_finished` only).
+          example: 3f6a1e0c-7d3a-4b5e-9c1e-0a2b6c8d9e10
+        state:
+          type: string
+          enum:
+            - completed
+            - failed
+          description: Terminal recording state (`recording_finished` only).
+          example: completed
+        max_connections:
+          type: integer
+          description: Connection limit that refused the attempt (`connection_denied` only).
+          example: 2
+        code:
+          type: string
+          description: Stable error code (`error` only), for example `unauthorized`, `feature_disabled`,
+            or `too_many_connections`.
+          example: unauthorized
+
+    UserChannelDto:
+      type: object
+      description: Live TV channel visible to the authenticated player user.
+      required:
+        - virtual_id
+        - name
+        - group
+        - is_group
+      properties:
+        virtual_id:
+          type: integer
+          description: Virtual channel ID.
+          example: 1001
+        name:
+          type: string
+          description: Display name of the channel.
+          example: Sports 1 HD
+        group:
+          type: string
+          description: Category or playlist group name.
+          example: Sports
+        epg_channel_id:
+          type: string
+          description: EPG mapping identifier if assigned (omitted when unknown).
+          example: sports1.example.com
+        is_group:
+          type: boolean
+          description: Whether this channel is a multi-source failover group.
+          example: true
+
+    UserProgrammeDto:
+      type: object
+      description: EPG programme entry for a live channel with user timeshift applied.
+      required:
+        - start
+        - start_ts
+        - stop
+        - stop_ts
+        - title
+        - categories
+        - is_live
+        - is_new
+      properties:
+        start:
+          type: string
+          description: Scheduled start time as an ISO 8601 string with timeshift offset.
+          example: "2026-11-20T20:00:00Z"
+        start_ts:
+          type: integer
+          format: int64
+          description: Scheduled start time as Unix timestamp seconds.
+          example: 1740045600
+        stop:
+          type: string
+          description: Scheduled end time as an ISO 8601 string with timeshift offset.
+          example: "2026-11-20T22:00:00Z"
+        stop_ts:
+          type: integer
+          format: int64
+          description: Scheduled end time as Unix timestamp seconds.
+          example: 1740052800
+        title:
+          type: string
+          description: Programme title.
+          example: Premier League Live
+        desc:
+          type: string
+          description: Programme description or synopsis (omitted when unknown).
+          example: Live match coverage and post-match studio discussion.
+        categories:
+          type: array
+          description: Genre or category classifications.
+          items:
+            type: string
+          example:
+            - Sports
+            - Football
+        is_live:
+          type: boolean
+          description: Whether the broadcast is a live event.
+          example: true
+        is_new:
+          type: boolean
+          description: Whether the broadcast is a new premiere episode.
+          example: true
+
+    PlaylistItemType:
+      type: string
+      description: Classification of playlist media item.
+      enum:
+        - Live
+        - Video
+        - Series
+        - SeriesInfo
+        - Catchup
+        - LiveUnknown
+        - LiveHls
+        - LiveDash
+        - LocalVideo
+        - LocalSeries
+        - LocalSeriesInfo
+      example: Live
+
+    UserStreamDto:
+      type: object
+      description: Summary of an active playback stream owned by the caller.
+      required:
+        - uid
+        - virtual_id
+        - title
+        - item_type
+        - protocol
+        - shared
+        - session_active
+        - started_at
+        - user_agent
+      properties:
+        uid:
+          type: integer
+          description: Unique stream session identifier.
+          example: 104
+        virtual_id:
+          type: integer
+          description: Virtual channel ID.
+          example: 1001
+        group_virtual_id:
+          type: integer
+          description: Group virtual ID if running within a failover group (omitted when unknown).
+          example: 1001
+        member_vid:
+          type: integer
+          description: Current member source virtual ID within the failover group (omitted when unknown).
+          example: 2001
+        title:
+          type: string
+          description: Channel or media title.
+          example: Sports 1 HD
+        item_type:
+          $ref: '#/components/schemas/PlaylistItemType'
+        protocol:
+          type: string
+          description: Playback protocol (`ts`, `hls`, or `dash`).
+          example: ts
+        shared:
+          type: boolean
+          description: Whether this stream is shared with other viewers on the server.
+          example: false
+        session_active:
+          type: boolean
+          description: Whether the stream connection is currently active.
+          example: true
+        started_at:
+          type: integer
+          format: int64
+          description: Stream start time as Unix timestamp seconds.
+          example: 1740045000
+        user_agent:
+          type: string
+          description: User-Agent header sent by the client player.
+          example: TiviMate/4.7.0
+        session_token:
+          type: string
+          description: Session token identifier for HLS playback sessions (omitted when unknown).
+
+    JoinableStreamDto:
+      type: object
+      description: Summary of a running shared stream available to join without extra upstream provider cost.
+      required:
+        - virtual_id
+        - title
+        - logo
+        - category
+        - protocol
+        - requires_free_slot
+      properties:
+        virtual_id:
+          type: integer
+          description: Virtual ID of the channel.
+          example: 1001
+        title:
+          type: string
+          description: Channel title.
+          example: Sports 1 HD
+        logo:
+          type: string
+          description: Channel logo URL.
+          example: http://example.com/logo.png
+        category:
+          type: string
+          description: Category or playlist group name.
+          example: Sports
+        protocol:
+          type: string
+          description: Stream protocol (`ts` or `hls`).
+          example: ts
+        requires_free_slot:
+          type: boolean
+          description: True if caller has reached connection limits and needs to free a slot to join.
+          example: false
+
+    UserFailoverMemberDto:
+      type: object
+      description: Redacted failover source member information for player clients.
+      required:
+        - member_vid
+        - index
+        - title
+        - has_archive
+        - current
+      properties:
+        member_vid:
+          type: integer
+          description: Member virtual ID used to address or switch to this specific source.
+          example: 2001
+        index:
+          type: integer
+          description: Zero-based priority index in the failover group.
+          example: 0
+        title:
+          type: string
+          description: Member display title.
+          example: Sports 1 HD (1080p Main)
+        has_archive:
+          type: boolean
+          description: Whether this member source supports catchup/archive playback.
+          example: true
+        current:
+          type: boolean
+          description: Whether this member is the active playback source.
+          example: true
+        health:
+          $ref: '#/components/schemas/UserMemberHealthDto'
+
+    UserFailoverMembersDto:
+      type: object
+      description: Redacted failover group response containing available source members.
+      required:
+        - group_name
+        - members
+      properties:
+        group_name:
+          type: string
+          description: Display name of the failover group.
+          example: Sports 1
+        current_member_vid:
+          type: integer
+          description: Virtual ID of the active member source (omitted when unknown).
+          example: 2001
+        members:
+          type: array
+          description: List of available member sources.
+          items:
+            $ref: '#/components/schemas/UserFailoverMemberDto'
+
+    StreamFailoverSwitchRequest:
+      type: object
+      description: Request payload to switch an active failover stream to another member source.
+      required:
+        - member_vid
+      properties:
+        member_vid:
+          type: integer
+          description: Target member virtual ID to switch to.
+          example: 2002
+
+    UserMemberHealthState:
+      type: string
+      description: High-level health state of a failover member.
+      enum:
+        - ok
+        - degraded
+        - failing
+      example: ok
+
+    VideoResolution:
+      type: string
+      description: |
+        Classified video resolution tier.
+        Note that `Unknown` is omitted when unknown in health responses.
+      enum:
+        - Unknown
+        - SD
+        - P720
+        - P1080
+        - P1440
+        - P2160
+        - P4320
+      example: P1080
+
+    VideoCodec:
+      type: string
+      description: |
+        Classified video codec.
+        Note that `Other` is omitted when unknown in health responses.
+      enum:
+        - Other
+        - H264
+        - H265
+        - MPEG4
+        - VC1
+        - AV1
+      example: H264
+
+    UserMemberHealthDto:
+      type: object
+      description: |
+        Redacted health, quality, and probe information of a failover member for playlist users.
+        QoS scores (rolling scores and failure streak) survive a server restart and are restored
+        from storage on startup. In contrast, probe media metrics (resolution, video codec,
+        bitrate) and circuit breaker state are maintained in memory only and reset on server restart.
+      required:
+        - state
+      properties:
+        state:
+          $ref: '#/components/schemas/UserMemberHealthState'
+        resolution:
+          $ref: '#/components/schemas/VideoResolution'
+        video_codec:
+          $ref: '#/components/schemas/VideoCodec'
+        bitrate_kbps:
+          type: integer
+          description: Video stream bitrate in kbps from media probe (omitted when unknown).
+          example: 5500
+        qos_24h:
+          type: integer
+          description: 24-hour rolling QoS score from 0 to 100 (omitted when unknown).
+          example: 92
+        qos_7d:
+          type: integer
+          description: 7-day rolling QoS score from 0 to 100 (omitted when unknown).
+          example: 88
+        retry_after_secs:
+          type: integer
+          format: int64
+          description: Remaining circuit breaker backoff seconds before retry (present only when state is failing; omitted otherwise).
+          example: 15
+
+    PlaylistClusterCategoriesDto:
+      type: object
+      description: Categories available within an output format grouped by cluster.
+      properties:
+        live:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+          example:
+            - UK Sports
+            - UK Entertainment
+        vod:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+          example:
+            - Action Movies
+        series:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+          example:
+            - Comedy Series
+
+    PlaylistCategoriesDto:
+      type: object
+      description: Available categories for Xtream and M3U playlists.
+      properties:
+        xtream:
+          $ref: '#/components/schemas/PlaylistClusterCategoriesDto'
+        m3u:
+          $ref: '#/components/schemas/PlaylistClusterCategoriesDto'
+
+    PlaylistClusterBouquetDto:
+      type: object
+      description: User bouquet selection for a cluster.
+      properties:
+        live:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+          example:
+            - UK Sports
+        vod:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        series:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+
+    PlaylistBouquetDto:
+      type: object
+      description: User bouquet filter configuration.
+      properties:
+        xtream:
+          $ref: '#/components/schemas/PlaylistClusterBouquetDto'
+        m3u:
+          $ref: '#/components/schemas/PlaylistClusterBouquetDto'
+
+    XtreamCluster:
+      type: string
+      description: Stream cluster classification.
+      enum:
+        - Live
+        - Video
+        - Series
+      example: Live
+
+    UserRuleSource:
+      type: object
+      description: User-facing source identifiers of a recording rule. Provider internals are omitted.
+      required:
+        - target_id
+        - virtual_id
+        - is_group
+      properties:
+        target_id:
+          type: string
+          description: Resolved target name of the rule source.
+          example: main
+        virtual_id:
+          type: string
+          description: Playlist channel virtual id resolved by the server.
+          example: "1042"
+        is_group:
+          type: boolean
+          description: Whether the source resolves to a failover group.
+          example: false
+
+    RuleBody:
+      description: |
+        Matching body of a rule. Only `weekly_timeslot` can be created through the API; `new_episode`
+        is parsed for stored rules but refused on create.
+      oneOf:
+        - type: object
+          title: WeeklyTimeslot
+          required:
+            - kind
+            - weekday
+            - local_start_time
+            - duration_secs
+            - timezone
+          properties:
+            kind:
+              type: string
+              enum:
+                - weekly_timeslot
+            weekday:
+              type: integer
+              minimum: 1
+              maximum: 7
+              description: ISO 8601 weekday, `1` = Monday .. `7` = Sunday.
+              example: 3
+            local_start_time:
+              type: string
+              pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+              description: Local start time in 24-hour `HH:MM` form.
+              example: "20:00"
+            duration_secs:
+              type: integer
+              format: int64
+              minimum: 1
+              description: Recording length without padding.
+              example: 3600
+            timezone:
+              type: string
+              description: IANA timezone name.
+              example: Europe/Berlin
+          additionalProperties: false
+        - type: object
+          title: NewEpisode
+          required:
+            - kind
+          properties:
+            kind:
+              type: string
+              enum:
+                - new_episode
+            series_id:
+              type: string
+              description: Stable EPG series id.
+            title_pattern:
+              type: string
+              description: Normalized title fallback when no series id exists.
+            exclude_repeat:
+              type: boolean
+              description: Exclude programmes with explicit `Repeat` status. Defaults to `true`.
+              default: true
+          additionalProperties: false
+
+    CreateRecordingRuleRequest:
+      type: object
+      description: Request body to create a recurring recording rule.
+      required:
+        - virtual_id
+        - body
+      properties:
+        target_id:
+          type: string
+          description: Own target name or numeric id; defaults to the caller's target. The server stores the resolved name.
+          example: main
+        virtual_id:
+          type: string
+          description: Playlist channel virtual id, or an EPG channel id.
+          example: "1042"
+        input_name:
+          type: string
+          description: |
+            Input name. For playlist users the server derives it from the playlist and ignores a client value; for Web
+            UI users an empty value means the server resolves it from the playlist.
+          default: ""
+          example: ""
+        body:
+          $ref: '#/components/schemas/RuleBody'
+        visibility:
+          $ref: '#/components/schemas/RecordingVisibility'
+        channel_id:
+          type: string
+          description: Stable EPG channel id used as matching fallback.
+          example: sports1.example.com
+        pre_roll_secs:
+          type: integer
+          format: int64
+          maximum: 900
+          description: Seconds recorded before the scheduled start.
+          default: 0
+          example: 0
+        post_roll_secs:
+          type: integer
+          format: int64
+          maximum: 1800
+          description: Seconds recorded after the scheduled end.
+          default: 0
+          example: 60
+
+    EditRecordingRuleRequest:
+      type: object
+      description: Patch body of a recording rule. Omitted fields stay unchanged.
+      properties:
+        body:
+          $ref: '#/components/schemas/RuleBody'
+        visibility:
+          $ref: '#/components/schemas/RecordingVisibility'
+        enabled:
+          type: boolean
+        channel_id:
+          type: string
+        clear_channel_id:
+          type: boolean
+          description: Remove the stored channel id (takes precedence over `channel_id`).
+          default: false
+        pre_roll_secs:
+          type: integer
+          format: int64
+          maximum: 900
+        post_roll_secs:
+          type: integer
+          format: int64
+          maximum: 1800
+
+    UserRecordingRuleResponse:
+      type: object
+      description: |
+        Redacted recording rule returned to playlist users, together with the queue revision observed while it was
+        read. Provider internals are omitted from `source`.
+      required:
+        - revision
+        - id
+        - own
+        - visibility
+        - enabled
+        - source
+        - body
+        - pre_roll_secs
+        - post_roll_secs
+        - created_at
+        - updated_at
+      properties:
+        revision:
+          type: integer
+          format: int64
+          description: Queue revision observed while the list was assembled.
+          example: 12
+        id:
+          type: string
+          description: Stable rule id.
+          example: rule-1763678400-ab12cd34
+        owner_id:
+          type: string
+          description: Owner principal. Present only for the caller's own rules.
+          example: api:alice
+        own:
+          type: boolean
+          description: Whether the rule belongs to the caller.
+          example: true
+        visibility:
+          $ref: '#/components/schemas/RecordingVisibility'
+        enabled:
+          type: boolean
+          example: true
+        source:
+          $ref: '#/components/schemas/UserRuleSource'
+        channel_id:
+          type: string
+          description: Stable EPG channel id used as matching fallback (omitted when unset).
+          example: sports1.example.com
+        body:
+          $ref: '#/components/schemas/RuleBody'
+        pre_roll_secs:
+          type: integer
+          format: int64
+          example: 0
+        post_roll_secs:
+          type: integer
+          format: int64
+          example: 60
+        created_at:
+          type: integer
+          format: int64
+          description: Creation time in Unix seconds.
+          example: 1763678400
+        updated_at:
+          type: integer
+          format: int64
+          description: Last update time in Unix seconds.
+          example: 1763678400
+
+    RecordingVisibility:
+      type: string
+      description: Visibility scope of a recording.
+      enum:
+        - private
+        - shared
+      example: private
+
+    RecordingSourceRequest:
+      type: object
+      description: Source channel identifiers for recording.
+      required:
+        - target_id
+        - virtual_id
+        - cluster
+        - input_name
+      properties:
+        target_id:
+          type: string
+          description: Target playlist identifier.
+          example: main
+        virtual_id:
+          type: string
+          description: Virtual channel or media ID.
+          example: "1001"
+        cluster:
+          $ref: '#/components/schemas/XtreamCluster'
+        input_name:
+          type: string
+          description: Upstream input source name.
+          example: sat-feed-1
+
+    EpgEpisodeMetadata:
+      type: object
+      description: EPG episode metadata for a recording.
+      properties:
+        programme_id:
+          type:
+            - string
+            - "null"
+          example: prog-12345
+        series_id:
+          type:
+            - string
+            - "null"
+          example: series-6789
+        episode_id:
+          type:
+            - string
+            - "null"
+          example: ep-01
+        season:
+          type:
+            - integer
+            - "null"
+          example: 1
+        episode:
+          type:
+            - integer
+            - "null"
+          example: 5
+        airing:
+          type: string
+          enum:
+            - unknown
+            - new
+            - repeat
+          default: unknown
+          example: new
+
+    CreateRecordingRequest:
+      type: object
+      description: Payload for scheduling a recording.
+      required:
+        - source
+        - program_title
+        - visibility
+      properties:
+        source:
+          $ref: '#/components/schemas/RecordingSourceRequest'
+        program_title:
+          type: string
+          description: Title of the programme.
+          example: FA Cup Quarter Final
+        program_start:
+          type: integer
+          format: int64
+          description: Scheduled start time as Unix timestamp seconds (required for Live, omitted for VOD/Series).
+          example: 1740045600
+        program_end:
+          type: integer
+          format: int64
+          description: Scheduled end time as Unix timestamp seconds (required for Live, omitted for VOD/Series).
+          example: 1740052800
+        pre_roll_secs:
+          type: integer
+          description: Seconds to record before scheduled start time (omitted when unset).
+          example: 120
+        post_roll_secs:
+          type: integer
+          description: Seconds to record after scheduled end time (omitted when unset).
+          example: 300
+        visibility:
+          $ref: '#/components/schemas/RecordingVisibility'
+        channel_id:
+          type: string
+          description: EPG channel mapping identifier (omitted when unknown).
+          example: sports1.example.com
+        channel_name:
+          type: string
+          description: Display name of the channel (omitted when unknown).
+          example: Sports 1 HD
+        epg:
+          $ref: '#/components/schemas/EpgEpisodeMetadata'
+
+    EditRecordingTaskBody:
+      type: object
+      description: Modifiable attributes of a scheduled recording request (all fields optional).
+      properties:
+        program_start:
+          type: integer
+          format: int64
+          example: 1740045600
+        program_end:
+          type: integer
+          format: int64
+          example: 1740052800
+        pre_roll_secs:
+          type: integer
+          example: 180
+        post_roll_secs:
+          type: integer
+          example: 600
+        program_title:
+          type: string
+          example: FA Cup Quarter Final (Extended)
+        channel_id:
+          type: string
+          example: sports1.example.com
+        channel_name:
+          type: string
+          example: Sports 1 HD
+
+    PreviewSourceDto:
+      type: object
+      description: Source channel definition for conflict preview.
+      required:
+        - target_name
+        - virtual_id
+        - input_name
+      properties:
+        target_name:
+          type: string
+          example: main
+        virtual_id:
+          type: string
+          example: "1001"
+        input_name:
+          type: string
+          example: sat-feed-1
+        channel_id:
+          type:
+            - string
+            - "null"
+          example: sports1.example.com
+        channel_name:
+          type:
+            - string
+            - "null"
+          example: Sports 1 HD
+
+    PreviewCandidateDto:
+      type: object
+      description: Candidate time window and priority for conflict preview.
+      required:
+        - padded_start
+        - padded_end
+      properties:
+        padded_start:
+          type: integer
+          format: int64
+          description: Padded start time in Unix timestamp seconds.
+          example: 1740045480
+        padded_end:
+          type: integer
+          format: int64
+          description: Padded end time in Unix timestamp seconds.
+          example: 1740053100
+        pre_roll_secs:
+          type: integer
+          default: 0
+          example: 120
+        post_roll_secs:
+          type: integer
+          default: 0
+          example: 300
+        priority:
+          type: integer
+          default: 0
+          example: 0
+
+    PreviewConflictsBody:
+      type: object
+      description: Conflict preview request payload.
+      required:
+        - source
+        - candidate
+      properties:
+        source:
+          $ref: '#/components/schemas/PreviewSourceDto'
+        candidate:
+          $ref: '#/components/schemas/PreviewCandidateDto'
+
+    OverlapSegmentDto:
+      type: object
+      description: Segment of time with peak upstream connection demand.
+      required:
+        - start
+        - end
+        - peak_demand
+      properties:
+        start:
+          type: integer
+          format: int64
+          example: 1740045480
+        end:
+          type: integer
+          format: int64
+          example: 1740053100
+        peak_demand:
+          type: integer
+          example: 1
+
+    PreviewConflictsResponse:
+      type: object
+      description: Evaluated conflict analysis result.
+      required:
+        - severity
+      properties:
+        severity:
+          type: string
+          description: Severity classification of potential conflicts (`no_known_conflict`, `possible_capacity_wait`, `likely_missed_window`).
+          enum:
+            - no_known_conflict
+            - possible_capacity_wait
+            - likely_missed_window
+          example: no_known_conflict
+        provider_scope:
+          type: string
+          description: Upstream provider identifier scoped to the check (omitted when unknown or not applicable).
+          example: sat-provider
+        overlap_segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/OverlapSegmentDto'
+
+    ErrorResponse:
+      type: object
+      description: Standard API error envelope.
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code string.
+          example: feature_disabled
+
+    RecordingKind:
+      type: string
+      enum:
+        - live
+        - vod
+        - series
+      description: Media kind of a recording task.
+      example: live
+
+    TaskPriorityDto:
+      type: string
+      enum:
+        - background
+        - normal
+        - high
+      description: Scheduling priority tier of a task.
+      example: normal
+
+    TransferStatusDto:
+      type: string
+      enum:
+        - scheduled
+        - queued
+        - waiting_for_capacity
+        - retry_waiting
+        - running
+        - paused
+        - cancelling
+        - completed
+        - failed
+        - cancelled
+      description: Execution and transfer state of a recording task.
+      example: completed
+
+    RecordingAllowedActions:
+      type: object
+      required:
+        - pause
+        - resume
+        - cancel
+        - retry
+        - edit
+        - remove
+      properties:
+        pause:
+          type: boolean
+        resume:
+          type: boolean
+        cancel:
+          type: boolean
+        retry:
+          type: boolean
+        edit:
+          type: boolean
+        remove:
+          type: boolean
+      description: Allowed client actions computed from current recording task state.
+
+    RecordingQuotaSummaryDto:
+      type: object
+      required:
+        - private_used_bytes
+        - shared_used_bytes
+      properties:
+        private_used_bytes:
+          type: integer
+          format: int64
+          description: Bytes consumed by caller's private recordings.
+          example: 4294967296
+        private_limit_bytes:
+          type:
+            - integer
+            - "null"
+          format: int64
+          description: Resolved private storage quota in bytes (null if unlimited).
+          example: 21474836480
+        shared_used_bytes:
+          type: integer
+          format: int64
+          description: Bytes consumed by shared recordings.
+          example: 0
+        shared_limit_bytes:
+          type:
+            - integer
+            - "null"
+          format: int64
+          description: Resolved shared storage quota in bytes (null if unlimited).
+          example: null
+      description: Caller's own private and shared recording quota consumption.
+
+    RecordingTaskDto:
+      type: object
+      required:
+        - id
+        - title
+        - kind
+        - priority
+        - status
+        - retry_attempts
+        - transferred_bytes
+        - restart_from_beginning_required
+        - visibility
+        - pre_roll_secs
+        - post_roll_secs
+        - allowed_actions
+      properties:
+        id:
+          type: string
+          description: Unique recording request identifier.
+          example: 3f6a1e0c-7d3a-4b5e-9c1e-0a2b6c8d9e10
+        title:
+          type: string
+          description: Display title of the recording.
+          example: Morning Match
+        kind:
+          $ref: '#/components/schemas/RecordingKind'
+        priority:
+          $ref: '#/components/schemas/TaskPriorityDto'
+        status:
+          $ref: '#/components/schemas/TransferStatusDto'
+        retry_attempts:
+          type: integer
+          description: Number of execution retry attempts made so far.
+          example: 0
+        transferred_bytes:
+          type: integer
+          format: int64
+          description: Total bytes transferred to disk.
+          example: 4294967296
+        total_bytes:
+          type: integer
+          format: int64
+          description: Expected total file size in bytes (omitted when unknown).
+        next_retry_at:
+          type: integer
+          format: int64
+          description: Unix timestamp seconds of next retry attempt (omitted when unknown).
+        error:
+          type: string
+          description: Last error message encountered during capture (omitted when unknown).
+        restart_from_beginning_required:
+          type: boolean
+          description: Whether restarting from beginning is required after byte-range failure.
+          example: false
+        owner_id:
+          type: string
+          description: Owner identifier (present only for caller's own items, omitted otherwise).
+          example: api:alice
+        visibility:
+          $ref: '#/components/schemas/RecordingVisibility'
+        channel_id:
+          type: string
+          description: EPG channel mapping identifier (omitted when unknown).
+          example: sports1.example.com
+        channel_name:
+          type: string
+          description: Channel display name (omitted when unknown).
+          example: Sports 1 HD
+        program_title:
+          type: string
+          description: Programme title (omitted when unknown).
+          example: Morning Match
+        program_start:
+          type: integer
+          format: int64
+          description: Scheduled start time as Unix timestamp seconds (omitted when unknown).
+          example: 1763679600
+        program_end:
+          type: integer
+          format: int64
+          description: Scheduled end time as Unix timestamp seconds (omitted when unknown).
+          example: 1763683200
+        scheduled_start:
+          type: integer
+          format: int64
+          description: Padded start time as Unix timestamp seconds (omitted when unknown).
+          example: 1763679570
+        scheduled_end:
+          type: integer
+          format: int64
+          description: Padded end time as Unix timestamp seconds (omitted when unknown).
+          example: 1763683260
+        pre_roll_secs:
+          type: integer
+          format: int64
+          description: Pre-roll padding in seconds.
+          example: 30
+        post_roll_secs:
+          type: integer
+          format: int64
+          description: Post-roll padding in seconds.
+          example: 60
+        completed_at:
+          type: integer
+          format: int64
+          description: Unix timestamp seconds when recording completed (omitted when unknown).
+          example: 1763683300
+        filename:
+          type: string
+          description: Basename of the finished recording file (omitted when unknown).
+          example: Morning-Match-2026-11-20.ts
+        epg:
+          $ref: '#/components/schemas/EpgEpisodeMetadata'
+        rule_id:
+          type: string
+          description: Originating recurring rule identifier (omitted when unknown).
+        occurrence_key:
+          type: string
+          description: Provenance key for recurring occurrences (omitted when unknown).
+        allowed_actions:
+          $ref: '#/components/schemas/RecordingAllowedActions'
+      description: Owner-filtered public projection of a recording task.
+
+    RecordingSnapshotResponse:
+      type: object
+      required:
+        - revision
+        - available
+        - quota
+        - tasks
+      properties:
+        revision:
+          type: integer
+          format: int64
+          description: Monotonic queue revision counter.
+          example: 12
+        available:
+          type: boolean
+          description: Whether the DVR subsystem is operational and accepting tasks.
+          example: true
+        quota:
+          $ref: '#/components/schemas/RecordingQuotaSummaryDto'
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecordingTaskDto'
+      description: Full recording queue snapshot and quota summary delivered over WebSocket.

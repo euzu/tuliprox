@@ -112,6 +112,7 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::RecordingDelete => "recording.delete",
         Permission::MaintenanceRead => "maintenance.read",
         Permission::MaintenanceWrite => "maintenance.write",
+        Permission::RecordingShare => "recording.share",
     }
 }
 
@@ -214,8 +215,8 @@ fn check_create(claims: &Claims, action: RecordingAction) -> RecordingDecision {
             if !has(claims, Permission::RecordingCreate) {
                 return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingCreate));
             }
-            if !claims.is_admin() {
-                return RecordingDecision::Deny(DenyReason::NotAdministrator);
+            if !claims.is_admin() && !has(claims, Permission::RecordingShare) {
+                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingShare));
             }
             RecordingDecision::Allow
         }
@@ -349,17 +350,16 @@ fn check_mutate_action(
     if !has(claims, required) {
         return RecordingDecision::Deny(DenyReason::MissingPermission(required));
     }
+    if owner_of(meta) == subject_id {
+        return RecordingDecision::Allow;
+    }
     if is_visibility(meta, RecordingVisibility::Private) {
-        if owner_of(meta) == subject_id {
-            return RecordingDecision::Allow;
-        }
         return RecordingDecision::Deny(DenyReason::NotOwner);
     }
-    // Shared visibility: only administrators may mutate.
-    if !claims.is_admin() {
-        return RecordingDecision::Deny(DenyReason::NotAdministrator);
+    if claims.is_admin() {
+        return RecordingDecision::Allow;
     }
-    RecordingDecision::Allow
+    RecordingDecision::Deny(DenyReason::NotAdministrator)
 }
 
 /// Separate policy for orphan catalog entries. The catalog is a
@@ -559,20 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn create_shared_requires_administrator_role() {
-        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), read_write_perms());
-        let sub = RecordingSubject::new(None, TerminalState::Active, true);
-        let d = authorize(
-            &claims,
-            claims.subject_id.as_ref().expect("test subject_id present"),
-            RecordingAction::CreateShared,
-            &sub,
-        );
-        assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotAdministrator)));
-    }
-
-    #[test]
-    fn create_shared_with_admin_role_and_recording_create_is_allowed() {
+    fn create_shared_admin_is_allowed() {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, read_write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
@@ -582,6 +569,34 @@ mod tests {
             &sub,
         );
         assert!(d.is_allow());
+    }
+
+    #[test]
+    fn create_shared_with_recording_share_is_allowed() {
+        let mut perms = read_write_perms();
+        perms.set(Permission::RecordingShare);
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), perms);
+        let sub = RecordingSubject::new(None, TerminalState::Active, true);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::CreateShared,
+            &sub,
+        );
+        assert!(d.is_allow());
+    }
+
+    #[test]
+    fn create_shared_private_only_is_denied() {
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), read_write_perms());
+        let sub = RecordingSubject::new(None, TerminalState::Active, true);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::CreateShared,
+            &sub,
+        );
+        assert!(matches!(d, RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingShare))));
     }
 
     // --- edit / cancel / delete ---
@@ -615,7 +630,21 @@ mod tests {
     }
 
     #[test]
-    fn edit_shared_requires_administrator() {
+    fn mutate_shared_admin_is_allowed() {
+        let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, write_perms());
+        let meta = owner_meta("web:alice", RecordingVisibility::Shared);
+        let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Edit,
+            &sub,
+        );
+        assert!(d.is_allow());
+    }
+
+    #[test]
+    fn mutate_shared_owner_with_permission_is_allowed() {
         let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Shared);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
@@ -625,7 +654,35 @@ mod tests {
             RecordingAction::Edit,
             &sub,
         );
+        assert!(d.is_allow());
+    }
+
+    #[test]
+    fn mutate_shared_other_user_is_denied() {
+        let claims = make_claims("bob", Some(subject("web:bob")), RoleSet::new(), write_perms());
+        let meta = owner_meta("web:alice", RecordingVisibility::Shared);
+        let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Edit,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotAdministrator)));
+    }
+
+    #[test]
+    fn mutate_shared_owner_without_permission_is_denied() {
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), read_perms());
+        let meta = owner_meta("web:alice", RecordingVisibility::Shared);
+        let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Edit,
+            &sub,
+        );
+        assert!(matches!(d, RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingManage))));
     }
 
     #[test]

@@ -35,9 +35,9 @@ use shared::{
         XtreamPlaylistItem,
     },
 };
-use std::{borrow::Cow, future::Future, sync::Arc};
+use std::{borrow::Cow, future::Future, ops::ControlFlow, sync::Arc};
 use tokio_stream::StreamExt;
-use tuliprox_core::model::{override_key_for, AppConfig, InputAliasMap};
+use tuliprox_core::model::{override_key_for, AppConfig, InputAliasMap, ProxyUserCredentials};
 
 query_enum! {
     /// Record fields a client can project with `fields`.
@@ -462,10 +462,12 @@ struct ItemPage {
 /// the drain: a partial result must not be mistaken for a complete one.
 pub(super) async fn drain_records<R>(
     mut records: LockedReceiverStream<Result<R, TuliproxError>>,
-    mut visit: impl FnMut(R),
+    mut visit: impl FnMut(R) -> ControlFlow<()>,
 ) -> Result<usize, TuliproxError> {
     while let Some(entry) = records.next().await {
-        visit(entry?);
+        if visit(entry?).is_break() {
+            break;
+        }
     }
     Ok(records.skipped_records())
 }
@@ -499,12 +501,13 @@ where
     let mut items = Vec::with_capacity(window.limit.min(DEFAULT_PAGE_LIMIT as usize));
     let skipped_records = drain_records(records, |record| {
         if !visible(&record) || !filter.matches(&record) {
-            return;
+            return ControlFlow::Continue(());
         }
         if window.contains(total_matched) {
             items.push(project(&record, fields, filter.epg, filter.aliases));
         }
         total_matched += 1;
+        ControlFlow::Continue(())
     })
     .await?;
     Ok(ItemPage { total_matched, skipped_records, items })
@@ -924,6 +927,177 @@ pub(super) async fn list_playlist_sources(State(app_state): State<Arc<AppState>>
         inputs: sources.inputs.iter().map(|input| summarize_input(input, &app_state.plugins)).collect(),
     };
     axum::Json(response).into_response()
+}
+
+fn match_live_channel<R>(
+    record: &R,
+    user: &ProxyUserCredentials,
+    group: Option<&str>,
+    needle: Option<&CaseInsensitiveNeedle>,
+    is_group_fn: &impl Fn(u32) -> bool,
+) -> Option<shared::model::UserChannelDto>
+where
+    R: StoredPlaylistRecord,
+    for<'a> shared::model::PlaylistItem: From<&'a R>,
+{
+    if !record.item_type().is_cluster(XtreamCluster::Live) || !user.allows_item_type(record.item_type()) {
+        return None;
+    }
+    if group.is_some_and(|g| record.group() != g) {
+        return None;
+    }
+    if let Some(needle) = needle {
+        let matched = needle.is_in(record.name())
+            || needle.is_in(record.title())
+            || needle.is_in(record.group())
+            || needle.is_in(record.epg_channel_id().unwrap_or_default());
+        if !matched {
+            return None;
+        }
+    }
+    if !crate::api::endpoints::hls_api::user_allows_entry_filter(user, record) {
+        return None;
+    }
+    let vid = record.virtual_id();
+    Some(shared::model::UserChannelDto {
+        virtual_id: vid,
+        name: record.name().to_string(),
+        group: record.group().to_string(),
+        epg_channel_id: record.epg_channel_id().map(str::to_string),
+        is_group: is_group_fn(vid),
+    })
+}
+
+async fn load_is_group_predicate(app_state: &AppState, target: &ConfigTarget) -> impl Fn(u32) -> bool {
+    let failover_groups = if tuliprox_repository::target_stream_item::failover_groups_enabled(target) {
+        Some(app_state.playlists.failover_groups.get_or_load(&app_state.app_config, &app_state.playlists, target).await)
+    } else {
+        None
+    };
+    move |v: u32| failover_groups.as_ref().is_some_and(|fg| fg.groups.contains_key(&shared::model::VirtualId::new(v)))
+}
+
+fn push_live_channel<R>(
+    channels: &mut Vec<shared::model::UserChannelDto>,
+    record: &R,
+    user: &ProxyUserCredentials,
+    group: Option<&str>,
+    needle: Option<&CaseInsensitiveNeedle>,
+    is_group_fn: &impl Fn(u32) -> bool,
+    limit: usize,
+) -> bool
+where
+    R: StoredPlaylistRecord,
+    for<'a> shared::model::PlaylistItem: From<&'a R>,
+{
+    if channels.len() >= limit {
+        return false;
+    }
+    if let Some(dto) = match_live_channel(record, user, group, needle, is_group_fn) {
+        channels.push(dto);
+    }
+    channels.len() < limit
+}
+
+/// Reads live channels of `target` visible under `user`'s content filter, matching optional `search` and `group`.
+pub(in crate::api::endpoints) async fn query_target_user_live_channels(
+    app_state: &AppState,
+    target: &ConfigTarget,
+    user: &ProxyUserCredentials,
+    search: Option<&str>,
+    group: Option<&str>,
+    limit: usize,
+) -> Result<Vec<shared::model::UserChannelDto>, TuliproxError> {
+    if !user.allows_cluster(XtreamCluster::Live) {
+        return Ok(Vec::new());
+    }
+
+    let app_config = &app_state.app_config;
+    let needle = CaseInsensitiveNeedle::new(search);
+    let is_group_fn = load_is_group_predicate(app_state, target).await;
+    let mut channels = Vec::new();
+
+    let mut in_memory = false;
+    {
+        let playlists = app_state.playlists.data.read().await;
+        if let Some(storage) = playlists.get(target.name.as_str()) {
+            if let Some(tree) = &storage.m3u {
+                in_memory = true;
+                for (_, record) in tree {
+                    if !push_live_channel(&mut channels, record, user, group, needle.as_ref(), &is_group_fn, limit) {
+                        break;
+                    }
+                }
+            } else if let Some(x_storage) = &storage.xtream {
+                in_memory = true;
+                let (tree, _) = x_storage.get_cluster(XtreamCluster::Live);
+                for (_, record) in tree {
+                    if !push_live_channel(&mut channels, record, user, group, needle.as_ref(), &is_group_fn, limit) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if in_memory {
+        return Ok(channels);
+    }
+
+    if target.has_output(TargetType::Xtream) {
+        if let Some(records) = iter_raw_xtream_target_playlist(app_config, target, XtreamCluster::Live).await {
+            drain_records(records, |record: XtreamPlaylistItem| {
+                if push_live_channel(&mut channels, &record, user, group, needle.as_ref(), &is_group_fn, limit) {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(())
+                }
+            })
+            .await?;
+        }
+    } else if let Some(records) = iter_raw_m3u_target_playlist(app_config, target, Some(XtreamCluster::Live)).await {
+        drain_records(records, |record: M3uPlaylistItem| {
+            if push_live_channel(&mut channels, &record, user, group, needle.as_ref(), &is_group_fn, limit) {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            }
+        })
+        .await?;
+    }
+
+    Ok(channels)
+}
+
+/// Finds one live channel with `vid` in `target` visible to `user`.
+pub(in crate::api::endpoints) async fn find_target_user_live_channel(
+    app_state: &AppState,
+    target: &ConfigTarget,
+    user: &ProxyUserCredentials,
+    vid: u32,
+) -> Result<Option<shared::model::UserChannelDto>, TuliproxError> {
+    if !user.allows_cluster(XtreamCluster::Live) {
+        return Ok(None);
+    }
+    let is_group_fn = load_is_group_predicate(app_state, target).await;
+
+    match tuliprox_repository::load_target_playlist_item(
+        vid,
+        &app_state.app_config,
+        &app_state.playlists,
+        target,
+        Some(XtreamCluster::Live),
+    )
+    .await
+    {
+        Some(tuliprox_repository::LoadedTargetPlaylistItem::Xtream(record)) => {
+            Ok(match_live_channel(&record, user, None, None, &is_group_fn))
+        }
+        Some(tuliprox_repository::LoadedTargetPlaylistItem::M3u(record)) => {
+            Ok(match_live_channel(&record, user, None, None, &is_group_fn))
+        }
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

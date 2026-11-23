@@ -3,9 +3,9 @@ use chrono_tz::Tz;
 use regex::Regex;
 use shared::model::{
     default_recording_notification_backoff_initial_secs, default_recording_notification_backoff_max_secs,
-    default_recording_notification_max_attempts, default_recording_notification_outbox_buffer, RecordingConfigDto,
-    RecordingContainerFormat, RecordingDiskConfigDto, RecordingNotificationConfigDto, RecordingQuotaConfigDto,
-    RecordingRetentionConfigDto, VideoConfigDto,
+    default_recording_notification_max_attempts, default_recording_notification_outbox_buffer, parse_positive_size,
+    ByteSize, RecordingConfigDto, RecordingContainerFormat, RecordingDiskConfigDto, RecordingNotificationConfigDto,
+    RecordingQuotaConfigDto, RecordingRetentionConfigDto, VideoConfigDto,
 };
 use std::{
     collections::HashMap,
@@ -469,11 +469,14 @@ pub struct RecordingDiskConfig {
     pub safety_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RecordingQuotaConfig {
     pub default_private_bytes: Option<u64>,
     pub per_user_bytes: HashMap<String, u64>,
     pub shared_bytes: Option<u64>,
+    pub default_private: Option<ByteSize>,
+    pub per_user: HashMap<String, ByteSize>,
+    pub shared: Option<ByteSize>,
 }
 
 macros::from_impl!(RecordingConfig);
@@ -613,10 +616,19 @@ impl From<&RecordingDiskConfig> for RecordingDiskConfigDto {
 macros::from_impl!(RecordingQuotaConfig);
 impl From<&RecordingQuotaConfigDto> for RecordingQuotaConfig {
     fn from(dto: &RecordingQuotaConfigDto) -> Self {
+        // The DTO is validated at config load, so every set value resolves here.
+        let resolve = |size: &ByteSize| parse_positive_size(size.as_str());
+        let default_private_bytes = dto.default_private.as_ref().and_then(resolve);
+        let shared_bytes = dto.shared.as_ref().and_then(resolve);
+        let per_user_bytes =
+            dto.per_user.iter().filter_map(|(user, size)| resolve(size).map(|bytes| (user.clone(), bytes))).collect();
         Self {
-            default_private_bytes: dto.default_private_bytes,
-            per_user_bytes: dto.per_user_bytes.clone(),
-            shared_bytes: dto.shared_bytes,
+            default_private_bytes,
+            per_user_bytes,
+            shared_bytes,
+            default_private: dto.default_private.clone(),
+            per_user: dto.per_user.clone(),
+            shared: dto.shared.clone(),
         }
     }
 }
@@ -624,9 +636,9 @@ impl From<&RecordingQuotaConfigDto> for RecordingQuotaConfig {
 impl From<&RecordingQuotaConfig> for RecordingQuotaConfigDto {
     fn from(instance: &RecordingQuotaConfig) -> Self {
         Self {
-            default_private_bytes: instance.default_private_bytes,
-            per_user_bytes: instance.per_user_bytes.clone(),
-            shared_bytes: instance.shared_bytes,
+            default_private: instance.default_private.clone(),
+            per_user: instance.per_user.clone(),
+            shared: instance.shared.clone(),
         }
     }
 }
@@ -721,8 +733,8 @@ mod recording_reload_tests {
         });
         cfg.quota = Some(RecordingQuotaConfig {
             default_private_bytes: Some(1_000),
-            per_user_bytes: std::collections::HashMap::new(),
             shared_bytes: Some(2_000),
+            ..Default::default()
         });
         cfg
     }
@@ -938,5 +950,27 @@ mod recording_reload_tests {
             }
             other => panic!("expected an applied reload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recording_quota_config_dto_round_trip_keeps_spelling() {
+        use shared::model::{ByteSize, RecordingQuotaConfigDto};
+        use std::collections::HashMap;
+
+        let dto = RecordingQuotaConfigDto {
+            default_private: Some(ByteSize::new("20GB")),
+            per_user: HashMap::from([("api:alice".to_string(), ByteSize::new("1TB"))]),
+            shared: Some(ByteSize::new("1024")),
+        };
+
+        let runtime = RecordingQuotaConfig::from(&dto);
+        assert_eq!(runtime.default_private_bytes, Some(21_474_836_480));
+        assert_eq!(runtime.per_user_bytes.get("api:alice"), Some(&1_099_511_627_776));
+        assert_eq!(runtime.shared_bytes, Some(1024));
+
+        let round_trip = RecordingQuotaConfigDto::from(&runtime);
+        assert_eq!(round_trip.default_private.as_ref().map(ByteSize::as_str), Some("20GB"));
+        assert_eq!(round_trip.per_user.get("api:alice").map(ByteSize::as_str), Some("1TB"));
+        assert_eq!(round_trip.shared.as_ref().map(ByteSize::as_str), Some("1024"));
     }
 }

@@ -112,12 +112,14 @@ normal tuliprox-hls -> tuliprox-parser
 normal tuliprox-hls -> tuliprox-session
 # The DVR. Reads the running server through `RecordingCtx`. It publishes
 # recording changes through `shared`'s `EventSink`, so it does not depend on
-# the streaming-session runtime that happens to implement that trait.
+# the streaming-session runtime that happens to implement that trait. It
+# reaches `mpegts` for the packet helpers that cut clips out of recordings.
 normal tuliprox-dvr -> shared
 normal tuliprox-dvr -> tuliprox-auth
 normal tuliprox-dvr -> tuliprox-core
 normal tuliprox-dvr -> tuliprox-messaging
 normal tuliprox-dvr -> tuliprox-repository
+normal tuliprox-dvr -> tuliprox-mpegts
 # Provider allocation and the streaming-session runtime. Reaches
 # `repository` to persist stream history and resolve GeoIP, and `mpegts`
 # for the transport-stream buffer it hands to preempted clients.

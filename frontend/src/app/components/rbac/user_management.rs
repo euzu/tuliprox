@@ -3,7 +3,7 @@ use crate::{
         config::HasFormData, menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Card, DropDownOption,
         DropDownSelection, Panel, Select, Table, TableDefinition, TextButton,
     },
-    config_field_child, config_field_custom, edit_field_text, generate_form_reducer,
+    config_field_child, edit_field_text, generate_form_reducer,
     hooks::use_service_context,
     html_if,
     i18n::use_translation,
@@ -455,14 +455,14 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
 
                     <div class="tp__user-management__user-edit-form__body tp__form-page__body">
                         { if is_edit {
-                            config_field_custom!(translate.t("LABEL.USERNAME"), form_state.data().username.clone())
+                            config_field_child!(translate.t("LABEL.USERNAME"), "USER_FORM.USERNAME", { html! { <span class="tp__form-field__value">{form_state.data().username.clone()}</span> } })
                         } else {
                             edit_field_text!(form_state, translate.t("LABEL.USERNAME"), username, UserFormAction::Username)
                         }}
                         { edit_field_text!(form_state, translate.t("LABEL.PASSWORD"), password, UserFormAction::Password, true) }
                         { edit_field_text!(form_state, translate.t("LABEL.REPEAT_PASSWORD"), confirm_password, UserFormAction::ConfirmPassword, true) }
 
-                        { config_field_child!(translate.t("LABEL.GROUPS"), {
+                        { config_field_child!(translate.t("LABEL.GROUPS"), "USER_FORM.GROUPS", {
                             html! {
                                 <>
                                     <Select

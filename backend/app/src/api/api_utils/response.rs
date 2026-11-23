@@ -12,7 +12,7 @@ use axum::{
 use log::error;
 use serde::Serialize;
 use shared::{
-    model::{ConnectFailureReason, FailureStage, StreamChannel},
+    model::{ConnectFailureReason, FailureStage, StreamChannel, HEADER_TULIPROX_REJECTION},
     utils::{bin_serialize, CONTENT_TYPE_CBOR},
 };
 use std::sync::Arc;
@@ -63,7 +63,7 @@ pub(super) fn stream_admission_rejected_response(
     error!("Stream admission rejected for user {username}: {error:?}");
     axum::response::Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
-        .header("x-tuliprox-rejection", "admission_rejected")
+        .header(HEADER_TULIPROX_REJECTION, "admission_rejected")
         .body(axum::body::Body::empty())
         .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
 }

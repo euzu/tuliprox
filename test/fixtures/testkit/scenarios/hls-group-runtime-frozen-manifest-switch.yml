@@ -49,7 +49,9 @@ steps:
         kind: hls_manifest_freeze
         account: input-a
   - command_id: wait-for-failover
-    pause_millis: 10000
+    await_origin:
+      latest_segment_account: input-b
+      timeout_millis: 20000
   - command_id: stop-playback
     stop: { playback_id: playback-1 }
     assert_origin:

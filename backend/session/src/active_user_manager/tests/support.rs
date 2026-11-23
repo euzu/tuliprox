@@ -99,6 +99,8 @@ pub(in crate::active_user_manager::tests) fn test_user_credentials(
         t_filter: None,
         t_has_unresolved_plan: false,
         t_has_invalid_filter: false,
+        player_features: tuliprox_core::model::PlayerFeatures::default(),
+        raw_player_features: None,
     }
 }
 

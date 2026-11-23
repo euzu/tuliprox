@@ -116,6 +116,51 @@ pub fn member_to_m3u_item(group: &FailoverGroupRecord, index: usize) -> M3uPlayl
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum LoadedTargetPlaylistItem {
+    Xtream(XtreamPlaylistItem),
+    M3u(M3uPlaylistItem),
+}
+
+impl LoadedTargetPlaylistItem {
+    #[must_use]
+    pub fn item_type(&self) -> shared::model::PlaylistItemType {
+        match self {
+            Self::Xtream(item) => item.item_type,
+            Self::M3u(item) => item.item_type,
+        }
+    }
+
+    #[must_use]
+    pub fn to_playlist_item(&self) -> shared::model::PlaylistItem {
+        match self {
+            Self::Xtream(item) => shared::model::PlaylistItem::from(item),
+            Self::M3u(item) => shared::model::PlaylistItem::from(item),
+        }
+    }
+}
+
+pub async fn load_target_playlist_item(
+    virtual_id: u32,
+    app_config: &Arc<AppConfig>,
+    playlists: &PlaylistStorageState,
+    target: &ConfigTarget,
+    cluster: Option<shared::model::XtreamCluster>,
+) -> Option<LoadedTargetPlaylistItem> {
+    if target.has_output(shared::model::TargetType::Xtream) || target.output.is_empty() {
+        if let Ok(item) = crate::xtream_get_item_for_stream_id(virtual_id, app_config, playlists, target, cluster).await
+        {
+            return Some(LoadedTargetPlaylistItem::Xtream(item));
+        }
+    }
+    if target.has_output(shared::model::TargetType::M3u) || target.output.is_empty() {
+        if let Ok(item) = crate::m3u_get_item_for_stream_id(virtual_id, app_config.as_ref(), playlists, target).await {
+            return Some(LoadedTargetPlaylistItem::M3u(item));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

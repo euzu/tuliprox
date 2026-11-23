@@ -73,13 +73,13 @@ pub use conflicts::{quota_limits_from_config, ConflictPreviewRequest};
 #[cfg(test)]
 use control::is_future_rule_recording;
 use control::CancelOrigin;
-pub use create::IdempotencyRequest;
+pub use create::{find_enclosing_in_candidates, find_enclosing_materialization, IdempotencyRequest};
 pub use error::ServiceError;
 pub use filenames::sanitize_filename_component;
 #[cfg(test)]
 use filenames::{validate_reserved_filename, MAX_FILENAME_COMPONENT_BYTES};
 pub(crate) use identity::recording_identity;
-pub use identity::{recording_identity_key, RecordingIdentity};
+pub use identity::{recording_identity_key, same_live_source, RecordingIdentity};
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub use input::{
     CreateMediaRecordingInput, CreateRecordingInput, EditRecordingPatch, RecordingSourceInput, RecordingTaskView,

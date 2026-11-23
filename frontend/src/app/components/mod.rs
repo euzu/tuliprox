@@ -74,6 +74,7 @@ mod field_wrapper;
 mod filter;
 mod particle_flow_background;
 mod recording;
+pub(crate) mod recording_options;
 mod setup;
 mod source_editor;
 mod title_card;
@@ -90,10 +91,10 @@ pub(crate) use self::{
     field_id::*, field_wrapper::*, filter::*, health_banner::*, hide_content::*, home::*, icon_button::*,
     key_value_editor::*, language_picker::*, loading_indicator::*, loading_screen::*, login::*, no_access::*,
     no_content::*, no_submit_form::*, panel::*, particle_flow_background::*, playlist::*, radio_button_group::*,
-    range_slider::*, rbac::*, reveal_content::*, role_based_content::*, search::*, select::*, select_helpers::*,
-    setup::*, sidebar::*, source_editor::*, split_pane::*, svg_icon::*, tabset::*, tag_list::*, task_status_badge::*,
-    text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*, userlist::*,
-    websocket_status::*,
+    range_slider::*, rbac::*, recording_options::*, reveal_content::*, role_based_content::*, search::*, select::*,
+    select_helpers::*, setup::*, sidebar::*, source_editor::*, split_pane::*, svg_icon::*, tabset::*, tag_list::*,
+    task_status_badge::*, text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*,
+    userlist::*, websocket_status::*,
 };
 pub use self::{
     autocomplete_input::*, checkbox::*, confirm_dialog::*, content_dialog::*, plugins::*, split_button::*, table::*,

@@ -17,6 +17,7 @@ mod input_refresh_policy;
 mod input_update_action;
 mod ip_check;
 mod item_field;
+mod joinable_stream;
 mod library_request;
 mod log;
 mod maintenance;
@@ -27,6 +28,9 @@ mod metadata_update_failure;
 pub mod notification;
 mod notification_dead_letter;
 mod pagination;
+mod player_api;
+mod player_capabilities;
+mod player_event;
 mod playlist;
 mod playlist_categories;
 mod playlist_document;
@@ -75,12 +79,15 @@ mod target_type;
 mod transfer;
 mod ui_playlist_item;
 mod user_command;
+mod user_failover;
 mod user_id;
 mod user_lifecycle;
 mod user_settings;
+mod user_stream;
 mod uuidtype;
 pub mod view_type;
 mod watch_health;
+mod watch_progress;
 pub mod web_socket;
 mod xtream;
 pub mod xtream_const;
@@ -88,9 +95,10 @@ pub mod xtream_const;
 pub use self::{
     active_user_connection_change::*, auth::*, auth_audit::*, cluster_flags::*, config::*, connection_denied::*,
     custom_video_stream_type::*, epg::*, epg_grid::*, epg_request::*, event::*, failover_group::*,
-    input_refresh_policy::*, input_update_action::*, ip_check::*, item_field::*, library_request::*, log::*,
-    maintenance::*, mapping::*, media_properties::*, messaging::*, metadata_update_failure::*, notification::*,
-    notification_dead_letter::*, pagination::*, playlist::*, playlist_categories::*, playlist_info_document::*,
+    input_refresh_policy::*, input_update_action::*, ip_check::*, item_field::*, joinable_stream::*,
+    library_request::*, log::*, maintenance::*, mapping::*, media_properties::*, messaging::*,
+    metadata_update_failure::*, notification::*, notification_dead_letter::*, pagination::*, player_api::*,
+    player_capabilities::*, player_event::*, playlist::*, playlist_categories::*, playlist_info_document::*,
     playlist_override::*, playlist_request::*, playlist_update_run::*, playlist_update_status::*, plugin::*,
     plugin_update_event::*, plugins_dto::*, plugins_marketplace_dto::*, plugins_updates_dto::*, processing_order::*,
     progress::*, provider_fetch_failure::*, provider_pool::*, recording::*, recording_math::*, regex_cache::*,
@@ -98,7 +106,8 @@ pub use self::{
     stalker::*, stalker_item::*, stats::*, status_check::*, stream_history::*, stream_history_record::*,
     stream_info::*, stream_meter::*, stream_probe_failure::*, stream_properties::*, strm_export_style::*,
     system_info::*, target_analytics::*, target_bouquet::*, target_type::*, transfer::*, ui_playlist_item::*,
-    user_command::*, user_id::*, user_lifecycle::*, uuidtype::*, watch_health::*, web_socket::*, xtream::*,
+    user_command::*, user_failover::*, user_id::*, user_lifecycle::*, user_stream::*, uuidtype::*, watch_health::*,
+    watch_progress::*, web_socket::*, xtream::*,
 };
 pub use ids::*;
 pub use prepare::*;

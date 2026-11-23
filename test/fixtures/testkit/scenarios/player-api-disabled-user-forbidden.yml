@@ -1,0 +1,45 @@
+schema_version: 1
+name: player-api-disabled-user-forbidden
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: false
+    share_live_mpeg_ts: false
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: player-api-disabled-user-forbidden
+actors:
+  - id: device-1
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/device-1
+    client_ip: { mode: forwarded, value: 10.40.0.10 }
+channels:
+  channel-x: { origin_marker: 17, protocol: m3u }
+steps:
+  - command_id: get-me-capabilities
+    api_request:
+      actor: device-1
+      method: GET
+      path: /api/v1/me/capabilities
+      expect_status: 403
+  - command_id: get-user-categories
+    api_request:
+      actor: device-1
+      method: GET
+      path: /api/v1/user/playlist/categories
+      expect_status: 200
+policy_contract:
+  user_access_control: true
+  player_api: true
+  users:
+    viewer:
+      max_connections: 1
+      ui_enabled: true
+      player_features:
+        api_enabled: false
+  admission_strategies: []

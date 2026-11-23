@@ -8,7 +8,7 @@ use crate::{
 use axum::response::IntoResponse;
 use log::trace;
 use reqwest::StatusCode;
-use shared::model::{CustomVideoStreamType, PlaylistItemType};
+use shared::model::{CustomVideoStreamType, PlaylistItemType, HEADER_TULIPROX_FALLBACK, HEADER_TULIPROX_REJECTION};
 use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 use tuliprox_core::{
@@ -26,7 +26,9 @@ fn prepare_video_headers(headers: &[(String, String)]) -> Vec<(String, String)> 
                 || key.eq_ignore_ascii_case("range")
                 || key.eq_ignore_ascii_case("content-range")
                 || key.eq_ignore_ascii_case("accept-ranges")
-                || key.eq_ignore_ascii_case("transfer-encoding"))
+                || key.eq_ignore_ascii_case("transfer-encoding")
+                || key.eq_ignore_ascii_case("cache-control")
+                || key.eq_ignore_ascii_case(HEADER_TULIPROX_FALLBACK))
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
@@ -67,6 +69,41 @@ pub(crate) fn get_custom_stream_response_error_status(cfg: &AppConfig) -> Status
     StatusCode::from_u16(raw).unwrap_or(StatusCode::BAD_GATEWAY)
 }
 
+/// The headers every fallback response carries: the reason, and no caching (a player or proxy must never
+/// replay a fallback for a later request).
+pub(crate) const fn fallback_headers(reason: CustomVideoStreamType) -> [(&'static str, &'static str); 2] {
+    [("cache-control", "no-store"), (HEADER_TULIPROX_FALLBACK, reason.as_str())]
+}
+
+/// A fallback answered with a status and no body (no custom video configured or allowed).
+pub(crate) fn fallback_status_response(status: StatusCode, reason: CustomVideoStreamType) -> axum::response::Response {
+    fallback_response(status, reason, None, axum::body::Body::empty())
+}
+
+/// A fallback answered with an HLS manifest that plays the custom video.
+pub(crate) fn fallback_manifest_response(
+    manifest: impl Into<axum::body::Body>,
+    reason: CustomVideoStreamType,
+) -> axum::response::Response {
+    fallback_response(StatusCode::OK, reason, Some("application/vnd.apple.mpegurl"), manifest.into())
+}
+
+fn fallback_response(
+    status: StatusCode,
+    reason: CustomVideoStreamType,
+    content_type: Option<&'static str>,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    let mut builder = axum::response::Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(axum::http::header::CONTENT_TYPE, content_type);
+    }
+    for (key, value) in fallback_headers(reason) {
+        builder = builder.header(key, value);
+    }
+    builder.body(body).unwrap_or_else(|_| status.into_response())
+}
+
 fn create_video_stream(
     cfg: &AppConfig,
     stream_type: CustomVideoStreamType,
@@ -88,7 +125,9 @@ fn create_video_stream(
             cfg,
             Box::pin(ThrottledStream::new(CustomVideoStream::new(video.clone()), 8000)),
         );
-        (Some(stream), Some((prepare_video_headers(headers), status, None, Some(stream_type))))
+        let mut prepared = prepare_video_headers(headers);
+        prepared.extend(fallback_headers(stream_type).into_iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        (Some(stream), Some((prepared, status, None, Some(stream_type))))
     } else {
         (None, None)
     }
@@ -198,10 +237,13 @@ pub fn create_panel_api_provisioning_stream_with_stop(
         trace!("Streaming response panel api provisioning");
         let stream = ProvisioningStream::new(video.clone(), stop_signal);
         let stream = apply_custom_stream_timeout(cfg, Box::pin(ThrottledStream::new(stream, 8000)));
-        (
-            Some(stream),
-            Some((prepare_video_headers(headers), StatusCode::OK, None, Some(CustomVideoStreamType::Provisioning))),
-        )
+        let mut prepared = prepare_video_headers(headers);
+        prepared.extend(
+            fallback_headers(CustomVideoStreamType::Provisioning)
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+        (Some(stream), Some((prepared, StatusCode::OK, None, Some(CustomVideoStreamType::Provisioning))))
     } else {
         (None, None)
     }
@@ -247,7 +289,10 @@ pub fn create_custom_video_stream_response(
             | CustomVideoStreamType::LowPriorityPreempted
             | CustomVideoStreamType::UserAccountExpired
     ) {
-        builder = builder.header("x-tuliprox-rejection", "admission_rejected");
+        builder = builder.header(HEADER_TULIPROX_REJECTION, "admission_rejected");
+    }
+    for (key, value) in fallback_headers(video_response) {
+        builder = builder.header(key, value);
     }
     builder.body(axum::body::Body::empty()).unwrap_or_else(|_| status.into_response())
 }
@@ -264,7 +309,8 @@ pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFil
 mod tests {
     use super::{
         create_channel_unavailable_stream, get_custom_stream_response_error_status, is_custom_video_stream_enabled,
-        prepare_video_headers, CustomVideoStreamType,
+        prepare_video_headers, CustomVideoStreamType, ProviderStreamResponse, HEADER_TULIPROX_FALLBACK,
+        HEADER_TULIPROX_REJECTION,
     };
     use crate::{
         api::model::TransportStreamBuffer,
@@ -358,15 +404,157 @@ mod tests {
         assert_eq!(parsed.to_string(), "hls_session_or_lease_expired");
     }
 
+    #[tokio::test]
+    async fn custom_video_headers_drop_transfer_encoding() {
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+        let (_stream, info) = create_channel_unavailable_stream(
+            &app_cfg,
+            &[
+                ("Transfer-Encoding".to_string(), "chunked".to_string()),
+                ("Cache-Control".to_string(), "max-age=60".to_string()),
+                ("X-Tuliprox-Fallback".to_string(), "x".to_string()),
+            ],
+            StatusCode::OK,
+        );
+        let (headers, _status, _url, _type) = info.expect("channel unavailable custom stream should exist");
+
+        assert!(headers.iter().all(|(name, _)| !name.eq_ignore_ascii_case("transfer-encoding")));
+        let cache_control: Vec<_> = headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("cache-control")).collect();
+        assert_eq!(cache_control.len(), 1);
+        assert_eq!(cache_control[0].1, "no-store");
+
+        let fallback: Vec<_> =
+            headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case(HEADER_TULIPROX_FALLBACK)).collect();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].1, "channel_unavailable");
+    }
+
     #[test]
-    fn custom_video_headers_drop_transfer_encoding() {
+    fn test_prepare_video_headers_drops_cache_control_and_fallback() {
         let headers = prepare_video_headers(&[
             ("Transfer-Encoding".to_string(), "chunked".to_string()),
-            ("cache-control".to_string(), "no-store".to_string()),
+            ("Cache-Control".to_string(), "max-age=60".to_string()),
+            ("X-Tuliprox-Fallback".to_string(), "x".to_string()),
         ]);
 
         assert!(headers.iter().all(|(name, _)| !name.eq_ignore_ascii_case("transfer-encoding")));
-        assert!(headers.iter().any(|(name, value)| name == "cache-control" && value == "no-store"));
+        assert!(headers.iter().all(|(name, _)| !name.eq_ignore_ascii_case("cache-control")));
+        assert!(headers.iter().all(|(name, _)| !name.eq_ignore_ascii_case(HEADER_TULIPROX_FALLBACK)));
+        assert!(headers.iter().any(|(name, value)| name == "content-type" && value == "video/mp2t"));
+    }
+
+    #[tokio::test]
+    async fn test_all_custom_video_factories_set_fallback_and_cache_control_headers() {
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        let buffer = TransportStreamBuffer::new(ts_packet);
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+        app_cfg.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
+            channel_unavailable: Some(buffer.clone()),
+            user_connections_exhausted: Some(buffer.clone()),
+            provider_connections_exhausted: Some(buffer.clone()),
+            low_priority_preempted: Some(buffer.clone()),
+            user_account_expired: Some(buffer.clone()),
+            panel_api_provisioning: Some(buffer.clone()),
+            hls_session_or_lease_expired: Some(buffer.clone()),
+            maintenance: Some(buffer),
+            panel_api_provisioning_hls_segments: Vec::new(),
+        })));
+
+        let cases: Vec<(ProviderStreamResponse, CustomVideoStreamType)> = vec![
+            (
+                create_channel_unavailable_stream(&app_cfg, &[], StatusCode::OK),
+                CustomVideoStreamType::ChannelUnavailable,
+            ),
+            (
+                super::create_user_connections_exhausted_stream(&app_cfg, &[]),
+                CustomVideoStreamType::UserConnectionsExhausted,
+            ),
+            (
+                super::create_provider_connections_exhausted_stream(&app_cfg, &[]),
+                CustomVideoStreamType::ProviderConnectionsExhausted,
+            ),
+            (super::create_low_priority_preempted_stream(&app_cfg, &[]), CustomVideoStreamType::LowPriorityPreempted),
+            (super::create_user_account_expired_stream(&app_cfg, &[]), CustomVideoStreamType::UserAccountExpired),
+            (super::create_panel_api_provisioning_stream(&app_cfg, &[]), CustomVideoStreamType::Provisioning),
+            (
+                super::create_hls_session_or_lease_expired_stream(&app_cfg, &[]),
+                CustomVideoStreamType::HlsSessionOrLeaseExpired,
+            ),
+            (super::create_maintenance_stream(&app_cfg, &[]), CustomVideoStreamType::Maintenance),
+        ];
+
+        for ((stream, info), expected_type) in cases {
+            assert!(stream.is_some(), "stream must exist for {expected_type}");
+            let (headers, _status, _url, stream_type) = info.expect("stream info must exist");
+            assert_eq!(stream_type, Some(expected_type));
+
+            let fallback_headers: Vec<_> =
+                headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case(HEADER_TULIPROX_FALLBACK)).collect();
+            assert_eq!(fallback_headers.len(), 1, "exactly one fallback header for {expected_type}");
+            assert_eq!(fallback_headers[0].1, expected_type.to_string());
+
+            let cache_headers: Vec<_> =
+                headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("cache-control")).collect();
+            assert_eq!(cache_headers.len(), 1, "exactly one cache-control header for {expected_type}");
+            assert_eq!(cache_headers[0].1, "no-store");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_path_without_video_sets_status_and_both_headers() {
+        use super::create_custom_video_stream_response;
+        use axum::response::IntoResponse;
+        use std::net::SocketAddr;
+
+        let cfg = Config {
+            custom_stream_response_enabled: false,
+            custom_stream_response_error_status: 503,
+            ..Config::default()
+        };
+        let app_state = crate::api::model::create_test_app_state(cfg);
+        let ctx = app_state.provider_stream_ctx();
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+
+        let all_types = [
+            CustomVideoStreamType::ChannelUnavailable,
+            CustomVideoStreamType::UserConnectionsExhausted,
+            CustomVideoStreamType::ProviderConnectionsExhausted,
+            CustomVideoStreamType::LowPriorityPreempted,
+            CustomVideoStreamType::UserAccountExpired,
+            CustomVideoStreamType::Provisioning,
+            CustomVideoStreamType::HlsSessionOrLeaseExpired,
+            CustomVideoStreamType::Maintenance,
+        ];
+
+        for stream_type in all_types {
+            let response = create_custom_video_stream_response(&ctx, &addr, stream_type).into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+            let fallback = response.headers().get(HEADER_TULIPROX_FALLBACK).expect("fallback header");
+            assert_eq!(fallback.to_str().unwrap(), stream_type.to_string());
+
+            let cache_control = response.headers().get("cache-control").expect("cache-control header");
+            assert_eq!(cache_control.to_str().unwrap(), "no-store");
+
+            let is_rejection_type = matches!(
+                stream_type,
+                CustomVideoStreamType::UserConnectionsExhausted
+                    | CustomVideoStreamType::ProviderConnectionsExhausted
+                    | CustomVideoStreamType::LowPriorityPreempted
+                    | CustomVideoStreamType::UserAccountExpired
+            );
+
+            if is_rejection_type {
+                let rejection = response.headers().get(HEADER_TULIPROX_REJECTION).expect("rejection header");
+                assert_eq!(rejection.to_str().unwrap(), "admission_rejected");
+            } else {
+                assert!(
+                    response.headers().get(HEADER_TULIPROX_REJECTION).is_none(),
+                    "no rejection header expected for {stream_type}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

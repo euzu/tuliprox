@@ -251,7 +251,10 @@ pub(crate) fn prepare_recording_config(recording: &mut RecordingConfigDto) -> Re
         }
     }
 
-    // quota: fallback bytes per minute must be > 0.
+    // quota: validate quota policies when set, fallback bytes per minute must be > 0.
+    if let Some(quota) = recording.quota.as_ref() {
+        quota.validate()?;
+    }
     if recording.fallback_bytes_per_minute == 0 {
         return Err(TuliproxError::ConfigRecording("recording.fallback_bytes_per_minute must be > 0".to_string()));
     }

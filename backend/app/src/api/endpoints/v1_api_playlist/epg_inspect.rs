@@ -37,6 +37,7 @@ use shared::{
 };
 use std::{
     collections::HashSet,
+    ops::ControlFlow,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -376,6 +377,7 @@ async fn collect_referenced_ids<R: StoredPlaylistRecord>(
         if let Some(id) = record.epg_channel_id().map(str::trim).filter(|id| !id.is_empty()) {
             insert_canonical_id(&mut ids, id, case);
         }
+        ControlFlow::Continue(())
     })
     .await?;
     Ok(ReferencedIds { ids, skipped_records })
@@ -565,11 +567,44 @@ pub(super) struct EpgChannelQuery {
 }
 
 fn parse_instant(param: &str, value: &str) -> Result<i64, InspectError> {
-    DateTime::parse_from_rfc3339(value.trim()).map(|time| time.timestamp()).map_err(|_| {
+    parse_instant_ts(value).ok_or_else(|| {
         InspectError::bad_request(format!(
-            "Invalid {param}; use RFC 3339, e.g. 2026-10-23T12:00:00Z (encode '+' in an offset as %2B)"
+            "Invalid {param}; use unix timestamp seconds or RFC 3339, e.g. 2026-10-23T12:00:00Z (encode '+' in an offset as %2B)"
         ))
     })
+}
+
+pub(in crate::api::endpoints) fn parse_instant_ts(value: &str) -> Option<i64> {
+    let trimmed = value.trim();
+    if let Ok(ts) = trimmed.parse::<i64>() {
+        return Some(ts);
+    }
+    DateTime::parse_from_rfc3339(trimmed).map(|time| time.timestamp()).ok()
+}
+
+/// Programmes of one channel in `[from, to)` from the target's primary EPG database.
+/// `None` when the target has no EPG database or the channel is not present in it.
+pub(in crate::api::endpoints) async fn query_channel_epg_programmes(
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
+    channel_id: &str,
+    from: i64,
+    to: i64,
+) -> Result<Option<Vec<shared::model::EpgProgramme>>, TuliproxError> {
+    let config = app_state.app_config.config.load();
+    let Ok(EpgDb::Available(_, epg_path)) = resolve_epg_db(&config, target, None) else {
+        return Ok(None);
+    };
+    let storage_key = canonicalize_untrusted_epg_id(channel_id, target.epg_id_case());
+    let found =
+        epg_query_channels_by_storage_key(&app_state.app_config.file_locks, &epg_path, vec![Arc::clone(&storage_key)])
+            .await?;
+    let Some((_, Some(channel))) = found.into_iter().next() else {
+        return Ok(None);
+    };
+    let programmes: Vec<shared::model::EpgProgramme> =
+        channel.programmes.into_iter().filter(|p| p.stop > from && p.start < to).collect();
+    Ok(Some(programmes))
 }
 
 /// `[from, to)` as unix seconds; `from` defaults to `now` and `to` to 24 hours after `from`.

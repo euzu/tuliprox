@@ -162,6 +162,8 @@ pub struct LegacyHlsRebase {
     /// before downloading a playlist, so a late response for an older upstream window cannot remap
     /// media another request already committed.
     pub commit_generation: u64,
+    /// Cooldown timestamp for manual member switches on this legacy playback session.
+    pub last_manual_switch: Option<tokio::time::Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -294,6 +296,7 @@ pub struct ActiveUserManager {
     last_logged_user_connection_count: AtomicUsize,
     cleanup_tx: tokio::sync::OnceCell<mpsc::Sender<CleanupEvent>>,
     provider_manager: tokio::sync::OnceCell<Arc<ActiveProviderManager>>,
+    shared_stream_manager: tokio::sync::OnceCell<std::sync::Weak<crate::streams::SharedStreamManager>>,
     transition_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     // An evicted stream can keep its provider slot after its user count is released.
     // Retain the handoff across bounded admission attempts until the slot is gone.
@@ -304,6 +307,7 @@ pub struct ActiveUserManager {
     divergence_cooldown_secs: u64,
     // Session change signals raised under the write lock, delivered once it is released.
     deferred_wakes: Arc<DeferredWakes>,
+    stream_switch_cooldowns: std::sync::Mutex<HashMap<(String, u32), tokio::time::Instant>>,
 }
 
 #[cfg(test)]

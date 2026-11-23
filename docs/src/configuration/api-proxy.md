@@ -168,6 +168,7 @@ in your `config.yml`. Without it, these fields are purely cosmetic!
 | `network_access`        | Block    |    No    | `None`     | Per-user network/country access restrictions. Uses OR logic — matching ANY `allowed_networks` (CIDR) OR ANY `allowed_countries` grants access. Requires GeoIP for country checks. Client IP from `X-Real-IP` / `X-Forwarded-For`. See [Network Access Restrictions](#network-access-restrictions) below.                                                                                                                              |
 | `plan`                  | String   |    No    | `None`     | Name of a [user plan](#3-user-plans-plans). Unset user values (`output_clusters`, `max_connections`, `soft_connections`) inherit from the plan; explicit user values always win. The plan's content `filter` is always applied.                                                                                                                                                                                                       |
 | `filter`                | String   |    No    | `None`     | Filter DSL expression restricting which content this user sees. AND-combined with the plan filter when both are set, so a user filter can only narrow a plan, never widen it.                                                                                                                                                                                                                                                         |
+| `player_features`       | Block    | No       | `None`     | Player API features and DVR permissions for this user (see [Player Features](#player-features-player_features)). Overrides plan settings field-by-field.                                                                                                                                                                                                                                                                              |
 
 ---
 
@@ -661,7 +662,60 @@ user:
 | `soft_connections` | Int    |    No    | `0`     | Soft connection allowance inherited the same way.                                                                                                                                                                                                         |
 | `filter`           | String |    No    | `None`  | Filter DSL expression restricting the content visible to plan members (e.g. group allow/deny lists, `Quality <= 3` caps). AND-combined with a member's own `filter` if both exist.                                                                        |
 | `trial.duration`   | String |    No    | `None`  | Trial window with unit (`24h`, `7d`). When a **new** user is created on this plan without an explicit `exp_date`, the expiry is set to now + duration and the status defaults to `Trial`. Enforcement of the expiry requires `user_access_control: true`. |
+| `player_features`  | Block  | No       | `None`  | Player API features and DVR permissions for users on this plan (see [Player Features](#player-features-player_features)). Overridden by user settings field-by-field.                                                                                     |
 | `comment`          | String |    No    | `None`  | Free-form description.                                                                                                                                                                                                                                    |
+
+### Player Features (`player_features`)
+
+The optional `player_features` block configures player-facing convenience APIs (`/api/v1/me/*`) and DVR capabilities for
+API proxy users. It can be set at the plan level, the user level, or both. Explicit user fields override plan fields
+field-by-field, while unset fields inherit from the plan.
+
+```yaml
+api_proxy:
+  plans:
+    - name: family
+      output_clusters: [live, vod, series]
+      max_connections: 2
+      player_features:
+        api_enabled: true              # Allow Player API access (/api/v1/me/*); unset follows ui_enabled
+        source_switch: true            # Allow manual failover source switching (MPEG-TS and HLS)
+        joinable_streams: true         # Allow discovering running shared streams on the target
+        recording: private             # none | read | private | shared
+        recording_quota: 20GB   # 20 GiB personal DVR quota (optional, > 0)
+        max_concurrent_recordings: 1   # Max concurrent overlapping recordings (optional, > 0)
+        max_recording_rules: 10        # Max active recording rules for private/shared DVR (optional, > 0)
+        free_shared_joins: true        # Join running shared streams when user connection limit is full
+        max_free_shared_joins: 1       # Max free shared connections (optional, > 0)
+        watch_progress: true           # Track and persist playback progress
+        event_stream: true             # Real-time user event stream WebSocket
+  user:
+    - target: main
+      credentials:
+        - username: kid
+          plan: family
+          player_features:
+            recording: read            # Overrides plan: read and stream existing recordings only
+```
+
+#### Player Feature Parameters
+
+| Parameter                   | Type     | Default | Technical Impact & Background                                                                                                                                                                                     |
+|:----------------------------|:---------|:--------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `api_enabled`               | Bool     | `unset` | Enables or disables access to the Player API (`/api/v1/me/*`). When unset, inherits from the plan or follows the user's `ui_enabled`.                                                                             |
+| `source_switch`             | Bool     | `false` | Enables `/api/v1/me/channels/{vid}/failover-members`, `/me/streams/{uid}/failover-members`, and manual switching via `POST /me/streams/{uid}/failover-switch` (TS & HLS).                                         |
+| `joinable_streams`          | Bool     | `false` | Enables `GET /api/v1/me/streams/joinable`, listing running shared streams on the user's target that can be joined without consuming an extra provider connection.                                                 |
+| `recording`                 | Enum     | `none`  | DVR capability tier: `none` (disabled), `read` (view, stream, download), `private` (create/manage own private recordings), `shared` (also create shared recordings).                                              |
+| `recording_quota`           | ByteSize | `None`  | Personal storage quota for private recordings (e.g. `20GB` or `500MB`). Must be `> 0` when set. Evaluated between `quota.per_user` and global `default_private`.                                                  |
+| `max_concurrent_recordings` | Int      | `None`  | Maximum overlapping active recordings for this user within the padded window. Must be `> 0` when set. Attached entries/clips do not consume slots or count toward this.                                           |
+| `max_recording_rules`       | Int      | `10`    | Maximum recording rules per user, enforced on `POST /api/v1/recording/rules`. Only effective at recording level `private` or `shared`; `/api/v1/me/capabilities` omits the field at `none`/`read`. Must be `> 0`. |
+| `free_shared_joins`         | Bool     | `false` | When `true`, joining an already-running shared stream does not count against `max_connections`, up to `max_free_shared_joins`.                                                                                    |
+| `max_free_shared_joins`     | Int      | `1`     | Concurrent free shared stream connection limit when `free_shared_joins` is enabled. Must be `> 0`.                                                                                                                |
+| `watch_progress`            | Bool     | `false` | When `true`, enables `GET`/`PUT`/`DELETE /api/v1/me/progress` to store and read playback positions per item. Progress is kept per user in the configuration directory.                                            |
+| `event_stream`              | Bool     | `false` | When `true`, enables the personal JSON event WebSocket at `GET /api/v1/me/events` (stream, failover, and recording events; at most four sockets per user).                                                        |
+
+Permissions for API users (`api:<username>`) are computed dynamically from `player_features` on every request. Updating `player_features`
+in the configuration takes effect immediately upon hot reload without reissuing JWT tokens.
 
 ### Resolution Rules
 
@@ -714,6 +768,15 @@ the `username` and `password` combination on these endpoints:
 - `/xtream` instead of `player_api.php`
 - `/m3u` instead of `get.php`
 - `/epg` instead of `xmltv.php`
+
+**Recordings as a VOD category:**
+
+A player that signs in as a playlist user with `player_features.recording` set to `read`, `private` or `shared`
+also gets a `Recordings` category (`category_id` `2000000000`) in `get_vod_categories`. It lists the user's own
+completed recordings and the shared ones their target and content filter allow, and they play through the normal
+movie path `/movie/{user}/{pass}/{stream_id}.{ext}`. The category appears only while DVR is enabled globally and
+the user's target has an Xtream output. Playing a recording occupies one of the user's `max_connections` slots
+like a local library file. See the DVR operator guide for the visibility and id rules.
 
 ---
 

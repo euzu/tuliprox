@@ -3,9 +3,13 @@ use super::{
     RECORDING_TASK_ID_COUNTER,
 };
 use crate::recording::{recording_path, recording_transition};
+use log::warn;
 use serde::{Deserialize, Serialize};
 use shared::{
-    model::{Claims, QueueRevision, RecordingKind, RecordingMetadata, RecordingTaskDto, TaskPriorityDto, UserId},
+    model::{
+        xtream_const::RECORDING_VOD_ID_BASE, Claims, QueueRevision, RecordingKind, RecordingMetadata, RecordingTaskDto,
+        TaskPriorityDto, UserId,
+    },
     utils::{sanitize_filename_chars, FILENAME_TRIM_PATTERNS},
 };
 use std::{
@@ -16,12 +20,32 @@ use std::{
 };
 use tuliprox_core::model::RecordingConfig;
 
+/// One completed recording as the Xtream VOD listing needs it.
+///
+/// Copies only the fields a listing publishes, so a catalogue request does not
+/// clone whole tasks including their source URLs and file paths.
+pub struct RecordingVodEntry {
+    pub uuid: String,
+    pub vod_id: u32,
+    pub filename: String,
+    pub title: String,
+    /// Length of the recorded window in seconds, when the recording knows it.
+    pub duration_secs: Option<u64>,
+    /// Unix timestamp the recording completed, when it did.
+    pub added: Option<i64>,
+    /// Owner, visibility and source: everything the visibility rule judges.
+    pub recording: RecordingMetadata,
+}
+
 /// A recording task in memory. Internal shape — never serialized to a
 /// client. Use [`RecordingTask::to_owner_view`] for the public projection.
 #[derive(Clone, Debug)]
 pub struct RecordingTask {
     /// uuid of the task for identification.
     pub uuid: String,
+    /// Stream id this recording answers to in the Xtream VOD namespace of its owner.
+    /// Assigned once by the queue and never reused.
+    pub vod_id: u32,
     /// Server-resolved media kind. Decides the execution strategy.
     pub kind: RecordingKind,
     /// `file_dir` is the directory where the file should be placed.
@@ -55,7 +79,49 @@ pub struct RecordingTask {
     /// Recording metadata. Every task carries it; the programme window is
     /// populated for `RecordingKind::Live` only.
     pub recording: RecordingMetadata,
+    /// When this task is a clip, its enclosing time window and byte offsets.
+    pub clip: Option<tuliprox_repository::recording_repository::RecordingClip>,
+    /// Pre-resolved or enclosing media identity.
+    pub media_identity: Option<String>,
+    /// Marked when the enclosing recording was cancelled by its owner while attached clips still need data.
+    pub cancelled_by_owner: bool,
 }
+
+/// Mark a recording task as a completed clip with the given byte offsets and size.
+pub fn complete_clip(
+    task: &mut PersistedRecordingTask,
+    start_offset: u64,
+    end_offset: u64,
+    header_bytes: Option<Vec<u8>>,
+    now_ts: i64,
+) {
+    let (start_ts, end_ts) = task.clip.as_ref().map_or((0, 0), |c| (c.start_ts, c.end_ts));
+    task.clip = Some(tuliprox_repository::recording_repository::RecordingClip {
+        start_ts,
+        end_ts,
+        start_offset: Some(start_offset),
+        end_offset: Some(end_offset),
+        header_bytes,
+    });
+    let clip_size = (end_offset.saturating_sub(start_offset)).saturating_add(crate::recording::CLIP_HEADER_LEN as u64);
+    task.size = clip_size;
+    task.total_size = Some(clip_size);
+    task.finished = true;
+    task.paused = false;
+    task.error = None;
+    task.next_retry_at = None;
+    task.retry_attempts = 0;
+    task.state = RecordingTaskState::Completed;
+    task.recording.measured_bytes = clip_size;
+    task.recording.reserved_bytes = 0;
+    task.recording.completed_at = Some(now_ts);
+}
+
+/// Highest recording VOD id players can address.
+///
+/// A stream id travels as a signed 32-bit integer, so `i32::MAX` is the last usable
+/// value; an id past it is not published at all.
+const RECORDING_VOD_ID_LIMIT: u32 = 0x7fff_ffff;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PersistedRecordingQueue {
@@ -67,6 +133,49 @@ pub struct PersistedRecordingQueue {
     /// The in-memory `RecordingQueue` mirrors this counter via an `AtomicU64`.
     #[serde(default)]
     pub revision: QueueRevision,
+    /// Next recording VOD id to hand out. Persisted with the metadata record so a
+    /// restart neither reuses nor renumbers ids.
+    #[serde(default)]
+    pub next_vod_id: u32,
+}
+
+impl PersistedRecordingQueue {
+    /// Give every task that has no id yet the next recording VOD id.
+    ///
+    /// Runs inside a queue mutation, so the insert that produced a task, the scan
+    /// for unassigned tasks and the assignment are one critical section. Ids are
+    /// never taken back: the counter only moves forward.
+    pub(super) fn assign_missing_vod_ids(&mut self) -> (u32, bool) {
+        // The counter starts above every id already handed out, in any partition, so
+        // a new id never equals an existing one regardless of the partition order.
+        let highest_assigned = self.all_tasks().map(|task| task.vod_id).max().unwrap_or(0);
+        let mut next = self.next_vod_id.max(RECORDING_VOD_ID_BASE).max(highest_assigned.saturating_add(1));
+        let mut assigned = false;
+        for task in self
+            .queue
+            .iter_mut()
+            .chain(self.scheduled.iter_mut())
+            .chain(self.active.iter_mut())
+            .chain(self.finished.iter_mut())
+            .filter(|task| task.vod_id == 0)
+        {
+            // A task that cannot get an id keeps 0 and stays unlisted; the counter
+            // never saturates, so ids are never reused.
+            if next > RECORDING_VOD_ID_LIMIT {
+                warn!("Recording VOD id space is exhausted at {}; further recordings stay unlisted", i32::MAX);
+                break;
+            }
+            task.vod_id = next;
+            next = next.saturating_add(1);
+            assigned = true;
+        }
+        self.next_vod_id = next;
+        (next, assigned)
+    }
+
+    fn all_tasks(&self) -> impl Iterator<Item = &PersistedRecordingTask> {
+        self.queue.iter().chain(self.scheduled.iter()).chain(self.active.iter()).chain(self.finished.iter())
+    }
 }
 
 fn generate_recording_task_id() -> String {
@@ -127,6 +236,7 @@ impl RecordingTask {
 
         Some(Self {
             uuid: generate_recording_task_id(),
+            vod_id: 0,
             kind,
             file_dir,
             file_path,
@@ -143,6 +253,9 @@ impl RecordingTask {
             retry_attempts: 0,
             next_retry_at: None,
             recording,
+            clip: None,
+            media_identity: None,
+            cancelled_by_owner: false,
         })
     }
 
@@ -165,6 +278,9 @@ impl RecordingTask {
     /// disclosed only to the owner itself.
     pub fn to_owner_view(&self, claims: &Claims, shared_visible: bool) -> Option<RecordingTaskDto> {
         let is_owner = claims.subject_id.as_ref().is_some_and(|subject| subject == self.owner_id());
+        if self.cancelled_by_owner && is_owner {
+            return None;
+        }
         if !is_owner && !shared_visible {
             return None;
         }

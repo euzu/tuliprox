@@ -26,7 +26,7 @@ fn entry_for(user: &str, file: &Path) -> PersistedRecordingTask {
     let meta = RecordingMetadata::new_live(
         RecordingOwner::User(UserId::from(format!("web:{user}").as_str())),
         RecordingVisibility::Private,
-        RecordingSource::new("target-1", "virtual-1", "input-1"),
+        RecordingSource::new("target-1", "virtual-1", "input-1").with_provider_id(Some("stream-1".to_string())),
         1_700_000_000,
         1_700_003_600,
         0,
@@ -36,6 +36,7 @@ fn entry_for(user: &str, file: &Path) -> PersistedRecordingTask {
         media_identity: String::new(),
         partition: RecordingPartition::default(),
         uuid: format!("{user}-entry"),
+        vod_id: 0,
         kind: RecordingKind::Live,
         file_dir: file.parent().expect("parent").to_path_buf(),
         file_path: file.to_path_buf(),
@@ -52,6 +53,8 @@ fn entry_for(user: &str, file: &Path) -> PersistedRecordingTask {
         retry_attempts: 0,
         next_retry_at: None,
         recording: meta,
+        clip: None,
+        cancelled_by_owner: false,
     }
 }
 
@@ -180,7 +183,8 @@ async fn two_users_recording_different_programmes_never_share_a_file() {
     let queue = open_queue(&storage).await;
     let alice = seeded("alice", &alice_file);
     let mut bob = entry_for("bob", &bob_file);
-    bob.recording.source = RecordingSource::new("target-1", "virtual-2", "input-1");
+    bob.recording.source =
+        RecordingSource::new("target-1", "virtual-2", "input-1").with_provider_id(Some("stream-2".to_string()));
     let bob = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(bob).expect("valid fixture"));
     assert_ne!(alice.media_identity, bob.media_identity, "different programmes are different media");
 

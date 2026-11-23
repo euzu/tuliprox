@@ -584,6 +584,8 @@ async fn stream_response_rolls_back_provisional_user_activation_when_provider_op
         crate::api::model::ConnectionKind::Normal,
         false,
         None,
+        false,
+        false,
     )
     .await
     .into_response();

@@ -103,6 +103,8 @@ pub(in crate::api::endpoints::hls_api::tests) fn recording_test_url(
         12345,
         cluster,
         None,
+        false,
+        None,
     )
     .ok_or_else(|| "recording URL missing".into())
 }

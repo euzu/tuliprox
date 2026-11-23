@@ -894,6 +894,7 @@ async fn xtream_vod_m3u_reverse_proxies_external_sources_and_alias_redirects_wit
                 None,
                 None,
                 None,
+                false,
             )
             .await
             .into_response();

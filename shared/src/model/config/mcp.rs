@@ -1,10 +1,45 @@
 use crate::{
     defaults::{
-        default_as_true, default_mcp_max_response_bytes, is_default_mcp_max_response_bytes, is_false, is_true,
-        MIN_MCP_MAX_RESPONSE_BYTES,
+        default_as_true, default_mcp_max_response_bytes, default_mcp_player_tools, is_default_mcp_max_response_bytes,
+        is_default_mcp_player_tools, is_false, is_true, MIN_MCP_MAX_RESPONSE_BYTES,
     },
     error::TuliproxError,
 };
+
+/// Level of MCP tools available to playlist proxy API users.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpPlayerTools {
+    #[default]
+    Off,
+    Read,
+    Write,
+}
+
+impl std::fmt::Display for McpPlayerTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => write!(f, "off"),
+            Self::Read => write!(f, "read"),
+            Self::Write => write!(f, "write"),
+        }
+    }
+}
+
+impl std::str::FromStr for McpPlayerTools {
+    type Err = TuliproxError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "read" => Ok(Self::Read),
+            "write" => Ok(Self::Write),
+            other => Err(TuliproxError::ConfigBase(format!(
+                "Invalid `mcp.player_tools` value: `{other}`; expected `off`, `read` or `write`"
+            ))),
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +51,10 @@ pub struct McpConfigDto {
     /// Hide and reject tools that change state.
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub read_only: bool,
+
+    /// Level of player tools offered to proxy API users (`off`, `read`, `write`).
+    #[serde(default = "default_mcp_player_tools", skip_serializing_if = "is_default_mcp_player_tools")]
+    pub player_tools: McpPlayerTools,
 
     /// Extra `Origin` values accepted besides the request `Host`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -36,6 +75,7 @@ impl Default for McpConfigDto {
         Self {
             enabled: false,
             read_only: true,
+            player_tools: default_mcp_player_tools(),
             allowed_origins: Vec::new(),
             max_response_bytes: default_mcp_max_response_bytes(),
             plugin_tools: false,
@@ -112,6 +152,7 @@ mod tests {
         let dto = McpConfigDto {
             enabled: true,
             read_only: false,
+            player_tools: McpPlayerTools::Write,
             allowed_origins: vec!["https://claude.ai".to_string()],
             max_response_bytes: 4096,
             plugin_tools: true,

@@ -398,3 +398,171 @@ fn reserve_recording_relative_path_does_not_double_bump_for_self() {
     let reserved = reserve_recording_relative_path(&mut candidate, "pilot", "rec-1");
     assert_eq!(reserved, "pilot_3", "must not bump because of self");
 }
+
+#[tokio::test]
+async fn mutations_assign_consecutive_recording_vod_ids_from_the_base() {
+    let dir = temp_state_file("vod_id_assignment");
+    let queue = RecordingQueue::new_persistent(&dir, &dir).expect("open recording repository");
+
+    mutate(&queue, |candidate| {
+        let first = task("vod-1", RecordingKind::Vod, RecordingTaskState::Queued);
+        candidate.queue.push(RecordingQueue::to_persisted(&first));
+        Ok(())
+    })
+    .await
+    .expect("first insert");
+    mutate(&queue, |candidate| {
+        let second = task("vod-2", RecordingKind::Vod, RecordingTaskState::Queued);
+        candidate.queue.push(RecordingQueue::to_persisted(&second));
+        Ok(())
+    })
+    .await
+    .expect("second insert");
+
+    let queue_guard = queue.queue.lock().await;
+    let ids: Vec<u32> = queue_guard.iter().map(|task| task.vod_id).collect();
+    assert_eq!(ids, vec![RECORDING_VOD_ID_BASE, RECORDING_VOD_ID_BASE + 1]);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_reload_keeps_assigned_ids_and_assigns_ids_to_old_records() {
+    let dir = temp_state_file("vod_id_reload");
+    let queue = RecordingQueue::new_persistent(&dir, &dir).expect("open recording repository");
+    let assigned = RecordingTask {
+        vod_id: RECORDING_VOD_ID_BASE + 7,
+        ..task("assigned", RecordingKind::Vod, RecordingTaskState::Completed)
+    };
+    let legacy = task("legacy", RecordingKind::Vod, RecordingTaskState::Completed);
+    queue.finished.write().await.push(assigned);
+    queue.finished.write().await.push(legacy);
+    queue.persist_to_disk().await.expect("persist state");
+
+    let restored = RecordingQueue::new_persistent(&dir, &dir).expect("reopen recording repository");
+    restored.load_from_disk().await.expect("load state");
+
+    let finished = restored.finished.read().await.clone();
+    let by_uuid = |uuid: &str| finished.iter().find(|task| task.uuid == uuid).map(|task| task.vod_id);
+    assert_eq!(by_uuid("assigned"), Some(RECORDING_VOD_ID_BASE + 7));
+    assert_eq!(by_uuid("legacy"), Some(RECORDING_VOD_ID_BASE + 8), "an unassigned record gets an id on load");
+    assert_eq!(restored.vod_id_counter.load(Ordering::SeqCst), RECORDING_VOD_ID_BASE + 9);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn assign_missing_vod_ids_advances_counter_past_preexisting_assigned_ids() {
+    let mut candidate = PersistedRecordingQueue { next_vod_id: RECORDING_VOD_ID_BASE, ..Default::default() };
+    let mut assigned_task = persisted_recording("assigned-rec", media_meta("web:alice"));
+    assigned_task.vod_id = RECORDING_VOD_ID_BASE + 5;
+    let unassigned_task = persisted_recording("unassigned-rec", media_meta("web:alice"));
+
+    candidate.queue.push(assigned_task);
+    candidate.queue.push(unassigned_task);
+
+    let (next, assigned) = candidate.assign_missing_vod_ids();
+    assert!(assigned);
+    assert_eq!(candidate.queue[0].vod_id, RECORDING_VOD_ID_BASE + 5);
+    assert_eq!(candidate.queue[1].vod_id, RECORDING_VOD_ID_BASE + 6);
+    assert_eq!(candidate.next_vod_id, RECORDING_VOD_ID_BASE + 7);
+    assert_eq!(next, RECORDING_VOD_ID_BASE + 7);
+}
+
+#[test]
+fn assign_missing_vod_ids_skips_ids_assigned_in_a_later_partition() {
+    let mut candidate = PersistedRecordingQueue { next_vod_id: RECORDING_VOD_ID_BASE, ..Default::default() };
+    candidate.queue.push(persisted_recording("unassigned-rec", media_meta("web:alice")));
+    let mut finished_task = persisted_recording("finished-rec", media_meta("web:alice"));
+    finished_task.vod_id = RECORDING_VOD_ID_BASE + 5;
+    candidate.finished.push(finished_task);
+
+    let (next, assigned) = candidate.assign_missing_vod_ids();
+    assert!(assigned);
+    assert_eq!(candidate.queue[0].vod_id, RECORDING_VOD_ID_BASE + 6);
+    assert_eq!(candidate.finished[0].vod_id, RECORDING_VOD_ID_BASE + 5);
+    assert_eq!(next, RECORDING_VOD_ID_BASE + 7);
+}
+
+#[test]
+fn recording_vod_entry_projection_falls_back_to_filename_when_title_is_empty_or_whitespace() {
+    let make_task = |title: Option<&str>| {
+        let mut t = task("rec-proj", RecordingKind::Vod, RecordingTaskState::Completed);
+        t.vod_id = RECORDING_VOD_ID_BASE;
+        t.filename = "movie.ts".to_string();
+        t.recording.relative_path = Some("movie.ts".to_string());
+        t.recording.program_title = title.map(ToString::to_string);
+        t
+    };
+
+    let none_entry = control::recording_vod_entry(&make_task(None)).expect("projected entry");
+    assert_eq!(none_entry.title, "movie.ts");
+
+    let empty_entry = control::recording_vod_entry(&make_task(Some(""))).expect("projected entry");
+    assert_eq!(empty_entry.title, "movie.ts");
+
+    let whitespace_entry = control::recording_vod_entry(&make_task(Some("  "))).expect("projected entry");
+    assert_eq!(whitespace_entry.title, "movie.ts");
+
+    let news_entry = control::recording_vod_entry(&make_task(Some("News"))).expect("projected entry");
+    assert_eq!(news_entry.title, "News");
+}
+
+#[test]
+fn assign_missing_vod_ids_stops_at_the_signed_32_bit_limit_without_reuse() {
+    let mut candidate = PersistedRecordingQueue { next_vod_id: 0x7fff_ffff, ..Default::default() };
+    candidate.queue.push(persisted_recording("last-id", media_meta("web:alice")));
+    candidate.queue.push(persisted_recording("over-limit-a", media_meta("web:alice")));
+    candidate.queue.push(persisted_recording("over-limit-b", media_meta("web:alice")));
+
+    let (next, assigned) = candidate.assign_missing_vod_ids();
+
+    assert!(assigned);
+    assert_eq!(candidate.queue[0].vod_id, u32::try_from(i32::MAX).expect("i32 max fits u32"));
+    assert_eq!(candidate.queue[1].vod_id, 0, "an id past i32::MAX is not published");
+    assert_eq!(candidate.queue[2].vod_id, 0);
+    assert_eq!(next, u32::try_from(i32::MAX).expect("i32 max fits u32") + 1);
+    assert_eq!(candidate.next_vod_id, next, "the counter moves past the limit instead of saturating");
+
+    // A later mutation must neither hand out the limit again nor wrap around.
+    candidate.queue.push(persisted_recording("later", media_meta("web:alice")));
+    let (next_again, assigned_again) = candidate.assign_missing_vod_ids();
+    assert!(!assigned_again);
+    assert_eq!(candidate.queue[3].vod_id, 0);
+    assert_eq!(next_again, next);
+}
+
+#[tokio::test]
+async fn committed_recording_vod_entries_project_only_records_the_caller_could_see() {
+    let dir = temp_state_file("vod_entries_visibility");
+    let queue = RecordingQueue::new_persistent(&dir, &dir).expect("open recording repository");
+
+    let finished_task = |uuid: &str, owner: &str, visibility: RecordingVisibility, target_id: &str| {
+        let mut entry = task(uuid, RecordingKind::Vod, RecordingTaskState::Completed);
+        entry.vod_id = RECORDING_VOD_ID_BASE;
+        entry.recording = RecordingMetadata::new_media(
+            RecordingOwner::User(UserId::from(owner)),
+            visibility,
+            RecordingSource::new(target_id, "42", "input-a"),
+            uuid.to_string(),
+        );
+        entry.recording.relative_path = Some(format!("{uuid}.ts"));
+        entry
+    };
+
+    {
+        let mut finished = queue.finished.write().await;
+        finished.push(finished_task("alice-own", "web:alice", RecordingVisibility::Private, "other"));
+        finished.push(finished_task("bob-private", "web:bob", RecordingVisibility::Private, "main"));
+        finished.push(finished_task("bob-shared-main", "web:bob", RecordingVisibility::Shared, "main"));
+        finished.push(finished_task("bob-shared-other", "web:bob", RecordingVisibility::Shared, "other"));
+        finished.push(finished_task("bob-shared-id", "web:bob", RecordingVisibility::Shared, "7"));
+    }
+
+    let projected = queue.committed_recording_vod_entries(&UserId::from("web:alice"), "main", 7).await;
+    let uuids: Vec<&str> = projected.iter().map(|entry| entry.uuid.as_str()).collect();
+
+    assert_eq!(uuids, vec!["alice-own", "bob-shared-main", "bob-shared-id"]);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
