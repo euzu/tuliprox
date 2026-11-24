@@ -1712,6 +1712,17 @@ correct extension. Playlist credentials can also be passed as `?token=<token>` i
 `stream_id` is the virtual id from the playlist. `get_series_info` takes `series_id`, `get_vod_info` takes `vod_id`, and
 `get_epg`/`get_short_epg`/`get_simple_data_table` take `stream_id`.
 
+`get_short_epg` and `get_simple_data_table` answer from the target's local EPG database when the target has one and the
+channel has an `epg_channel_id`; otherwise the request goes to the provider. A channel that is missing in the local EPG
+gets an empty answer.
+
+- `get_short_epg`: the current and next programmes, `limit` entries (default 4).
+- `get_simple_data_table`: the catch-up table. It starts at the oldest programme that ends inside the archive window
+  (`tv_archive_duration` days; for a failover group the longest archive of a playable member), or at the current
+  programme when the channel has no playable archive. Each entry has `now_playing` (`1` for the programme on air) and
+  `has_archive` (`1` for a programme that has ended inside the window). `limit` caps the entries (default 1000).
+  `start` and `end` are forwarded only when the provider answers.
+
 ### Recordings as Xtream VOD
 
 A playlist user whose effective `player_features.recording` is `read`, `private`, or `shared` also accesses their

@@ -1,8 +1,8 @@
 use super::{
     empty_stream_info_response, get_xtream_player_api_stream_url, is_hls_playback_request, override_live_hls_extension,
-    recording_input_matches, resolve_m3u_xtream_timeshift, resolve_xtream_playback_extension, xtream_get_short_epg,
-    xtream_player_api_stream, xtream_player_api_stream_with_token, ApiStreamContext, ApiStreamRequest,
-    XtreamApiTimeShiftRequest,
+    recording_input_matches, resolve_m3u_xtream_timeshift, resolve_xtream_playback_extension,
+    xtream_get_catchup_response, xtream_get_short_epg, xtream_player_api_stream, xtream_player_api_stream_with_token,
+    ApiStreamContext, ApiStreamRequest, XtreamApiTimeShiftRequest,
 };
 use crate::{
     api::model::{create_test_app_state, AppState, PlaylistStorage, PlaylistXtreamStorage, UserApiRequest},
@@ -433,6 +433,53 @@ async fn xtream_short_epg_emits_has_archive_for_native_xtream_input() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("json");
 
     assert_eq!(json["epg_listings"][0]["has_archive"], 1);
+}
+
+#[tokio::test]
+async fn xtream_catchup_table_is_served_from_local_epg() {
+    let dir = tempdir().expect("temp dir");
+    // The input points at an unreachable provider: a provider request would fail the call.
+    let mut input = m3u_timeshift_input();
+    input.input_type = InputType::Xtream;
+    input.url = "http://127.0.0.1:9".to_string();
+    let item = m3u_catchup_item("Formula 1", &input.name, "channel/index.m3u8", None);
+    let (app_state, target) = build_short_epg_app_state(&dir, item, Some(input)).await;
+    let mut user = ProxyUserCredentials::default();
+    user.output_clusters = ClusterFlags::all();
+
+    let response = xtream_get_catchup_response(&app_state, &user, &target, "100", "", "", 0).await.into_response();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = response_body_text(response).await.expect("body");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let listings = json["epg_listings"].as_array().expect("epg listings");
+
+    assert_eq!(listings.len(), 1);
+    assert_eq!(listings[0]["id"], "100");
+    assert_eq!(listings[0]["epg_id"], "f1.calendar");
+    assert_eq!(listings[0]["now_playing"], 0);
+    assert_eq!(listings[0]["has_archive"], 0);
+    let title = listings[0]["title"].as_str().expect("encoded title");
+    assert_eq!(BASE64_STANDARD.decode(title).expect("decode title"), b"Formula 1 Qualifying");
+}
+
+#[tokio::test]
+async fn xtream_catchup_table_archive_without_duration_uses_one_day_window() {
+    let dir = tempdir().expect("temp dir");
+    let mut input = m3u_timeshift_input();
+    input.input_type = InputType::Xtream;
+    input.url = "http://127.0.0.1:9".to_string();
+    let mut item = m3u_catchup_item("Formula 1", &input.name, "channel/index.m3u8", None);
+    if let Some(StreamProperties::Live(live)) = item.additional_properties.as_mut() {
+        live.tv_archive_duration = None;
+    }
+    let (app_state, target) = build_short_epg_app_state(&dir, item, Some(input)).await;
+    let pli = super::xtream_get_item_for_stream_id(100, &app_state.app_config, &app_state.playlists, &target, None)
+        .await
+        .expect("cached item");
+    let classified =
+        super::classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, pli.virtual_id).await;
+
+    assert_eq!(super::catchup_archive_days(&app_state, &classified, &pli), Some(1));
 }
 
 #[tokio::test]

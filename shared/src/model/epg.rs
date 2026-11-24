@@ -61,7 +61,8 @@ impl EpgChannel {
         self.get_programme_with_limit_at(limit, now)
     }
 
-    fn get_programme_with_limit_at(&self, limit: u32, now: i64) -> Vec<&EpgProgramme> {
+    /// Programmes in start order whose stop time is at or after `now`, at most `limit` entries.
+    pub fn get_programme_with_limit_at(&self, limit: u32, now: i64) -> Vec<&EpgProgramme> {
         // Programmes are sorted by start, not by stop. Use binary search only
         // for the first future entry, then scan the earlier prefix for an
         // overlapping programme whose stop time has not passed.
