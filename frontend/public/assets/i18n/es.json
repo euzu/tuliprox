@@ -846,7 +846,8 @@
       "PROVIDER_AFFINITY_TTL_SECS": "Durante cuánto tiempo una reproducción con reconexión (HLS, DASH, Catchup, VOD) sigue volviendo al proveedor que entregó su contenido por última vez, una vez terminada la ventana de reconexión. No ocupa ninguna conexión ni provoca una sobreasignación de cortesía; otras reproducciones pueden seguir usando el proveedor. Usa 0 para terminar la afinidad junto con el TTL de la sesión HLS/Catchup (predeterminado 120, máximo 86400).",
       "HLS_WRAP_MEDIA_PLAYLIST": "Si está activado (predeterminado), una solicitud de entrada HLS en directo con proxy cuyo proveedor devuelve una lista de medios se responde con una lista maestra de una sola variante. El reproductor actualiza entonces una URL con token sellado, de modo que la reproducción conserva su cuenta de proveedor cuando cambia la IP del cliente. Desactívalo para reproductores que gestionan mal una lista maestra.",
       "RETRY": "Número de veces que se reintenta la conexión al proveedor ante un fallo inicial de stream.",
-      "SHARED_BURST_BUFFER_MB": "Tamaño de búfer inicial en MB para proporcionar datos inmediatos a los nuevos clientes que se unen a un stream compartido.",
+      "SHARED_BURST_BUFFER_MB": "Tamaño mínimo en MB del búfer circular de ráfaga compartida, que también es la reserva de retraso para suscriptores lentos. Un búfer de canal mayor puede aumentarlo, y un único fragmento mayor que el búfer se conserva completo.",
+      "SHARED_BURST_SECS": "Tiempo mínimo en segundos que un nuevo espectador de un stream MPEG-TS en directo compartido empieza por detrás del directo. Tuliprox inicia la reproducción en el fotograma clave más reciente recibido hace al menos este número de segundos (habitualmente 3-5 s tras el directo). Si el búfer no contiene un fotograma clave tan antiguo, empieza en el fotograma clave más antiguo del búfer, que puede estar a menos tiempo del directo. Si no se detecta ningún fotograma clave, o el fotograma clave adecuado es más de 10 s anterior a ese punto, el inicio se elige solo por la hora de llegada. 0 envía todo el búfer de ráfaga desde su byte más antiguo.",
       "THROTTLE": "Habilita la limitación de ancho de banda para los streams salientes.",
       "THROTTLE_KBPS": "Ancho de banda máximo en kilobits por segundo por stream."
     },
@@ -2094,6 +2095,7 @@
     "SHARED": "Compartido",
     "SCOPE": "Ámbito",
     "SHARED_BURST_BUFFER_BYTES": "Búfer de ráfaga compartido (MB)",
+    "SHARED_BURST_SECS": "Ráfaga compartida (segs)",
     "SHARE_LIVE_STREAMS": "Compartir en directo",
     "SHOW_SELECTED": "Mostrar seleccionados",
     "SIZE": "Tamaño",

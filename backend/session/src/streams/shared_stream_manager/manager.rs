@@ -557,16 +557,17 @@ impl SharedStreamManager {
         }
         let allocation_id = handle.allocation_id;
         let raw_handle = provider_handle.and_then(|mut managed| managed.disarm())?;
+        let stream_config = config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.stream.as_ref());
         let mut shared_state =
             SharedStreamState::new(headers, buf_size, Some(raw_handle), min_buffer_bytes, low_priority_preempted)
                 .with_subscriber_idle_timeout_secs(
-                    config
-                        .reverse_proxy
-                        .as_ref()
-                        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-                        .map_or(DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS, |stream| {
-                            stream.shared_subscriber_idle_timeout_secs
-                        }),
+                    stream_config.map_or(DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS, |stream| {
+                        stream.shared_subscriber_idle_timeout_secs
+                    }),
+                )
+                .with_burst_secs(
+                    stream_config
+                        .map_or_else(shared::defaults::default_shared_burst_secs, |stream| stream.shared_burst_secs),
                 );
         shared_state.subscriber_max_duration =
             config.sleep_timer_mins.filter(|mins| *mins > 0).map(|mins| Duration::from_secs(u64::from(mins) * 60));

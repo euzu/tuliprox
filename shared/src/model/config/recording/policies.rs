@@ -150,11 +150,12 @@ impl RecordingDiskConfigDto {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingQuotaConfigDto {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // The `*_bytes` aliases keep configs written before the keys accepted human-readable sizes loading.
+    #[serde(default, alias = "default_private_bytes", skip_serializing_if = "Option::is_none")]
     pub default_private: Option<ByteSize>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, alias = "per_user_bytes", skip_serializing_if = "HashMap::is_empty")]
     pub per_user: HashMap<String, ByteSize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "shared_bytes", skip_serializing_if = "Option::is_none")]
     pub shared: Option<ByteSize>,
 }
 
@@ -188,6 +189,22 @@ impl RecordingQuotaConfigDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_quota_config_dto_accepts_legacy_bytes_keys() {
+        let yaml = r#"
+default_private_bytes: 53687091200
+per_user_bytes:
+  "api:alice": 1024
+shared_bytes: 536870912000
+"#;
+        let dto: RecordingQuotaConfigDto = crate::utils::yaml_from_str(yaml).expect("deserialize legacy quota yaml");
+        assert!(dto.validate().is_ok());
+        let bytes = |size: Option<&ByteSize>| size.and_then(|size| size.parse_bytes().ok().map(|bytes| bytes.0));
+        assert_eq!(bytes(dto.default_private.as_ref()), Some(53_687_091_200));
+        assert_eq!(bytes(dto.per_user.get("api:alice")), Some(1024));
+        assert_eq!(bytes(dto.shared.as_ref()), Some(536_870_912_000));
+    }
 
     #[test]
     fn recording_quota_config_dto_yaml_resolves_exact_bytes() {

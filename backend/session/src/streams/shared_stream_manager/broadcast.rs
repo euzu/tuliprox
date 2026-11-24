@@ -6,6 +6,7 @@ use shared::utils::sanitize_sensitive_info;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration, Instant};
 use tuliprox_core::utils::{debug_if_enabled, network::request::STREAM_IDLE_TIMEOUT, trace_if_enabled};
+use tuliprox_mpegts::splice::TsRandomAccessScanner;
 
 impl SharedStreamState {
     #[allow(clippy::too_many_lines)]
@@ -26,6 +27,7 @@ impl SharedStreamState {
         let broadcast_started_at = Instant::now();
 
         let broadcast_handle = tokio::spawn(async move {
+            let mut scanner = TsRandomAccessScanner::new();
             let mut source_stream = std::pin::pin!(bytes_stream);
             let mut counter = 0_usize;
             let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
@@ -72,11 +74,15 @@ impl SharedStreamState {
                         }
                         match chunk {
                             Some(Ok(data)) => {
+                                // Invariant: scan outside the burst_buffer lock; positions and next_start
+                                // count exactly the same stream bytes in the same order.
+                                let rap = scanner.observe(&data);
+                                let now = Instant::now();
                                 let chunk_len = data.len();
                                 let push_seq = {
                                     let mut buffer = burst_buffer.lock().await;
                                     let seq = buffer.next_sequence;
-                                    buffer.push(data);
+                                    buffer.push(data, now, rap);
                                     seq
                                 };
                                 live_notification.notify_waiters();

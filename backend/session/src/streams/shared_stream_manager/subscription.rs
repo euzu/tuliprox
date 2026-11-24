@@ -54,6 +54,7 @@ impl SharedStreamState {
             task_handles: std::sync::Mutex::new(Vec::new()),
             subscriber_idle_timeout_secs: DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS,
             subscriber_max_duration: None,
+            burst_duration: Duration::from_secs(shared::defaults::default_shared_burst_secs()),
             pending_joins: AtomicUsize::new(0),
         }
     }
@@ -62,6 +63,11 @@ impl SharedStreamState {
         if secs > 0 {
             self.subscriber_idle_timeout_secs = secs;
         }
+        self
+    }
+
+    pub(super) fn with_burst_secs(mut self, secs: u64) -> Self {
+        self.burst_duration = Duration::from_secs(secs);
         self
     }
 
@@ -154,6 +160,7 @@ impl SharedStreamState {
         let burst_buffer_for_log = Arc::clone(&self.burst_buffer);
         let live_notification = Arc::clone(&self.live_notification);
         let timeout_duration = Duration::from_secs(self.subscriber_idle_timeout_secs);
+        let burst_duration = self.burst_duration;
         let idle_check_interval = Duration::from_secs(1);
         let mut last_lag_log = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
         let mut consecutive_lag_count: u32 = 0;
@@ -180,8 +187,16 @@ impl SharedStreamState {
             let mut last_active = Instant::now();
             let (snapshot, mut next_sequence) = {
                 let buffer = burst_buffer.lock().await;
-                buffer.snapshot()
+                buffer.join_snapshot(Instant::now(), burst_duration)
             };
+            if log::log_enabled!(log::Level::Debug) {
+                let burst_chunks = snapshot.len();
+                let burst_bytes = snapshot.iter().map(bytes::Bytes::len).sum::<usize>();
+                debug!(
+                    "Shared stream subscriber {} join burst: {burst_chunks} chunks, {burst_bytes} bytes",
+                    sanitize_sensitive_info(&address.to_string())
+                );
+            }
             match send_burst_buffer(&snapshot, &client_tx_clone, &cancel_token, timeout_duration, &byte_budget).await {
                 Ok(sent_burst_chunks) => {
                     drop(snapshot);

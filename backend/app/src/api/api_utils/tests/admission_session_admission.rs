@@ -176,6 +176,7 @@ async fn activate_session_before_stream_open_marks_pending_provider_for_grace_ho
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),

@@ -847,7 +847,8 @@
       "PROVIDER_AFFINITY_TTL_SECS": "How long a reconnect-capable playback (HLS, DASH, Catchup, VOD) keeps returning to the provider that last delivered its media after the reconnect window has ended. Holds no connection slot and never causes a grace over-allocation; other playbacks can still use the provider. Set 0 to end affinity together with the HLS/Catchup session TTL (default 120, maximum 86400).",
       "HLS_WRAP_MEDIA_PLAYLIST": "If enabled (default), a proxied live HLS entry request whose provider returns a media playlist is answered with a single-variant master playlist. The player then refreshes a sealed token URL, so playback keeps its provider account when the client IP changes. Disable for players that mishandle a master playlist.",
       "RETRY": "Number of times to retry connecting to the provider on initial stream failure.",
-      "SHARED_BURST_BUFFER_MB": "Initial buffer size in MB to provide immediate data to new clients joining a shared stream.",
+      "SHARED_BURST_BUFFER_MB": "Paylaşılan patlama halka arabelleğinin MB cinsinden minimum boyutu; aynı zamanda yavaş aboneler için gecikme rezervidir. Daha büyük bir kanal arabelleği bu değeri artırabilir ve halkadan büyük tek bir parça bütün olarak tutulur.",
+      "SHARED_BURST_SECS": "Paylaşılan canlı bir MPEG-TS akışının yeni bir izleyicisinin canlı yayının gerisinden başlayacağı minimum süre (saniye). Tuliprox oynatmayı en az bu kadar saniye önce gelen en yeni anahtar karede (keyframe) başlatır (genellikle canlı yayının 3-5 sn gerisi). Arabellekte bu kadar eski bir anahtar kare yoksa, arabellekteki en eski anahtar karede başlar; bu durumda canlı yayına olan mesafe daha kısa olabilir. Hiçbir anahtar kare algılanmazsa veya uygun anahtar kare bu noktadan 10 sn'den daha eskiyse, başlangıç noktası yalnızca varış zamanına göre seçilir. 0 ayarlanırsa tüm patlama arabelleği en eski baytından itibaren gönderilir.",
       "THROTTLE": "Enables bandwidth limiting for outgoing streams.",
       "THROTTLE_KBPS": "Maximum bandwidth in Kilobits per second per stream."
     },
@@ -2098,6 +2099,7 @@
     "SHARED": "Shared",
     "SCOPE": "Kapsam",
     "SHARED_BURST_BUFFER_BYTES": "Shared burst buffer (MB)",
+    "SHARED_BURST_SECS": "Paylaşılan patlama (sn)",
     "SHARE_LIVE_STREAMS": "Share live",
     "SHOW_SELECTED": "Show selected",
     "SIZE": "Size",

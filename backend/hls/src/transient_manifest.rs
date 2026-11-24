@@ -9,7 +9,7 @@ use std::{
 use tuliprox_core::{model::StripConfig, utils::format_hls_duration_ms};
 use tuliprox_parser::hls::{
     origin_manifest::{parse_attribute_list, HlsManifestWindowPolicy},
-    rewrite_hls_url,
+    rewrite_hls_url, strip_low_latency_hls_tag,
 };
 use url::Url;
 
@@ -193,7 +193,10 @@ fn rewrite_transient_fragment(
             if line.trim().starts_with("#EXT-X-KEY:") {
                 checkpoint.encryption_state.apply_key_tag(line);
             }
-            let rewritten_line = rewrite_context.rewrite_line(line, checkpoint.encryption_state.encrypted_media());
+            let Some(line) = strip_low_latency_hls_tag(line) else {
+                continue;
+            };
+            let rewritten_line = rewrite_context.rewrite_line(&line, checkpoint.encryption_state.encrypted_media());
             rewritten_body.push_str(&rewritten_line);
             rewritten_body.push_str(line_ending);
         }
@@ -923,16 +926,17 @@ mod tests {
     }
 
     #[test]
-    fn low_latency_part_uri_is_rewritten_with_part_diagnostics_kind() {
-        let result = rewrite("#EXTM3U\n#EXT-X-PART:DURATION=1.0,URI=\"parts/part001.m4s\"\n");
+    fn low_latency_tags_are_removed_from_transient_playlist() {
+        let result = rewrite(
+            "#EXTM3U\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=0.75,HOLD-BACK=6\n\
+             #EXT-X-PART-INF:PART-TARGET=0.25\n#EXT-X-PART:DURATION=0.25,URI=\"parts/part001.m4s\"\n\
+             #EXTINF:2.0,\nseg.ts\n#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"parts/part002.m4s\"\n",
+        );
 
-        assert!(result
-            .body
-            .contains("#EXT-X-PART:DURATION=1.0,URI=\"/hls/shared/live/proxy-id/__hls_access_lease_id__/r/"));
-        assert!(result.body.contains(".m4s\""));
-        assert!(!result.body.contains("parts/part001.m4s"));
+        assert!(result.body.starts_with("#EXTM3U\n#EXT-X-SERVER-CONTROL:HOLD-BACK=6\n#EXTINF:2.0,\n"));
+        assert!(!result.body.contains("PART"));
         assert_eq!(result.resources.len(), 1);
-        assert_eq!(result.resources[0].kind, TransientResourceKind::Part);
+        assert_eq!(result.resources[0].kind, TransientResourceKind::Segment);
     }
 
     #[test]

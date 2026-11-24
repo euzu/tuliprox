@@ -134,6 +134,7 @@ reverse_proxy:
   #   unavailable_policy: deny
   stream:
     shared_burst_buffer_mb: 12 # default 12 MB
+    shared_burst_secs: 3 # default 3 s behind live for new shared viewers
   # stream_history:
   #   stream_history_enabled: true
   #   stream_history_batch_size: 128
