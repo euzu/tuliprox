@@ -463,11 +463,12 @@ fn rewrite_resource_uri(
 /// Removes Low-Latency HLS signalling from a playlist tag line. The proxy does not forward
 /// blocking playlist reload directives (`_HLS_msn`, `_HLS_part`, `_HLS_skip`) to the origin, and a
 /// server that offers partial segments must support blocking reload, so proxied playlists are
-/// served as regular HLS: part, preload-hint, rendition-report, part-inf and skip tags are dropped
-/// and `#EXT-X-SERVER-CONTROL` keeps only `HOLD-BACK`. Returns `None` when the line is dropped.
+/// served as regular HLS: part, preload-hint, rendition-report and part-inf tags are dropped and
+/// `#EXT-X-SERVER-CONTROL` keeps only `HOLD-BACK`. `#EXT-X-SKIP` of a delta playlist stays: dropping
+/// it would shift the sequence number of every listed segment. Returns `None` when the line is dropped.
 pub fn strip_low_latency_hls_tag(line: &str) -> Option<Cow<'_, str>> {
-    const DROPPED_TAGS: [&str; 5] =
-        ["#EXT-X-PART:", "#EXT-X-PART-INF:", "#EXT-X-PRELOAD-HINT:", "#EXT-X-RENDITION-REPORT:", "#EXT-X-SKIP:"];
+    const DROPPED_TAGS: [&str; 4] =
+        ["#EXT-X-PART:", "#EXT-X-PART-INF:", "#EXT-X-PRELOAD-HINT:", "#EXT-X-RENDITION-REPORT:"];
     const SERVER_CONTROL: &str = "#EXT-X-SERVER-CONTROL:";
     let trimmed = line.trim();
     if DROPPED_TAGS.iter().any(|tag| trimmed.starts_with(tag)) {
@@ -1148,7 +1149,6 @@ mod test {
         let content = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n\
             #EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=0.75,HOLD-BACK=6,CAN-SKIP-UNTIL=12\n\
             #EXT-X-PART-INF:PART-TARGET=0.25\n\
-            #EXT-X-SKIP:SKIPPED-SEGMENTS=3\n\
             #EXT-X-PART:DURATION=0.25,URI=\"part1.m4s\",INDEPENDENT=YES\n\
             #EXTINF:2,\nseg-1.m4s\n\
             #EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part2.m4s\"\n\
@@ -1157,6 +1157,26 @@ mod test {
         let tags = rewritten.lines().filter(|line| line.starts_with('#')).collect::<Vec<_>>();
         assert_eq!(tags, ["#EXTM3U", "#EXT-X-TARGETDURATION:2", "#EXT-X-SERVER-CONTROL:HOLD-BACK=6", "#EXTINF:2,"]);
         assert_eq!(rewritten.lines().filter(|line| line.starts_with("http://proxy/hls/")).count(), 1);
+    }
+
+    #[test]
+    fn rewrite_hls_keeps_delta_playlist_skip_and_sequence() {
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:100\n\
+            #EXT-X-SERVER-CONTROL:CAN-SKIP-UNTIL=12,HOLD-BACK=6\n\
+            #EXT-X-SKIP:SKIPPED-SEGMENTS=3\n#EXTINF:2,\nseg-103.ts";
+        let rewritten = rewrite_hls(&test_user(), &rewrite_props(content, Some("s")));
+        let tags = rewritten.lines().filter(|line| line.starts_with('#')).collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            [
+                "#EXTM3U",
+                "#EXT-X-TARGETDURATION:2",
+                "#EXT-X-MEDIA-SEQUENCE:100",
+                "#EXT-X-SERVER-CONTROL:HOLD-BACK=6",
+                "#EXT-X-SKIP:SKIPPED-SEGMENTS=3",
+                "#EXTINF:2,"
+            ]
+        );
     }
 
     #[test]

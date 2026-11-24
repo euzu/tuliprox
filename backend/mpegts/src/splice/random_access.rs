@@ -18,6 +18,8 @@ pub struct TsRandomAccessScanner {
     last_pat: Option<u64>,
     pmt_after_last_pat: bool,
     pes_open: bool,
+    /// PAT position that opened the random access point the open PES may complete.
+    pes_pat: Option<u64>,
     pes_scratch: Vec<u8>,
 }
 
@@ -38,6 +40,7 @@ impl TsRandomAccessScanner {
             last_pat: None,
             pmt_after_last_pat: false,
             pes_open: false,
+            pes_pat: None,
             pes_scratch: Vec::with_capacity(KEYFRAME_SCAN_BYTES),
         }
     }
@@ -164,19 +167,18 @@ impl TsRandomAccessScanner {
         self.programs.reset();
         self.last_pat = None;
         self.pmt_after_last_pat = false;
-        self.pes_open = false;
-        self.pes_scratch.clear();
+        self.close_open_pes();
     }
 
     fn inspect_packet(&mut self, view: TsPacket<'_>, packet_pos: u64, newest_rap: &mut Option<u64>) {
         let pid = view.pid();
         let pusi = view.payload_unit_start();
 
+        // A repeated PAT inside an open video PES leaves it open: its keyframe still belongs to
+        // the PAT captured when the PES started.
         if pid == PAT_PID && pusi {
             self.last_pat = Some(packet_pos);
             self.pmt_after_last_pat = false;
-            self.pes_open = false;
-            self.pes_scratch.clear();
         }
 
         let was_pmt = self.programs.observe(view);
@@ -185,14 +187,9 @@ impl TsRandomAccessScanner {
             if self.programs.video().is_none() {
                 *newest_rap = self.last_pat;
                 self.pmt_after_last_pat = false;
-                self.pes_open = false;
-                self.pes_scratch.clear();
+                self.close_open_pes();
                 return;
             }
-        }
-
-        if !self.pmt_after_last_pat {
-            return;
         }
 
         let Some((video_pid, stream_type)) = self.programs.video() else {
@@ -203,34 +200,46 @@ impl TsRandomAccessScanner {
             return;
         }
 
-        if pusi {
-            if view.random_access() || is_idr_start(stream_type, view.payload()) {
-                *newest_rap = self.last_pat;
-                self.pmt_after_last_pat = false;
-                self.pes_open = false;
-                self.pes_scratch.clear();
-            } else {
-                let data = pes_elementary_data(view.payload());
-                self.pes_open = data.is_some();
-                self.pes_scratch.clear();
-                if let Some(data) = data {
-                    let take = data.len().min(KEYFRAME_SCAN_BYTES);
-                    self.pes_scratch.extend_from_slice(&data[..take]);
-                }
+        if !pusi {
+            if self.pes_open {
+                self.continue_open_pes(view, stream_type, newest_rap);
             }
-        } else if self.pes_open {
-            let room = KEYFRAME_SCAN_BYTES.saturating_sub(self.pes_scratch.len());
-            let payload = view.payload();
-            self.pes_scratch.extend_from_slice(&payload[..payload.len().min(room)]);
-            if es_has_keyframe(stream_type, &self.pes_scratch) {
-                *newest_rap = self.last_pat;
-                self.pmt_after_last_pat = false;
-                self.pes_open = false;
-                self.pes_scratch.clear();
-            } else if self.pes_scratch.len() >= KEYFRAME_SCAN_BYTES {
-                self.pes_open = false;
-                self.pes_scratch.clear();
-            }
+            return;
         }
+
+        // A new video PES replaces any open one.
+        self.close_open_pes();
+        if !self.pmt_after_last_pat {
+            return;
+        }
+        if view.random_access() || is_idr_start(stream_type, view.payload()) {
+            *newest_rap = self.last_pat;
+            self.pmt_after_last_pat = false;
+        } else if let Some(data) = pes_elementary_data(view.payload()) {
+            self.pes_open = true;
+            self.pes_pat = self.last_pat;
+            self.pes_scratch.extend_from_slice(&data[..data.len().min(KEYFRAME_SCAN_BYTES)]);
+        }
+    }
+
+    fn continue_open_pes(&mut self, view: TsPacket<'_>, stream_type: u8, newest_rap: &mut Option<u64>) {
+        let room = KEYFRAME_SCAN_BYTES.saturating_sub(self.pes_scratch.len());
+        let payload = view.payload();
+        self.pes_scratch.extend_from_slice(&payload[..payload.len().min(room)]);
+        if es_has_keyframe(stream_type, &self.pes_scratch) {
+            *newest_rap = self.pes_pat;
+            if self.pes_pat == self.last_pat {
+                self.pmt_after_last_pat = false;
+            }
+            self.close_open_pes();
+        } else if self.pes_scratch.len() >= KEYFRAME_SCAN_BYTES {
+            self.close_open_pes();
+        }
+    }
+
+    fn close_open_pes(&mut self) {
+        self.pes_open = false;
+        self.pes_pat = None;
+        self.pes_scratch.clear();
     }
 }

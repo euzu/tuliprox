@@ -12,6 +12,9 @@ pub(crate) struct ProgramMap {
     pmt_pids: HashMap<u16, u16>,
     /// First video elementary stream: PID and stream type.
     video: Option<(u16, u8)>,
+    /// PMT PID of the program that provides `video`. In a multi-program stream a PMT without
+    /// video replaces the selection only when it belongs to that program.
+    video_pmt: Option<u16>,
     /// CRC of the PAT the program map was built from.
     pat_crc: Option<u32>,
 }
@@ -23,6 +26,7 @@ impl ProgramMap {
     pub(crate) fn reset(&mut self) {
         self.pmt_pids.clear();
         self.video = None;
+        self.video_pmt = None;
         self.pat_crc = None;
     }
 
@@ -70,20 +74,35 @@ impl ProgramMap {
                     (program != 0).then_some((pmt_pid, program))
                 })
                 .collect();
+            if self.video_pmt.is_some_and(|pmt| !self.pmt_pids.contains_key(&pmt)) {
+                self.video = None;
+                self.video_pmt = None;
+            }
             return false;
         }
         if is_pmt && section[0] == PMT_TABLE_ID && entries.len() >= 4 {
             let info_len = (usize::from(entries[2] & 0x0F) << 8) | usize::from(entries[3]);
             let mut streams = entries.get(4 + info_len..).unwrap_or(&[]);
-            self.video = None;
+            let mut program_video = None;
             while streams.len() >= 5 {
                 let stream_type = streams[0];
                 let es_pid = pid_from_bytes(streams[1], streams[2]);
                 let es_info_len = (usize::from(streams[3] & 0x0F) << 8) | usize::from(streams[4]);
-                if self.video.is_none() && is_video_stream_type(stream_type) {
-                    self.video = Some((es_pid, stream_type));
+                if program_video.is_none() && is_video_stream_type(stream_type) {
+                    program_video = Some((es_pid, stream_type));
                 }
                 streams = streams.get(5 + es_info_len..).unwrap_or(&[]);
+            }
+            match program_video {
+                Some(video) if self.video_pmt.is_none_or(|selected| selected == pid) => {
+                    self.video = Some(video);
+                    self.video_pmt = Some(pid);
+                }
+                None if self.video_pmt == Some(pid) => {
+                    self.video = None;
+                    self.video_pmt = None;
+                }
+                _ => {}
             }
             return true;
         }

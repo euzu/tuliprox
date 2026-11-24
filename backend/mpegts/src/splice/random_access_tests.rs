@@ -132,3 +132,44 @@ fn mpeg2_sequence_header_without_rai_flag_in_start_packet() {
     let stream = join(&[pat(0), pmt, pes(VIDEO_PID, false, false, &[&mpeg2(0xB3)])]);
     assert_eq!(scanner.observe(&stream), Some(0));
 }
+
+#[test]
+fn repeated_pat_inside_open_pes_keeps_its_keyframe_scan() {
+    let mut scanner = TsRandomAccessScanner::new();
+    let sei = [vec![0x06], vec![0x05; 150]].concat();
+    let pes_start = pes(VIDEO_PID, false, false, &[&h264(9), &sei]);
+    let idr_continuation = ts(VIDEO_PID, false, None, &[0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84]);
+    let stream = join(&[pat(0), video_pmt(0), pes_start, pat(0), idr_continuation]);
+
+    assert_eq!(scanner.observe(&stream), Some(0));
+}
+
+/// PAT announcing a video program on `PMT_PID` and a radio program on `RADIO_PMT_PID`.
+fn two_program_pat() -> Vec<u8> {
+    let section = vec![0x00, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00, 0x00, 0x02, 0xF0, 0x01];
+    psi(0, &finish_section(section))
+}
+
+const RADIO_PMT_PID: u16 = 0x1001;
+
+fn radio_pmt() -> Vec<u8> { psi(RADIO_PMT_PID, &pmt_section(0, 2, &[(AAC, 0x201)])) }
+
+#[test]
+fn radio_program_pmt_does_not_hide_the_video_program() {
+    let mut scanner = TsRandomAccessScanner::new();
+    let non_key = pes(VIDEO_PID, false, false, &[&h264(1)]);
+    let stream = join(&[two_program_pat(), video_pmt(0), radio_pmt(), non_key]);
+    assert_eq!(scanner.observe(&stream), None);
+
+    let keyframe = pes(VIDEO_PID, true, false, &[&h264(5)]);
+    let gop = join(&[two_program_pat(), video_pmt(0), radio_pmt(), keyframe]);
+    assert_eq!(scanner.observe(&gop), Some(752));
+}
+
+#[test]
+fn radio_only_stream_still_opens_at_pat_and_pmt() {
+    let mut scanner = TsRandomAccessScanner::new();
+    let section = vec![0x00, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x02, 0xF0, 0x01];
+    let stream = join(&[psi(0, &finish_section(section)), radio_pmt()]);
+    assert_eq!(scanner.observe(&stream), Some(0));
+}

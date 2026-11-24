@@ -162,7 +162,7 @@ reverse_proxy:
 | `catchup_session_ttl_secs` | Int | `45` | Same session-holding principle applied to Archive/Catchup TV. See notes on section [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup) for details. |
 | `provider_affinity_ttl_secs` | Int | `120` | How long a reconnect-capable playback (HLS, DASH, Catchup, VOD) keeps returning to its last provider account after the reconnect window has ended. It holds no connection slot and never causes a grace over-allocation. `0` ends the preference together with the reconnect window; the maximum is `86400`. See [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup). |
 | `hls_wrap_media_playlist` | Bool | `true` | With the shared HLS cache off, a proxied live HLS entry request whose provider returns a media playlist is answered with a single-variant master playlist. The player then refreshes a sealed token URL instead of the entry URL, so the playback keeps its owner, lease and provider account when the client IP changes. Disable it for players that mishandle a master playlist. See [Playlist refreshes and client IP changes](#playlist-refreshes-and-client-ip-changes). |
-| `shared_burst_buffer_mb` | Int | `12` | Memory cap (in MB) of the burst ring buffer and lag reserve for slow subscribers on shared live streams. See notes on section [Shared Live Streams](#shared-live-streams) for details. |
+| `shared_burst_buffer_mb` | Int | `12` | Minimum size (in MB) of the burst ring buffer and lag reserve for slow subscribers on shared live streams. A larger channel buffer can raise the ring size, and a single chunk larger than the ring is kept whole. See notes on section [Shared Live Streams](#shared-live-streams) for details. |
 | `shared_burst_secs` | Int | `3` | Minimum seconds a new subscriber of a shared live stream starts behind live, aligned to the newest keyframe arriving at least this many seconds ago. `0` sends the whole burst buffer. See [Shared Live Streams](#shared-live-streams). |
 | `cleanup_queue_capacity` | Int | `4096` | Maximum number of concurrent cleanup permits available to active response bodies and shared subscribers. Must be at least `1`. If all permits remain held, new stream admission waits for a bounded interval and then returns `503 Service Unavailable` instead of growing memory without limit. |
 | `recent_eviction_reentry_ttl_ms` | Int | `3000` | Time window after an eviction during which a retry of the evicted playback must not evict its replacement. The guard is scoped to the user, client address and channel, so unrelated clients are not blocked. Suppressed retries end quietly (no `user_connections_exhausted` video and no `ConnectionDenied` event), since they are not a real connection-limit refusal. Raise this for players with slow automatic retries; `0` disables the guard. The cumulative suppression count is exposed as `reentry_suppressed_total` in the server status (`GET /api/v1/status`). |
@@ -709,9 +709,10 @@ With the shared HLS cache on, the playback owner does not contain the client IP,
 
 Tuliprox serves proxied live HLS as regular HLS. It does not forward the blocking playlist reload directives
 (`_HLS_msn`, `_HLS_part`, `_HLS_skip`) to the provider, so it removes the Low-Latency HLS signalling from every
-proxied playlist: `#EXT-X-PART`, `#EXT-X-PART-INF`, `#EXT-X-PRELOAD-HINT`, `#EXT-X-RENDITION-REPORT` and
-`#EXT-X-SKIP` are dropped, and `#EXT-X-SERVER-CONTROL` keeps only `HOLD-BACK`. Players then poll the playlist and
-load full segments, with the latency of regular HLS.
+proxied playlist: `#EXT-X-PART`, `#EXT-X-PART-INF`, `#EXT-X-PRELOAD-HINT` and `#EXT-X-RENDITION-REPORT` are
+dropped, and `#EXT-X-SERVER-CONTROL` keeps only `HOLD-BACK`. Players then poll the playlist and load full segments,
+with the latency of regular HLS. An `#EXT-X-SKIP` tag of a delta playlist is kept, so the sequence numbers of the
+listed segments stay correct.
 
 ---
 
@@ -733,14 +734,16 @@ Tuliprox can share a live stream (`share_live_streams.mpeg_ts: true` in the targ
 If 5 users watch the same Live-TV channel, Tuliprox pulls the stream only 1x from the provider and multicasts the bytes locally to 5 clients.
 
 Tuliprox keeps an in-memory ring buffer of the recent stream (`shared_burst_buffer_mb`, default `12`).
-This ring buffer serves as a memory cap and a lag reserve for slow subscribers.
+This ring buffer is the lag reserve for slow subscribers. The value is a minimum: a larger channel buffer raises the
+ring size (12 KiB per channel buffer slot), and a single chunk larger than the ring is kept whole.
 
 When a new viewer connects, Tuliprox determines the start point using `shared_burst_secs` (default `3`).
 The viewer starts at the newest keyframe (PAT/PMT followed by a video keyframe) that arrived at least this many seconds ago.
 The decoder can synchronize immediately while retaining a small prebuffer.
 Typical join delay is 3-5 seconds behind live instead of buffer size divided by bitrate (for example, 21 seconds at 12 MB HD).
 
-If no keyframe is that old, Tuliprox starts at the oldest buffered keyframe.
+If no keyframe is that old, Tuliprox starts at the oldest buffered keyframe, so the viewer can start less than
+`shared_burst_secs` behind live.
 If no keyframes are detected (such as non-TS or scrambled streams), the start point falls back to arrival time alone.
 The same fallback applies when the newest suitable keyframe is more than 10 seconds older than the requested start,
 so a stream whose keyframes stop being detected does not fall back to a long delay.

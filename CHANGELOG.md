@@ -1771,7 +1771,7 @@
   `#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES` was passed through unchanged, but the `_HLS_msn`/`_HLS_part`
   directives of the player never reached the provider, so a blocking reload returned at once without the requested
   part. Proxied playlists (regular and shared HLS cache) are now served as regular HLS: part, preload-hint,
-  rendition-report, part-inf and skip tags are removed and `#EXT-X-SERVER-CONTROL` keeps only `HOLD-BACK`.
+  rendition-report and part-inf tags are removed and `#EXT-X-SERVER-CONTROL` keeps only `HOLD-BACK`.
 
 - **New viewers of a shared live stream start close to live.** A viewer joining a shared MPEG-TS stream received the
   whole burst buffer from its oldest byte and played 20-30 s behind live (12 MB at HD bitrate). The viewer now starts
@@ -2788,8 +2788,10 @@
 - **config.yml (`reverse_proxy.stream`)**:
   - `shared_burst_secs` (default `3`): minimum time in seconds a new viewer of a shared live MPEG-TS stream starts behind
     live, aligned to the newest keyframe arriving at least this many seconds ago (typically 3-5 s behind live instead of
-    20-30 s). `0` sends the whole burst buffer from its oldest byte. `shared_burst_buffer_mb` remains the memory cap and
-    lag reserve. Editable in the Web UI under Reverse Proxy → Stream.
+    20-30 s). When the buffer holds no keyframe that old, the viewer starts at the oldest buffered keyframe and can be
+    less than this time behind live. `0` sends the whole burst buffer from its oldest byte. `shared_burst_buffer_mb`
+    remains the minimum ring size and lag reserve; a larger channel buffer can raise the ring size, and a single chunk
+    larger than the ring is kept whole. Editable in the Web UI under Reverse Proxy → Stream.
   - `hls_wrap_media_playlist` (default `true`): answers a proxied live HLS entry request whose provider returns a media
     playlist with a single-variant master playlist, so playlist refreshes keep their provider account across client
     IP changes. Applies only while the shared HLS cache is off for the target. Disable it for players that mishandle a
