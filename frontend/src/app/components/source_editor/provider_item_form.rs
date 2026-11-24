@@ -3,8 +3,8 @@ use crate::{
         select::Select, selection_first, selection_vec, Card, DropDownOption, DropDownSelection, Tag, TagList,
         TextButton,
     },
-    config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u64,
-    edit_field_text, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, edit_field_bool, edit_field_number_u64, edit_field_text,
+    generate_form_reducer,
     i18n::use_translation,
 };
 use shared::{
@@ -397,9 +397,10 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
                 }
             })}
             if props.readonly {
-                { config_field_custom!(
+                { config_field_child!(
                     translate.t(LABEL_PROVIDER_URL_SELECTION_POLICY),
-                    translate.t(provider_url_selection_policy_label_key(form_state.form.provider_url_selection_policy))
+                    "PROVIDER_FORM.URL_SELECTION_POLICY",
+                    { html! { <span class="tp__form-field__value">{translate.t(provider_url_selection_policy_label_key(form_state.form.provider_url_selection_policy))}</span> } }
                 ) }
             } else {
                 { config_field_child!(translate.t(LABEL_PROVIDER_URL_SELECTION_POLICY), "PROVIDER_FORM.URL_SELECTION_POLICY", {
@@ -423,34 +424,40 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
             if props.readonly {
                 { config_field_bool!(dns_state.form, translate.t(LABEL_DNS_ENABLED), enabled) }
                 <div class="tp__config-view__cols-2">
-                    { config_field_custom!(translate.t(LABEL_DNS_REFRESH_SECS), dns_state.form.refresh_secs.to_string()) }
-                    { config_field_custom!(
+                    { config_field_child!(translate.t(LABEL_DNS_REFRESH_SECS), "PROVIDER_DNS.REFRESH_SECS", { html! { <span class="tp__form-field__value">{dns_state.form.refresh_secs.to_string()}</span> } }) }
+                    { config_field_child!(
                         translate.t(LABEL_DNS_MAX_ADDRS),
-                        dns_state.form.max_addrs.map_or_else(String::new, |value| value.to_string())
+                        "PROVIDER_DNS.MAX_ADDRS",
+                        { html! { <span class="tp__form-field__value">{dns_state.form.max_addrs.map_or_else(String::new, |value| value.to_string())}</span> } }
                     ) }
                 </div>
-                { config_field_custom!(translate.t(LABEL_DNS_PREFER), dns_prefer_to_id(dns_state.form.prefer).to_string()) }
-                { config_field_custom!(
+                { config_field_child!(translate.t(LABEL_DNS_PREFER), "PROVIDER_FORM.DNS.PREFER", { html! { <span class="tp__form-field__value">{dns_prefer_to_id(dns_state.form.prefer).to_string()}</span> } }) }
+                { config_field_child!(
                     translate.t(LABEL_DNS_SCHEMES),
-                    dns_state.form.schemes.as_ref().map_or_else(String::new, |schemes| {
-                        let mut result = String::new();
-                        for scheme in schemes {
-                            if !result.is_empty() {
-                                result.push_str(", ");
+                    "PROVIDER_FORM.DNS.SCHEMES",
+                    { html! { <span class="tp__form-field__value">{
+                        dns_state.form.schemes.as_ref().map_or_else(String::new, |schemes| {
+                            let mut result = String::new();
+                            for scheme in schemes {
+                                if !result.is_empty() {
+                                    result.push_str(", ");
+                                }
+                                result.push_str(scheme_to_id(*scheme));
                             }
-                            result.push_str(scheme_to_id(*scheme));
-                        }
-                        result
-                    })
+                            result
+                        })
+                    }</span> } }
                 ) }
                 { config_field_bool!(dns_state.form, translate.t(LABEL_DNS_KEEP_VHOST), keep_vhost) }
-                { config_field_custom!(
+                { config_field_child!(
                     translate.t(LABEL_DNS_ON_RESOLVE_ERROR),
-                    on_resolve_error_to_id(dns_state.form.on_resolve_error).to_string()
+                    "PROVIDER_FORM.DNS.ON_RESOLVE_ERROR",
+                    { html! { <span class="tp__form-field__value">{on_resolve_error_to_id(dns_state.form.on_resolve_error).to_string()}</span> } }
                 ) }
-                { config_field_custom!(
+                { config_field_child!(
                     translate.t(LABEL_DNS_ON_CONNECT_ERROR),
-                    on_connect_error_to_id(dns_state.form.on_connect_error).to_string()
+                    "PROVIDER_FORM.DNS.ON_CONNECT_ERROR",
+                    { html! { <span class="tp__form-field__value">{on_connect_error_to_id(dns_state.form.on_connect_error).to_string()}</span> } }
                 ) }
             } else {
                 <>
@@ -461,6 +468,7 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
                             <crate::app::components::number_input::NumberInput
                                 label={Some(translate.t(LABEL_DNS_MAX_ADDRS))}
                                 name={"dns_max_addrs"}
+                                field_id={Some("PROVIDER_DNS.MAX_ADDRS".to_string())}
                                 value={dns_state.form.max_addrs.map(|v| i64::try_from(v).unwrap_or(i64::MAX))}
                                 on_change={Callback::from({
                                     let dns_state = dns_state.clone();

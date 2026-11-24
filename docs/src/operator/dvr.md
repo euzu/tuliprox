@@ -48,10 +48,10 @@ video:
         cleanup_interval_secs: 3600   # > 0; watermark-check cadence
         safety_bytes: 1073741824      # > 0 (1 GiB)
     quota:
-        default_private_bytes: 53687091200   # 50 GiB
-        per_user_bytes:
-          "web:alice": 107374182400          # 100 GiB, key is the user id (see section 9)
-        shared_bytes: 536870912000           # 500 GiB
+        default_private: 20GB                 # accepts human-readable sizes (e.g. 20GB, 500MB)
+        per_user:
+          "web:alice": 50GB                   # key is the user id (see section 9)
+        shared: 500GB
     notifications:
         outbox_buffer: 1024           # default 1024; in-memory queue depth
         max_attempts: 6               # default 6; then dead-lettered
@@ -75,9 +75,9 @@ Choosing values:
 
 - **Private-only home use** — leave `quota` unset, set `retention.keep_last_per_channel` to taste,
   and leave `disk` unset if the recording filesystem is dedicated.
-- **Shared family install** — set `quota.shared_bytes` and `disk.{high,low}_water_percent` so a
+- **Shared family install** — set `quota.shared` and `disk.{high,low}_water_percent` so a
   full disk degrades into retention rather than failed recordings.
-- **Multi-tenant** — set `quota.default_private_bytes` plus per-user overrides, and keep
+- **Multi-tenant** — set `quota.default_private` plus per-user overrides, and keep
   `notifications.max_attempts` low so a broken webhook does not accumulate a backlog.
 
 ### 1.0.1 ⚠️ Retention policy warning
@@ -114,7 +114,8 @@ The validation list, applied at `VideoConfigDto::prepare`:
 - `cleanup_interval_secs > 0`.
 - `low_water_percent < high_water_percent` and both in `0..=100`.
 - `safety_bytes > 0`.
-- `default_private_bytes`, `per_user_bytes[*]`, `shared_bytes` all `> 0` when set.
+- `default_private`, `per_user[*]`, `shared` all `> 0` when set.
+- `per_user` keys are user ids with a namespace: `api:<username>` or `web:<username>`.
 - `fallback_bytes_per_minute > 0`.
 - `timezone` is a valid IANA zone (`chrono_tz::Tz::parse`).
 - `filename_template` contains at least one known placeholder and is no longer than 240 UTF-8 bytes.
@@ -229,6 +230,65 @@ bytes on a character boundary. The path is validated against the recording root 
 any path that escapes the root (via `..`, symlinks, or absolute paths) is rejected with
 `recording_unsafe_path`.
 
+### 2.1 Materialization and library entry model
+
+The recording engine separates the physical capture file from user-facing library records:
+
+- **`PersistedMaterialization`**: Represents the physical media file on disk and the active capture task. It carries no owner identity.
+  Multiple users who schedule the same broadcast attach to the same materialization ("recorded once, linked twice").
+- **`PersistedLibraryEntry`**: Represents a user's personal catalog entry, including owner ID (`api:<username>` or `web:<username>`),
+  visibility (`Private` or `Shared`), custom title, and personal metadata.
+
+Entries link to their underlying materialization through a reference count (`reference_count`).
+Deleting a recording via `DELETE /api/v1/recording/requests/{id}` deletes only the caller's library entry and decrements the reference
+count. The underlying media file and materialization are purged only when `reference_count` drops to zero, or through an explicit
+administrator call to `DELETE /api/v1/recording/materializations/{id}` when unreferenced.
+
+### 2.2 Recording identity from the medium and edit split
+
+Recording deduplication derives identity from the underlying broadcast medium rather than client request metadata:
+
+- **Live TV (single channel)**: `input_name` + provider stream ID + padded recording window (`program_start - pre_roll` to
+  `program_end + post_roll`). Identical time windows and padding share one materialization; different padding creates a separate file.
+- **Live TV (failover group)**: `target_id` + group virtual ID + padded recording window (member selection occurs at playback time).
+- **Live TV without EPG**: provider stream identity + scheduled window.
+- **VOD and Series Episodes**: `input_name` + cluster + provider stream ID (without timestamps). Identical episodes requested across
+  different targets or at different times share one materialization.
+- **Rule-based recordings**: Follow the same medium-based identity rules, with rule occurrence keys preventing duplicate scheduling.
+
+**Edit split:** If a user edits the padding or time window of a library entry attached to a multi-reference materialization, the entry
+is automatically split into a separate new recording (materialization), preserving the existing file and schedule for other users.
+If the entry is the sole reference, it is updated in place.
+
+### 2.3 Recordings over running shared live streams
+
+When a scheduled live MPEG-TS recording starts on a channel that is already streaming as a shared live stream (`share_live_streams`),
+the recording worker connects as a subscriber (`join_shared=1`) instead of allocating an additional provider connection slot:
+
+- **Fallback on race**: If the shared stream disconnects before recording commences, the worker receives `503 channel_unavailable`
+  and immediately falls back to acquiring a dedicated provider connection slot.
+- **Timeouts and lifecycle**: Recording subscribers are exempt from subscriber idle and max-duration timeouts. The recording subscriber
+  keeps the shared stream alive even if all live viewers disconnect.
+- **Priority elevation**: The shared provider connection elevates its effective priority to the recording priority (lowest numeric value)
+  for the duration of the capture window. When the recording finishes, the stream priority reverts to that of the remaining viewers.
+- **Custom recording headers**: If an input defines custom recording headers (`with_recording_headers`) that differ from live playback
+  headers, joining the shared stream is bypassed to avoid origin content divergence.
+
+### 2.4 Clips from enclosing live recordings (MPEG-TS) and compaction
+
+When a user requests a live recording that is temporally completely enclosed within an existing live MPEG-TS recording of the same source,
+Tuliprox creates a virtual **clip** instead of capturing duplicate media:
+
+- **Index generation**: The recording worker maintains a 1-second cadence index (`.tuliprox-recording.idx`) mapping timestamps to file byte offsets.
+- **Virtual delivery**: Clip playback and downloads prepend PAT/PMT packets to the byte range `[start_offset, end_offset)`. Range requests
+  and `Content-Length` reflect the virtual clip file size.
+- **Error propagation**: If the parent recording fails or experiences an upstream gap before the clip's window ends, the clip is marked
+  failed with `recording_source_recording_failed` or `recording_source_gap`.
+- **Cancellation**: If the owner of the enclosing recording cancels or deletes their task while the clip is still recording, the worker
+  continues capturing until the latest end timestamp of all attached entries and clips.
+- **Compaction**: When the full enclosing recording is deleted and only clips remain on disk, a background compaction worker copies the
+  union of active clip byte ranges into a new compacted file (`_compacted`), updates entry offsets atomically, and removes the original file.
+
 ## 3. Filename placeholders
 
 `filename_template` names live recordings. The container format supplies the extension
@@ -312,6 +372,18 @@ When the bitrate is unknown at create time, the reservation is
 `UnknownBitrate` warning. The runtime re-reserves with the measured rate as soon as the worker
 starts.
 
+### 5.3 Quota resolution order for API proxy users
+
+For playlist proxy users (`api:<username>`), quota is resolved in the following priority order:
+
+1. Explicit per-user override in `video.recording.quota.per_user["api:<username>"]`.
+2. Personal quota configured in `player_features.recording_quota` (from the user credential block, or inherited from the user's plan).
+3. Global default private quota in `video.recording.quota.default_private`.
+
+Shared recordings created by API users with the `shared` level draw exclusively from the shared pool (`video.recording.quota.shared`).
+Each user's library entry is charged the full size of its recording (or its clip's virtual byte size), ensuring that deleting a co-viewer's
+entry never unexpectedly charges or shifts quota to other users.
+
 ## 6. Disk admission
 
 The disk admission path:
@@ -325,6 +397,15 @@ admit    = charge <= headroom
 path's mount. The pre-start flow always passes the canonical recording root so the measurement is
 on the same filesystem the file will live on. Two starts cannot consume the same headroom — the
 active reservation is serialized through the queue-mutation boundary.
+
+### 6.1 Concurrent recording limits (`max_concurrent_recordings`)
+
+For API users with a configured `max_concurrent_recordings` limit, admission checks that active (non-terminal) recordings
+belonging to the caller do not exceed this limit within the candidate's padded recording window (`program_start - pre_roll` to
+`program_end + post_roll`). If the limit would be breached, admission rejects the request with HTTP 400 (`recording_concurrency_exceeded`).
+
+Attached entries and virtual clips referencing an already-running or planned materialization do not consume additional provider
+capacity and do not count toward `max_concurrent_recordings`.
 
 ## 7. Safe deletion guarantees
 
@@ -377,16 +458,16 @@ behaviour they cover is asserted portably by the no-clobber tests.
 
 ## 8. Authorization matrix
 
-| Operation                    | Private recording                 | Shared recording                 | Orphan                          |
-|------------------------------|-----------------------------------|----------------------------------|---------------------------------|
-| Read / Playback / Download   | owner with `recording.read`       | anyone with `recording.read`     | admin only                      |
-| Create private               | user with `recording.create`      | n/a                              | n/a                             |
-| Create shared                | rejected (admin only)             | admin + `recording.create`       | n/a                             |
-| Edit / Cancel                | owner + `recording.manage`        | admin + `recording.manage`       | n/a                             |
-| Delete                       | owner + `recording.delete`        | admin + `recording.delete`       | n/a                             |
-| Manage recurring rule        | owner + `recording.manage`        | admin + `recording.manage`       | admin only                      |
-| `SystemRetentionDelete`      | ownership bypassed; state-gated   | ownership bypassed; state-gated  | ownership bypassed; state-gated |
-| Orphan catalog               | n/a                               | n/a                              | n/a                             |
+| Operation                  | Private recording                     | Shared recording                       | Orphan                          |
+|:---------------------------|:--------------------------------------|:---------------------------------------|:--------------------------------|
+| Read / Playback / Download | owner with `recording.read`           | anyone with `recording.read`           | admin only                      |
+| Create private             | user with `recording.create`          | n/a                                    | n/a                             |
+| Create shared              | rejected (admin or `recording.share`) | admin or user with `recording.share`   | n/a                             |
+| Edit / Cancel              | owner + `recording.manage`            | admin or owner with `recording.manage` | n/a                             |
+| Delete                     | owner + `recording.delete`            | admin or owner with `recording.delete` | n/a                             |
+| Manage recurring rule      | owner + `recording.manage`            | admin + `recording.manage`             | admin only                      |
+| `SystemRetentionDelete`    | ownership bypassed; state-gated       | ownership bypassed; state-gated        | ownership bypassed; state-gated |
+| Orphan catalog             | n/a                                   | n/a                                    | n/a                             |
 
 Administrators **do not** implicitly receive another regular user's private recording content. The
 private owner is the only non-administrator allowed to read it. Administrative access is read-only
@@ -397,6 +478,59 @@ combination.
 Orphan catalog entries (recordings whose target/input no longer matches a configured source) are
 visible only to administrators with `recording.read`. The path is never exposed; an opaque orphan
 id is generated per discovery.
+
+### 8.1 API user recordings and permissions
+
+Playlist proxy users configure DVR capabilities through `player_features.recording` on their user or plan:
+
+| Level     | Effective permissions                                                        | Description                                                                                               |
+|:----------|:-----------------------------------------------------------------------------|:----------------------------------------------------------------------------------------------------------|
+| `none`    | none                                                                         | DVR disabled. WebSocket snapshot returns `recording_forbidden`; REST routes return `403`.                 |
+| `read`    | `recording.read`                                                             | View visible recordings in the WebSocket snapshot, stream playback, and download media.                   |
+| `private` | `recording.read`, `recording.create`, `recording.manage`, `recording.delete` | Additionally schedule private recordings, edit padding/intervals, cancel, and delete own library entries. |
+| `shared`  | all above + `recording.share`                                                | Additionally create shared recordings accessible to other users with `recording.read`.                    |
+
+Effective permissions for API users (`api:<username>`) are computed dynamically from live configuration on every request and
+WebSocket snapshot dispatch. Updating a user's plan or features takes effect immediately without re-authenticating or issuing new JWTs.
+
+#### Shared recording visibility rules
+
+To prevent leaking catalog items across targets or content filters, an API user sees a shared recording in snapshots and catalog
+endpoints (playback, download, thumbnails) only if:
+
+1. `metadata.source.target_id` matches the user's assigned target.
+2. The channel (`metadata.source.virtual_id`) is permitted by the user's content filter (`allows_content` and `allows_item_type`).
+
+If a source cannot be resolved or is excluded by the filter, the shared recording is hidden (fail-closed).
+A user's own private recordings always remain visible to their creator, even if a subsequent filter change hides the underlying channel.
+
+### 8.2 Recordings in the Xtream VOD catalogue
+
+A playlist user whose effective `player_features.recording` is `read`, `private` or `shared` also finds
+their recordings in the regular Xtream VOD endpoints of their player, next to the movies of their target.
+The feature needs three things at once: DVR is enabled globally (`recording.enabled`), the user is a
+playlist user from `api_proxy.yml` with the `Video` output cluster, and their target has an Xtream output.
+If any of them is missing, the endpoints answer exactly as they would without DVR.
+
+- **Category.** `get_vod_categories` carries one extra category, `Recordings`
+  (`category_id` `2000000000`). `get_vod_streams?category_id=2000000000` returns only recordings and does
+  not scan the target playlist. Without a `category_id`, recordings are appended after the playlist entries.
+- **Completed only.** A recording is listed once it is `completed` and has a final file on disk. A running,
+  failed or cancelled recording is neither listed nor playable, so "listed" always means "playable".
+- **Visibility.** The same rule as the snapshot and the library routes applies: own private recordings are
+  always visible, shared recordings only within the user's target and content filter, everything else is
+  hidden. A recording that is not visible answers `404` on `/movie/{user}/{pass}/{id}.{ext}`, so the
+  existence of another user's private recording is not disclosed.
+- **Ids.** Each recording keeps a persistent stream id from the range starting at `1000000000`, stored with
+  the task and never reused. A playlist item that already carries the same id wins: the movie path and
+  `get_vod_info` consult recordings only when no playlist entry matches.
+- **Playback counts as a connection.** Playing a recording through `/movie/{user}/{pass}/{id}.{ext}` goes
+  through the same admission as a local library file, so it occupies one of the user's `max_connections`
+  slots for the duration of the stream. It requests no provider connection. HTTP range requests and clip
+  entries work as on `/library/recording/playback/{uuid}`; the `Content-Type` follows the container
+  (`ts` → `video/mp2t`, `mp4` → `video/mp4`, `mkv` → `video/x-matroska`).
+- **No provider data.** Recording entries carry the title, the container extension and the recording
+  category only. They expose no input name, provider id or upstream URL.
 
 ## 9. User ids
 
@@ -410,7 +544,7 @@ A web user and an API user with the same name are different principals. The user
 configured, so a web user signing in with different letter case still gets the same id. The
 characters `%`, `/`, `\` and NUL are percent-encoded (`a/b` becomes `web:a%2Fb`).
 
-These ids own recordings and rules, key `quota.per_user_bytes`, and are the target of token
+These ids own recordings and rules, key `quota.per_user`, and are the target of token
 revocation. Renaming a user in the configuration therefore starts a new principal: recordings and
 rules stay with the old name until it is renamed back.
 
@@ -469,6 +603,10 @@ POST   /api/v1/recording/rules
 PATCH  /api/v1/recording/rules/{id}
 DELETE /api/v1/recording/rules/{id}?future=retain|cancel
 ```
+
+For recurring recording rules (`RuleSource`), `provider_id` and `is_group` are set by the server from the resolved
+source and are ignored on input during create and edit. For playlist users the server also derives `input_name`
+from their own target and stores `target_id` as the target name; see [Player API](../player-api.md).
 
 A `requests/{id}` route addresses the caller's own library entry. The four
 `materializations/{id}` routes act on the shared physical file, are

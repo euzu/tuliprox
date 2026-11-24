@@ -89,6 +89,8 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         t_filter: None,
         t_has_unresolved_plan: false,
         t_has_invalid_filter: false,
+        player_features: tuliprox_core::model::PlayerFeatures::default(),
+        raw_player_features: None,
     }
 }
 
@@ -117,7 +119,7 @@ pub(crate) fn with_recording_headers(app_config: &AppConfig, input: Arc<ConfigIn
     let config = app_config.config.load();
     let Some(recording) = config.recording() else { return input };
     let recording_headers = recording.origin_headers(&config);
-    if recording_headers.keys().all(|name| input.headers.keys().any(|key| key.eq_ignore_ascii_case(name.as_str()))) {
+    if !adds_recording_headers(recording_headers, &input) {
         return input;
     }
     let mut merged = input.as_ref().clone();
@@ -128,6 +130,25 @@ pub(crate) fn with_recording_headers(app_config: &AppConfig, input: Arc<ConfigIn
         }
     }
     Arc::new(merged)
+}
+
+/// Whether the configured recording headers differ from the input's own headers.
+pub(crate) fn recording_headers_differ(app_config: &AppConfig, input: &ConfigInput) -> bool {
+    let config = app_config.config.load();
+    let Some(recording) = config.recording() else { return false };
+    let recording_headers = recording.origin_headers(&config);
+    if recording_headers.is_empty() {
+        return false;
+    }
+    let sources = app_config.sources.load();
+    let original_input = sources.get_input_by_name(&input.name);
+    adds_recording_headers(recording_headers, original_input.map_or(input, |v| v.as_ref()))
+}
+
+/// Whether merging the recording headers adds one the input does not set itself;
+/// the input's own headers keep precedence, so only missing names change the request.
+fn adds_recording_headers(recording_headers: &axum::http::HeaderMap, input: &ConfigInput) -> bool {
+    !recording_headers.keys().all(|name| input.headers.keys().any(|key| key.eq_ignore_ascii_case(name.as_str())))
 }
 
 /// The input as seen by `user`: recording playback adds the recording headers.

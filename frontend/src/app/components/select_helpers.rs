@@ -1,6 +1,6 @@
 use crate::app::components::{DropDownOption, DropDownSelection};
 use std::str::FromStr;
-use yew::{virtual_dom::VNode, Html};
+use yew::{html, virtual_dom::VNode, Html};
 
 pub(crate) fn build_options<T, I, F>(values: I, selected: &T, label: F) -> Vec<DropDownOption>
 where
@@ -48,9 +48,37 @@ pub(crate) fn selection_vec(selection: DropDownSelection) -> Vec<String> {
     }
 }
 
+pub(crate) fn build_tri_state_options(
+    current: Option<bool>,
+    inherit_label: &str,
+    enabled_label: &str,
+    disabled_label: &str,
+) -> Vec<DropDownOption> {
+    vec![
+        DropDownOption { id: String::new(), label: html! { inherit_label }, selected: current.is_none() },
+        DropDownOption { id: "true".to_string(), label: html! { enabled_label }, selected: current == Some(true) },
+        DropDownOption { id: "false".to_string(), label: html! { disabled_label }, selected: current == Some(false) },
+    ]
+}
+
+pub(crate) fn parse_tri_state_id(id: Option<&str>) -> Option<bool> {
+    match id {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_tri_state_selection(selection: &DropDownSelection) -> Option<bool> {
+    parse_tri_state_id(selection_first(selection))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{selection_first, selection_first_owned, selection_parse_first, selection_vec};
+    use super::{
+        build_tri_state_options, parse_tri_state_selection, selection_first, selection_first_owned,
+        selection_parse_first, selection_vec,
+    };
     use crate::app::components::DropDownSelection;
 
     #[test]
@@ -81,6 +109,34 @@ mod tests {
         assert_eq!(selection_parse_first::<u8>(&selection), Some(7));
         assert_eq!(selection_first_owned(selection.clone()), Some("7".to_string()));
         assert_eq!(selection_vec(selection), vec!["7".to_string(), "9".to_string()]);
+    }
+
+    #[test]
+    fn tri_state_options_handles_all_variants() {
+        let none_opts = build_tri_state_options(None, "Inherit", "Enabled", "Disabled");
+        assert_eq!(none_opts.len(), 3);
+        assert!(none_opts[0].selected);
+        assert!(!none_opts[1].selected);
+        assert!(!none_opts[2].selected);
+
+        let true_opts = build_tri_state_options(Some(true), "Inherit", "Enabled", "Disabled");
+        assert!(!true_opts[0].selected);
+        assert!(true_opts[1].selected);
+        assert!(!true_opts[2].selected);
+
+        let false_opts = build_tri_state_options(Some(false), "Inherit", "Enabled", "Disabled");
+        assert!(!false_opts[0].selected);
+        assert!(!false_opts[1].selected);
+        assert!(false_opts[2].selected);
+    }
+
+    #[test]
+    fn tri_state_selection_parsing() {
+        assert_eq!(parse_tri_state_selection(&DropDownSelection::Empty), None);
+        assert_eq!(parse_tri_state_selection(&DropDownSelection::Single(String::new())), None);
+        assert_eq!(parse_tri_state_selection(&DropDownSelection::Single("true".to_string())), Some(true));
+        assert_eq!(parse_tri_state_selection(&DropDownSelection::Single("false".to_string())), Some(false));
+        assert_eq!(parse_tri_state_selection(&DropDownSelection::Single("other".to_string())), None);
     }
 }
 

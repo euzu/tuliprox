@@ -24,7 +24,7 @@ async fn media_retry_waiting_and_limit_keep_the_transfer_cause() -> Result<(), B
         let cause = "Error while opening stream: (http://user:password@upstream.example/live/1?token=secret) Operation timed out";
         let public_cause = crate::recording::recording_worker::redact_url_tokens(cause);
         assert_eq!(public_cause, "Error while opening stream: [stream URL] Operation timed out");
-        let retry = super::super::prepare_active_retry(&queue, "task", &config, &public_cause).await?;
+        let retry = super::super::prepare_active_retry(&queue, "task", &config, &public_cause, false).await?;
         assert!(matches!(retry, Some(super::super::RetryCommit::Waiting { delay_secs: 1, attempts: 1 })));
         {
             let active = queue.active.read().await;
@@ -33,8 +33,8 @@ async fn media_retry_waiting_and_limit_keep_the_transfer_cause() -> Result<(), B
             assert!(active.error.as_deref().is_some_and(|error| error.contains(&public_cause)));
             assert!(active.next_retry_at.is_some());
         }
-        let retry = super::super::prepare_active_retry(&queue, "task", &config, &public_cause).await?;
-        assert!(matches!(retry, Some(super::super::RetryCommit::Failed(_))));
+        let retry = super::super::prepare_active_retry(&queue, "task", &config, &public_cause, false).await?;
+        assert!(matches!(retry, Some(super::super::RetryCommit::Failed { .. })));
         let finished = queue.finished.read().await;
         let failed = finished.first().ok_or("terminal transfer missing")?;
         assert_eq!(failed.state, RecordingTaskState::Failed);

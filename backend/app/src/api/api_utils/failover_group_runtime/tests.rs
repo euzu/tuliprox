@@ -16,7 +16,7 @@ fn upstream_error_class_follows_http_status() {
 mod switcher {
     use super::super::{
         GroupEnd, GroupFailoverContext, GroupFailoverDriver, GroupPoll, GroupSwitcher, ManualSwitchCommand, MemberHost,
-        RuntimeMember,
+        RuntimeMember, SwitchError,
     };
     use crate::api::{
         api_utils::tests::group_playback_support::{member_ts, FakeOriginMode, GroupPlaybackEnv},
@@ -375,7 +375,98 @@ mod switcher {
         assert!(matches!(ended.unwrap(), GroupEnd::SwitchFailed { reason: SwitchReason::Manual }));
         assert_eq!(switcher.driver.current, 0, "did not adopt third member (maris)");
         let res = rx.await.expect("response");
-        assert_eq!(res.unwrap_err(), "Failed to open target member and failed to restore current member");
+        assert_eq!(res.unwrap_err(), SwitchError::TargetFailedUnrestored);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_switch_cooldown_rejects_subsequent_request_within_2s() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath", "maris"])
+            .origin_mode("solis", FakeOriginMode::TsThenStall(member_ts(0x100, 50)))
+            .origin_mode("korath", FakeOriginMode::TsThenStall(member_ts(0x100, 50)))
+            .origin_mode("maris", FakeOriginMode::TsThenStall(member_ts(0x100, 50)))
+            .build()
+            .await;
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover: FailoverGroupRuntimeConfig::default(),
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "switcher-session".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let mut switcher = GroupSwitcher::new(GroupFailoverDriver::new(Arc::new(ctx), 0));
+        let mut host = FakeHost::new(futures::stream::pending().boxed(), false);
+
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        let target_vid_korath = env.member_vid("korath");
+        let sender = switcher.switch_sender();
+        sender.send(ManualSwitchCommand { target_member_vid: target_vid_korath, respondent: tx1 }).expect("send 1");
+
+        loop {
+            match poll(&mut switcher, &mut host).await {
+                GroupPoll::Data(_) | GroupPoll::Keepalive(_) => {
+                    if host.installed > 0 {
+                        break;
+                    }
+                }
+                GroupPoll::Ended(end) => panic!("ended unexpectedly: {end:?}"),
+                GroupPoll::Pending => {}
+            }
+        }
+        let res1 = rx1.await.expect("res1");
+        assert!(res1.is_ok(), "first switch accepted");
+        assert_eq!(switcher.driver.current, 1);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        let target_vid_maris = env.member_vid("maris");
+        sender.send(ManualSwitchCommand { target_member_vid: target_vid_maris, respondent: tx2 }).expect("send 2");
+
+        let _ = poll(&mut switcher, &mut host).await;
+        let res2 = rx2.await.expect("res2");
+        match res2 {
+            Err(SwitchError::Cooldown { retry_after }) => {
+                assert_eq!(retry_after, Duration::from_secs(1));
+            }
+            other => panic!("expected Cooldown, got {other:?}"),
+        }
+
+        tokio::time::advance(Duration::from_millis(1100)).await;
+
+        let (tx3, rx3) = tokio::sync::oneshot::channel();
+        sender.send(ManualSwitchCommand { target_member_vid: target_vid_maris, respondent: tx3 }).expect("send 3");
+
+        loop {
+            match poll(&mut switcher, &mut host).await {
+                GroupPoll::Data(_) | GroupPoll::Keepalive(_) => {
+                    if host.installed > 1 {
+                        break;
+                    }
+                }
+                GroupPoll::Ended(end) => panic!("ended unexpectedly: {end:?}"),
+                GroupPoll::Pending => {}
+            }
+        }
+        let res3 = rx3.await.expect("res3");
+        assert!(res3.is_ok(), "third switch accepted after cooldown expired");
+        assert_eq!(switcher.driver.current, 2);
     }
 
     #[tokio::test]

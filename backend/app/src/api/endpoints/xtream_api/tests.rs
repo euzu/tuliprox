@@ -1204,3 +1204,1514 @@ async fn filtered_xtream_categories_keep_one_generation_during_replacement() {
     assert_eq!(new.0, "New category");
     assert_ne!(old.1, new.1, "mixed generations would yield an empty intersection");
 }
+
+fn set_xtream_test_user_filter(
+    env: &crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv,
+    filter_expr: Option<&str>,
+) {
+    let mut proxy = env.app_state.app_config.api_proxy.load_full().expect("api proxy").as_ref().clone();
+    let mut updated_user = proxy.user[0].credentials[0].as_ref().clone();
+    updated_user.t_filter =
+        filter_expr.map(|expr| Arc::new(shared::foundation::get_filter(expr, None).expect("valid filter")));
+    proxy.user[0].credentials = vec![Arc::new(updated_user)];
+    env.app_state.app_config.api_proxy.store(Some(Arc::new(proxy)));
+}
+
+#[tokio::test]
+async fn xtream_content_filter_hiding_group_entry_denies_member_vid_and_group_vid() {
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use axum::http::StatusCode;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+    let member_1_vid = env.group_record.members[1].member_vid.get();
+
+    // Group entry has Group="General". Filter Group != "General" hides the group entry.
+    set_xtream_test_user_filter(&env, Some(r#"Group != "General""#));
+
+    // 1. Member VID request must be denied with the filtered item status (502 ChannelUnavailable).
+    let member_res = env.get_xtream_live(member_1_vid).await;
+    assert_eq!(member_res.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(env.origin_hits("solis"), 0);
+    assert_eq!(env.origin_hits("korath"), 0);
+
+    // 2. Group VID request must also be denied.
+    let group_res = env.get_xtream_live(env.group_vid).await;
+    assert_eq!(group_res.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(env.origin_hits("solis"), 0);
+    assert_eq!(env.origin_hits("korath"), 0);
+}
+
+#[tokio::test]
+async fn xtream_content_filter_allowing_group_entry_serves_member_vid_starting_on_member() {
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use axum::http::StatusCode;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+    let member_1_vid = env.group_record.members[1].member_vid.get();
+
+    // Group entry has Group="General". Synthesized member item has Group="zdf hd".
+    // Filter Group="General" matches the group entry but would NOT match the synthesized member item.
+    set_xtream_test_user_filter(&env, Some(r#"Group = "General""#));
+
+    let member_res = env.get_xtream_live(member_1_vid).await;
+    assert_eq!(member_res.status(), StatusCode::OK);
+    assert_eq!(env.origin_hits("korath"), 1, "member VID must start on member 1 (korath)");
+    assert_eq!(env.origin_hits("solis"), 0);
+}
+
+#[tokio::test]
+async fn xtream_content_filter_hls_member_vid_checks_group_entry() {
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use axum::http::StatusCode;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).hls().build().await;
+    let member_1_vid = env.group_record.members[1].member_vid.get();
+
+    // 1. Filter hiding group entry denies member VID HLS request with 404 NOT_FOUND.
+    set_xtream_test_user_filter(&env, Some(r#"Group != "General""#));
+    let denied_hls = env.get_hls_manifest(member_1_vid).await;
+    assert_eq!(denied_hls.status(), StatusCode::NOT_FOUND);
+
+    // 2. Filter allowing group entry serves member VID HLS request with 200 OK.
+    set_xtream_test_user_filter(&env, Some(r#"Group = "General""#));
+    let allowed_hls = env.get_hls_manifest(member_1_vid).await;
+    assert_eq!(allowed_hls.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn xtream_content_filter_none_serves_member_vid() {
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use axum::http::StatusCode;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+    let member_1_vid = env.group_record.members[1].member_vid.get();
+
+    // User without filter
+    set_xtream_test_user_filter(&env, None);
+
+    let member_res = env.get_xtream_live(member_1_vid).await;
+    assert_eq!(member_res.status(), StatusCode::OK);
+    assert_eq!(env.origin_hits("korath"), 1, "member VID must start on member 1 (korath)");
+    assert_eq!(env.origin_hits("solis"), 0);
+}
+
+#[tokio::test]
+async fn xtream_timeshift_content_filter_hiding_group_entry_denies_group_vid() {
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use axum::http::StatusCode;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .without_plain_channel()
+        .with_member_archives(&[Some(7), Some(7)])
+        .build()
+        .await;
+
+    // Filter hiding the group entry (group entry has Group="General")
+    set_xtream_test_user_filter(&env, Some(r#"Group != "General""#));
+
+    let now_minus_1_day = (chrono::Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d:%H-%M").to_string();
+    let res = env.get_xtream_timeshift(env.group_vid, "60", &now_minus_1_day).await;
+
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(env.origin_hits("solis"), 0);
+    assert_eq!(env.origin_hits("korath"), 0);
+}
+
+#[tokio::test]
+async fn xtream_timeshift_content_filter_matching_group_category_serves_group_vid() {
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use axum::http::StatusCode;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .without_plain_channel()
+        .with_member_archives(&[Some(7), Some(7)])
+        .build()
+        .await;
+
+    // Filter matching the group entry's category ("General") but not member rows ("zdf hd")
+    set_xtream_test_user_filter(&env, Some(r#"Group = "General""#));
+
+    let now_minus_1_day = (chrono::Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d:%H-%M").to_string();
+    let res = env.get_xtream_timeshift(env.group_vid, "60", &now_minus_1_day).await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(env.origin_hits("solis") + env.origin_hits("korath") >= 1);
+}
+
+#[tokio::test]
+async fn xtream_catchup_content_filter_hiding_group_entry_denies_member_vid() {
+    use crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv;
+    use axum::http::StatusCode;
+
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .without_plain_channel()
+        .with_member_archives(&[Some(7), Some(7)])
+        .build()
+        .await;
+
+    let member_1_vid = env.group_record.members[1].member_vid.get();
+
+    // Filter hiding the group entry (group entry has Group="General")
+    set_xtream_test_user_filter(&env, Some(r#"Group != "General""#));
+
+    let now_minus_1_day = (chrono::Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d:%H-%M").to_string();
+    let res = env.get_xtream_timeshift(member_1_vid, "60", &now_minus_1_day).await;
+
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(env.origin_hits("solis"), 0);
+    assert_eq!(env.origin_hits("korath"), 0);
+}
+
+mod recording_vod {
+    use super::*;
+    use crate::api::{
+        endpoints::xtream_api::xtream_player_api,
+        model::{RecordingTask, UserApiRequest},
+    };
+    use axum::http::StatusCode;
+    use shared::model::{
+        xtream_const::{RECORDINGS_VOD_CATEGORY_ID, RECORDING_VOD_ID_BASE},
+        ApiProxyConfigDto, ApiProxyServerInfoDto, PlayerFeaturesDto, PlayerRecordingLevel, ProxyUserCredentialsDto,
+        RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingVisibility, TargetUserDto, UserId,
+    };
+    use tuliprox_dvr::recording::recording_queue::mutate;
+
+    /// 256 bytes with a value equal to their offset, so a range slice is checkable.
+    fn recording_bytes() -> Vec<u8> { (0..=255u8).collect() }
+
+    struct RecordingVodEnv {
+        _dir: tempfile::TempDir,
+        app_state: Arc<AppState>,
+        target: Arc<ConfigTarget>,
+        vod_id: u32,
+    }
+
+    fn api_proxy(recording: PlayerRecordingLevel, alice_filter: Option<&str>) -> crate::model::ApiProxyConfig {
+        let dto = ApiProxyConfigDto {
+            server: vec![ApiProxyServerInfoDto {
+                name: "default".to_string(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some("8901".to_string()),
+                timezone: "UTC".to_string(),
+                message: "test".to_string(),
+                path: None,
+            }],
+            user: vec![TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![
+                    ProxyUserCredentialsDto {
+                        username: "alice".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        max_connections: 1,
+                        player_features: Some(PlayerFeaturesDto { recording: Some(recording), ..Default::default() }),
+                        filter: alice_filter.map(ToString::to_string),
+                        ..Default::default()
+                    },
+                    ProxyUserCredentialsDto {
+                        username: "bob".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        max_connections: 1,
+                        player_features: Some(PlayerFeaturesDto {
+                            recording: Some(PlayerRecordingLevel::Read),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    ProxyUserCredentialsDto {
+                        username: "carol".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        max_connections: 1,
+                        player_features: Some(PlayerFeaturesDto {
+                            recording: Some(PlayerRecordingLevel::None),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = crate::model::ApiProxyConfig::from(&dto);
+        for target_user in &mut api_proxy.user {
+            for credential in &mut target_user.credentials {
+                Arc::make_mut(credential).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        api_proxy
+    }
+
+    async fn seed_task(
+        app_state: &Arc<AppState>,
+        recording_dir: &std::path::Path,
+        owner: &str,
+        uuid: &str,
+        state: shared::model::RecordingTaskState,
+        metadata: RecordingMetadata,
+        clip: Option<tuliprox_repository::recording_repository::RecordingClip>,
+    ) -> String {
+        let relative = format!("{owner}/film.ts");
+        let file_path = recording_dir.join(&relative);
+        std::fs::create_dir_all(file_path.parent().expect("parent")).expect("create recording dir");
+        std::fs::write(&file_path, recording_bytes()).expect("write recording");
+
+        let recording_config = app_state.app_config.config.load().recording().expect("recording config").clone();
+        let mut task = RecordingTask::new(
+            RecordingKind::Vod,
+            "https://provider.example/film.ts",
+            "film.ts",
+            &recording_config,
+            Some(Arc::from("input-a")),
+            0,
+            metadata,
+        )
+        .expect("valid task");
+        task.uuid = uuid.to_string();
+        task.recording.relative_path = Some(relative);
+        task.state = state;
+        task.finished = state == shared::model::RecordingTaskState::Completed;
+        task.size = recording_bytes().len() as u64;
+        task.clip = clip;
+        let uuid = task.uuid.clone();
+        let persisted = crate::api::model::RecordingQueue::to_persisted(&task);
+        let partition_is_finished = task.finished;
+        mutate(&app_state.recording.queue, move |candidate| {
+            if partition_is_finished {
+                candidate.finished.push(persisted);
+            } else {
+                candidate.queue.push(persisted);
+            }
+            Ok(())
+        })
+        .await
+        .expect("insert recording");
+        uuid
+    }
+
+    fn media_metadata(owner: &str, visibility: RecordingVisibility, target_id: &str) -> RecordingMetadata {
+        RecordingMetadata::new_media(
+            RecordingOwner::User(UserId::api(owner)),
+            visibility,
+            RecordingSource::new(target_id, "42", "input-a").with_cluster(XtreamCluster::Video),
+            "Film".to_string(),
+        )
+    }
+
+    async fn seed_recording(
+        app_state: &Arc<AppState>,
+        recording_dir: &std::path::Path,
+        owner: &str,
+        visibility: RecordingVisibility,
+        state: shared::model::RecordingTaskState,
+    ) -> String {
+        seed_task(
+            app_state,
+            recording_dir,
+            owner,
+            &format!("{owner}-film"),
+            state,
+            media_metadata(owner, visibility, "main"),
+            None,
+        )
+        .await
+    }
+
+    async fn env_inner(
+        recording: PlayerRecordingLevel,
+        alice_filter: Option<&str>,
+        skip_vod_input: bool,
+    ) -> RecordingVodEnv {
+        let dir = tempdir().expect("temp dir");
+        let recording_dir = dir.path().join("recordings");
+        std::fs::create_dir_all(&recording_dir).expect("create recording root");
+        let recording_dto = shared::model::RecordingConfigDto {
+            enabled: true,
+            directory: Some(recording_dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let config = Config {
+            storage_dir: dir.path().to_string_lossy().into_owned(),
+            user_config_dir: Some(dir.path().join("user_config").to_string_lossy().into_owned()),
+            video: Some(crate::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(crate::model::RecordingConfig::from(&recording_dto)),
+            }),
+            user_access_control: true,
+            ..Config::default()
+        };
+        let app_state = create_test_app_state(config);
+        app_state.app_config.set_api_proxy(api_proxy(recording, alice_filter)).expect("api proxy");
+        let target = Arc::new(ConfigTarget { name: "main".to_string(), ..short_epg_target() });
+        let inputs = if skip_vod_input {
+            vec![Arc::new(ConfigInput {
+                id: 1,
+                name: "input-a".intern(),
+                enabled: true,
+                options: Some(crate::model::ConfigInputOptions {
+                    flags: crate::model::ConfigInputFlags::SkipVod.into(),
+                    ..crate::model::ConfigInputOptions::defaults().clone()
+                }),
+                ..ConfigInput::default()
+            })]
+        } else {
+            Vec::new()
+        };
+        let source_inputs = if skip_vod_input { vec!["input-a".intern()] } else { Vec::new() };
+        let sources = SourcesConfig {
+            inputs,
+            sources: vec![crate::model::ConfigSource { inputs: source_inputs, targets: vec![Arc::clone(&target)] }],
+            ..SourcesConfig::default()
+        };
+        app_state.app_config.sources.store(Arc::new(sources));
+
+        seed_recording(
+            &app_state,
+            &recording_dir,
+            "alice",
+            RecordingVisibility::Private,
+            shared::model::RecordingTaskState::Completed,
+        )
+        .await;
+        let vod_id = app_state.recording.queue.finished.read().await[0].vod_id;
+
+        RecordingVodEnv { _dir: dir, app_state, target, vod_id }
+    }
+
+    async fn env(recording: PlayerRecordingLevel) -> RecordingVodEnv { env_inner(recording, None, false).await }
+
+    fn api_request(action: &str) -> UserApiRequest {
+        UserApiRequest {
+            username: "alice".to_string(),
+            password: "pass".to_string(),
+            action: action.to_string(),
+            ..UserApiRequest::default()
+        }
+    }
+
+    /// Caches a movie so the playlist iterator publishes it for the target.
+    async fn cache_vod_item(app_state: &Arc<AppState>, target: &Arc<ConfigTarget>, item: XtreamPlaylistItem) {
+        let mut video = BPlusTree::new();
+        video.insert(item.virtual_id.get(), item.clone());
+        app_state
+            .playlists
+            .cache_playlist(
+                &target.name,
+                PlaylistStorage::XtreamPlaylist(Box::new(PlaylistXtreamStorage::from_trees(
+                    BPlusTree::new(),
+                    video,
+                    BPlusTree::new(),
+                ))),
+            )
+            .await;
+        let mut id_mapping = BPlusTree::new();
+        id_mapping.insert(
+            item.virtual_id,
+            VirtualIdRecord::new(
+                item.provider_id,
+                item.virtual_id,
+                PlaylistItemType::Video,
+                VirtualId::new(0),
+                UUIDType::default(),
+            ),
+        );
+        app_state.playlists.cache_id_mapping(&target.name, id_mapping).await;
+    }
+
+    /// Gives `user` a running stream, so their single connection slot is taken.
+    async fn occupy_connection(
+        app_state: &Arc<AppState>,
+        user: &ProxyUserCredentials,
+        session_token: &str,
+        virtual_id: u32,
+    ) {
+        let addr = "127.0.0.1:55411".parse().expect("addr");
+        let fingerprint = Fingerprint::new("fp-busy".to_string(), "127.0.0.1".to_string(), addr);
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user,
+                session_token,
+                virtual_id,
+                provider: "provider-b",
+                stream_url: "http://other.example/live/9.ts",
+                addr: &addr,
+                connection_permission: shared::model::UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        let channel = shared::model::StreamChannel {
+            target_id: 1,
+            virtual_id,
+            group_virtual_id: None,
+            provider_id: virtual_id,
+            input_name: "provider-b".intern(),
+            item_type: PlaylistItemType::Live,
+            cluster: XtreamCluster::Live,
+            group: "Live".intern(),
+            title: "Busy".intern(),
+            url: "http://other.example/live/9.ts".into(),
+            shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
+            technical: None,
+            epg_channel_id: None,
+            epg_reference_ts: None,
+            upstream_user_agent: None,
+        };
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 401,
+                username: &user.username,
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-b".intern(),
+                stream_channel: &channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some(session_token),
+            })
+            .await;
+    }
+
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let text = response_body_text(response).await.expect("body");
+        serde_json::from_str(&text).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn vod_categories_include_recordings_for_a_read_user_only() {
+        let env = env(PlayerRecordingLevel::Read).await;
+
+        let alice = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5001".parse().expect("addr")),
+            api_request(crate::model::XC_ACTION_GET_VOD_CATEGORIES),
+            &env.app_state,
+        )
+        .await
+        .into_response();
+        assert_eq!(alice.status(), StatusCode::OK);
+        let categories = body_json(alice).await;
+        let entries = categories.as_array().expect("array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["category_id"], RECORDINGS_VOD_CATEGORY_ID.to_string());
+        assert_eq!(entries[0]["category_name"], "Recordings");
+
+        let mut carol_request = api_request(crate::model::XC_ACTION_GET_VOD_CATEGORIES);
+        carol_request.username = "carol".to_string();
+        let carol = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5002".parse().expect("addr")),
+            carol_request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+        assert_eq!(carol.status(), StatusCode::OK);
+        assert_eq!(body_json(carol).await, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn vod_streams_lists_the_completed_recording_in_the_recording_category() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_STREAMS);
+        request.category_id = RECORDINGS_VOD_CATEGORY_ID.to_string();
+
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5003".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let entries = body_json(response).await;
+        let entries = entries.as_array().expect("array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["stream_id"], serde_json::json!(env.vod_id));
+        assert_eq!(entries[0]["category_id"], serde_json::json!(RECORDINGS_VOD_CATEGORY_ID.to_string()));
+        assert_eq!(entries[0]["container_extension"], serde_json::json!("ts"));
+        assert_eq!(entries[0]["name"], serde_json::json!("Film"));
+        assert_eq!(env.vod_id, RECORDING_VOD_ID_BASE, "the first recording takes the first reserved id");
+    }
+
+    #[tokio::test]
+    async fn vod_streams_without_category_appends_the_recording_after_the_playlist() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let mut playlist_item =
+            create_test_vod_item("http://provider.example/movie/user/pass/77.mp4", "mp4", PlaylistItemType::Video);
+        playlist_item.virtual_id = VirtualId::new(77);
+        cache_vod_item(&env.app_state, &env.target, playlist_item).await;
+
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5004".parse().expect("addr")),
+            api_request(crate::model::XC_ACTION_GET_VOD_STREAMS),
+            &env.app_state,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let entries = body_json(response).await;
+        let entries = entries.as_array().expect("array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["stream_id"], serde_json::json!(77));
+        assert_eq!(entries[1]["stream_id"], serde_json::json!(env.vod_id));
+    }
+
+    #[tokio::test]
+    async fn vod_streams_with_reserved_category_prefers_provider_category_over_recordings() {
+        let env = env(PlayerRecordingLevel::Read).await;
+
+        // Provide a real provider category that collides with the reserved recording category id.
+        let config = env.app_state.app_config.config.load();
+        let storage =
+            crate::repository::ensure_xtream_storage_path(&config, &env.target.name).await.expect("storage path");
+        let cat_path = crate::repository::get_collection_path(
+            &storage,
+            crate::repository::xtream_cluster_category_collection(XtreamCluster::Video),
+        );
+        let category_entries = serde_json::json!([{
+            "category_id": RECORDINGS_VOD_CATEGORY_ID.to_string(),
+            "category_name": "Provider Category",
+            "parent_id": 0,
+        }]);
+        std::fs::write(&cat_path, serde_json::to_string(&category_entries).expect("json")).expect("write categories");
+
+        // Seed a provider movie in the colliding category.
+        let mut playlist_item =
+            create_test_vod_item("http://provider.example/movie/user/pass/888.mp4", "mp4", PlaylistItemType::Video);
+        playlist_item.virtual_id = VirtualId::new(888);
+        playlist_item.category_id = RECORDINGS_VOD_CATEGORY_ID;
+        if let Some(StreamProperties::Video(props)) = &mut playlist_item.additional_properties {
+            props.category_id = RECORDINGS_VOD_CATEGORY_ID;
+            props.stream_id = 888;
+        }
+        cache_vod_item(&env.app_state, &env.target, playlist_item).await;
+
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_STREAMS);
+        request.category_id = RECORDINGS_VOD_CATEGORY_ID.to_string();
+
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5010".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let entries = body_json(response).await;
+        let entries = entries.as_array().expect("array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["stream_id"], serde_json::json!(888));
+        assert_eq!(entries[0]["category_id"], serde_json::json!(RECORDINGS_VOD_CATEGORY_ID.to_string()));
+        assert!(entries.iter().all(|e| e["stream_id"] != serde_json::json!(env.vod_id)));
+    }
+
+    #[tokio::test]
+    async fn vod_streams_are_unchanged_for_a_user_without_the_feature() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let mut playlist_item =
+            create_test_vod_item("http://provider.example/movie/user/pass/77.mp4", "mp4", PlaylistItemType::Video);
+        playlist_item.virtual_id = VirtualId::new(77);
+        cache_vod_item(&env.app_state, &env.target, playlist_item).await;
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_STREAMS);
+        request.username = "carol".to_string();
+
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5005".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let entries = body_json(response).await;
+        let entries = entries.as_array().expect("array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["stream_id"], serde_json::json!(77));
+    }
+
+    async fn vod_id_of(env: &RecordingVodEnv, uuid: &str) -> u32 {
+        env.app_state
+            .recording
+            .queue
+            .finished
+            .read()
+            .await
+            .iter()
+            .find(|task| task.uuid == uuid)
+            .map(|task| task.vod_id)
+            .expect("seeded recording")
+    }
+
+    #[tokio::test]
+    async fn a_recording_is_found_by_id_only_for_a_user_that_may_see_it() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let recording_dir = std::path::PathBuf::from(
+            env.app_state.app_config.config.load().recording().expect("recording").directory.clone(),
+        );
+        seed_recording(
+            &env.app_state,
+            &recording_dir,
+            "bob",
+            RecordingVisibility::Private,
+            shared::model::RecordingTaskState::Completed,
+        )
+        .await;
+        let bob_vod_id = vod_id_of(&env, "bob-film").await;
+        assert_ne!(bob_vod_id, env.vod_id, "each recording carries its own id");
+
+        let alice = env.app_state.app_config.get_target_for_user("alice", "pass").expect("alice").0;
+        let bob = env.app_state.app_config.get_target_for_user("bob", "pass").expect("bob").0;
+
+        let own = crate::api::api_utils::visible_recording_by_vod_id(
+            &env.app_state,
+            &alice,
+            env.vod_id,
+            &crate::api::endpoints::recording_api::AppRecordingVisibility::new(&env.app_state),
+        )
+        .await
+        .expect("alice sees her own recording");
+        assert_eq!(own.uuid, "alice-film");
+        assert_eq!(own.vod_id, env.vod_id);
+
+        let bobs = crate::api::api_utils::visible_recording_by_vod_id(
+            &env.app_state,
+            &alice,
+            bob_vod_id,
+            &crate::api::endpoints::recording_api::AppRecordingVisibility::new(&env.app_state),
+        )
+        .await;
+        assert_eq!(bobs.map(|entry| entry.uuid), None, "bob's private recording is not alice's");
+
+        let alices = crate::api::api_utils::visible_recording_by_vod_id(
+            &env.app_state,
+            &bob,
+            env.vod_id,
+            &crate::api::endpoints::recording_api::AppRecordingVisibility::new(&env.app_state),
+        )
+        .await;
+        assert_eq!(alices.map(|entry| entry.uuid), None, "alice's private recording is not bob's");
+
+        let bobs_own = crate::api::api_utils::visible_recording_by_vod_id(
+            &env.app_state,
+            &bob,
+            bob_vod_id,
+            &crate::api::endpoints::recording_api::AppRecordingVisibility::new(&env.app_state),
+        )
+        .await
+        .expect("bob sees his own recording");
+        assert_eq!(bobs_own.uuid, "bob-film");
+    }
+
+    #[tokio::test]
+    async fn another_users_private_recording_is_not_listed() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_STREAMS);
+        request.username = "bob".to_string();
+        request.category_id = RECORDINGS_VOD_CATEGORY_ID.to_string();
+
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5013".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let entries = body_json(response).await;
+        assert_eq!(entries.as_array().expect("array").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn vod_info_answers_with_the_recording_stream_id() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_INFO);
+        request.vod_id = env.vod_id.to_string();
+
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5006".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let document = body_json(response).await;
+        assert_eq!(document["movie_data"]["stream_id"], serde_json::json!(env.vod_id));
+        assert_eq!(document["info"]["name"], serde_json::json!("Film"));
+        assert_eq!(document["movie_data"]["container_extension"], serde_json::json!("ts"));
+    }
+
+    #[tokio::test]
+    async fn movie_path_serves_a_recording_range_with_exact_byte_window() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::RANGE, "bytes=0-99".parse().expect("range header"));
+
+        let response = super::xtream_player_api_stream(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5007".parse().expect("addr")),
+            &headers,
+            &env.app_state,
+            &api_request(""),
+            ApiStreamRequest::from(ApiStreamContext::Movie, "alice", "pass", &format!("{}.ts", env.vod_id), ""),
+            Some((
+                env.app_state.app_config.get_target_for_user("alice", "pass").expect("alice").0,
+                Arc::clone(&env.target),
+            )),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_RANGE).map(|v| v.to_str().expect("value")),
+            Some("bytes 0-99/256")
+        );
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_TYPE).map(|v| v.to_str().expect("value")),
+            Some("video/mp2t")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(body.as_ref(), &recording_bytes()[..100]);
+    }
+
+    async fn movie_response(
+        env: &RecordingVodEnv,
+        username: &str,
+        stream_id: &str,
+        headers: HeaderMap,
+    ) -> axum::response::Response {
+        super::xtream_player_api_stream(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5099".parse().expect("addr")),
+            &headers,
+            &env.app_state,
+            &api_request(""),
+            ApiStreamRequest::from(ApiStreamContext::Movie, username, "pass", stream_id, ""),
+            Some((
+                env.app_state.app_config.get_target_for_user(username, "pass").expect("user").0,
+                Arc::clone(&env.target),
+            )),
+        )
+        .await
+        .into_response()
+    }
+
+    fn fallback_header(response: &axum::response::Response) -> Option<&str> {
+        response.headers().get("X-Tuliprox-Fallback").and_then(|value| value.to_str().ok())
+    }
+
+    /// The regular movie fallback an unknown id answers with.
+    async fn assert_matches_unknown_id_fallback(env: &RecordingVodEnv, username: &str, stream_id: &str) {
+        let baseline = movie_response(env, username, "42", HeaderMap::new()).await;
+        assert_eq!(baseline.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(fallback_header(&baseline), Some("channel_unavailable"));
+
+        let response = movie_response(env, username, stream_id, HeaderMap::new()).await;
+        assert_eq!(response.status(), baseline.status());
+        assert_eq!(fallback_header(&response), fallback_header(&baseline));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_movie_id_below_the_recording_range_answers_with_the_regular_fallback() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let with_feature = movie_response(&env, "alice", "42", HeaderMap::new()).await;
+        let without_feature = movie_response(&env, "carol", "42", HeaderMap::new()).await;
+
+        assert_eq!(with_feature.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(fallback_header(&with_feature), Some("channel_unavailable"));
+        assert_eq!(with_feature.status(), without_feature.status());
+        assert_eq!(fallback_header(&with_feature), fallback_header(&without_feature));
+    }
+
+    #[tokio::test]
+    async fn an_invisible_recording_id_falls_back_like_an_unknown_id() {
+        let env = env(PlayerRecordingLevel::Read).await;
+
+        assert_matches_unknown_id_fallback(&env, "bob", &format!("{}.ts", env.vod_id)).await;
+    }
+
+    #[tokio::test]
+    async fn a_running_recording_is_neither_listed_nor_served() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let recording_dir = std::path::PathBuf::from(
+            env.app_state.app_config.config.load().recording().expect("recording").directory.clone(),
+        );
+        seed_recording(
+            &env.app_state,
+            &recording_dir,
+            "alice",
+            RecordingVisibility::Private,
+            shared::model::RecordingTaskState::Running,
+        )
+        .await;
+        let running_uuid = "alice-film";
+        let running_vod_id = env
+            .app_state
+            .recording
+            .queue
+            .queue
+            .lock()
+            .await
+            .iter()
+            .find(|task| task.uuid == running_uuid)
+            .expect("running task")
+            .vod_id;
+
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_STREAMS);
+        request.category_id = RECORDINGS_VOD_CATEGORY_ID.to_string();
+        let listed = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5009".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+        let entries = body_json(listed).await;
+        let entries = entries.as_array().expect("array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["stream_id"], serde_json::json!(env.vod_id));
+
+        assert_matches_unknown_id_fallback(&env, "alice", &format!("{running_vod_id}.ts")).await;
+    }
+
+    #[tokio::test]
+    async fn a_playlist_item_with_the_recording_id_wins_the_info_lookup() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let mut playlist_item =
+            create_test_vod_item("http://provider.example/movie/user/pass/9.mp4", "mp4", PlaylistItemType::Video);
+        playlist_item.virtual_id = VirtualId::new(env.vod_id);
+        playlist_item.name = "Provider Movie".intern();
+        playlist_item.title = "Provider Movie".intern();
+        cache_vod_item(&env.app_state, &env.target, playlist_item).await;
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_INFO);
+        request.vod_id = env.vod_id.to_string();
+
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5011".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+
+        let document = body_json(response).await;
+        assert_eq!(document["movie_data"]["stream_id"], serde_json::json!(env.vod_id));
+        assert_eq!(document["info"]["name"], serde_json::json!("Provider Movie"));
+        assert_eq!(document["movie_data"]["container_extension"], serde_json::json!("mp4"));
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_user_gets_the_same_rejection_as_for_local_files() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let alice = env.app_state.app_config.get_target_for_user("alice", "pass").expect("alice").0;
+        occupy_connection(&env.app_state, &alice, "busy-session", 9_999).await;
+
+        let response = super::xtream_player_api_stream(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5012".parse().expect("addr")),
+            &HeaderMap::new(),
+            &env.app_state,
+            &api_request(""),
+            ApiStreamRequest::from(ApiStreamContext::Movie, "alice", "pass", &format!("{}.ts", env.vod_id), ""),
+            Some((Arc::clone(&alice), Arc::clone(&env.target))),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response.headers().get("X-Tuliprox-Rejection").map(|v| v.to_str().expect("value")),
+            Some("admission_rejected")
+        );
+    }
+    async fn vod_streams(env: &RecordingVodEnv, username: &str, category_id: Option<u32>) -> Vec<serde_json::Value> {
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_STREAMS);
+        request.username = username.to_string();
+        if let Some(category_id) = category_id {
+            request.category_id = category_id.to_string();
+        }
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5095".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        body_json(response).await.as_array().expect("array").clone()
+    }
+
+    async fn vod_info(env: &RecordingVodEnv, username: &str, vod_id: u32) -> serde_json::Value {
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_INFO);
+        request.username = username.to_string();
+        request.vod_id = vod_id.to_string();
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5096".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        body_json(response).await
+    }
+
+    async fn cache_source_item(env: &RecordingVodEnv, name: &str) {
+        let mut item =
+            create_test_vod_item("http://provider.example/movie/user/pass/42.mp4", "mp4", PlaylistItemType::Video);
+        item.virtual_id = VirtualId::new(42);
+        item.name = name.intern();
+        item.title = name.intern();
+        if let Some(StreamProperties::Video(props)) = &mut item.additional_properties {
+            props.name = name.intern();
+            props.stream_id = 42;
+        }
+        cache_vod_item(&env.app_state, &env.target, item).await;
+    }
+
+    async fn write_reserved_provider_category(env: &RecordingVodEnv) {
+        let config = env.app_state.app_config.config.load();
+        let storage =
+            crate::repository::ensure_xtream_storage_path(&config, &env.target.name).await.expect("storage path");
+        let cat_path = crate::repository::get_collection_path(
+            &storage,
+            crate::repository::xtream_cluster_category_collection(XtreamCluster::Video),
+        );
+        let category_entries = serde_json::json!([{
+            "category_id": RECORDINGS_VOD_CATEGORY_ID.to_string(),
+            "category_name": "Provider Category",
+            "parent_id": 0,
+        }]);
+        std::fs::write(&cat_path, serde_json::to_string(&category_entries).expect("json")).expect("write categories");
+    }
+
+    fn write_vod_bouquet(env: &RecordingVodEnv, entries: &serde_json::Value) {
+        let config = env.app_state.app_config.config.load();
+        let user_dir =
+            std::path::PathBuf::from(config.user_config_dir.as_ref().expect("user config dir")).join("alice");
+        std::fs::create_dir_all(&user_dir).expect("user dir");
+        std::fs::write(user_dir.join("xtream_vod_bouquet.json"), serde_json::to_string(&entries).expect("json"))
+            .expect("write bouquet");
+    }
+
+    #[tokio::test]
+    async fn vod_info_reports_the_recorded_window_and_completion_time() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let recording_dir = std::path::PathBuf::from(
+            env.app_state.app_config.config.load().recording().expect("recording").directory.clone(),
+        );
+        let mut metadata = RecordingMetadata::new_live(
+            RecordingOwner::User(UserId::api("alice")),
+            RecordingVisibility::Private,
+            RecordingSource::new("main", "42", "input-a").with_cluster(XtreamCluster::Video),
+            1_700_000_000,
+            1_700_003_600,
+            0,
+            0,
+        );
+        metadata.completed_at = Some(1_700_003_700);
+        seed_task(
+            &env.app_state,
+            &recording_dir,
+            "alice",
+            "alice-window",
+            shared::model::RecordingTaskState::Completed,
+            metadata,
+            None,
+        )
+        .await;
+        let window_vod_id = vod_id_of(&env, "alice-window").await;
+
+        let document = vod_info(&env, "alice", window_vod_id).await;
+        assert_eq!(document["info"]["duration_secs"], serde_json::json!("3600"));
+        assert_eq!(document["info"]["duration"], serde_json::json!("01:00:00"));
+        assert_eq!(document["movie_data"]["added"], serde_json::json!("1700003700"));
+
+        let listed = vod_streams(&env, "alice", Some(RECORDINGS_VOD_CATEGORY_ID)).await;
+        let entry = listed
+            .iter()
+            .find(|entry| entry["stream_id"] == serde_json::json!(window_vod_id))
+            .expect("windowed recording listed");
+        assert_eq!(entry["added"], serde_json::json!("1700003700"));
+    }
+
+    #[tokio::test]
+    async fn movie_recording_with_unsatisfiable_range_answers_416_without_leaking_a_connection() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::RANGE, "bytes=256-300".parse().expect("range header"));
+
+        let response = movie_response(&env, "alice", &format!("{}.ts", env.vod_id), headers).await;
+
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_RANGE).map(|v| v.to_str().expect("value")),
+            Some("bytes */256")
+        );
+        assert_eq!(env.app_state.active_users.user_connections("alice").await, 0);
+    }
+
+    #[tokio::test]
+    async fn movie_path_serves_a_clip_header_and_window_with_exact_bytes() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let recording_dir = std::path::PathBuf::from(
+            env.app_state.app_config.config.load().recording().expect("recording").directory.clone(),
+        );
+        let header: Vec<u8> = (0..tuliprox_dvr::recording_worker::CLIP_HEADER_LEN)
+            .map(|index| u8::try_from(index % 251).expect("byte"))
+            .collect();
+        let clip = tuliprox_repository::recording_repository::RecordingClip {
+            start_ts: 1_700_000_000,
+            end_ts: 1_700_000_100,
+            start_offset: Some(0),
+            end_offset: Some(100),
+            header_bytes: Some(header.clone()),
+        };
+        seed_task(
+            &env.app_state,
+            &recording_dir,
+            "alice",
+            "alice-clip",
+            shared::model::RecordingTaskState::Completed,
+            media_metadata("alice", RecordingVisibility::Private, "main"),
+            Some(clip),
+        )
+        .await;
+        let clip_vod_id = vod_id_of(&env, "alice-clip").await;
+
+        let response = movie_response(&env, "alice", &format!("{clip_vod_id}.ts"), HeaderMap::new()).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let expected_size = header.len() + 100;
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_LENGTH).map(|v| v.to_str().expect("value")),
+            Some(expected_size.to_string().as_str())
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let mut expected = header;
+        expected.extend_from_slice(&recording_bytes()[..100]);
+        assert_eq!(body.as_ref(), expected.as_slice());
+    }
+
+    #[tokio::test]
+    async fn shared_recording_from_the_same_target_passes_the_filter_and_is_listed_and_playable() {
+        let env = env_inner(PlayerRecordingLevel::Read, Some(r#"Name ~ "Film""#), false).await;
+        cache_source_item(&env, "Film Channel").await;
+        let recording_dir = std::path::PathBuf::from(
+            env.app_state.app_config.config.load().recording().expect("recording").directory.clone(),
+        );
+        seed_task(
+            &env.app_state,
+            &recording_dir,
+            "bob",
+            "bob-shared",
+            shared::model::RecordingTaskState::Completed,
+            media_metadata("bob", RecordingVisibility::Shared, "main"),
+            None,
+        )
+        .await;
+        let bob_vod_id = vod_id_of(&env, "bob-shared").await;
+
+        let listed = vod_streams(&env, "alice", Some(RECORDINGS_VOD_CATEGORY_ID)).await;
+        let ids: Vec<&serde_json::Value> = listed.iter().map(|entry| &entry["stream_id"]).collect();
+        assert_eq!(ids, vec![&serde_json::json!(env.vod_id), &serde_json::json!(bob_vod_id)]);
+
+        let response = movie_response(&env, "alice", &format!("{bob_vod_id}.ts"), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(body.as_ref(), recording_bytes().as_slice());
+    }
+
+    #[tokio::test]
+    async fn shared_recording_from_another_target_is_not_listed_and_falls_back() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        let recording_dir = std::path::PathBuf::from(
+            env.app_state.app_config.config.load().recording().expect("recording").directory.clone(),
+        );
+        seed_task(
+            &env.app_state,
+            &recording_dir,
+            "bob",
+            "bob-other-target",
+            shared::model::RecordingTaskState::Completed,
+            media_metadata("bob", RecordingVisibility::Shared, "other"),
+            None,
+        )
+        .await;
+        let bob_vod_id = vod_id_of(&env, "bob-other-target").await;
+
+        let listed = vod_streams(&env, "alice", Some(RECORDINGS_VOD_CATEGORY_ID)).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["stream_id"], serde_json::json!(env.vod_id));
+
+        assert_matches_unknown_id_fallback(&env, "alice", &format!("{bob_vod_id}.ts")).await;
+    }
+
+    #[tokio::test]
+    async fn shared_recording_excluded_by_the_content_filter_is_not_listed_and_falls_back() {
+        let env = env_inner(PlayerRecordingLevel::Read, Some(r#"Name ~ "hidden""#), false).await;
+        cache_source_item(&env, "Visible Channel").await;
+        let recording_dir = std::path::PathBuf::from(
+            env.app_state.app_config.config.load().recording().expect("recording").directory.clone(),
+        );
+        seed_task(
+            &env.app_state,
+            &recording_dir,
+            "bob",
+            "bob-filtered",
+            shared::model::RecordingTaskState::Completed,
+            media_metadata("bob", RecordingVisibility::Shared, "main"),
+            None,
+        )
+        .await;
+        let bob_vod_id = vod_id_of(&env, "bob-filtered").await;
+
+        let listed = vod_streams(&env, "alice", Some(RECORDINGS_VOD_CATEGORY_ID)).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["stream_id"], serde_json::json!(env.vod_id));
+
+        assert_matches_unknown_id_fallback(&env, "alice", &format!("{bob_vod_id}.ts")).await;
+    }
+
+    #[tokio::test]
+    async fn vod_categories_ignore_a_provider_category_hidden_by_the_bouquet_filter() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        write_reserved_provider_category(&env).await;
+        // The bouquet shows a different category, so the colliding provider
+        // category is filtered out of the user's list.
+        write_vod_bouquet(&env, &serde_json::json!([{"id": 7, "name": "Other"}]));
+
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5097".parse().expect("addr")),
+            api_request(crate::model::XC_ACTION_GET_VOD_CATEGORIES),
+            &env.app_state,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let categories = body_json(response).await;
+        let categories = categories.as_array().expect("array");
+        assert!(categories.is_empty(), "the provider owns the reserved id, so no recording category is appended");
+    }
+
+    #[tokio::test]
+    async fn vod_streams_without_category_omit_recordings_when_the_provider_owns_the_reserved_id() {
+        let env = env(PlayerRecordingLevel::Read).await;
+        write_reserved_provider_category(&env).await;
+        let mut playlist_item =
+            create_test_vod_item("http://provider.example/movie/user/pass/77.mp4", "mp4", PlaylistItemType::Video);
+        playlist_item.virtual_id = VirtualId::new(77);
+        cache_vod_item(&env.app_state, &env.target, playlist_item).await;
+
+        let entries = vod_streams(&env, "alice", None).await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["stream_id"], serde_json::json!(77));
+    }
+
+    #[tokio::test]
+    async fn skip_vod_input_flag_does_not_hide_recordings() {
+        let env = env_inner(PlayerRecordingLevel::Read, None, true).await;
+        let mut playlist_item =
+            create_test_vod_item("http://provider.example/movie/user/pass/77.mp4", "mp4", PlaylistItemType::Video);
+        playlist_item.virtual_id = VirtualId::new(77);
+        cache_vod_item(&env.app_state, &env.target, playlist_item).await;
+
+        let reserved = vod_streams(&env, "alice", Some(RECORDINGS_VOD_CATEGORY_ID)).await;
+        assert_eq!(reserved.len(), 1);
+        assert_eq!(reserved[0]["stream_id"], serde_json::json!(env.vod_id));
+
+        let all = vod_streams(&env, "alice", None).await;
+        assert_eq!(all.len(), 1, "the playlist part still honours SkipVod");
+        assert_eq!(all[0]["stream_id"], serde_json::json!(env.vod_id));
+
+        let document = vod_info(&env, "alice", env.vod_id).await;
+        assert_eq!(document["info"]["name"], serde_json::json!("Film"));
+
+        let response = movie_response(&env, "alice", &format!("{}.ts", env.vod_id), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(body.as_ref(), recording_bytes().as_slice());
+    }
+
+    #[tokio::test]
+    async fn skip_vod_input_flag_returns_empty_list_for_non_recording_vod_info() {
+        let env = env_inner(PlayerRecordingLevel::Read, None, true).await;
+        let mut playlist_item =
+            create_test_vod_item("http://provider.example/movie/user/pass/77.mp4", "mp4", PlaylistItemType::Video);
+        playlist_item.virtual_id = VirtualId::new(77);
+        cache_vod_item(&env.app_state, &env.target, playlist_item).await;
+
+        let mut request = api_request(crate::model::XC_ACTION_GET_VOD_INFO);
+        request.username = "alice".to_string();
+        request.vod_id = "77".to_string();
+        let response = xtream_player_api(
+            &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5099".parse().expect("addr")),
+            request,
+            &env.app_state,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body, serde_json::json!([]));
+    }
+}
+
+mod player_api_account_info {
+    use super::*;
+    use crate::api::endpoints::xtream_api::{xtream_api_register, xtream_player_api};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        response::IntoResponse,
+    };
+    use shared::model::{
+        ApiProxyConfigDto, ApiProxyServerInfoDto, PlayerFeaturesDto, ProxyUserCredentialsDto, TargetUserDto,
+        WebAuthConfigDto, WebUiConfigDto,
+    };
+    use tower::ServiceExt;
+
+    async fn player_api_account_info_response(
+        web_ui_enabled: bool,
+        web_auth_enabled: bool,
+        web_ui_path: Option<&str>,
+        user_ui_enabled: bool,
+        user_player_api_enabled: Option<bool>,
+        global_player_api_enabled: Option<bool>,
+    ) -> serde_json::Value {
+        let dir = tempdir().expect("temp dir");
+        let web_ui_dto = WebUiConfigDto {
+            enabled: web_ui_enabled,
+            user_ui_enabled: true,
+            player_api_enabled: global_player_api_enabled,
+            path: web_ui_path.map(ToString::to_string),
+            auth: if web_auth_enabled {
+                Some(WebAuthConfigDto {
+                    enabled: true,
+                    issuer: "test".to_string(),
+                    secret: "test-secret".to_string(),
+                    ..WebAuthConfigDto::default()
+                })
+            } else {
+                None
+            },
+            ..WebUiConfigDto::default()
+        };
+        let config = Config {
+            storage_dir: dir.path().to_string_lossy().into_owned(),
+            user_config_dir: Some(dir.path().join("user_config").to_string_lossy().into_owned()),
+            web_ui: Some((&web_ui_dto).into()),
+            user_access_control: true,
+            ..Config::default()
+        };
+        let app_state = create_test_app_state(config);
+        let api_proxy_dto = ApiProxyConfigDto {
+            server: vec![ApiProxyServerInfoDto {
+                name: "default".to_string(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some("8901".to_string()),
+                timezone: "UTC".to_string(),
+                message: "test".to_string(),
+                path: None,
+            }],
+            user: vec![TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: user_ui_enabled,
+                    max_connections: 1,
+                    player_features: Some(PlayerFeaturesDto {
+                        api_enabled: user_player_api_enabled,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = crate::model::ApiProxyConfig::from(&api_proxy_dto);
+        for target_user in &mut api_proxy.user {
+            for credential in &mut target_user.credentials {
+                Arc::make_mut(credential).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        app_state.app_config.set_api_proxy(api_proxy).expect("set api proxy");
+        let target = Arc::new(ConfigTarget { name: "main".to_string(), ..short_epg_target() });
+        let sources = SourcesConfig {
+            sources: vec![crate::model::ConfigSource { inputs: Vec::new(), targets: vec![Arc::clone(&target)] }],
+            ..SourcesConfig::default()
+        };
+        app_state.app_config.sources.store(Arc::new(sources));
+
+        let request = UserApiRequest {
+            username: "alice".to_string(),
+            password: "pass".to_string(),
+            action: crate::model::XC_ACTION_GET_ACCOUNT_INFO.to_string(),
+            ..UserApiRequest::default()
+        };
+        let fingerprint =
+            Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:5001".parse().expect("addr"));
+        let response = xtream_player_api(&fingerprint, request, &app_state).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = response_body_text(response).await.expect("body text");
+        serde_json::from_str(&text).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn account_info_player_api_path_with_ui_path() {
+        let body = player_api_account_info_response(
+            true,       // web_ui_enabled
+            true,       // web_auth_enabled
+            Some("ui"), // web_ui.path = "ui"
+            true,       // user_ui_enabled
+            Some(true), // user player_api_enabled
+            Some(true), // global player_api_enabled
+        )
+        .await;
+        assert_eq!(body["server_info"]["player_api_path"], "/ui");
+    }
+
+    #[tokio::test]
+    async fn account_info_player_api_path_empty_path() {
+        let body = player_api_account_info_response(
+            true,     // web_ui_enabled
+            true,     // web_auth_enabled
+            Some(""), // empty web_ui.path
+            true,     // user_ui_enabled
+            Some(true),
+            Some(true),
+        )
+        .await;
+        assert_eq!(body["server_info"]["player_api_path"], "/");
+    }
+
+    #[tokio::test]
+    async fn account_info_player_api_path_omitted_when_player_api_disabled_and_web_ui_disabled() {
+        // Case A: User without Player API (api_enabled: false, ui_enabled: false)
+        let body_user_disabled = player_api_account_info_response(
+            true,
+            true,
+            Some("ui"),
+            false,       // user_ui_enabled: false
+            Some(false), // user_player_api_enabled: false
+            Some(true),
+        )
+        .await;
+        assert!(body_user_disabled["server_info"].get("player_api_path").is_none());
+
+        // Case B: Web UI disabled
+        let body_web_ui_disabled = player_api_account_info_response(
+            false, // web_ui_enabled: false
+            true,
+            Some("ui"),
+            true,
+            Some(true),
+            Some(true),
+        )
+        .await;
+        assert!(body_web_ui_disabled["server_info"].get("player_api_path").is_none());
+
+        // Case C: Web auth disabled
+        let body_web_auth_disabled = player_api_account_info_response(
+            true,
+            false, // web_auth_enabled: false
+            Some("ui"),
+            true,
+            Some(true),
+            Some(true),
+        )
+        .await;
+        assert!(body_web_auth_disabled["server_info"].get("player_api_path").is_none());
+    }
+
+    #[tokio::test]
+    async fn account_info_player_api_path_empty_action_via_router() {
+        let dir = tempdir().expect("temp dir");
+        let web_ui_dto = WebUiConfigDto {
+            enabled: true,
+            user_ui_enabled: true,
+            player_api_enabled: Some(true),
+            path: Some("ui".to_string()),
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "test".to_string(),
+                secret: "test-secret".to_string(),
+                ..WebAuthConfigDto::default()
+            }),
+            ..WebUiConfigDto::default()
+        };
+        let config = Config {
+            storage_dir: dir.path().to_string_lossy().into_owned(),
+            user_config_dir: Some(dir.path().join("user_config").to_string_lossy().into_owned()),
+            web_ui: Some((&web_ui_dto).into()),
+            user_access_control: true,
+            ..Config::default()
+        };
+        let app_state = create_test_app_state(config);
+        let api_proxy_dto = ApiProxyConfigDto {
+            server: vec![ApiProxyServerInfoDto {
+                name: "default".to_string(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some("8901".to_string()),
+                timezone: "UTC".to_string(),
+                message: "test".to_string(),
+                path: None,
+            }],
+            user: vec![TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    max_connections: 1,
+                    player_features: Some(PlayerFeaturesDto { api_enabled: Some(true), ..Default::default() }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = crate::model::ApiProxyConfig::from(&api_proxy_dto);
+        for target_user in &mut api_proxy.user {
+            for credential in &mut target_user.credentials {
+                Arc::make_mut(credential).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        app_state.app_config.set_api_proxy(api_proxy).expect("set api proxy");
+        let target = Arc::new(ConfigTarget { name: "main".to_string(), ..short_epg_target() });
+        let sources = SourcesConfig {
+            sources: vec![crate::model::ConfigSource { inputs: Vec::new(), targets: vec![Arc::clone(&target)] }],
+            ..SourcesConfig::default()
+        };
+        app_state.app_config.sources.store(Arc::new(sources));
+
+        let router = xtream_api_register().with_state(Arc::clone(&app_state));
+        let mut req = Request::builder()
+            .uri("/player_api.php?username=alice&password=pass")
+            .body(Body::empty())
+            .expect("request builder");
+        req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let response = router.oneshot(req).await.expect("endpoint response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = response_body_text(response).await.expect("body text");
+        let body: serde_json::Value = serde_json::from_str(&text).expect("json body");
+        assert_eq!(body["server_info"]["player_api_path"], "/ui");
+    }
+}

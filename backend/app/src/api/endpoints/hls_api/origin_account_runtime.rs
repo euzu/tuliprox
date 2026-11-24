@@ -4,6 +4,9 @@ use super::{
     session::*,
     *,
 };
+use shared::model::StreamInfo;
+use tuliprox_hls::api::{HlsManualSwitchError, HlsSessionKey};
+use tuliprox_repository::failover_group_repository::FailoverGroupRecord;
 
 /// Prepares the origin account runtime for HLS origin work. A healthy known binding is reused without the
 /// prepare lock; otherwise the locked path rebinds or acquires an account.
@@ -635,6 +638,8 @@ struct AppHlsOriginAccountRuntime {
     handoff_budget: Arc<tokio::sync::Mutex<Option<FailoverBudget>>>,
     /// Group failover config cached for the lifetime of this runtime (see [`Self::group_failover_config`]).
     cached_failover: std::sync::OnceLock<Option<FailoverGroupRuntimeConfig>>,
+    /// Cooldown timestamp for manual member switches on this shared cache session.
+    last_manual_switch: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
 }
 
 /// Resets the single-flight handoff flag on every exit, including a panic in the spawned task.
@@ -667,6 +672,7 @@ impl AppHlsOriginAccountRuntime {
             handoff_in_flight: Arc::new(AtomicBool::new(false)),
             handoff_budget: Arc::new(tokio::sync::Mutex::new(None)),
             cached_failover: std::sync::OnceLock::new(),
+            last_manual_switch: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -738,6 +744,89 @@ impl HlsOriginAccountRuntime for AppHlsOriginAccountRuntime {
             let Some(app_state) = app_state.upgrade() else { return };
             handoff_hls_group_member(&app_state, &session, &handoff_budget, &member, &fingerprint, reason).await;
         });
+    }
+
+    fn request_member_handoff(
+        &self,
+        session: &HlsSessionHandle,
+        target_member_index: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), HlsManualSwitchError>> + Send + '_>> {
+        let app_state = self.app_state.clone();
+        let member = Arc::clone(&self.member);
+        let handoff_in_flight = Arc::clone(&self.handoff_in_flight);
+        let handoff_budget = Arc::clone(&self.handoff_budget);
+        let fingerprint = self.fingerprint.clone();
+        let session = Arc::clone(session);
+        let last_manual_switch = Arc::clone(&self.last_manual_switch);
+
+        Box::pin(async move {
+            let Some(app_state) = app_state.upgrade() else {
+                return Err(HlsManualSwitchError::Unsupported);
+            };
+
+            let (target_id, group_vid, input_name, stream_ref) = {
+                let session = session.read().await;
+                let (target_id, group_vid) = session.key.group_identity().ok_or(HlsManualSwitchError::Unsupported)?;
+                let input_name = session.origin_source.input_name.clone();
+                let stream_ref = session.origin_source.stream_ref.clone();
+                (target_id, group_vid, input_name, stream_ref)
+            };
+            let target = app_state.app_config.get_target_by_id(target_id).ok_or(HlsManualSwitchError::Unsupported)?;
+            let ResolvedStreamTarget::Group(group) =
+                classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, VirtualId::new(group_vid))
+                    .await
+            else {
+                return Err(HlsManualSwitchError::Unsupported);
+            };
+
+            if target_member_index >= group.members.len() {
+                return Err(HlsManualSwitchError::MemberNotFound);
+            }
+
+            let current_index = group.members.iter().position(|m| {
+                m.input_name.as_ref() == input_name.as_ref() && m.input_stream_id.as_ref() == stream_ref.as_str()
+            });
+
+            if current_index == Some(target_member_index) {
+                return Ok(());
+            }
+
+            let now = tokio::time::Instant::now();
+            {
+                if let Ok(guard) = last_manual_switch.lock() {
+                    if let Some(last) = *guard {
+                        let elapsed = now.saturating_duration_since(last);
+                        if elapsed < crate::api::api_utils::failover_group_runtime::MANUAL_SWITCH_COOLDOWN {
+                            let retry_after = crate::api::api_utils::failover_group_runtime::MANUAL_SWITCH_COOLDOWN
+                                .saturating_sub(elapsed);
+                            return Err(HlsManualSwitchError::Cooldown { retry_after });
+                        }
+                    }
+                }
+            }
+
+            if handoff_in_flight.swap(true, Ordering::AcqRel) {
+                return Err(HlsManualSwitchError::InProgress);
+            }
+            let _guard = HandoffInFlightGuard { flag: handoff_in_flight };
+
+            execute_hls_group_member_handoff(
+                &app_state,
+                &session,
+                &handoff_budget,
+                &member,
+                &fingerprint,
+                HlsGroupHandoffChoice::Manual { target_index: target_member_index },
+                Some((target, group)),
+            )
+            .await?;
+
+            if let Ok(mut guard) = last_manual_switch.lock() {
+                *guard = Some(tokio::time::Instant::now());
+            }
+
+            Ok(())
+        })
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1100,10 +1189,12 @@ fn log_handoff_outcome(proxy_session_id: &ProxySessionId, outcome: &str) {
     );
 }
 
-/// Hands a live failover-group session over to the next healthy member. R3 triggers call this via
-/// [`HlsOriginAccountRuntime::notify_member_unhealthy`]; R2 also calls it from the cached entry
-/// path when a fresh selection disagrees with a non-reusable bound session.
-#[allow(clippy::too_many_lines)]
+#[derive(Clone, Copy, Debug)]
+enum HlsGroupHandoffChoice {
+    Automatic(HlsMemberUnhealthyReason),
+    Manual { target_index: usize },
+}
+
 async fn handoff_hls_group_member(
     app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
@@ -1112,17 +1203,42 @@ async fn handoff_hls_group_member(
     fingerprint: &Fingerprint,
     reason: HlsMemberUnhealthyReason,
 ) {
+    let _ = execute_hls_group_member_handoff(
+        app_state,
+        session,
+        handoff_budget,
+        member,
+        fingerprint,
+        HlsGroupHandoffChoice::Automatic(reason),
+        None,
+    )
+    .await;
+}
+
+/// Hands a live failover-group session over to the next healthy member or an explicit manual target.
+#[allow(clippy::too_many_lines)]
+async fn execute_hls_group_member_handoff(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    handoff_budget: &tokio::sync::Mutex<Option<FailoverBudget>>,
+    member: &ArcSwap<AppHlsMemberBinding>,
+    fingerprint: &Fingerprint,
+    choice: HlsGroupHandoffChoice,
+    resolved_group: Option<(Arc<ConfigTarget>, Arc<FailoverGroupRecord>)>,
+) -> Result<(), HlsManualSwitchError> {
     let now_ms = current_time_millis();
-    let Some((target_id, group_vid)) = session.read().await.key.group_identity() else {
-        return;
-    };
-    let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
-        return;
-    };
-    let ResolvedStreamTarget::Group(group) =
-        classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, VirtualId::new(group_vid)).await
-    else {
-        return;
+    let (target, group) = if let Some(pair) = resolved_group {
+        pair
+    } else {
+        let (target_id, group_vid) =
+            session.read().await.key.group_identity().ok_or(HlsManualSwitchError::Unsupported)?;
+        let target = app_state.app_config.get_target_by_id(target_id).ok_or(HlsManualSwitchError::Unsupported)?;
+        let ResolvedStreamTarget::Group(group) =
+            classify_virtual_id(&app_state.app_config, &app_state.playlists, &target, VirtualId::new(group_vid)).await
+        else {
+            return Err(HlsManualSwitchError::Unsupported);
+        };
+        (target, group)
     };
 
     let (current_index, failed_origin, old_binding, proxy_session_id, playback_kind, policy, request_headers) = {
@@ -1143,65 +1259,73 @@ async fn handoff_hls_group_member(
         )
     };
 
-    if let Some(index) = current_index {
-        record_member_failure(&app_state.member_health, &group.members[index], None, reason.failure_class());
-    }
-
-    debug!(
-        "HLS group member handoff trigger: proxy_session={} reason={reason:?} failure_class={:?}",
-        safe_proxy_session_id(&proxy_session_id),
-        reason.failure_class()
-    );
-
-    let playback = group_playback_settings(app_state, &target);
-    let member_count = group.members.len();
-    let mut decision = {
-        let mut guard = handoff_budget.lock().await;
-        let budget = guard.get_or_insert_with(|| FailoverBudget::new(&playback.failover));
-        budget.on_trigger(current_index.unwrap_or(0), member_count, Instant::now())
-    };
-
-    let exclude = loop {
-        debug!(
-            "HLS group member handoff budget decision: proxy_session={} decision={decision:?}",
-            safe_proxy_session_id(&proxy_session_id)
-        );
-        match decision {
-            BudgetDecision::GiveUp => {
-                log_handoff_outcome(&proxy_session_id, "give-up");
-                begin_hls_group_member_handoff(app_state, session, old_binding.as_ref(), current_time_millis()).await;
-                return;
+    let exclude: Vec<usize> = match choice {
+        HlsGroupHandoffChoice::Automatic(reason) => {
+            if let Some(index) = current_index {
+                record_member_failure(&app_state.member_health, &group.members[index], None, reason.failure_class());
             }
-            BudgetDecision::RetrySame => {
-                if session.read().await.origin_source != failed_origin {
-                    return;
+
+            debug!(
+                "HLS group member handoff trigger: proxy_session={} reason={reason:?} failure_class={:?}",
+                safe_proxy_session_id(&proxy_session_id),
+                reason.failure_class()
+            );
+
+            let playback = group_playback_settings(app_state, &target);
+            let member_count = group.members.len();
+            let mut decision = {
+                let mut guard = handoff_budget.lock().await;
+                let budget = guard.get_or_insert_with(|| FailoverBudget::new(&playback.failover));
+                budget.on_trigger(current_index.unwrap_or(0), member_count, Instant::now())
+            };
+
+            loop {
+                debug!(
+                    "HLS group member handoff budget decision: proxy_session={} decision={decision:?}",
+                    safe_proxy_session_id(&proxy_session_id)
+                );
+                match decision {
+                    BudgetDecision::GiveUp => {
+                        log_handoff_outcome(&proxy_session_id, "give-up");
+                        begin_hls_group_member_handoff(app_state, session, old_binding.as_ref(), current_time_millis())
+                            .await;
+                        return Err(HlsManualSwitchError::Failed("automatic budget give-up".to_string()));
+                    }
+                    BudgetDecision::RetrySame => {
+                        if session.read().await.origin_source != failed_origin {
+                            return Ok(());
+                        }
+                        let commits_before = session.read().await.origin_manifest_commits();
+                        trigger_current_hls_group_member_refresh(
+                            app_state,
+                            session,
+                            member,
+                            fingerprint,
+                            current_time_millis(),
+                        )
+                        .await;
+                        if session.read().await.origin_source != failed_origin {
+                            return Ok(());
+                        }
+                        let commits_after = session.read().await.origin_manifest_commits();
+                        if commits_after > commits_before {
+                            log_handoff_outcome(&proxy_session_id, "retried-same-ok");
+                            return Ok(());
+                        }
+                        log_handoff_outcome(&proxy_session_id, "retried-same-failed");
+                        decision = {
+                            let mut guard = handoff_budget.lock().await;
+                            let budget = guard.get_or_insert_with(|| FailoverBudget::new(&playback.failover));
+                            budget.on_trigger(current_index.unwrap_or(0), member_count, Instant::now())
+                        };
+                    }
+                    BudgetDecision::Next { exclude } => break exclude,
                 }
-                let commits_before = session.read().await.origin_manifest_commits();
-                trigger_current_hls_group_member_refresh(
-                    app_state,
-                    session,
-                    member,
-                    fingerprint,
-                    current_time_millis(),
-                )
-                .await;
-                if session.read().await.origin_source != failed_origin {
-                    return;
-                }
-                let commits_after = session.read().await.origin_manifest_commits();
-                if commits_after > commits_before {
-                    log_handoff_outcome(&proxy_session_id, "retried-same-ok");
-                    return;
-                }
-                log_handoff_outcome(&proxy_session_id, "retried-same-failed");
-                decision = {
-                    let mut guard = handoff_budget.lock().await;
-                    let budget = guard.get_or_insert_with(|| FailoverBudget::new(&playback.failover));
-                    budget.on_trigger(current_index.unwrap_or(0), member_count, Instant::now())
-                };
             }
-            BudgetDecision::Next { exclude } => break exclude,
         }
+        // The target is only preferred: when it cannot be opened, the ordinary selection picks another healthy
+        // member (normally the current one again), so a failed manual switch never ends the playback.
+        HlsGroupHandoffChoice::Manual { .. } => Vec::new(),
     };
 
     // Serialize the member handoff with concurrent account prepares. Once the old binding is
@@ -1217,7 +1341,7 @@ async fn handoff_hls_group_member(
     let current_binding = {
         let session = session.read().await;
         if session.origin_source != failed_origin {
-            return;
+            return Err(HlsManualSwitchError::InProgress);
         }
         session.origin_account_binding.clone()
     };
@@ -1227,9 +1351,13 @@ async fn handoff_hls_group_member(
     let expected_work_generation =
         begin_hls_group_member_handoff(app_state, session, current_binding.as_ref(), now_ms).await;
 
+    let playback = group_playback_settings(app_state, &target);
     let req = GroupSelectionRequest {
         mode: SelectionMode::Live,
-        prefer: None,
+        prefer: match choice {
+            HlsGroupHandoffChoice::Automatic(_) => None,
+            HlsGroupHandoffChoice::Manual { target_index } => Some(target_index),
+        },
         lease: Some(PlaybackLeaseRef::new(&session_owner, playback_kind)),
         allow_provider_grace: playback.allow_provider_grace,
         bypass_maintenance: false,
@@ -1263,7 +1391,7 @@ async fn handoff_hls_group_member(
         // No member left: the old binding is already detached and fenced, so the session's
         // existing terminal/unavailable handling takes over.
         log_handoff_outcome(&proxy_session_id, "no-member");
-        return;
+        return Err(HlsManualSwitchError::Failed("no member available or probe failed".to_string()));
     };
 
     let Some(provider_config) =
@@ -1271,13 +1399,13 @@ async fn handoff_hls_group_member(
     else {
         drop(resolved.acquired.handle);
         log_handoff_outcome(&proxy_session_id, "no-member");
-        return;
+        return Err(HlsManualSwitchError::Failed("no provider config".to_string()));
     };
     let Some(new_account) = resolved.acquired.handle.handle().and_then(|handle| handle.allocation.get_provider_name())
     else {
         drop(resolved.acquired.handle);
         log_handoff_outcome(&proxy_session_id, "no-member");
-        return;
+        return Err(HlsManualSwitchError::Failed("no provider name".to_string()));
     };
     let member_url = if let Some(probed) = probed.as_ref() {
         Some(probed.request_url.clone())
@@ -1295,7 +1423,7 @@ async fn handoff_hls_group_member(
     let Some(member_url) = member_url else {
         drop(resolved.acquired.handle);
         log_handoff_outcome(&proxy_session_id, "no-member");
-        return;
+        return Err(HlsManualSwitchError::Failed("no member url".to_string()));
     };
 
     let (raw_request_url, entry_url) = match build_hls_origin_resolution(&resolved.input, &member_url) {
@@ -1351,7 +1479,7 @@ async fn handoff_hls_group_member(
     let Ok(snapshot) = published else {
         drop(resolved.acquired.handle);
         log_handoff_outcome(&proxy_session_id, "no-member");
-        return;
+        return Err(HlsManualSwitchError::Failed("publication fence failed".to_string()));
     };
 
     drop(prepare_guard);
@@ -1375,7 +1503,7 @@ async fn handoff_hls_group_member(
     )
     .await;
 
-    {
+    if matches!(choice, HlsGroupHandoffChoice::Automatic(_)) {
         let mut guard = handoff_budget.lock().await;
         if let Some(budget) = guard.as_mut() {
             budget.on_switched(new_index, current_index.unwrap_or(new_index), Instant::now());
@@ -1383,6 +1511,37 @@ async fn handoff_hls_group_member(
     }
 
     log_handoff_outcome(&proxy_session_id, "switched");
+    match choice {
+        HlsGroupHandoffChoice::Manual { target_index } if target_index != new_index => Err(
+            HlsManualSwitchError::Failed("target member unavailable; playback continued on another member".to_string()),
+        ),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) enum ResolvedHlsGroupPlayback {
+    Cache(HlsSessionHandle),
+    Legacy(Box<UserSession>),
+}
+
+pub(crate) async fn find_hls_group_playback(
+    app_state: &AppState,
+    stream: &StreamInfo,
+    target_id: u16,
+    group_vid: u32,
+) -> Option<ResolvedHlsGroupPlayback> {
+    let session_token = stream.session_token.as_deref()?;
+    if stream.channel.shared {
+        let group_key = HlsSessionKey::for_group(target_id, group_vid);
+        if let Some(session) = app_state.hls.proxy.sessions().get_by_key(&group_key).await {
+            return Some(ResolvedHlsGroupPlayback::Cache(session));
+        }
+    }
+    let user_session = app_state.active_users.get_user_session(&stream.username, session_token).await?;
+    if user_session.member_binding.is_some() {
+        return Some(ResolvedHlsGroupPlayback::Legacy(Box::new(user_session)));
+    }
+    None
 }
 
 #[cfg(test)]

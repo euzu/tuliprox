@@ -5399,6 +5399,7 @@ dependencies = [
  "tuliprox-auth",
  "tuliprox-core",
  "tuliprox-messaging",
+ "tuliprox-mpegts",
  "tuliprox-repository",
  "url",
  "windows-sys 0.61.2",

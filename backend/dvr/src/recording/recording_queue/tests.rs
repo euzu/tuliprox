@@ -3,6 +3,7 @@ use crate::recording::recording_transition;
 use chrono::Utc;
 use shared::model::{
     recording::{RecordingOwner, RecordingSource, RecordingVisibility},
+    xtream_const::RECORDING_VOD_ID_BASE,
     QueueRevision, RecordingKind, RecordingMetadata, UserId,
 };
 use std::{
@@ -44,6 +45,7 @@ fn media_meta(owner: &str) -> RecordingMetadata {
 fn task(uuid: &str, kind: RecordingKind, state: RecordingTaskState) -> RecordingTask {
     RecordingTask {
         uuid: uuid.to_string(),
+        vod_id: 0,
         kind,
         file_dir: PathBuf::from("/tmp"),
         file_path: PathBuf::from(format!("/tmp/{uuid}.ts")),
@@ -63,6 +65,9 @@ fn task(uuid: &str, kind: RecordingKind, state: RecordingTaskState) -> Recording
             RecordingKind::Live => live_meta("web:alice", 1_700_000_000, 3_600),
             _ => media_meta("web:alice"),
         },
+        clip: None,
+        media_identity: None,
+        cancelled_by_owner: false,
     }
 }
 
@@ -233,6 +238,7 @@ fn persisted_recording(uuid: &str, meta: RecordingMetadata) -> PersistedRecordin
         media_identity: String::new(),
         partition: RecordingPartition::default(),
         uuid: uuid.to_string(),
+        vod_id: 0,
         kind: RecordingKind::Live,
         file_dir: PathBuf::from("/tmp"),
         file_path: PathBuf::from(format!("/tmp/{uuid}.ts")),
@@ -249,6 +255,8 @@ fn persisted_recording(uuid: &str, meta: RecordingMetadata) -> PersistedRecordin
         retry_attempts: 0,
         next_retry_at: None,
         recording: meta,
+        clip: None,
+        cancelled_by_owner: false,
     }
 }
 

@@ -562,6 +562,7 @@ pub struct M3uPlaylistM3uTextIterator {
     inner: M3uTextStream,
     started: bool,
     url_tvg: Option<String>,
+    player_api_path: Option<String>,
 }
 
 impl M3uPlaylistM3uTextIterator {
@@ -569,6 +570,7 @@ impl M3uPlaylistM3uTextIterator {
         cfg: &AppConfig,
         target: &ConfigTarget,
         user: &ProxyUserCredentials,
+        player_api_path: Option<String>,
     ) -> Result<Self, TuliproxError> {
         let base_url = cfg.get_user_server_info(user).map(|server| server.get_base_url()).unwrap_or_default();
         let url_tvg = build_proxy_xmltv_url_tvg(&base_url, &user.username, &user.password);
@@ -578,7 +580,7 @@ impl M3uPlaylistM3uTextIterator {
         let rewrite_resources = cfg.is_reverse_proxy_resource_rewrite_enabled();
         let items = M3uPlaylistIterator::new(cfg, target, user).await?;
         let inner = m3u_text_stream(items, target_options, rewrite, rewrite_resources);
-        Ok(Self { inner, started: false, url_tvg })
+        Ok(Self { inner, started: false, url_tvg, player_api_path })
     }
 }
 
@@ -588,10 +590,14 @@ impl Stream for M3uPlaylistM3uTextIterator {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if !self.started {
             self.started = true;
-            let header = self
-                .url_tvg
-                .as_ref()
-                .map_or_else(|| "#EXTM3U".to_string(), |url| format!("#EXTM3U url-tvg=\"{url}\" x-tvg-url=\"{url}\""));
+            let header = match (&self.url_tvg, self.player_api_path.as_deref()) {
+                (Some(url), Some(path)) => {
+                    format!("#EXTM3U url-tvg=\"{url}\" x-tvg-url=\"{url}\" x-tuliprox-player-api=\"{path}\"")
+                }
+                (Some(url), None) => format!("#EXTM3U url-tvg=\"{url}\" x-tvg-url=\"{url}\""),
+                (None, Some(path)) => format!("#EXTM3U x-tuliprox-player-api=\"{path}\""),
+                (None, None) => "#EXTM3U".to_string(),
+            };
             return Poll::Ready(Some(Ok(header)));
         }
 
@@ -1018,6 +1024,7 @@ mod tests {
             inner: Box::pin(futures::stream::empty::<Result<String, String>>()),
             started: false,
             url_tvg: None,
+            player_api_path: None,
         };
 
         let first = text_iter.next().await;
@@ -1037,6 +1044,7 @@ mod tests {
             inner: Box::pin(futures::stream::empty::<Result<String, String>>()),
             started: false,
             url_tvg: Some("https://proxy.example/xmltv.php?username=user&password=pass".to_string()),
+            player_api_path: None,
         };
 
         let first = text_iter.next().await;
@@ -1045,6 +1053,33 @@ mod tests {
             Some(
                 "#EXTM3U url-tvg=\"https://proxy.example/xmltv.php?username=user&password=pass\" x-tvg-url=\"https://proxy.example/xmltv.php?username=user&password=pass\""
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn m3u_text_iterator_emits_player_api_path_in_extm3u_header() {
+        let mut text_iter = M3uPlaylistM3uTextIterator {
+            inner: Box::pin(futures::stream::empty::<Result<String, String>>()),
+            started: false,
+            url_tvg: Some("U".to_string()),
+            player_api_path: Some("/ui".to_string()),
+        };
+        let first = text_iter.next().await;
+        assert_eq!(
+            first.as_ref().and_then(|line| line.as_deref().ok()),
+            Some("#EXTM3U url-tvg=\"U\" x-tvg-url=\"U\" x-tuliprox-player-api=\"/ui\"")
+        );
+
+        let mut text_iter_no_tvg = M3uPlaylistM3uTextIterator {
+            inner: Box::pin(futures::stream::empty::<Result<String, String>>()),
+            started: false,
+            url_tvg: None,
+            player_api_path: Some("/ui".to_string()),
+        };
+        let first_no_tvg = text_iter_no_tvg.next().await;
+        assert_eq!(
+            first_no_tvg.as_ref().and_then(|line| line.as_deref().ok()),
+            Some("#EXTM3U x-tuliprox-player-api=\"/ui\"")
         );
     }
 

@@ -103,7 +103,7 @@ fn task_error(err: &tokio::task::JoinError) -> SettingsError {
 }
 
 /// Encodes configured names independently of opaque subject identifiers.
-pub fn settings_filename(username: &str) -> Result<String, SettingsError> {
+pub(crate) fn encode_settings_stem(username: &str) -> Result<String, SettingsError> {
     if username.is_empty() {
         return Err(SettingsError::OwnerMismatch);
     }
@@ -134,14 +134,19 @@ pub fn settings_filename(username: &str) -> Result<String, SettingsError> {
         stem.truncate(prefix_len);
         let _ = write!(stem, "~{}", blake3::hash(username.as_bytes()).to_hex());
     }
-    Ok(format!("{stem}.yml"))
+    Ok(stem)
+}
+
+/// Encodes configured names independently of opaque subject identifiers for settings files.
+pub fn settings_filename(username: &str) -> Result<String, SettingsError> {
+    Ok(format!("{}.yml", encode_settings_stem(username)?))
 }
 
 pub fn settings_path(config_path: &Path, owner: &SettingsOwner) -> Result<PathBuf, SettingsError> {
     Ok(config_path.join("user_settings").join(owner.namespace()?).join(settings_filename(&owner.username)?))
 }
 
-async fn safe_path(path: &Path) -> Result<(), SettingsError> {
+pub(crate) async fn safe_path(path: &Path) -> Result<(), SettingsError> {
     // The config directory is trusted; settings directories and files cannot be links.
     for candidate in path.ancestors().take(3) {
         match tokio::fs::symlink_metadata(candidate).await {

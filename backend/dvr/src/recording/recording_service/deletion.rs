@@ -48,7 +48,18 @@ impl RecordingService {
             .await;
             return Err(ServiceError::IoError(err.to_string()));
         }
-        finalize_deletion(&queue, uuid).await.map_err(|_| ServiceError::UnknownRecording)?;
+        let (worker_to_stop, actions) =
+            finalize_deletion(&queue, uuid).await.map_err(|_| ServiceError::UnknownRecording)?;
+        if let Some(worker_uuid) = worker_to_stop {
+            queue.stop_worker_early(&worker_uuid).await;
+        }
+        crate::recording::recording_deletion::apply_cancelled_enclosing_action(&queue, actions).await;
+        if target.still_referenced {
+            if let Err(err) = crate::recording::recording_deletion::maybe_compact_clips(&queue, &target.file_path).await
+            {
+                log::warn!("Failed to compact clips after user delete of {}: {err}", target.file_path.display());
+            }
+        }
         Ok(!target.still_referenced)
     }
 

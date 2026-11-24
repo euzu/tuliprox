@@ -7,7 +7,11 @@ use crate::active_provider_manager::{ConnectionKind, ProviderReleaseSnapshot};
 use jsonwebtoken::get_current_timestamp;
 use log::debug;
 use shared::model::{StreamInfo, UserConnectionPermission};
-use std::{collections::HashSet, net::SocketAddr, sync::atomic::Ordering};
+use std::{
+    collections::HashSet,
+    net::SocketAddr,
+    sync::{atomic::Ordering, Arc},
+};
 use tuliprox_core::model::AllocationId;
 
 /// Panel identity of a removed stream row, as carried by `DisconnectedStream`.
@@ -704,5 +708,43 @@ impl ActiveUserManager {
             self.emit_promotion_update(username, action).await;
         }
         connection_changed || user_removed
+    }
+
+    pub fn set_shared_stream_manager(&self, manager: &Arc<crate::streams::SharedStreamManager>) {
+        let _ = self.shared_stream_manager.set(Arc::downgrade(manager));
+    }
+
+    pub async fn is_free_subscriber(&self, uid: u32) -> bool {
+        if let Some(shared_manager) = self.shared_stream_manager.get().and_then(std::sync::Weak::upgrade) {
+            shared_manager.is_subscriber_free(tuliprox_core::model::SharedSubscriberId::from_stream_uid(uid)).await
+        } else {
+            false
+        }
+    }
+
+    pub async fn try_admit_converted_free_join(&self, username: &str, session_token: &str, stream_uid: u32) -> bool {
+        let mut user_connections = self.write_connections().await;
+        let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+            return false;
+        };
+        let counts = connection_data.effective_counts_for_admission(Some(session_token));
+        let selected_kind =
+            decide_connection_kind(counts, connection_data.max_connections, connection_data.soft_connections);
+        if let Some(kind) = selected_kind {
+            connection_data.increment_kind(kind);
+            connection_data.stream_kinds.insert(stream_uid, kind);
+            if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == session_token) {
+                session.connection_kind = Some(kind);
+                session.lifecycle = PlaybackLifecycle::Active;
+                session.permission = UserConnectionPermission::Allowed;
+                Self::bump_session_transition_version(session);
+            }
+            true
+        } else {
+            if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == session_token) {
+                session.set_permission(UserConnectionPermission::Exhausted);
+            }
+            false
+        }
     }
 }

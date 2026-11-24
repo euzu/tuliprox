@@ -5,13 +5,14 @@ use axum::{
     response::IntoResponse,
 };
 use log::warn;
+use shared::model::CustomVideoStreamType;
 use std::sync::Arc;
 use tuliprox_hls::api::{
     commit_terminal_tail_if_lease_reserve_requires_cutover, finite_hls_immutable_media_response,
     finite_hls_media_head_response, finite_hls_media_response, publication_late_after_ms, retry_after_secs_from_ms,
     terminal_tail_manifest_body, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseState, HlsCacheResponseContext,
-    HlsLeasePlaybackMode, HlsSessionHandle, HlsTerminalFailedClosedReason, HlsTerminalResolution,
-    HlsTerminalSegmentPath, HlsTerminalTailPlan, ProxySessionId,
+    HlsLeasePlaybackMode, HlsRuntimeCustomTailReason, HlsSessionHandle, HlsTerminalFailedClosedReason,
+    HlsTerminalResolution, HlsTerminalSegmentPath, HlsTerminalTailPlan, ProxySessionId,
 };
 
 const HLS_TERMINAL_ENDPOINT_MAX_REEVALUATIONS: usize = 2;
@@ -186,23 +187,29 @@ pub(super) fn hls_terminal_playback_response(
             let Ok(body) = terminal_tail_manifest_body(plan, proxy_session_id, access_lease_id) else {
                 return Some(StatusCode::NOT_FOUND.into_response());
             };
-            Some(hls_response(body.to_owned()))
+            Some(crate::api::model::fallback_manifest_response(body.to_owned(), plan.reason.video_type()))
         }
         HlsLeasePlaybackMode::TerminalCustomResponse(plan) => {
             Some(if plan.matches_route(proxy_session_id, access_lease_id) {
-                hls_response(plan.manifest_body().to_owned())
+                crate::api::model::fallback_manifest_response(
+                    plan.manifest_body().to_owned(),
+                    plan.reason().video_type(),
+                )
             } else {
                 StatusCode::NOT_FOUND.into_response()
             })
         }
-        HlsLeasePlaybackMode::TerminalUnavailable { .. } => Some(
-            if crate::api::model::is_custom_video_stream_enabled(&app_state.app_config) {
+        HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
+            let video_type = lease
+                .runtime_policy_denial_reason()
+                .map_or(CustomVideoStreamType::ChannelUnavailable, HlsRuntimeCustomTailReason::video_type);
+            let status = if crate::api::model::is_custom_video_stream_enabled(&app_state.app_config) {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 crate::api::model::get_custom_stream_response_error_status(&app_state.app_config)
-            }
-            .into_response(),
-        ),
+            };
+            Some(crate::api::model::fallback_status_response(status, video_type))
+        }
         HlsLeasePlaybackMode::Live => None,
         HlsLeasePlaybackMode::Ended => Some(StatusCode::NOT_FOUND.into_response()),
     }

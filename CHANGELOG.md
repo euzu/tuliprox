@@ -4,6 +4,9 @@
 
 ## ⚠️ Breaking Changes
 
+- **Web UI sessions must sign in again once.** The new `recording.share` permission bumps the permission schema version to 6,
+  so tokens issued before the update are rejected with `X-Token-Refresh: required` and the Web UI returns to the sign-in page.
+
 - **Notifier plugins read routing from `ext.messaging.routing`.** A notifier plugin joins the messaging config through
   `ui.config_extensions` with `section: messaging`. Its fields appear on the Web UI messaging page and are stored in
   `plugins.plugins[].settings.ext.messaging`. The host reads the channel routing only from `ext.messaging.routing`. The
@@ -218,6 +221,180 @@
   id added.
 
 ## 🌟 New Features
+
+- **Live responses name their stream uid.** For users with Player API access, every direct live MPEG-TS response
+  carries `X-Tuliprox-Stream-Uid`, the `uid` of this connection in `GET /api/v1/me/streams`. A player on a login shared
+  by several devices stops or splits exactly its own stream with `DELETE /api/v1/me/streams/{uid}` or
+  `POST /api/v1/me/streams/{uid}/split`. The header is exposed through CORS. HLS playlists carry none, because the
+  connection exists only after the first segment.
+
+- **Xtream account info and M3U playlists advertise the Player API base.** `player_api.php` returns
+  `server_info.player_api_path` (`/<web_ui.path>`, or `/` without a path), and M3U playlist downloads (`get.php`,
+  `apiget`, `m3u`) advertise the same value in the `X-Tuliprox-Player-Api-Path` response header and the `#EXTM3U` attribute
+  `x-tuliprox-player-api="<path>"`, so a player that knows only the playlist host finds `/auth/token` and `/api/v1/me`.
+  The value appears only when the Web UI and web authentication are enabled and the user's Player API is enabled.
+
+- **Private recording rules for playlist users.** API users with `player_features.recording` at `private` or `shared`
+  can use `GET`, `POST`, `PATCH`, and `DELETE /api/v1/recording/rules` with their player token, in the same place as
+  their recordings. `read` lists own rules plus visible shared rules of the own target, `private` also manages own
+  private rules, `shared` also manages own shared rules; foreign rules answer `403 recording_rule_not_owner` and the
+  target of a rule is immutable. New rules are limited per user by `player_features.max_recording_rules` (default
+  `10`, `> 0`, answered as `400 recording_rule_limit_exceeded`). Only `weekly_timeslot` rules can be created. Playlist
+  users receive the redacted `UserRecordingRuleDto` shape: no `source.provider_id` or `source.input_name`, `own` marks
+  the caller's rules, and `owner_id` appears only for own rules. The server derives `input_name` (a client value is
+  ignored) and stores `target_id` as the resolved target name; administrator responses keep the full
+  `RecordingRuleDto` shape. The rule scheduler re-checks the owner before each materialization and skips deleted,
+  disabled, expired, or downgraded users without logging errors, and deleting a playlist user deletes their rules.
+  MCP tools `me_list_rules` (read), `me_create_rule`, and `me_delete_rule` (write) mirror the routes.
+
+- **Personal watch progress for playlist users.** With `player_features.watch_progress: true` a player stores the
+  playback position per movie, episode, or recording through `GET|PUT|DELETE /api/v1/me/progress` and
+  `GET|PUT|DELETE /api/v1/me/progress/{kind}/{item_id}`. An entry carries `position_secs`, optional `duration_secs`,
+  `watched`, optional `series_id`, and `updated_at`; `watched` is set explicitly or automatically at 90 % of the
+  duration, and an already watched entry stays watched while the position is at least 60 seconds. Omitted
+  `duration_secs` and `series_id` keep the stored values, and a `PUT` for a user deleted in the meantime answers `401`.
+  The list filters by `kind` and `watched` and clamps `limit` to `1..=200` (default `50`). Progress is stored per user
+  as one JSON file next to the user settings, written atomically under the file lock, capped at 500 entries and 180
+  days, and deleted with the user. No playlist lookup happens, so no other user's data can be read.
+
+- **Personal player event stream.** With `player_features.event_stream: true` a client subscribes to
+  `GET /api/v1/me/events`, a WebSocket that delivers JSON text frames: `connected`, `stream_ended` (`kicked`,
+  `preempted`, or `stopped` when the caller ends it with `DELETE /api/v1/me/streams/{uid}`),
+  `failover_member_switched` (only for an own active stream and with `source_switch`), `recording_finished`
+  (`completed` or `failed`, own or visible shared recordings), `connection_denied`, `resync_required` on broadcast lag,
+  and `error`. Authentication is the Bearer token on the upgrade or a first `{"type":"auth","token":"..."}` text frame
+  within 5 seconds; tokens in the query string are not accepted. At most four sockets per user are open at once, the
+  server pings every 30 seconds, features are re-evaluated per event, and losing the feature closes the socket with
+  `1008`.
+
+- **Joinable shared streams across targets.** `GET /api/v1/me/streams/joinable` now also lists compatible single-source
+  streams started by other targets when the caller's target publishes the same provider item (same input and upstream
+  URL) and shares the protocol. Returned fields (`virtual_id`, `title`, `logo`, `category`) always come from the
+  caller's target; foreign target names, provider ids, and virtual ids are never exposed, and group streams of foreign
+  targets are not listed. Playback is unchanged and joins through the same provider URL key. The feature stays behind
+  `player_features.joinable_streams`.
+
+- **Split an own shared stream into a dedicated connection.** `POST /api/v1/me/streams/{uid}/split` (gate
+  `player_features.source_switch`) answers `{"reconnect_required":true,"url":"/live/<user>/<pass>/<vid>.ts?dedicated=1"}`
+  for an own shared live MPEG-TS stream with more than one viewer. A target without an Xtream output returns the M3U
+  stream route `/m3u-stream/live/<user>/<pass>/<vid>.ts?dedicated=1` instead. Catch-up, VOD, series, HLS, and DASH
+  answer `409 split_unsupported_protocol`; non-shared or single-viewer streams `409 stream_not_shared`; a second split
+  within two seconds `429 switch_cooldown`, and so does a failover member switch within two seconds after a split.
+  Switch-after-switch uses the same driver cooldown as the admin switch route. No capacity is pre-reserved: the client
+  closes the old connection and opens the returned URL, where
+  `dedicated=1` skips the shared join only for users with `source_switch`. The new capability field `stream_split`
+  mirrors `source_switch`, and the MCP tool `me_split_stream` wraps the route and replaces the password in the returned
+  URL with `***`.
+
+- **Recordings appear as an Xtream VOD category for playlist users.** A playlist user whose effective
+  `player_features.recording` is `read`, `private` or `shared` sees one extra `Recordings` category
+  (`category_id` `2000000000`) in `get_vod_categories`, can list their completed recordings with
+  `get_vod_streams` (all entries or filtered by that category), fetch them through `get_vod_info`, and play them
+  through `/movie/{user}/{pass}/{stream_id}.{ext}` with HTTP Range and clip support. Visibility follows the
+  existing snapshot rule (own private, shared within target and content filter). Stream ids are persisted per
+  recording from `1000000000` and never reused; a playlist item with the same id always wins. Playback runs
+  through the local-file admission, so it counts against `max_connections` but requests no provider connection.
+  Users without the feature see no category and no extra entries.
+
+- **`/me` failover member lists carry a redacted `health` object per member** (state, resolution, video_codec,
+  bitrate_kbps, qos_24h, qos_7d, retry_after_secs).
+
+- **Player & Integration API specification.** A developer guide (`docs/src/player-api.md`) and an OpenAPI 3.1 file
+  (`docs/src/api/tuliprox-integration-api.openapi.yaml`) describe every interface a third-party player or integration can
+  use: authentication, the `/api/v1/me` Player API, the user bouquet API, recordings with media playback and the
+  WebSocket snapshot, MCP player tools, Xtream/M3U/HLS playback and the diagnostic response headers, with request and
+  response examples.
+
+- **Dedicated Player API (`/api/v1/me`) for playlist users.** Playlist proxy API users (`api_proxy.yml`) can use personal
+  Bearer tokens obtained via `POST /auth/token` with their Xtream credentials to control playback and discover stream state
+  directly from external player apps:
+  - `GET /api/v1/me/capabilities`: reports effective plan features, permissions, quotas, connection counts, active streams,
+    and supported source-switch protocols (`ts`, `hls`).
+  - `GET /api/v1/me/streams`: lists all active playback streams owned by the caller (`uid`, `virtual_id`, `group_virtual_id`,
+    `member_vid`, `title`, `item_type`, `protocol`, `shared`, `session_active`, `started_at`, `user_agent`, `session_token`).
+  - `DELETE /api/v1/me/streams/{uid}`: stops an own stream on another device and frees the user connection slot immediately
+    (`204 No Content`). HLS sessions terminate via transition guard and reject subsequent segment polls.
+  - `GET /api/v1/me/channels/{vid}/failover-members`: redacted member list (`UserFailoverMembersDto`) for a failover group
+    channel of the user's target before playback starts.
+  - `GET /api/v1/me/streams/{uid}/failover-members`: redacted member list for a running group stream of the caller.
+  - `POST /api/v1/me/streams/{uid}/failover-switch`: manually switches an active MPEG-TS or live HLS group stream to a target
+    member. Synchronous response (`200 OK`) after binding is published; HLS clients observe the switch on the next manifest
+    poll via discontinuity.
+  - `GET /api/v1/me/streams/joinable`: lists running shared streams on the caller's target that can be joined without consuming
+    an extra provider connection.
+  - `GET /api/v1/me/channels`: searches visible live channels in the user's playlist, filtered by user content rules.
+  - `GET /api/v1/me/epg`: retrieves programme guide listings for a visible channel in a time window with the caller's EPG
+    timeshift applied.
+  All `/me` player routes enforce user scoping and require Player API access enabled (`web_ui.player_api_enabled: true`
+  in config.yml and user effective `player_features.api_enabled: true`, which default to their
+  respective Web UI switches).
+
+- **Player API switches independent of the Web UI.** Player API routes (`/api/v1/me/*`, MCP
+  player tools) can now be enabled independently of Web UI access via `player_api_enabled` in `web_ui` configuration
+  and `player_features.api_enabled` per plan or user in `api_proxy.yml`. When unset, each switch inherits from its
+  Web UI counterpart (`user_ui_enabled` and `ui_enabled`), allowing headless player-only users (`ui_enabled: false`,
+  `player_features.api_enabled: true`) without access to Web UI management routes.
+
+- **Diagnostic fallback headers, cache control, and CORS exposure.** Stream responses that serve fallback video or rejection
+  slates now carry `X-Tuliprox-Fallback: <reason>` (`channel_unavailable`, `user_connections_exhausted`,
+  `provider_connections_exhausted`, `low_priority_preempted`, `user_account_expired`, `provisioning`,
+  `hls_session_or_lease_expired`, `maintenance`) and `Cache-Control: no-store`. Both `X-Tuliprox-Fallback` and
+  `X-Tuliprox-Rejection` are exposed to browser clients via `Access-Control-Expose-Headers`. For HLS, terminal responses and
+  fallback manifests carry the headers on every poll.
+
+- **Configurable `player_features` per plan and user.** Plans and users in `api_proxy.yml` configure player features, with user
+  credentials overriding plan settings field-by-field:
+  - `api_enabled`: enables access to Player API routes (`/api/v1/me/*`, MCP player tools) independently of Web UI access.
+  - `source_switch`: enables failover group member queries and manual source switching.
+  - `joinable_streams`: enables listing running shared streams.
+  - `recording`: granular DVR permission level (`none`, `read`, `private`, `shared`).
+  - `recording_quota`: optional private recording quota (> 0, accepts human-readable sizes like `20GB` or `500MB`).
+  - `max_concurrent_recordings`: optional limit on overlapping concurrent recordings (> 0).
+  - `free_shared_joins`: allows joining active shared streams even when the user's connection limit is reached.
+  - `max_free_shared_joins`: maximum concurrent free shared stream connections (> 0).
+
+- **Personal DVR for proxy API users and new `recording.share` permission.** API proxy users can record live TV and VOD/series
+  through the existing DVR subsystem:
+  - Four capability tiers: `none` (no access), `read` (read/playback/download visible recordings), `private` (create and manage
+    own private recordings), `shared` (create shared recordings).
+  - Permissions are calculated dynamically from `player_features` without reissuing JWT tokens.
+  - New permission bit `recording.share` governs creating shared recordings, separating shared creation from `recording.create`.
+  - Quota resolution order: `video.recording.quota.per_user["api:<user>"]` -> `player_features.recording_quota` ->
+    `video.recording.quota.default_private`. Shared recordings draw from `quota.shared`. DVR quotas accept human-readable sizes like `20GB` or `500MB`.
+  - Overlapping concurrent recordings are bounded by `max_concurrent_recordings` during the padded recording window. Attached
+    entries and clips do not consume additional provider slots and do not count toward concurrency limits.
+  - Shared recording visibility: API users only see shared recordings whose source target matches their own target and whose
+    channel passes their content filter (fail-closed).
+  - Recording identity is derived from the medium rather than the request, enabling deduplication across users: live captures
+    key on provider stream identity and padded start/end timestamps (or target + group VID for failover groups); VOD and series
+    episodes key on item identity without time.
+  - Editing padding or time window on an entry attached to a shared materialization automatically splits the entry into a
+    separate new recording.
+
+- **Free shared joins.** Users with `player_features.free_shared_joins: true` can join already-running shared live streams even
+  when their connection limit (`max_connections`) is exhausted, up to `max_free_shared_joins`. When all paying viewers leave, the
+  free join converts into a regular connection if a user slot is available, or gracefully disconnects with a fallback.
+
+- **Recordings over running shared streams.** When scheduled live recordings start on a channel already streaming as a live
+  shared stream (MPEG-TS), the recording worker joins the stream as a subscriber (`join_shared=1`) instead of allocating an
+  extra provider connection. If the stream ends before recording starts, it transparently falls back to an own provider slot
+  (`503 channel_unavailable` triggers slot acquisition). Recording subscribers are exempt from idle and max-duration timeouts.
+  The shared stream elevates its effective priority to the recording priority during the capture window, then reverts to viewer
+  priority. Joining shared playback is skipped when custom recording headers differ from playback headers.
+
+- **Clips from enclosing live recordings (MPEG-TS) and compaction.** When a requested live recording falls completely within the
+  time window of an existing MPEG-TS recording of the same source, it is captured as a virtual clip referencing the same underlying
+  materialization. The recorder writes a 1-second cadence index (`.tuliprox-recording.idx`), and clip streaming/downloads serve
+  prepended PAT/PMT packets and exact byte ranges. Quota is charged only for the clip's byte size. When the full recording is
+  deleted and only clips remain, background compaction copies the active clip byte ranges into a new compacted file and updates
+  offsets atomically.
+
+- **Player AI tools for MCP (`mcp.player_tools`).** The Model Context Protocol server can expose player-facing tools to playlist
+  users with `mcp.player_tools: read | write` (default `off`). API users authenticate via Bearer token and see only player tools
+  matching their effective features (`me_capabilities`, `me_search_channels`, `me_get_epg`, `me_list_streams`, `me_stop_stream`,
+  `me_list_sources`, `me_switch_source`, `me_list_joinable`, `me_list_recordings`, `me_record_program`, `me_cancel_recording`,
+  `me_delete_recording`, `me_recording_conflicts`). Admin tools are completely hidden from API users. Protocol `initialize`
+  returns role-scoped instructions: admin workflow guidance for administrators and player tool instructions for playlist API users.
 
 - **HLS origin telemetry timing split and diagnosis.** Shared HLS origin fetch telemetry splits segment body duration
   into origin wait and consumer wait, marks real manifest response headers, and reports delivery mode (`cache` or
@@ -1583,6 +1760,49 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **HLS start keeps its provider binding between segment retries.** When the first segment of a new HLS start failed
+  and waited for its retry backoff, the start window and the 3T protection could both expire while no origin request
+  was active. tuliprox then released the account binding, and the waiting player got an error instead of the
+  manifest that the retry published. While the start has not delivered media and still has render-window work queued
+  or in flight, the binding now stays.
+
+- **HLS start fallback answers 503/502 instead of 404.** When a canonical HLS start fell back to channel-unavailable
+  without a usable custom video, tuliprox answered HTTP `404 Not Found`, so players treated a channel that was still
+  starting or had failed to start as missing. A start that is still open now answers `503 Service Unavailable` with
+  `Retry-After: 2`. A failed or exhausted start answers `custom_stream_response_error_status` (default `502`). A
+  configured `channel_unavailable` custom video still plays as before.
+
+- **Network rules of playlist users apply to the Player API.** `network_access` (allowed networks and countries) was
+  checked on playlist, stream, HLS, and HDHomeRun routes, but not on token sign-in, refresh, or requests with the
+  token. A client outside the allowed networks could sign in and use `/api/v1/me`, the event WebSocket, recordings,
+  user settings, and MCP. All of these now answer `403`.
+
+- **Every Web UI form field has a help text.** About 115 fields showed "No dedicated explanation is available for this
+  field yet." They now explain their meaning, values and defaults in all six languages. Fields whose help was looked
+  up by the translated label text (so it depended on the UI language) now use a stable help id.
+
+- **The default `episode_pattern` now groups recordings without metadata.** For recordings without channel, title, or
+  series name, the folder name is taken from the filename with the episode marker removed. The default pattern has no
+  group named `episode`, so nothing was removed and every episode got its own folder. The filename is now cut before
+  the whole match when the pattern has no `episode` group; patterns with that group behave as before.
+
+- **Legacy plans are validated before they move to `plans.yml`.** Plans still embedded in `api-proxy.yml` were copied to
+  `plans.yml` and applied without validation. An invalid plan (for example `recording_quota: 0`) was active for one
+  run, and on the next start the invalid `plans.yml` left every API user without plans. Invalid legacy plans are now
+  rejected with an error; `plans.yml` is not written and the legacy block stays in `api-proxy.yml` to be fixed.
+
+- **HLS group failover no longer blocks itself on its own previous origin generation.** When a shared HLS session
+  rebound to a new member while fetches of its previous generation were still running, the new generation was refused
+  as if another owner held the account. The handoff then skipped that member and the viewer could get manifest `503`
+  responses for several seconds. The new generation of the same session now waits up to five seconds for the previous
+  one to drain; a foreign owner is still refused at once.
+
+- **Content filtering for failover member VIDs now evaluates the group entry.** Previously, resolving synthetic member virtual IDs
+  in M3U playlists, Xtream endpoints, timeshift requests, and HLS sessions evaluated content filters against the synthetic
+  member item rather than the parent failover group. All member resolution paths now evaluate `allows_content` and
+  `allows_item_type` against the group playlist item, ensuring channels hidden from a user cannot be accessed through direct
+  member IDs (returning `404 Not Found`).
 
 - **Overlapping HLS segment fetches on an admitted account are no longer refused.** When the provider lease of an
   admitted live HLS binding was not yet in its HLS start or confirmed state (for example right after a group member

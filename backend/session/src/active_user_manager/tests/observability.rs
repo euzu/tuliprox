@@ -302,3 +302,42 @@ async fn divergence_log_rate_limited_within_cooldown_window() {
     assert_eq!(entry.count_since_last_log, 2);
     assert_eq!(entry.last_logged, first_logged);
 }
+
+#[tokio::test]
+async fn test_user_has_stream_predicate_cases() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let addr_alice: SocketAddr = "127.0.0.1:55091".parse().unwrap();
+    let fp_alice = Fingerprint::new("fp-alice".to_string(), "127.0.0.1".to_string(), addr_alice);
+
+    manager.add_connection(&addr_alice).await;
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 1001,
+            meter_uid: 2001,
+            username: "alice",
+            max_connections: 2,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fp_alice,
+            provider: "provider-a".intern(),
+            stream_channel: &StreamChannel { virtual_id: 42, ..test_channel(42) },
+            user_agent: Cow::Borrowed("vlc"),
+            session_token: None,
+        })
+        .await;
+
+    // 1. Match: user alice has stream with virtual_id 42
+    assert!(manager.user_has_stream("alice", |s| s.channel.virtual_id == 42).await);
+
+    // 2. No match: user alice has stream but virtual_id does not match
+    assert!(!manager.user_has_stream("alice", |s| s.channel.virtual_id == 99).await);
+
+    // 3. Other user: user bob has no streams
+    assert!(!manager.user_has_stream("bob", |s| s.channel.virtual_id == 42).await);
+}

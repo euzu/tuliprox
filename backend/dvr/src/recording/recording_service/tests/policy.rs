@@ -154,8 +154,8 @@ async fn a_vod_takes_no_window_but_can_still_be_retitled() {
 }
 
 #[tokio::test]
-async fn padding_alone_does_not_split_shared_media() {
-    // The programme window decides the media, its padding does not.
+async fn padding_edits_split_shared_media() {
+    // Under E9 rules, padding changes the media identity and splits shared media.
     let start = chrono::Utc::now().timestamp() + 3_600;
     let queue = scheduled_queue(vec![
         upcoming_live("alice-entry", "web:alice", start),
@@ -169,7 +169,7 @@ async fn padding_alone_does_not_split_shared_media() {
 
     let (_, tasks) = queue.committed_snapshot().await;
     let paths: Vec<_> = tasks.iter().map(|task| task.file_path.clone()).collect();
-    assert_eq!(paths[0], paths[1], "still one file for one programme");
+    assert_ne!(paths[0], paths[1], "different padding splits into separate files");
 }
 
 #[test]
@@ -183,6 +183,7 @@ fn service_error_code_is_stable_string() {
     assert_eq!(ServiceError::UnknownRecording.code(), "recording_unknown");
     assert_eq!(ServiceError::PersistenceFailed.code(), "recording_persistence_failed");
     assert_eq!(ServiceError::ProvenanceImmutable.code(), "recording_provenance_immutable");
+    assert_eq!(ServiceError::ConcurrencyExceeded.code(), "recording_concurrency_exceeded");
     assert_eq!(ServiceError::Disabled.code(), "recording_disabled");
 }
 

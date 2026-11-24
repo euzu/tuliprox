@@ -87,6 +87,7 @@ pub async fn recording_snapshot(
     queue: &RecordingQueue,
     claims: &Claims,
     app_config: &tuliprox_core::model::AppConfig,
+    visibility: Option<&dyn crate::recording::recording_catalog_access::RecordingVisibilityPort>,
 ) -> RecordingSnapshot {
     let available = crate::recording::recording_supervisor::recording_enabled(app_config);
     let empty = |revision| RecordingSnapshot {
@@ -103,12 +104,21 @@ pub async fn recording_snapshot(
     };
     let (revision, tasks) = queue.committed_snapshot().await;
     let quota = quota_summary_for(&subject, &tasks, app_config);
-    let tasks = tasks
-        .iter()
-        .filter(|task| task_visible_to(&task.recording, claims, &subject))
-        .map(|task| task.to_view(task.owner_id() == &subject))
-        .collect();
-    RecordingSnapshot { revision, available, quota, tasks }
+    let mut visible_tasks = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if task.cancelled_by_owner && task.owner_id() == &subject {
+            continue;
+        }
+        let is_visible = if let Some(vis) = visibility {
+            vis.is_visible(&task.recording, claims, &subject).await
+        } else {
+            task_visible_to(&task.recording, claims, &subject)
+        };
+        if is_visible {
+            visible_tasks.push(task.to_view(task.owner_id() == &subject));
+        }
+    }
+    RecordingSnapshot { revision, available, quota, tasks: visible_tasks }
 }
 
 /// The caller's own quota position, computed from the same committed
@@ -122,6 +132,7 @@ fn quota_summary_for(
     let config = app_config.config.load();
     let limits = crate::recording::recording_service::quota_limits_from_config(
         config.recording().and_then(|recording| recording.quota.as_ref()),
+        app_config.live_api_user_recording_quotas(),
     );
     let quota = crate::recording::recording_quota::regular_user_dto(subject, &totals, &limits, tasks);
     RecordingQuotaSummaryDto {
@@ -275,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn recording_snapshot_yields_no_subject_id() {
         let queue = RecordingQueue::new();
-        let snapshot = recording_snapshot(&queue, &no_subject_claims(), &bare_app_config()).await;
+        let snapshot = recording_snapshot(&queue, &no_subject_claims(), &bare_app_config(), None).await;
         assert_eq!(snapshot.revision.0, 0);
         assert_eq!(snapshot.tasks.len(), 0);
         assert_eq!(snapshot.quota, RecordingQuotaSummaryDto::default(), "a session with no subject is charged nothing");
@@ -284,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn recording_snapshot_yields_no_recording_read_perm() {
         let queue = RecordingQueue::new();
-        let snapshot = recording_snapshot(&queue, &no_read_claims(), &bare_app_config()).await;
+        let snapshot = recording_snapshot(&queue, &no_read_claims(), &bare_app_config(), None).await;
         assert_eq!(snapshot.revision.0, 0);
         assert_eq!(snapshot.tasks.len(), 0);
     }
@@ -351,7 +362,7 @@ mod tests {
         task.recording.source = RecordingSource::new("target-internal-7", "1", "provider-input-a");
         queue.scheduled.write().await.push(task);
 
-        let snapshot = recording_snapshot(&queue, &alice_claims(), &bare_app_config()).await;
+        let snapshot = recording_snapshot(&queue, &alice_claims(), &bare_app_config(), None).await;
         assert_eq!(snapshot.tasks.len(), 1, "the owner sees their own recording");
         let wire = wire_form(&snapshot);
 
@@ -374,7 +385,7 @@ mod tests {
             None,
         ));
 
-        let snapshot = recording_snapshot(&queue, &alice_claims(), &bare_app_config()).await;
+        let snapshot = recording_snapshot(&queue, &alice_claims(), &bare_app_config(), None).await;
         assert_eq!(snapshot.tasks.len(), 1, "alice can see bob's shared recording");
 
         assert!(!wire_form(&snapshot).contains("web:bob"), "the other user's id reached alice");
@@ -398,7 +409,7 @@ mod tests {
             tuliprox_repository::recording_repository::materialization_id_for(&RecordingQueue::to_persisted(&task));
         queue.scheduled.write().await.push(task);
 
-        let snapshot = recording_snapshot(&queue, &alice_claims(), &bare_app_config()).await;
+        let snapshot = recording_snapshot(&queue, &alice_claims(), &bare_app_config(), None).await;
         let wire = wire_form(&snapshot);
 
         assert!(!wire.contains(&materialization_id), "a regular user was handed a materialization id: {wire}");

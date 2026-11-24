@@ -1034,6 +1034,8 @@ async fn shared_proxy_clients_keep_independent_bodies_and_cleanup() {
         crate::api::model::ConnectionKind::Normal,
         false,
         None,
+        false,
+        false,
     )
     .await
     .into_response();
@@ -1054,6 +1056,8 @@ async fn shared_proxy_clients_keep_independent_bodies_and_cleanup() {
         crate::api::model::ConnectionKind::Normal,
         false,
         None,
+        false,
+        false,
     )
     .await
     .into_response();
@@ -1144,6 +1148,8 @@ async fn shared_start_abort_does_not_leak_meter_registration() {
         crate::api::model::ConnectionKind::Normal,
         false,
         None,
+        false,
+        false,
     )
     .await
     .into_response();

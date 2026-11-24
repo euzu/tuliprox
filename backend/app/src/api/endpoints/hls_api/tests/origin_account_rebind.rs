@@ -336,7 +336,7 @@ pub(super) fn enable_isolated_rebind_cache(app: &Arc<AppState>, path: &std::path
         reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
             hls_cache: Some(HlsCacheConfigDto {
                 cache_path: Some(path.to_string_lossy().into_owned()),
-                ..HlsCacheConfigDto::default()
+                ..super::test_hls_cache_dto(app)
             }),
             ..ReverseProxyConfigDto::default()
         })),

@@ -19,7 +19,7 @@ use crate::{
 use axum::response::IntoResponse;
 use log::{debug, error};
 use serde::Deserialize;
-use shared::model::{PlaylistItemType, TargetType, VirtualId, XtreamCluster};
+use shared::model::{PlaylistEntry, PlaylistItemType, TargetType, VirtualId, XtreamCluster};
 use std::{str::FromStr, sync::Arc};
 use tokio_stream::StreamExt;
 
@@ -49,6 +49,7 @@ pub(super) struct RecordingCandidateFields<'a> {
     pub(super) group: &'a str,
     pub(super) url: &'a str,
     pub(super) item_type: PlaylistItemType,
+    pub(super) provider_id: Option<String>,
 }
 
 fn non_blank(value: &str) -> Option<String> {
@@ -57,7 +58,8 @@ fn non_blank(value: &str) -> Option<String> {
 }
 
 pub(super) fn recording_candidate(fields: &RecordingCandidateFields<'_>) -> ResolvedRecordingSource {
-    let RecordingCandidateFields { virtual_id, input_name, name, title, group, url, item_type } = *fields;
+    let RecordingCandidateFields { virtual_id, input_name, name, title, group, url, item_type, ref provider_id } =
+        *fields;
     let is_episode = matches!(item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries);
     ResolvedRecordingSource {
         virtual_id: virtual_id.get(),
@@ -67,6 +69,8 @@ pub(super) fn recording_candidate(fields: &RecordingCandidateFields<'_>) -> Reso
         series_name: if is_episode { non_blank(name) } else { None },
         extension: shared::utils::extract_extension_from_url(url).map(str::to_string),
         downloadable: item_type != PlaylistItemType::SeriesInfo,
+        provider_id: provider_id.clone(),
+        is_group: false,
     }
 }
 
@@ -100,6 +104,7 @@ pub(in crate::api) async fn resolve_target_recording_source(
                         group: &item.group,
                         url: &item.url,
                         item_type: item.item_type,
+                        provider_id: item.get_input_stream_id().map(|s| s.to_string()),
                     }));
                     break;
                 }
@@ -119,6 +124,7 @@ pub(in crate::api) async fn resolve_target_recording_source(
                         group: &item.group,
                         url: &item.url,
                         item_type: item.item_type,
+                        provider_id: item.get_input_stream_id().map(|s| s.to_string()),
                     }));
                     break;
                 }
@@ -214,6 +220,7 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                         group: &item.group,
                         url: &item.url,
                         item_type: item.item_type,
+                        provider_id: item.get_input_stream_id().map(|s| s.to_string()),
                     }));
                 }
             }
@@ -231,6 +238,7 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                         group: &item.group,
                         url: &item.url,
                         item_type: item.item_type,
+                        provider_id: item.get_input_stream_id().map(|s| s.to_string()),
                     }));
                 }
             }
@@ -245,13 +253,15 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct RecordingStreamQuery {
-    pub(super) target_name: String,
-    pub(super) input_name: String,
-    pub(super) provider_allocation_id: Option<u64>,
+pub(crate) struct RecordingStreamQuery {
+    pub(crate) target_name: String,
+    pub(crate) input_name: String,
+    pub(crate) provider_allocation_id: Option<u64>,
+    pub(crate) join_shared: Option<String>,
+    pub(crate) priority: Option<i8>,
 }
 
-pub(super) async fn playlist_recording_stream(
+pub(crate) async fn playlist_recording_stream(
     fingerprint: crate::auth::Fingerprint,
     axum::extract::Path((token, cluster, virtual_id)): axum::extract::Path<(String, String, u32)>,
     axum::extract::Query(query): axum::extract::Query<RecordingStreamQuery>,
@@ -270,6 +280,7 @@ pub(super) async fn playlist_recording_stream(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
     let input = crate::api::api_utils::with_recording_headers(&app_state.app_config, resolved.input);
+    let join_shared = query.join_shared.as_deref() == Some("1");
     if resolved.target.has_output(TargetType::Xtream) {
         let stream_id = virtual_id.to_string();
         return xtream_player_api_stream_with_resolved_target(
@@ -280,6 +291,8 @@ pub(super) async fn playlist_recording_stream(
             super::super::xtream_api::InternalPlaybackSource::Recording(input),
             ApiStreamRequest::from_access_token(ctxt, &token, &stream_id, ""),
             query.provider_allocation_id,
+            join_shared,
+            query.priority,
         )
         .await
         .into_response();
@@ -296,7 +309,11 @@ pub(super) async fn playlist_recording_stream(
     if pli.input_name != input.name || pli.item_type.cluster() != ctxt.cluster() {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
-    let user = Arc::new(crate::api::api_utils::create_recording_proxy_user(&app_state));
+    let mut user = crate::api::api_utils::create_recording_proxy_user(&app_state);
+    if let Some(priority) = query.priority {
+        user.priority = priority;
+    }
+    let user = Arc::new(user);
     m3u_api_stream_loaded(
         user,
         resolved.target,
@@ -310,6 +327,7 @@ pub(super) async fn playlist_recording_stream(
         query.provider_allocation_id,
         None,
         None,
+        join_shared,
     )
     .await
     .into_response()

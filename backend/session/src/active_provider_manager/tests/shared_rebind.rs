@@ -161,3 +161,20 @@ fn preempt_after_attach_targets_new_allocation() {
     );
     assert!(connections.priority_index.get(&solis).is_none_or(std::collections::BTreeMap::is_empty));
 }
+
+#[test]
+fn priority_of_shared_allocation_unchanged_by_free_join() {
+    let manager = manager_with_inputs(&[("solis", 2)]);
+    let solis: Arc<str> = "solis".into();
+    let paid_handle = manager.acquire_connection(&solis, &addr(1), 5, ConnectionKind::Normal).expect("solis slot");
+    assert!(manager.make_shared_connection(&paid_handle, KEY, SharedSubscriberId::from_stream_uid(1)));
+    assert_eq!(manager.read_connections().shared.by_key.get(KEY).map(|s| s.priority), Some(5));
+
+    manager
+        .add_shared_connection(&addr(2), SharedSubscriberId::from_stream_uid(2), KEY, 10, ConnectionKind::Normal)
+        .expect("free join succeeds");
+
+    let connections = manager.read_connections();
+    let shared = connections.shared.by_key.get(KEY).expect("shared stream exists");
+    assert_eq!(shared.priority, 5);
+}

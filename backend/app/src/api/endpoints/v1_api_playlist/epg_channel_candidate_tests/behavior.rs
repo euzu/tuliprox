@@ -12,6 +12,8 @@ pub(in crate::api::endpoints::v1_api_playlist::epg_channel_candidate_tests) fn c
         series_name: None,
         extension: None,
         downloadable: true,
+        provider_id: None,
+        is_group: false,
     }
 }
 
@@ -50,6 +52,7 @@ fn episode_candidate_carries_series_name_and_group() {
         group,
         url: "http://example.test/series/7.mkv",
         item_type,
+        provider_id: None,
     };
     let episode = recording_candidate(&fields(PlaylistItemType::Series, "Crime"));
     assert_eq!(episode.series_name.as_deref(), Some("The Show"));

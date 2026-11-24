@@ -118,6 +118,7 @@ mod session;
 use self::origin_account_runtime::prepare_hls_origin_runtime;
 pub(in crate::api) use catchup::*;
 pub(in crate::api) use manifest::*;
+pub(in crate::api) use origin_account_runtime::{find_hls_group_playback, ResolvedHlsGroupPlayback};
 pub(in crate::api) use owner_token::*;
 pub(in crate::api) use segment::*;
 pub(in crate::api) use session::*;

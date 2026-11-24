@@ -312,7 +312,8 @@
       "CORRUPT_SEGMENT_WATCHDOG_MAX_PARALLEL_JOBS": "Concurrent watchdog sanitize jobs.",
       "SESSION_IDLE_TIMEOUT": "Idle time before unused HLS sessions are removed.",
       "STRIP_MODE": "How the initial playlist lags behind live edge.",
-      "STRIP_VALUE": "Gap value in segments or seconds."
+      "STRIP_VALUE": "Gap value in segments or seconds.",
+      "STARTUP_MODE": "Startup streaming strategy for HLS playback (`conservative`, `first_ready`, `progressive`, or `optimistic`). Controls whether initial segments stream immediately before origin transfer finishes."
     },
     "CONFIG_API": {
       "HOST": "Host where the tuliprox API listens. Default: 0.0.0.0",
@@ -329,12 +330,15 @@
       "PRIORITY": "The order of processing. Lower numbers mean higher priority (e.g. -1 is higher than 0).",
       "SEQUENTIAL_GROUP": "Optional process-wide group ID. Inputs with the same ID are refreshed one after another when parallel processing is enabled.",
       "URL": "Input source URL. Supported schemes:\n\n```http(s)://\nfile://\nprovider://<provider>/...\nbatch://...(auto-switches m3u/xtream to batch types).```\n\nFor m3u_batch/xtream_batch only local CSV sources are allowed (batch://...).",
-      "USERNAME": "Login username for this account or service."
+      "USERNAME": "Login username for this account or service.",
+      "PERSIST": "Optional path template (e.g. `./playlist_{}.m3u`) to save the downloaded raw provider playlist to local disk. The `{}` placeholder is replaced with the current timestamp.",
+      "PLAYBACK_PROVIDER": "Name of a global provider profile used to resolve `provider://` playback URLs created by mappings. Enables CDN failover for independent playlists. If omitted, no playback provider profile is attached."
     },
     "STALKER_INPUT_CONFIG": {
       "AUTH_MODE": "Authentication identity to use. Auto accepts either a MAC address or username/password; the explicit modes require the identity they name.",
       "MAG_PRESET": "Predefined MAG device profile used for portal headers and identity defaults.",
-      "ENDPOINT_PREFERENCE": "Preferred Stalker portal endpoint. Auto tries the compatible endpoint candidates."
+      "ENDPOINT_PREFERENCE": "Preferred Stalker portal endpoint. Auto tries the compatible endpoint candidates.",
+      "CATALOG_MAX_PAGES": "Limits the maximum number of catalog pagination requests made to the Stalker portal during updates. Defaults to `4096`. Helps prevent timeouts on very large portals."
     },
     "STALKER_DEVICE_PROFILE": {
       "MAC_ADDRESS": "Portal device MAC address. Required by auto without credentials, mac_only, and mac_plus_credentials.",
@@ -390,7 +394,11 @@
       "FLUSSONIC_HLS_AUDIO_TRACKS": "Labels fragmented-MP4 HLS objects below Flussonic tracks-a<N> paths as audio/mp4 when the provider sends no specific Content-Type. Enable only for Flussonic sources.",
       "XTREAM_SKIP_LIVE": "If true, the live section of the Xtream provider is skipped during update.",
       "XTREAM_SKIP_SERIES": "If true, the series section of the Xtream provider is skipped during update.",
-      "XTREAM_SKIP_VOD": "If true, the VOD section of the Xtream provider is skipped during update."
+      "XTREAM_SKIP_VOD": "If true, the VOD section of the Xtream provider is skipped during update.",
+      "SKIP_LIVE": "When enabled, skips live television channels from this input source during Xtream or Stalker ingestion. Defaults to `false`.",
+      "SKIP_VOD": "When enabled, skips video-on-demand movies from this input source during Xtream or Stalker ingestion. Defaults to `false`.",
+      "SKIP_SERIES": "When enabled, skips television series and episode streams from this input source during Xtream or Stalker ingestion. Defaults to `false`.",
+      "STALKER_BULK_EPG": "Enables bulk fetching of electronic program guide (EPG) data for live channels during playlist refresh. Defaults to `false`. Accelerates EPG ingestion on supported Stalker portals."
     },
     "CONFIG_TARGET": {
       "ENABLED": "If disabled, the processing for this target output is skipped.",
@@ -400,7 +408,10 @@
       "WATCH": "List of group patterns to monitor. Each pattern is a regular expression matched against the group name (e.g. ^Sport.* or (?i)event). Each entry reports channel changes, new groups and/or removed groups. Notifications are sent via configured messaging."
     },
     "CONFIG_TARGET_OPTIONS": {
-      "SHARE_LIVE_STREAMS": "Enables live stream sharing. The master toggle sets HLS and MPEG-TS together; each format can also be changed separately."
+      "SHARE_LIVE_STREAMS": "Enables live stream sharing. The master toggle sets HLS and MPEG-TS together; each format can also be changed separately.",
+      "FAILOVER_GROUPS": "Configures stream failover group behavior and channel matching rules for this target. Overrides global failover settings when defined.",
+      "IGNORE_LOGO": "When enabled, ignores `tvg-logo` and `tvg-logo-small` attributes in generated M3U playlists. Defaults to `false`.",
+      "REMOVE_DUPLICATES": "Enables legacy pre-transform stream deduplication for each input before mapping and filtering. Retains only the first occurrence of repeated source identities. Defaults to `false`."
     },
     "EPG_OUTPUT_OPTIONS": {
       "CLEAR_INVALID_IDS": "Clears EPG IDs that do not match the processed EPG data. Playlist entries are not removed.",
@@ -539,7 +550,14 @@
       "UPDATE_QUALITY": "Minimum accepted cluster update quality in percent. A value of 0 disables the quality check.",
       "URL": "Source URL for this input.",
       "SERIES_SOURCE": "Source selector for the Series cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
-      "VOD_SOURCE": "Source selector for the VOD cluster when staged input is enabled (`default`, `staged`, `input`, `skip`)."
+      "VOD_SOURCE": "Source selector for the VOD cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
+      "EPG_SMART_MATCH": "Configures automatic matching rules to link playlist channels missing a `tvg-id` with EPG guide data based on channel names and prefixes.",
+      "MEDIA_SERVER_FLAVOR": "Specifies the media server software type: `Jellyfin`, `Emby`, `Plex`, or `Silo`.",
+      "PLUGIN_ID": "Specifies the identifier of the installed plugin providing this input source.",
+      "PROBE_FILTER": "Filter expression restricting which streams are probed for media information. Leave empty to probe all eligible streams.",
+      "RESOLVE_FILTER": "Filter expression restricting which stream URLs are resolved in advance. Leave empty to apply resolution to all eligible streams.",
+      "STAGED_TYPE": "Selects the playlist format expected by the staged input: `M3U` (default) or `Xtream`.",
+      "STALKER_ALIAS_OVERRIDE": "Overrides portal authentication, hardware MAG preset, or API preferences for this specific Stalker alias."
     },
     "MEDIA_SERVER": {
       "ACCOUNT_TOKEN": "Optional account token used by media-server integrations that require an account-scoped authentication token.",
@@ -630,7 +648,8 @@
       "ALLOWED_ORIGINS": "Additional `Origin` values accepted besides the request host, e.g. `https://claude.ai`. Needed behind a reverse proxy that rewrites the `Host` header.",
       "ENABLED": "Mounts the MCP endpoint at `{web_ui_path}/mcp` so AI assistants can query this instance. Requires a restart.",
       "MAX_RESPONSE_BYTES": "Tool results larger than this many bytes are truncated. Minimum 1024, default 262144.",
-      "READ_ONLY": "Hides and rejects tools that change state. Forced to read-only when Web UI authentication is disabled."
+      "READ_ONLY": "Hides and rejects tools that change state. Forced to read-only when Web UI authentication is disabled.",
+      "PLAYER_TOOLS": "Enables MCP tools for playlist proxy API users. Off disables player tools; Read offers inspection tools; Write also allows managing recordings and playback streams."
     },
     "MESSAGING_CONFIG": {
       "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type.",
@@ -662,7 +681,8 @@
       "PLUGIN_NONE": "No plugin that renders outputs is installed. Install and enable one under Plugins first.",
       "PLUGIN_REQUIRED": "Select the plugin that renders this output.",
       "FILENAME": "File name inside the target's directory. A plain name without a path; <plugin>.out when empty.",
-      "FILTER": "Filter expression selecting which items reach this output. It is applied before the plugin renders."
+      "FILTER": "Filter expression selecting which items reach this output. It is applied before the plugin renders.",
+      "PLUGIN_ID": "Specifies the identifier of the installed plugin that renders this target output format."
     },
     "OUTPUT_STRM_FORM": {
       "EXPORT_STYLE": "The naming convention used for generating .strm files (e.g. kodi, plex, jellyfin).",
@@ -670,7 +690,9 @@
     },
     "OUTPUT_XTREAM_FORM": {
       "FILTER": "Filter expression used to specify which items should be included in the Xtream output.",
-      "TRAKT_LISTS": "Associates Trakt.tv lists to synchronize with this Xtream target output."
+      "TRAKT_LISTS": "Associates Trakt.tv lists to synchronize with this Xtream target output.",
+      "TRAKT_CATALOG_SELECTION": "Controls whether the Xtream output delivers the `full` provider catalog (default) or only items `curated` by Trakt lists and charts.",
+      "TRAKT_CHARTS": "Configures Trakt trending or popular charts to filter catalog items or include them as categories in the Xtream output."
     },
     "PLAYLIST_EPG_SOURCE_SELECTOR": {
       "URL": "Source URL used to download EPG data."
@@ -683,7 +705,8 @@
     "PROVIDER_DNS": {
       "ENABLED": "Enables DNS/IP-connect behavior for this provider.",
       "KEEP_VHOST": "If enabled, keeps the original hostname in the Host header while connecting by resolved IP.",
-      "REFRESH_SECS": "DNS refresh interval in seconds for provider hostnames (minimum effective value is 10)."
+      "REFRESH_SECS": "DNS refresh interval in seconds for provider hostnames (minimum effective value is 10).",
+      "MAX_ADDRS": "Maximum number of resolved IP addresses to store per hostname. Leave empty for no limit."
     },
     "PUSHOVER_MESSAGING_CONFIG": {
       "TOKEN": "Pushover application API token.",
@@ -735,7 +758,19 @@
       "STATUS": "The active or disabled state of the user proxy credential.",
       "TOKEN": "Unique API token that can be used instead of username/password.",
       "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true).",
-      "PRIORITY": "Connection priority assigned to this user proxy context. Default = 0, lowest priority = 127, highest priority = -128."
+      "PLAYER_API_ENABLED": "Enables or disables Player API access (/api/v1/me/*, MCP player tools) for this user. If unset, inherits from plan or follows Web UI access (ui_enabled).",
+      "PRIORITY": "Connection priority assigned to this user proxy context. Default = 0, lowest priority = 127, highest priority = -128.",
+      "USERNAME": "Login name of this user for playlists, streams, the Xtream API and the Player API. It must be unique and cannot be changed after the user is created.",
+      "PLAYER_SOURCE_SWITCH": "Allows the player to list the failover sources of a running stream and to switch or split to another source manually.\n\nInherit = take the value from the plan; without a plan, the built-in default applies.",
+      "PLAYER_JOINABLE_STREAMS": "Allows the player to list running shared streams that it can join, including compatible streams of other targets.\n\nInherit = take the value from the plan; without a plan, the built-in default applies.",
+      "PLAYER_RECORDING": "DVR level of the player.\n\n`none` = no access. `read` = play, download and snapshot recordings. `private` = also create and manage own recordings. `shared` = also create recordings that other users can see. Each level includes the previous one.\n\nInherit = take the value from the plan; without a plan, the built-in default applies.",
+      "PLAYER_RECORDING_QUOTA": "Disk quota for private recordings, for example `20GB` or `500MB` (accepted units: B, KB, MB, GB, TB).\n\nAn entry in `video.recording.quota.per_user` takes precedence. Without any value, `video.recording.quota.default_private` applies; if that is also empty, there is no limit. `0` is not allowed.\n\nInherit = take the value from the plan; without a plan, the built-in default applies.",
+      "PLAYER_MAX_CONCURRENT_RECORDINGS": "Maximum number of recordings that may run at the same time, including pre- and post-roll. Recordings that attach to an existing recording do not use a slot. Empty = no limit. `0` is not allowed.\n\nInherit = take the value from the plan; without a plan, the built-in default applies.",
+      "PLAYER_MAX_RECORDING_RULES": "Maximum number of recording rules (series and weekly rules). Applies only with recording level `private` or `shared`. Default: 10. `0` is not allowed.\n\nInherit = take the value from the plan; without a plan, the built-in default applies.",
+      "PLAYER_FREE_SHARED_JOINS": "Allows joining a running shared stream even when all own connections are in use. The join uses no extra provider connection.\n\nInherit = take the value from the plan; without a plan, the built-in default applies.",
+      "PLAYER_MAX_FREE_SHARED_JOINS": "Maximum number of free shared joins at the same time. Default: 1. `0` is not allowed.\n\nInherit = take the value from the plan; without a plan, the built-in default applies.",
+      "PLAYER_WATCH_PROGRESS": "Allows the player to store and resume the playback position of movies and episodes.\n\nInherit = take the value from the plan; without a plan, the built-in default applies.",
+      "PLAYER_EVENT_STREAM": "Allows the personal event stream (WebSocket) that reports stream, failover and recording changes to the player.\n\nInherit = take the value from the plan; without a plan, the built-in default applies."
     },
     "USER_PLAN": {
       "NAME": "Unique plan name. Users reference it via their Plan field to inherit these settings.",
@@ -744,7 +779,18 @@
       "SOFT_CONNECTIONS": "Additional preemptible provider slots inherited by plan members whose own value is 0/unset.",
       "FILTER": "Filter DSL expression restricting the content visible to plan members. Combined with a member's own filter using AND, so it can only narrow, never widen.",
       "TRIAL": "Optional trial window with a unit, e.g. 24h, 7d, 30d. When set, users newly created on this plan without their own expiry get an automatic trial expiry and Trial status. Applied only at user creation; enforcement requires user_access_control. Leave empty for no trial.",
-      "COMMENT": "Optional free-form description of this plan."
+      "PLAYER_API_ENABLED": "Enables or disables Player API access (/api/v1/me/*, MCP player tools) for plan members. If unset, follows User-UI access (ui_enabled).",
+      "COMMENT": "Optional free-form description of this plan.",
+      "SOURCE_SWITCH": "Allows the player to list the failover sources of a running stream and to switch or split to another source manually.\n\nUsers of this plan without an own value inherit this setting.",
+      "JOINABLE_STREAMS": "Allows the player to list running shared streams that it can join, including compatible streams of other targets.\n\nUsers of this plan without an own value inherit this setting.",
+      "RECORDING": "DVR level of the player.\n\n`none` = no access. `read` = play, download and snapshot recordings. `private` = also create and manage own recordings. `shared` = also create recordings that other users can see. Each level includes the previous one.\n\nUsers of this plan without an own value inherit this setting.",
+      "RECORDING_QUOTA": "Disk quota for private recordings, for example `20GB` or `500MB` (accepted units: B, KB, MB, GB, TB).\n\nAn entry in `video.recording.quota.per_user` takes precedence. Without any value, `video.recording.quota.default_private` applies; if that is also empty, there is no limit. `0` is not allowed.\n\nUsers of this plan without an own value inherit this setting.",
+      "MAX_CONCURRENT_RECORDINGS": "Maximum number of recordings that may run at the same time, including pre- and post-roll. Recordings that attach to an existing recording do not use a slot. Empty = no limit. `0` is not allowed.\n\nUsers of this plan without an own value inherit this setting.",
+      "MAX_RECORDING_RULES": "Maximum number of recording rules (series and weekly rules). Applies only with recording level `private` or `shared`. Default: 10. `0` is not allowed.\n\nUsers of this plan without an own value inherit this setting.",
+      "FREE_SHARED_JOINS": "Allows joining a running shared stream even when all own connections are in use. The join uses no extra provider connection.\n\nUsers of this plan without an own value inherit this setting.",
+      "MAX_FREE_SHARED_JOINS": "Maximum number of free shared joins at the same time. Default: 1. `0` is not allowed.\n\nUsers of this plan without an own value inherit this setting.",
+      "WATCH_PROGRESS": "Allows the player to store and resume the playback position of movies and episodes.\n\nUsers of this plan without an own value inherit this setting.",
+      "EVENT_STREAM": "Allows the personal event stream (WebSocket) that reports stream, failover and recording changes to the player.\n\nUsers of this plan without an own value inherit this setting."
     },
     "RATE_LIMIT_CONFIG": {
       "BURST_SIZE": "Defines the initial number of available connections before throttling applies (e.g. 10).",
@@ -829,14 +875,16 @@
       "STRM_PROPS": "List of Kodi stream properties (e.g. inputstream=...) to include in .strm files.",
       "UNDERSCORE_WHITESPACE": "If enabled, replaces all spaces with underscores in filenames and paths.",
       "USE_METADATA": "If enabled, STRM filenames prefer the media metadata name. Otherwise, the target's processed title is used; it remains the fallback when metadata has no name.",
-      "USERNAME": "The user whose credentials will be embedded in the .strm URLs."
+      "USERNAME": "The user whose credentials will be embedded in the .strm URLs.",
+      "FLAT": "When enabled, creates a flatter directory structure by omitting category folders, while retaining show and season folders. Deduplicates movies with matching TMDb IDs into a shared folder. Defaults to `false`."
     },
     "TARGET_FORM": {
       "BOUQUETS": "Opens this target's bouquet editor. A whitelist keeps only selected groups; a blacklist excludes selected groups. Changes take effect with the next playlist update.",
       "PERSIST_FILTER": "Optional final filter applied after EPG processing and all mappings, immediately before persistence.",
       "FILTER": "Global filter expression applied to the target before creating explicit outputs.",
       "FORCE_REDIRECT": "Forces streams directly to the proxy or the provider instead of resolving individually.",
-      "PROCESSING_ORDER": "Determines the priority or the sequence in which target channels are matched and listed."
+      "PROCESSING_ORDER": "Determines the priority or the sequence in which target channels are matched and listed.",
+      "FAILOVER_GROUPS_LINK": "Opens the failover groups management view prefiltered to channels belonging to this target."
     },
     "TELEGRAM_CONFIG": {
       "BOT_TOKEN": "Telegram Bot API token. Obtain this from @BotFather.",
@@ -863,28 +911,22 @@
       "URL": "Download source of the IMDb ratings dataset.\n\nAn empty value uses the default URL: `https://datasets.imdbws.com/title.ratings.tsv.gz`.",
       "MIN_VOTES": "IMDb ratings with fewer votes are ignored.\n\n`0` keeps all ratings.\n\nThe default of `1000` removes obscure titles with only a handful of votes.",
       "RATING_SOURCE": "Selects the effective rating: `imdb_then_provider` uses the IMDb rating when it passes `min_votes`, otherwise the provider rating. `imdb` uses only IMDb ratings. `provider` keeps the provider rating.",
-      "REPLACE_RATING": "Writes the effective rating to the Xtream output fields `rating` and `rating_5based`.\n\nWhen disabled, the Xtream responses stay as they are."
+      "REPLACE_RATING": "Writes the effective rating to the Xtream output fields `rating` and `rating_5based`.\n\nWhen disabled, the Xtream responses stay as they are.",
+      "RATING": "Displays the current IMDb user rating and total vote count matched for this title."
     },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "The category name used in the playlist for items from this Trakt list.",
       "FUZZY_MATCH_THRESHOLD": "Similarity threshold for matching Trakt items to provider streams (0-100).",
       "LIST_SLUG": "The slug (part of URL) of the Trakt list to fetch.",
-      "USER": "The Trakt username who owns the list."
+      "USER": "The Trakt username who owns the list.",
+      "CREATE_XTREAM_CATEGORY": "When enabled, creates a dedicated Xtream category containing items matched from this Trakt list. Defaults to `true`. When disabled, the list is used for catalog selection only.",
+      "TMDB_ONLY": "When enabled, matches playlist items strictly by TMDb ID and bypasses fuzzy title matching. Defaults to `false`."
     },
     "TRAKT_LIST_FORM": {
       "TRAKT_CONTENT_TYPE": "Specifies whether to fetch 'movies' or 'shows' from the assigned Trakt list."
     },
     "VIDEO_CONFIG": {
-      "DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT": "Random jitter added to download retry delays.\n\nA value of 20 means delays vary by about ±20%. This helps avoid retry spikes when many downloads fail at the same time.\n\nMust stay between 0 and 95.",
-      "DOWNLOAD_RETRY_MAX_ATTEMPTS": "Maximum number of transient retry attempts before a transfer is marked as failed.\n\nThis applies to downloads and live recordings after transient startup or transport failures.\n\nMust be at least 1.",
-      "DOWNLOAD_RETRY_BACKOFF_INITIAL": "Initial wait time in seconds after the first transient download failure.\n\nLater retries grow from this base using the configured multiplier.",
-      "DOWNLOAD_RETRY_BACKOFF_MULTIPLIER": "Multiplier applied to each subsequent transient retry delay.\n\nExample: initial 3 and multiplier 3.0 yields about 3s, 9s, 27s until the max delay is reached.",
-      "DOWNLOAD_RETRY_BACKOFF_MAX": "Maximum retry delay in seconds.\n\nOnce exponential growth reaches this value, later retries stay capped here.",
       "EXTENSIONS": "List of valid video file extensions (e.g. mp4, avi, mkv). Streams ending in these are classified as video VODs.",
-      "HEADERS": "Custom HTTP headers applied to video download requests (e.g. User-Agent).",
-      "MAX_BACKGROUND_PER_PROVIDER": "Maximum number of background-priority transfers allowed per provider before additional background jobs wait.\n\nSet to 0 to disable this limit.",
-      "RECORDING_FILENAME_TEMPLATE": "Template used for recording filenames. Supported placeholders: {channel}, {program_title}, {start_time}, {end_time}, {episode}, and {owner}.",
-      "RESERVE_SLOTS_FOR_USERS": "Keeps this many provider slots free for normal user streaming before background downloads are allowed to consume them.\n\nSet to 0 to disable reserved headroom.",
       "WEB_SEARCH": "Template URL for external web search (e.g. IMDb). {} is replaced by the title."
     },
     "DIRECTORY": "The destination directory for recorded video files.",
@@ -907,6 +949,7 @@
       "PATH": "Optional path prefix (e.g. /ui) for reverse proxy integration.",
       "PLAYER_SERVER": "Optional server override used specifically for the built-in web player.",
       "USER_UI_ENABLED": "Enables or disables the simplified bouquet editor for standard users.",
+      "PLAYER_API_ENABLED": "Enables or disables the Player API (/api/v1/me/*) globally. If unset, follows User-UI Enabled.",
       "COMBINE_VIEWS_STATS_STREAMS": "If set, the Stats and Streams views are combined into a single view.",
       "LANDING_PAGE": "The default view shown when loading the Web UI.",
       "STREAM_INFO": "Controls which stream information fields are visible in the stream display.",
@@ -1010,6 +1053,139 @@
       "DIRECTOR": "Director or creator of the movie or series.",
       "RELEASE_DATE": "Official release date in YYYY-MM-DD format.",
       "RATING": "Critic or user rating between 0.0 and 10.0."
+    },
+    "RECORDING_QUOTA_CONFIG": {
+      "DEFAULT_PRIVATE": "Default disk quota for the private recordings of each user, for example `20GB` or `500MB` (units: B, KB, MB, GB, TB). Used when neither `per_user` nor the user's `player_features.recording_quota` sets a value. Empty = no limit. `0` is not allowed.",
+      "PER_USER": "Quota for one user: the key is the user id (`web:<username>` for Web UI users, `api:<username>` for playlist/API users) and the value a size such as `50GB`. It takes precedence over `player_features.recording_quota` and `default_private`. `0` is not allowed.",
+      "SHARED": "Disk quota shared by all shared recordings, for example `500GB`. Empty = no limit. `0` is not allowed."
+    },
+    "RECORDING_CONFIG": {
+      "CONTAINER_FORMAT": "Video container format for recorded media files (`mpegts`, `matroska`, or `mp4`). Default is `mpegts`, which survives stream interruption because unfinished files remain playable.",
+      "DEFAULT_POST_ROLL_SECS": "Default number of seconds to continue recording after a programme's scheduled end time. Prevents missing overruns on live broadcasts.",
+      "DEFAULT_PRE_ROLL_SECS": "Default number of seconds to start recording before a programme's scheduled start time. Can be overridden per recording rule or task.",
+      "DIRECTORY": "Root directory for all recordings. A relative path is resolved against the tuliprox home directory; empty means `recordings` there. The directory cannot be changed while recordings exist.",
+      "ENABLED": "Master switch for the digital video recorder (DVR) feature. When disabled, recording supervisors stop and no scheduled recordings or cleanup sweeps run.",
+      "EPISODE_PATTERN": "Regex for recordings without channel, title, or series name. With folders enabled, the file name is cut before the named group `episode`, or before the whole match if the pattern has no such group, and the rest becomes the folder name. The default recognizes `S01E02`, `1x02`, `Season 1 Episode 2`, and `Episode 2`. An invalid regex rejects the configuration.",
+      "FALLBACK_BYTES_PER_MINUTE": "Estimated bit rate in bytes per minute used to calculate recording disk space when stream metadata is not yet known.",
+      "FILENAME_TEMPLATE": "Template used for recording filenames. Supported placeholders: {channel}, {program_title}, {start_time}, {end_time}, {episode}, and {owner}.",
+      "HEADERS": "Custom HTTP headers applied to video download requests (e.g. User-Agent).",
+      "MAX_BACKGROUND_PER_PROVIDER": "Maximum number of background-priority transfers allowed per provider before additional background jobs wait.\n\nSet to 0 to disable this limit.",
+      "MAX_POST_ROLL_SECS": "Upper limit in seconds for recording post-roll padding (default `1800`, maximum `1800`). Requests exceeding this value are rejected.",
+      "MAX_PRE_ROLL_SECS": "Upper limit in seconds for recording pre-roll padding (default `900`, maximum `900`). Requests exceeding this value are rejected.",
+      "ORGANIZE_INTO_DIRECTORIES": "If enabled, recordings are stored in subfolders: `<group>/<file>` for live and VOD, `<group>/<series>/<file>` for series episodes. Without a playlist group, live uses the channel name and VOD the title. If disabled, all files are stored directly in the recording directory.",
+      "PRIORITY": "Base priority assigned to background recording jobs (`-128` to `127`). Lower numbers give higher priority when competing for provider connections. Default is `0`.",
+      "RESERVE_SLOTS_FOR_USERS": "Keeps this many provider slots free for normal user streaming before background downloads are allowed to consume them.\n\nSet to 0 to disable reserved headroom.",
+      "RETRY_BACKOFF_INITIAL_SECS": "Initial wait time in seconds after the first transient download failure.\n\nLater retries grow from this base using the configured multiplier.",
+      "RETRY_BACKOFF_JITTER_PERCENT": "Random jitter added to download retry delays.\n\nA value of 20 means delays vary by about ±20%. This helps avoid retry spikes when many downloads fail at the same time.\n\nMust stay between 0 and 95.",
+      "RETRY_BACKOFF_MAX_SECS": "Maximum retry delay in seconds.\n\nOnce exponential growth reaches this value, later retries stay capped here.",
+      "RETRY_BACKOFF_MULTIPLIER": "Multiplier applied to each subsequent transient retry delay.\n\nExample: initial 3 and multiplier 3.0 yields about 3s, 9s, 27s until the max delay is reached.",
+      "RETRY_MAX_ATTEMPTS": "Maximum number of transient retry attempts before a transfer is marked as failed.\n\nThis applies to downloads and live recordings after transient startup or transport failures.\n\nMust be at least 1.",
+      "TIMEZONE": "IANA timezone name used for evaluating recording schedules and timeslot rules (for example, `UTC` or `Europe/Berlin`). Defaults to `UTC`."
+    },
+    "RECORDING_DISK_CONFIG": {
+      "HIGH_WATER_PERCENT": "Used disk space in percent (`0` to `100`) on the recording filesystem at which cleanup starts: the oldest completed recordings are deleted until usage drops to the low water mark. Cleanup by disk usage needs both marks; empty = off.",
+      "LOW_WATER_PERCENT": "Used disk space in percent at which a cleanup pass stops. Must be lower than the high water mark. Cleanup by disk usage needs both marks; empty = off.",
+      "CLEANUP_INTERVAL_SECS": "Interval in seconds between disk space checks against water mark limits.",
+      "SAFETY_BYTES": "Minimum free disk space in bytes that must remain available on the recording volume."
+    },
+    "RECORDING_RETENTION_CONFIG": {
+      "KEEP_LAST_PER_CHANNEL": "Maximum number of completed recordings retained per channel. Older recordings are pruned when new ones finish.",
+      "DELETE_AFTER_DAYS": "Maximum age in days before recorded media files are automatically deleted.",
+      "SWEEP_INTERVAL_SECS": "Interval in seconds between periodic retention sweep executions."
+    },
+    "RECORDING_NOTIFICATION_CONFIG": {
+      "OUTBOX_BUFFER": "In-memory queue buffer size for outgoing recording lifecycle event notifications.",
+      "MAX_ATTEMPTS": "Delivery attempts per notification before it is moved to the dead letters. Minimum `1`, default `6`.",
+      "BACKOFF_INITIAL_SECS": "Initial delay in seconds before retrying a failed notification webhook or message delivery.",
+      "BACKOFF_MAX_SECS": "Maximum backoff delay in seconds between notification delivery retries."
+    },
+    "THUMBNAIL_CONFIG": {
+      "ENABLED": "Enables automatic generation of video preview thumbnails during media library scans (default `false`).",
+      "WIDTH": "Target pixel width for generated preview thumbnails (default `320`).",
+      "HEIGHT": "Target pixel height for generated preview thumbnails (default `180`)."
+    },
+    "PANEL_API_CONFIG": {
+      "URL": "Base endpoint of the provider's reseller panel API.",
+      "API_KEY": "Your reseller administrative key for the panel API.",
+      "PROVISION_TIMEOUT": "Maximum time in seconds to wait while probing a newly provisioned account before the boot or update continues. Default: `65`.",
+      "PROBE_INTERVAL": "Seconds between probes while waiting for a newly provisioned account to become usable. Must be greater than `0`. Default: `15`.",
+      "PROVISION_COOLDOWN": "Extra wait in seconds after a successful probe, to avoid 5XX errors while the provider finishes provisioning. Default: `0`.",
+      "PROVISION_OFFSET": "Renewal window before an account expires, as a number with optional suffix `s`, `m`, `h` or `d` (for example `12h` or `2d`). When now plus this offset is past the expiry date, tuliprox calls `client_renew` (falls back to `client_new`). Empty = no early renewal.",
+      "ALIAS_POOL_MIN": "Minimum number of accounts to keep, as a number or `auto`. `auto` uses the number of enabled tuliprox users (Active or Trial, not expired) mapped to this input's targets. Default: `1`.",
+      "ALIAS_POOL_MAX": "Upper bound for the number of alias accounts, as a number or `auto`. With `auto`, the check runs when users are added or updated. Default: `1`."
+    },
+    "PLUGIN_MARKETPLACE": {
+      "SOURCE_URL": "HTTPS URL pointing to a plugin repository marketplace manifest (`marketplace.json`)."
+    },
+    "PLUGIN_CONFIG": {
+      "BOOT_UPDATE_BUDGET": "Maximum time allowed for checking and applying plugin updates during system startup (e.g. `30s` or `1m`)."
+    },
+    "USER_FORM": {
+      "USERNAME": "Unique login username for the user account. Used for Web UI authentication and API access.",
+      "PASSWORD": "Password for the user account. Must be at least `8` characters. Leave empty when editing to keep the existing password unchanged.",
+      "CONFIRM_PASSWORD": "Re-enter the password to confirm matching entry before saving.",
+      "GROUPS": "Assigned permission groups determining what resources and administration features this user can access."
+    },
+    "GROUP_FORM": {
+      "NAME": "Unique display name identifying the user permission group."
+    },
+    "RECORDING_FORM": {
+      "PROGRAM_START": "Scheduled start date and time for the programme to be recorded.",
+      "PROGRAM_END": "Scheduled end date and time for the programme to be recorded.",
+      "DURATION_MINUTES": "Total duration of the recording in minutes, excluding pre-roll and post-roll padding.",
+      "PRE_ROLL_SECS": "Number of seconds to begin recording before the scheduled programme start time.",
+      "POST_ROLL_SECS": "Number of seconds to continue recording past the scheduled programme end time."
+    },
+    "RULE_FORM": {
+      "INPUT_NAME": "Name of the input source providing the stream for this recording rule.",
+      "TARGET_ID": "Target playlist configuration that provides channel mapping and output formatting for this rule.",
+      "VIRTUAL_ID": "Virtual channel identifier within the target playlist associated with this recording rule.",
+      "CHANNEL_ID": "EPG channel identifier used to match electronic program guide schedules for this rule.",
+      "KIND": "Matching mode for this rule: `NewEpisode` records new series episodes, while `WeeklyTimeslot` records a recurring broadcast time window.",
+      "WEEKDAY": "Day of the week for recurring timeslot matching (Monday = `1` through Sunday = `7`).",
+      "START_TIME": "Local time of day (24-hour format `HH:MM`) when the weekly timeslot broadcast begins.",
+      "DURATION_SECS": "Length of the scheduled broadcast in seconds, excluding pre-roll and post-roll margins.",
+      "TIMEZONE": "IANA timezone identifier used to evaluate local wall-clock timeslot broadcast windows.",
+      "SERIES_ID": "Stable series identifier from the EPG feed used to match and record episodes of a television show.",
+      "TITLE_PATTERN": "Programme title matched against EPG data when series identifiers are absent. Matches by normalized title comparison (regular expressions are not supported).",
+      "EXCLUDE_REPEAT": "When enabled, reruns and rebroadcasts flagged as repeats in the EPG feed are ignored and not recorded.",
+      "PRE_ROLL": "Extra recording lead time in seconds added before the scheduled broadcast start.",
+      "POST_ROLL": "Extra recording margin in seconds appended after the scheduled broadcast concludes.",
+      "VISIBILITY": "Determines access visibility for recordings produced by this rule: `shared` for all authorized users or `private` for the rule owner only.",
+      "ENABLED": "Toggles whether this recording rule is actively evaluated by the scheduler."
+    },
+    "STREAM_HISTORY": {
+      "FROM": "Starting date filter for displaying historical stream session records.",
+      "TO": "Ending date filter for displaying historical stream session records."
+    },
+    "SETUP": {
+      "USERNAME": "Initial administrator username chosen during initial setup to manage Tuliprox.",
+      "PASSWORD": "Initial administrator password configured during setup for administrative access. Must be at least `8` characters.",
+      "PASSWORD_REPEAT": "Repeat the administrator password to ensure accurate entry."
+    },
+    "CURATION_CONFIG": {
+      "ENABLED": "Enables catalog curation rules for this target using configured Trakt or TMDB sources. When disabled, playlists are generated without catalog curation or filtering. Defaults to `true`.",
+      "CURATION": "Summarizes the active curation policy, catalog selection mode, and configured Trakt or TMDB sources for this target."
+    },
+    "TRAKT_API_CONFIG": {
+      "API_KEY": "Trakt API client ID used to authenticate requests to the Trakt API.",
+      "URL": "Base URL for the Trakt API. Defaults to `https://api.trakt.tv`.",
+      "USER_AGENT": "Custom HTTP User-Agent header sent with Trakt API requests. Defaults to `VLC/3.0.16 LibVLC/3.0.16`.",
+      "VERSION": "API version string sent in Trakt API headers. Defaults to `2`."
+    },
+    "TRAKT_CHART_CONFIG": {
+      "CATEGORY_NAME": "Custom category display name for this Trakt chart in the Xtream output. Required when `create_xtream_category` is enabled; not used for selection-only charts.",
+      "CREATE_XTREAM_CATEGORY": "When enabled, creates a dedicated Xtream category containing the media items matched from this Trakt chart. Defaults to `true`. When disabled, the chart is used for catalog selection only.",
+      "FUZZY_MATCH_THRESHOLD": "Minimum similarity percentage (0-100) required to match titles from the Trakt chart with playlist items when `tmdb_only` is disabled. Defaults to `80`.",
+      "TMDB_ONLY": "When enabled, matches playlist items strictly by TMDb ID and bypasses fuzzy title matching. Defaults to `false`."
+    },
+    "TRAKT_CHART_FORM": {
+      "TRAKT_CHART_KIND": "Selects whether the chart tracks `Movies` (default) or `Shows`.",
+      "TRAKT_CHART_TYPE": "Selects the Trakt chart metric: `Trending` (default, currently watched items) or `Popular` (all-time popular titles)."
+    },
+    "TRAKT_CONFIG": {
+      "ENABLED": "Enables Trakt integration for this Xtream output. Allows enriching categories and filtering catalogs using Trakt lists and charts. Defaults to `true`.",
+      "INCLUDE_XTREAM_BASE_CATEGORIES": "When enabled, includes the provider's standard VOD and series categories in the Xtream output alongside Trakt categories. Defaults to `true`."
     }
   },
   "HINT": {
@@ -1339,6 +1515,7 @@
     "FIRMWARE_VERSION": "Firmware Version",
     "FLAT": "Flat",
     "FOLLOW_SYMLINKS": "Follow symlinks",
+    "FOLLOW_USER_UI": "Follows User-UI",
     "FORCE_REDIRECT": "Force redirect",
     "FORMAT": "Format",
     "FORMATS": "Formats",
@@ -1749,6 +1926,22 @@
     "RBAC_WRITE": "Write",
     "RECONNECT": "Reconnect",
     "RECORDING": "Recording",
+    "PLAYER_FEATURES": "Player features",
+    "PLAYER_FEATURES_HINT": "Features apply to playlist users with Player API access (player_features.api_enabled, unset follows ui_enabled).",
+    "SOURCE_SWITCH": "Source switch",
+    "JOINABLE_STREAMS": "Joinable streams",
+    "FREE_SHARED_JOINS": "Free shared joins",
+    "MAX_FREE_SHARED_JOINS": "Max free shared joins",
+    "MAX_CONCURRENT_RECORDINGS": "Max concurrent recordings",
+    "MAX_RECORDING_RULES": "Max recording rules",
+    "WATCH_PROGRESS": "Watch progress",
+    "EVENT_STREAM": "Event stream",
+    "PLAYER_RECORDING_QUOTA": "Recording quota",
+    "INHERIT": "Inherit from plan",
+    "PLAYER_RECORDING_NONE": "None",
+    "PLAYER_RECORDING_READ": "Read",
+    "PLAYER_RECORDING_PRIVATE": "Private",
+    "PLAYER_RECORDING_SHARED": "Shared",
     "RECORDING_ACTION_CANCEL": "Cancel",
     "RECORDING_ACTION_DELETE": "Delete",
     "RECORDING_ACTION_REMOVE_ENTRY": "Remove entry (keep file)",
@@ -1765,7 +1958,7 @@
     "RECORDING_CLEANUP_INTERVAL_SECS": "Disk cleanup interval (seconds)",
     "RECORDING_DEFAULT_POST_ROLL_SECS": "Default post-roll (seconds)",
     "RECORDING_DEFAULT_PRE_ROLL_SECS": "Default pre-roll (seconds)",
-    "RECORDING_DEFAULT_PRIVATE_BYTES": "Default private quota (bytes)",
+    "RECORDING_DEFAULT_PRIVATE_BYTES": "Default private quota (e.g. 20GB, 500MB; B, KB, MB, GB, TB)",
     "RECORDING_DELETE_AFTER_DAYS": "Delete after (days)",
     "RECORDING_ENABLED": "Recording enabled",
     "RECORDING_FALLBACK_BYTES_PER_MINUTE": "Fallback bytes per minute",
@@ -1790,14 +1983,14 @@
     "RECORDING_OUTBOX_BUFFER": "Notification outbox buffer",
     "RECORDING_PADDING": "Padding",
     "RECORDING_PER_USER_BYTES": "Per-user quotas",
-    "RECORDING_QUOTA_BYTES": "Bytes",
+    "RECORDING_QUOTA_BYTES": "Size (e.g. 20GB, 500MB; B, KB, MB, GB, TB)",
     "RECORDING_QUOTA_PRIVATE": "Private quota",
     "RECORDING_QUOTA_SHARED": "Shared quota",
     "RECORDING_QUOTA_USER": "User",
     "RECORDING_QUOTAS": "Quotas",
     "RECORDING_RETENTION_DISK": "Retention and disk",
     "RECORDING_SAFETY_BYTES": "Disk safety reserve (bytes)",
-    "RECORDING_SHARED_BYTES": "Shared quota (bytes)",
+    "RECORDING_SHARED_BYTES": "Shared quota (e.g. 20GB, 500MB; B, KB, MB, GB, TB)",
     "RECORDING_SWEEP_INTERVAL_SECS": "Retention sweep interval (seconds)",
     "RECORDING_RULE_COLUMN_ENABLED": "Enabled",
     "RECORDING_RULE_COLUMN_SCHEDULE": "Schedule",
@@ -2099,6 +2292,7 @@
     "USER_STATUS_TRIAL": "Trial",
     "USER_UI": "User UI",
     "USER_UI_ENABLED": "User-UI Enabled",
+    "PLAYER_API_ENABLED": "Player-API Enabled",
     "COMBINE_VIEWS_STATS_STREAMS": "Combine Stats & Streams",
     "USE_MEMORY_CACHE": "Mem-Cache",
     "USE_OUTPUT": "Use output",
@@ -2566,7 +2760,11 @@
     "EFFECTIVE": "effective",
     "RATING_TOOLTIP_IMDB": "IMDb {rating} · {votes} votes",
     "RATING_TOOLTIP_PROVIDER": "Provider {rating}",
-    "VOTES": "votes"
+    "VOTES": "votes",
+    "PLAYER_TOOLS": "Player tools",
+    "PLAYER_TOOLS_OFF": "Off",
+    "PLAYER_TOOLS_READ": "Read-only",
+    "PLAYER_TOOLS_WRITE": "Read & Write"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -2641,7 +2839,6 @@
       "NO_SEARCH_MATCHES": "No channel matches the search."
     },
     "RECORDING": {
-      "INVALID_QUOTA": "Quota values must be non-negative whole numbers of bytes.",
       "INVALID_RANGE": "The value is outside the allowed range.",
       "INVALID_UNSIGNED": "Enter a non-negative whole number.",
       "NO_TARGET": "Select a target playlist before recording.",
@@ -2670,6 +2867,8 @@
         "PERSISTENCE_FAILED": "The change could not be saved. Try again.",
         "NETWORK": "The server could not be reached. Check your connection.",
         "OTHER": "The recording request failed.",
+        "SOURCE_RECORDING_FAILED": "The source recording failed.",
+        "SOURCE_GAP": "The source recording has a gap in the requested time window.",
         "DISABLED": "Recording is disabled. Enable it under Configuration > Video > Download > Recording enabled."
       },
       "TASK_CANCELLED": "Recording cancelled.",
@@ -2688,7 +2887,8 @@
       "CONFIRM_RESTART_FROM_BEGINNING": "The provider does not support partial downloads. Start this recording again from the beginning? The saved partial download will be discarded.",
       "CONFIRM_CANCEL": "Do you really want to stop this recording?",
       "CONFIRM_REMOVE": "Remove this entry from the list? The saved file will be kept.",
-      "CONFIRM_DELETE_FILE": "Delete this recording and its saved file?"
+      "CONFIRM_DELETE_FILE": "Delete this recording and its saved file?",
+      "INVALID_QUOTA_USER": "User must be written as api:<username> or web:<username>."
     },
     "RBAC": {
       "ADMIN_HINT": "User is Admin — additional groups have no effect.",
@@ -2859,6 +3059,8 @@
     "TARGET_NOT_EXISTS": "Target does not exist",
     "USER_DELETED": "User successfully deleted",
     "VALIDATION": {
+      "BYTE_SIZE_INVALID": "Enter a size greater than 0, for example 20GB or 500MB.",
+      "PLAYER_FEATURES_NUMBER_GREATER_THAN_ZERO": "Value must be greater than 0.",
       "NETWORK_ACCESS_COUNTRIES": "Enter one 2-letter ISO country code per entry, for example DE.",
       "NETWORK_ACCESS_NETWORKS": "Enter one CIDR per entry, for example 192.168.0.0/16 or 2001:db8::/32.",
       "REQUIRED": "This field is required."

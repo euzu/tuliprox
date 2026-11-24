@@ -52,8 +52,8 @@ pub(super) fn StagedInputForm(props: &StagedInputFormProps) -> Html {
     } else {
         html! {
             <div class="tp__config-view__cols-2">
-                { crate::config_field_custom!(translate.t(LABEL_TYPE), staged_type.to_string()) }
-                { crate::config_field_custom!(translate.t(LABEL_CLUSTER), clusters.map_or_else(String::new, |value| value.to_string())) }
+                { config_field_child!(translate.t(LABEL_TYPE), "INPUT_FORM.STAGED_TYPE", { html! { <span class="tp__form-field__value">{staged_type.to_string()}</span> } }) }
+                { config_field_child!(translate.t(LABEL_CLUSTER), "INPUT_FORM.STAGED_CLUSTERS", { html! { <span class="tp__form-field__value">{clusters.map_or_else(String::new, |value| value.to_string())}</span> } }) }
             </div>
         }
     };

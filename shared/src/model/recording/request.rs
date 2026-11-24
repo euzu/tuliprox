@@ -37,6 +37,10 @@ pub struct RecordingSource {
     pub input_name: String,
     #[serde(default)]
     pub cluster: super::super::XtreamCluster,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub is_group: bool,
 }
 
 impl RecordingSource {
@@ -46,11 +50,23 @@ impl RecordingSource {
             virtual_id: virtual_id.into(),
             input_name: input_name.into(),
             cluster: super::super::XtreamCluster::Live,
+            provider_id: None,
+            is_group: false,
         }
     }
 
     pub fn with_cluster(mut self, cluster: super::super::XtreamCluster) -> Self {
         self.cluster = cluster;
+        self
+    }
+
+    pub fn with_provider_id(mut self, provider_id: Option<String>) -> Self {
+        self.provider_id = provider_id;
+        self
+    }
+
+    pub fn with_is_group(mut self, is_group: bool) -> Self {
+        self.is_group = is_group;
         self
     }
 }

@@ -273,6 +273,12 @@ impl ActiveUserManager {
         self.update_user_session(username, token).await
     }
 
+    /// Returns a live user session without updating its timestamp or acquiring a write lock.
+    pub async fn get_user_session(&self, username: &str, token: &str) -> Option<UserSession> {
+        let users = self.connections.read().await;
+        users.live_session(username, token).map(|(_, session)| session.clone())
+    }
+
     /// Checks an in-flight resource against the same session and account binding without touching admission.
     pub async fn playback_session_is_current(&self, username: &str, token: &str, identity: SessionIdentity) -> bool {
         self.connections.read().await.current_session(username, token, identity).is_some()

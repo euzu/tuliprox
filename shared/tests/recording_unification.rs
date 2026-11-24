@@ -1,6 +1,6 @@
 use shared::model::{
-    ConfigDto, RecordingConfigDto, RecordingDiskConfigDto, RecordingNotificationConfigDto, RecordingQuotaConfigDto,
-    RecordingRetentionConfigDto, VideoConfigDto,
+    ByteSize, ConfigDto, RecordingConfigDto, RecordingDiskConfigDto, RecordingNotificationConfigDto,
+    RecordingQuotaConfigDto, RecordingRetentionConfigDto, VideoConfigDto,
 };
 
 fn parse(yaml: &str) -> ConfigDto {
@@ -86,9 +86,9 @@ fn recording_round_trips_transfer_and_dvr_fields() {
             safety_bytes: Some(1024),
         }),
         quota: Some(RecordingQuotaConfigDto {
-            default_private_bytes: Some(100),
-            per_user_bytes: [("user".to_string(), 200)].into(),
-            shared_bytes: Some(300),
+            default_private: Some(ByteSize::new("100")),
+            per_user: [("api:user".to_string(), ByteSize::new("200"))].into(),
+            shared: Some(ByteSize::new("300")),
         }),
         notifications: Some(RecordingNotificationConfigDto {
             outbox_buffer: 8,

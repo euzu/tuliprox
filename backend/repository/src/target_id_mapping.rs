@@ -1,4 +1,4 @@
-use crate::bplustree::{BPlusTree, BPlusTreeMetadata, BPlusTreeUpdate, FlushPolicy};
+use crate::bplustree::{BPlusTree, BPlusTreeMetadata, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
 use chrono::Local;
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,9 @@ use std::{
     collections::HashMap,
     io::Error,
     path::{Path, PathBuf},
+    sync::Arc,
 };
+use tuliprox_core::model::{AppConfig, ConfigTarget};
 
 // TODO make configurable
 const EXPIRATION_DURATION: i64 = 86400;
@@ -301,6 +303,35 @@ impl TargetIdMapping {
     }
 }
 
+/// Read-only view of a target's persisted `UUIDType` → virtual id index.
+///
+/// Lookups are page-level reads against the published index; the full mapping is never
+/// materialised, so a caller can resolve a handful of identities without holding an
+/// in-memory index for the whole playlist.
+pub struct TargetUuidIndex {
+    query: BPlusTreeQuery<UUIDType, u32>,
+}
+
+impl TargetUuidIndex {
+    /// Opens the published UUID index of `target`, or `None` when it has not been written yet.
+    pub async fn open(app_config: &Arc<AppConfig>, target: &ConfigTarget) -> Option<Self> {
+        let index_path = {
+            let config = app_config.config.load();
+            let target_path = crate::get_target_storage_path(&config, &target.name)?;
+            get_uuid_index_path(&crate::get_target_id_mapping_file(&target_path))
+        };
+        tokio::task::spawn_blocking(move || {
+            BPlusTreeQuery::<UUIDType, u32>::try_new_read_only(&index_path).ok().map(|query| Self { query })
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Returns the virtual id persisted for `uuid`.
+    pub fn virtual_id(&mut self, uuid: &UUIDType) -> Option<u32> { self.query.query(uuid).ok().flatten() }
+}
+
 impl Drop for TargetIdMapping {
     fn drop(&mut self) {
         if self.persist_on_drop && self.has_pending_changes() {
@@ -363,6 +394,31 @@ mod tests {
             assert_eq!(vid1_again, VirtualId::new(1));
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_only_uuid_index_resolves_published_ids() -> Result<(), TuliproxError> {
+        let dir = tempdir().map_err(|_| TuliproxError::Config("Failed to create temp dir".to_string()))?;
+        let app_config = crate::test_config::app_config_in(dir.path());
+        let target = ConfigTarget::from(&shared::model::ConfigTargetDto {
+            name: "uuid-index-target".to_string(),
+            ..Default::default()
+        });
+        let storage = crate::get_target_storage_path(&app_config.config.load(), &target.name).expect("storage path");
+        std::fs::create_dir_all(&storage).expect("storage directory");
+
+        let uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000042");
+        let vid = {
+            let mut mapping = TargetIdMapping::new(&crate::get_target_id_mapping_file(&storage), false)?;
+            let vid = mapping.get_and_update_virtual_id(&uuid, 7, PlaylistItemType::Live, VirtualId::default());
+            mapping.persist().expect("persist target id mapping");
+            vid
+        };
+
+        let mut index = TargetUuidIndex::open(&app_config, &target).await.expect("published uuid index opens");
+        assert_eq!(index.virtual_id(&uuid), Some(vid.get()));
+        assert_eq!(index.virtual_id(&UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000043")), None);
         Ok(())
     }
 }

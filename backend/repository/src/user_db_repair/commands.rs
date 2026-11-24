@@ -4,7 +4,7 @@ use super::{
     related_database_files, replay_pending_wal, user_storage_version, UserDbRepairReport, RECOVERY_DIRECTORY,
 };
 use crate::{
-    api_user_recovery::{classify_user_record, ApiUserRepository, StoredApiUserV7, UserRecordDecode},
+    api_user_recovery::{classify_user_record, ApiUserRepository, StoredApiUserV8, UserRecordDecode},
     startup_migration::load_user_records_read_only,
 };
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,7 @@ pub struct UserDbCheckReport {
 
 struct Snapshot {
     export: UserDbExport,
-    users: BTreeMap<String, StoredApiUserV7>,
+    users: BTreeMap<String, StoredApiUserV8>,
     unassigned: BTreeMap<String, String>,
     verified_history_records: Option<u64>,
     history_error: Option<String>,
@@ -168,7 +168,7 @@ fn read_snapshot(db_path: &Path) -> io::Result<Snapshot> {
     let verified_history_records = match ApiUserRepository::read_verified_history(db_path, database_root(db_path)?) {
         Ok((report, records)) => {
             for (key, record) in records {
-                users.insert(key, StoredApiUserV7::from(&record));
+                users.insert(key, StoredApiUserV8::from(&record));
             }
             Some(report.live_records)
         }
@@ -225,7 +225,7 @@ fn read_document(path: &Path) -> io::Result<UserDbExport> {
 fn validate_document(
     snapshot: &Snapshot,
     document: Option<&UserDbExport>,
-) -> io::Result<BTreeMap<String, StoredApiUserV7>> {
+) -> io::Result<BTreeMap<String, StoredApiUserV8>> {
     let Some(document) = document else {
         if !snapshot.unassigned.is_empty() {
             return Err(invalid(
@@ -499,10 +499,11 @@ mod tests {
         assert!(dir.path().join(RECOVERY_DIRECTORY).is_dir(), "recovery history must exist");
 
         let fields = record_fields(&db_path, "alice")?;
-        assert_eq!(fields.len(), 21, "published records keep every optional slot");
+        assert_eq!(fields.len(), 22, "published records keep every optional slot");
         assert_eq!(fields[19], serde_json::json!("basic"));
         assert_eq!(fields[20], serde_json::Value::Null);
-        assert_eq!(record_fields(&db_path, "bob")?.len(), 21);
+        assert_eq!(fields[21], serde_json::Value::Null);
+        assert_eq!(record_fields(&db_path, "bob")?.len(), 22);
 
         let verified = check_user_database(&db_path, None)?;
         assert!(verified.recovery_verified, "fresh history must verify");
@@ -519,7 +520,7 @@ mod tests {
         let report = set_user_database(&db_path, None)?;
         assert_eq!(report.records, 1);
         assert_eq!(report.source, UserDbRepairSource::ExplicitLiveRecords);
-        assert_eq!(record_fields(&db_path, "bob")?.len(), 21);
+        assert_eq!(record_fields(&db_path, "bob")?.len(), 22);
         Ok(())
     }
 
@@ -638,7 +639,7 @@ mod tests {
             .find(|path| path.is_file())
             .ok_or_else(|| io::Error::other("the pre-replay archive must keep the pending log"))?;
         assert_eq!(fs::read(archived_log)?, pending_log);
-        assert_eq!(record_fields(&db_path, "bob")?.len(), 21);
+        assert_eq!(record_fields(&db_path, "bob")?.len(), 22);
         assert!(check_user_database(&db_path, None)?.recovery_verified);
         Ok(())
     }
@@ -671,7 +672,7 @@ mod tests {
         let report = set_user_database(&db_path, None)?;
         assert_eq!(report.records, 1);
         assert_eq!(tuliprox_btree::typed_migration::storage_version(&db_path)?, Some(3));
-        assert_eq!(record_fields(&db_path, "alice")?.len(), 21);
+        assert_eq!(record_fields(&db_path, "alice")?.len(), 22);
         assert!(check_user_database(&db_path, None)?.recovery_verified);
         Ok(())
     }

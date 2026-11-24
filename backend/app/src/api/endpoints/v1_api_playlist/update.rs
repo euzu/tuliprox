@@ -1,14 +1,17 @@
 use super::{error::QUEUE_BUSY_MESSAGE, ManualUpdateEnqueueError, PLAYLIST_UPDATE_STATUS_READ_CONCURRENCY};
 use crate::{
     api::{
-        auth_middleware::{authenticate, check_permission, effective_permissions, rejection_for, VerifiedClaims},
+        auth_middleware::{
+            authenticate, check_permission, effective_permissions, rejection_for, validate_api_user, ApiUserAccess,
+            VerifiedClaims,
+        },
         model::AppState,
     },
-    auth::AuthBearer,
+    auth::{AuthBearer, Fingerprint},
     model::{ProcessTargets, SourcesConfig},
 };
 use axum::{
-    extract::{Query, State},
+    extract::{FromRequestParts, Query, Request, State},
     http::{header::IF_MATCH, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -251,11 +254,22 @@ pub(super) async fn playlist_update_status_protected(
     State(app_state): State<Arc<AppState>>,
     AuthBearer(token): AuthBearer,
     Query(query): Query<PlaylistUpdateStatusQuery>,
+    request: Request,
 ) -> Response {
     let claims = match authenticate(&app_state, &token).await {
         Ok(claims) => claims,
         Err(error) => return rejection_for(error),
     };
+    if claims.subject_id.as_ref().is_some_and(shared::model::UserId::is_api) {
+        let (mut parts, _) = request.into_parts();
+        let fingerprint = match Fingerprint::from_request_parts(&mut parts, &app_state).await {
+            Ok(fp) => fp,
+            Err(err) => return err.into_response(),
+        };
+        if let Err(err) = validate_api_user(&app_state, &claims, ApiUserAccess::Any, &fingerprint) {
+            return rejection_for(err);
+        }
+    }
     if !query.include_scope {
         if let Err(error) = check_permission::<{ Permission::PlaylistRead as u32 }>(&app_state, &claims, None) {
             return rejection_for(error);

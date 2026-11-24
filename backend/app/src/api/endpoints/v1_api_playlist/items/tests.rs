@@ -22,6 +22,7 @@ use shared::{
 };
 use std::{
     collections::HashSet,
+    ops::ControlFlow,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -743,6 +744,7 @@ async fn drain_records_visits_every_record_and_returns_the_skip_count_after_the_
     let mut seen = Vec::new();
     let skipped = drain_records(stream_with_skips(playlist().into_iter().map(Ok).collect(), 3), |record| {
         seen.push(record.virtual_id());
+        ControlFlow::Continue(())
     })
     .await
     .unwrap();
@@ -753,6 +755,27 @@ async fn drain_records_visits_every_record_and_returns_the_skip_count_after_the_
 }
 
 #[tokio::test]
+async fn drain_records_stops_visiting_when_visitor_breaks() {
+    let entries = vec![
+        Ok(m3u_item(1, "p1", "A", "g", None)),
+        Ok(m3u_item(2, "p2", "B", "g", None)),
+        Ok(m3u_item(3, "p3", "C", "g", None)),
+    ];
+    let mut visited = 0_usize;
+    let _ = drain_records(stream_with_skips(entries, 0), |_| {
+        visited += 1;
+        if visited == 2 {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(visited, 2, "drain_records must stop reading once ControlFlow::Break is returned");
+}
+
+#[tokio::test]
 async fn drain_records_propagates_a_stream_error_and_stops_visiting() {
     let entries = vec![
         Ok(m3u_item(1, "p1", "A", "g", None)),
@@ -760,7 +783,11 @@ async fn drain_records_propagates_a_stream_error_and_stops_visiting() {
         Ok(m3u_item(2, "p2", "B", "g", None)),
     ];
     let mut visited = 0_usize;
-    let result = drain_records(stream_with_skips(entries, 1), |_| visited += 1).await;
+    let result = drain_records(stream_with_skips(entries, 1), |_| {
+        visited += 1;
+        ControlFlow::Continue(())
+    })
+    .await;
     assert!(result.is_err());
     assert_eq!(visited, 1, "records behind the error are not visited");
 }
@@ -771,7 +798,7 @@ async fn read_stored_is_none_without_a_stream_and_runs_the_reader_otherwise() {
     assert_eq!(none, None);
 
     let counted = read_stored(Some(stream_with_skips(playlist().into_iter().map(Ok).collect(), 2)), |records| {
-        drain_records(records, |_| {})
+        drain_records(records, |_| ControlFlow::Continue(()))
     })
     .await
     .unwrap();

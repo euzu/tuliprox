@@ -5,6 +5,7 @@
 //! once deletion starts.
 
 use crate::recording::recording_queue::RecordingQueue;
+use futures::future::BoxFuture;
 use shared::model::{
     permission::Permission,
     recording::{RecordingMetadata, RecordingOwner, RecordingSource, RecordingVisibility},
@@ -13,6 +14,16 @@ use shared::model::{
 };
 use std::path::Path;
 use tuliprox_auth::{authorize, RecordingAction, RecordingDecision, RecordingSubject, TerminalState};
+
+/// External visibility predicate injected from the application layer into the DVR.
+pub trait RecordingVisibilityPort: Send + Sync {
+    fn is_visible<'a>(
+        &'a self,
+        meta: &'a RecordingMetadata,
+        claims: &'a Claims,
+        subject_id: &'a UserId,
+    ) -> BoxFuture<'a, bool>;
+}
 
 /// Why a catalog or media request was denied. The HTTP layer maps
 /// this to a stable status code; the path string is the canonical
@@ -150,6 +161,7 @@ pub async fn authorize_open(
     uuid: &str,
     relative_path: &Path,
     is_regular_file: bool,
+    visibility: Option<&dyn RecordingVisibilityPort>,
 ) -> Result<(), CatalogAccessError> {
     check_schema_version(claims)?;
     if !has_read_perm(claims) {
@@ -170,9 +182,15 @@ pub async fn authorize_open(
     validate_open(relative_path.to_string_lossy().as_ref(), is_regular_file)?;
     let subject = RecordingSubject::new(Some(meta), TerminalState::Completed, true);
     match authorize(claims, subject_id, RecordingAction::Download, &subject) {
-        RecordingDecision::Allow => Ok(()),
-        RecordingDecision::Deny(_) => Err(CatalogAccessError::Forbidden),
+        RecordingDecision::Allow => {}
+        RecordingDecision::Deny(_) => return Err(CatalogAccessError::Forbidden),
     }
+    if let Some(vis) = visibility {
+        if !vis.is_visible(meta, claims, subject_id).await {
+            return Err(CatalogAccessError::Forbidden);
+        }
+    }
+    Ok(())
 }
 
 /// Look up a recording task by uuid. Awaits each guard in turn so

@@ -5,8 +5,10 @@ use log::{debug, error, warn};
 use shared::{
     foundation::{get_filter, Filter, FilterBuilder},
     model::{
-        ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, TargetUserDto,
-        XtreamCluster,
+        permission::{Permission, PermissionSet},
+        Claims, ClusterFlags, NetworkAccessDto, PlayerFeaturesDto, PlayerRecordingLevel, ProxyType,
+        ProxyUserCredentialsDto, ProxyUserStatus, RoleSet, TargetUserDto, UserId, XtreamCluster,
+        CURRENT_PERMISSION_SCHEMA_VERSION,
     },
 };
 use std::{collections::HashMap, sync::Arc};
@@ -90,6 +92,83 @@ impl From<&NetworkAccess> for NetworkAccessDto {
     }
 }
 
+/// Resolved player feature flags and limits for an API user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct PlayerFeatures {
+    pub source_switch: bool,
+    pub joinable_streams: bool,
+    pub recording: PlayerRecordingLevel,
+    pub recording_quota_bytes: Option<u64>,
+    pub max_concurrent_recordings: Option<u32>,
+    pub max_recording_rules: u32,
+    pub free_shared_joins: bool,
+    pub max_free_shared_joins: u32,
+    pub watch_progress: bool,
+    pub event_stream: bool,
+    pub api_enabled: Option<bool>,
+}
+
+impl Default for PlayerFeatures {
+    fn default() -> Self {
+        Self {
+            source_switch: false,
+            joinable_streams: false,
+            recording: PlayerRecordingLevel::None,
+            recording_quota_bytes: None,
+            max_concurrent_recordings: None,
+            max_recording_rules: 10,
+            free_shared_joins: false,
+            max_free_shared_joins: 1,
+            watch_progress: false,
+            event_stream: false,
+            api_enabled: None,
+        }
+    }
+}
+
+/// Compute permissions granted to an API user by their current player features.
+#[must_use]
+pub fn api_user_permissions(features: &PlayerFeatures) -> PermissionSet {
+    match features.recording {
+        PlayerRecordingLevel::None => PermissionSet::new(),
+        PlayerRecordingLevel::Read => Permission::RecordingRead.into(),
+        PlayerRecordingLevel::Private => {
+            Permission::RecordingRead
+                | Permission::RecordingCreate
+                | Permission::RecordingManage
+                | Permission::RecordingDelete
+        }
+        PlayerRecordingLevel::Shared => {
+            Permission::RecordingRead
+                | Permission::RecordingCreate
+                | Permission::RecordingManage
+                | Permission::RecordingDelete
+                | Permission::RecordingShare
+        }
+    }
+}
+
+/// Claims that describe an API user the way a bearer token would.
+///
+/// The recording visibility rule is shared with the authenticated routes, so an
+/// API user is described by their API subject, their effective recording
+/// permissions and the current schema version.
+#[must_use]
+pub fn api_user_claims(user: &ProxyUserCredentials) -> Claims {
+    Claims {
+        username: user.username.clone(),
+        iss: "tuliprox".to_string(),
+        iat: 0,
+        exp: i64::MAX,
+        roles: RoleSet::new(),
+        permissions: api_user_permissions(&user.player_features),
+        pwd_version: 0,
+        subject_id: Some(UserId::api(&user.username)),
+        permission_schema_version: CURRENT_PERMISSION_SCHEMA_VERSION,
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ProxyUserCredentials {
@@ -130,6 +209,10 @@ pub struct ProxyUserCredentials {
     pub t_has_unresolved_plan: bool,
     /// True when the configured user filter failed to compile; the user is denied.
     pub t_has_invalid_filter: bool,
+    /// Effective player features resolved from user and plan settings.
+    pub player_features: PlayerFeatures,
+    /// Raw configured player features before plan resolution.
+    pub raw_player_features: Option<PlayerFeaturesDto>,
 }
 
 macros::from_impl!(ProxyUserCredentials);
@@ -168,6 +251,8 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             t_filter: None,
             t_has_unresolved_plan: false,
             t_has_invalid_filter: false,
+            player_features: PlayerFeatures::default(),
+            raw_player_features: dto.player_features.clone(),
         }
     }
 }
@@ -196,6 +281,7 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
             network_access: instance.network_access.as_ref().map(NetworkAccessDto::from),
             plan: instance.plan.clone(),
             filter: instance.filter.clone(),
+            player_features: instance.raw_player_features.clone(),
         }
     }
 }
@@ -206,6 +292,8 @@ pub const RECORDING_PROXY_USERNAME: &str = "recording_user";
 
 impl ProxyUserCredentials {
     pub fn is_recording_proxy_user(&self) -> bool { self.t_is_api_user && self.username == RECORDING_PROXY_USERNAME }
+
+    pub fn player_api_enabled(&self) -> bool { self.player_features.api_enabled.unwrap_or(self.ui_enabled) }
 
     /// Fill unset capability values from the referenced plan and compile the
     /// combined content filter. Idempotent; call after any load/conversion.
@@ -237,6 +325,48 @@ impl ProxyUserCredentials {
             self.raw_soft_connections
         } else {
             plan.map_or(0, |p| p.soft_connections)
+        };
+
+        let user_features = self.raw_player_features.as_ref();
+        let plan_features = plan.and_then(|p| p.player_features.as_ref());
+        // A user value wins field by field; an unset field inherits the plan value.
+        macro_rules! pick {
+            ($field:ident) => {
+                user_features.and_then(|f| f.$field).or_else(|| plan_features.and_then(|f| f.$field))
+            };
+        }
+        let default = PlayerFeatures::default();
+        let recording = pick!(recording).unwrap_or(default.recording);
+        let source_switch = pick!(source_switch).unwrap_or(default.source_switch);
+        let joinable_streams = pick!(joinable_streams).unwrap_or(default.joinable_streams);
+        let free_shared_joins = pick!(free_shared_joins).unwrap_or(default.free_shared_joins);
+        let recording_quota_bytes = user_features
+            .and_then(|f| f.recording_quota.as_ref())
+            .or_else(|| plan_features.and_then(|f| f.recording_quota.as_ref()))
+            .and_then(|quota| shared::model::parse_positive_size(quota.as_str()));
+        let max_concurrent_recordings = pick!(max_concurrent_recordings).or(matches!(
+            recording,
+            PlayerRecordingLevel::Private | PlayerRecordingLevel::Shared
+        )
+        .then_some(1));
+        let max_free_shared_joins = pick!(max_free_shared_joins).unwrap_or(default.max_free_shared_joins);
+        let max_recording_rules = pick!(max_recording_rules).unwrap_or(default.max_recording_rules);
+        let watch_progress = pick!(watch_progress).unwrap_or(default.watch_progress);
+        let event_stream = pick!(event_stream).unwrap_or(default.event_stream);
+        let api_enabled = pick!(api_enabled);
+
+        self.player_features = PlayerFeatures {
+            source_switch,
+            joinable_streams,
+            recording,
+            recording_quota_bytes,
+            max_concurrent_recordings,
+            max_recording_rules,
+            free_shared_joins,
+            max_free_shared_joins,
+            watch_progress,
+            event_stream,
+            api_enabled,
         };
 
         let plan_filter = plan.and_then(|p| p.t_filter.as_ref().map(Arc::clone));
@@ -479,5 +609,313 @@ mod tests {
         let mut user2 = ProxyUserCredentials::from(&user_dto2);
         user2.resolve_plan(&plans);
         assert_eq!(user2.proxy, ProxyType::Reverse(Some(ClusterFlags::Vod)));
+    }
+
+    #[test]
+    fn player_features_user_overrides_plan() {
+        let plan_dto = UserPlanDto {
+            name: "plan_override".to_string(),
+            player_features: Some(PlayerFeaturesDto {
+                source_switch: Some(false),
+                joinable_streams: Some(false),
+                recording: Some(PlayerRecordingLevel::Read),
+                recording_quota: Some(shared::model::ByteSize::new("20GB")),
+                max_concurrent_recordings: Some(2),
+                max_recording_rules: Some(4),
+                free_shared_joins: Some(false),
+                max_free_shared_joins: Some(3),
+                watch_progress: Some(false),
+                event_stream: Some(false),
+                api_enabled: None,
+            }),
+            ..Default::default()
+        };
+        let mut plans = HashMap::new();
+        plans.insert("plan_override".to_string(), Arc::new(UserPlan::from(&plan_dto)));
+
+        let user_dto = ProxyUserCredentialsDto {
+            username: "u1".to_string(),
+            password: "p".to_string(),
+            plan: Some("plan_override".to_string()),
+            player_features: Some(PlayerFeaturesDto {
+                source_switch: Some(true),
+                joinable_streams: Some(true),
+                recording: Some(PlayerRecordingLevel::Shared),
+                recording_quota: Some(shared::model::ByteSize::new("1GB")),
+                max_concurrent_recordings: Some(5),
+                max_recording_rules: Some(20),
+                free_shared_joins: Some(true),
+                max_free_shared_joins: Some(10),
+                watch_progress: Some(true),
+                event_stream: Some(true),
+                api_enabled: None,
+            }),
+            ..Default::default()
+        };
+        let mut user = ProxyUserCredentials::from(&user_dto);
+        user.resolve_plan(&plans);
+        assert_eq!(
+            user.player_features,
+            PlayerFeatures {
+                source_switch: true,
+                joinable_streams: true,
+                recording: PlayerRecordingLevel::Shared,
+                recording_quota_bytes: Some(1_073_741_824),
+                max_concurrent_recordings: Some(5),
+                max_recording_rules: 20,
+                free_shared_joins: true,
+                max_free_shared_joins: 10,
+                watch_progress: true,
+                event_stream: true,
+                api_enabled: None,
+            }
+        );
+    }
+
+    #[test]
+    fn player_features_plan_used_when_user_unset() {
+        let plan_dto = UserPlanDto {
+            name: "plan_inherit".to_string(),
+            player_features: Some(PlayerFeaturesDto {
+                source_switch: Some(true),
+                joinable_streams: Some(true),
+                recording: Some(PlayerRecordingLevel::Private),
+                recording_quota: Some(shared::model::ByteSize::new("20GB")),
+                max_concurrent_recordings: Some(4),
+                max_recording_rules: Some(15),
+                free_shared_joins: Some(true),
+                max_free_shared_joins: Some(8),
+                watch_progress: Some(true),
+                event_stream: Some(true),
+                api_enabled: None,
+            }),
+            ..Default::default()
+        };
+        let mut plans = HashMap::new();
+        plans.insert("plan_inherit".to_string(), Arc::new(UserPlan::from(&plan_dto)));
+
+        let user_dto = ProxyUserCredentialsDto {
+            username: "u2".to_string(),
+            password: "p".to_string(),
+            plan: Some("plan_inherit".to_string()),
+            player_features: None,
+            ..Default::default()
+        };
+        let mut user = ProxyUserCredentials::from(&user_dto);
+        user.resolve_plan(&plans);
+        assert_eq!(
+            user.player_features,
+            PlayerFeatures {
+                source_switch: true,
+                joinable_streams: true,
+                recording: PlayerRecordingLevel::Private,
+                recording_quota_bytes: Some(21_474_836_480),
+                max_concurrent_recordings: Some(4),
+                max_recording_rules: 15,
+                free_shared_joins: true,
+                max_free_shared_joins: 8,
+                watch_progress: true,
+                event_stream: true,
+                api_enabled: None,
+            }
+        );
+    }
+
+    #[test]
+    fn player_features_default_when_both_unset() {
+        let plan_dto = UserPlanDto { name: "plan_empty".to_string(), player_features: None, ..Default::default() };
+        let mut plans = HashMap::new();
+        plans.insert("plan_empty".to_string(), Arc::new(UserPlan::from(&plan_dto)));
+
+        let user_dto = ProxyUserCredentialsDto {
+            username: "u3".to_string(),
+            password: "p".to_string(),
+            plan: Some("plan_empty".to_string()),
+            player_features: None,
+            ..Default::default()
+        };
+        let mut user = ProxyUserCredentials::from(&user_dto);
+        user.resolve_plan(&plans);
+        assert_eq!(
+            user.player_features,
+            PlayerFeatures {
+                source_switch: false,
+                joinable_streams: false,
+                recording: PlayerRecordingLevel::None,
+                recording_quota_bytes: None,
+                max_concurrent_recordings: None,
+                max_recording_rules: 10,
+                free_shared_joins: false,
+                max_free_shared_joins: 1,
+                watch_progress: false,
+                event_stream: false,
+                api_enabled: None,
+            }
+        );
+        assert_eq!(user.player_features, PlayerFeatures::default());
+    }
+
+    #[test]
+    fn player_features_max_concurrent_recordings_defaults() {
+        let test_concurrent = |level: PlayerRecordingLevel, expected: Option<u32>| {
+            let u_dto = ProxyUserCredentialsDto {
+                username: "u_conc".to_string(),
+                password: "p".to_string(),
+                player_features: Some(PlayerFeaturesDto {
+                    recording: Some(level),
+                    max_concurrent_recordings: None,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let mut u = ProxyUserCredentials::from(&u_dto);
+            u.resolve_plan(&HashMap::new());
+            assert_eq!(u.player_features.max_concurrent_recordings, expected);
+        };
+        test_concurrent(PlayerRecordingLevel::None, None);
+        test_concurrent(PlayerRecordingLevel::Read, None);
+        test_concurrent(PlayerRecordingLevel::Private, Some(1));
+        test_concurrent(PlayerRecordingLevel::Shared, Some(1));
+    }
+
+    #[test]
+    fn player_features_field_wise_inheritance_new_fields() {
+        let plan_dto = UserPlanDto {
+            name: "plan_test".to_string(),
+            player_features: Some(PlayerFeaturesDto {
+                max_recording_rules: Some(25),
+                watch_progress: Some(true),
+                event_stream: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut plans = HashMap::new();
+        plans.insert("plan_test".to_string(), Arc::new(UserPlan::from(&plan_dto)));
+
+        // User overrides only watch_progress
+        let user_dto = ProxyUserCredentialsDto {
+            username: "u_override".to_string(),
+            password: "p".to_string(),
+            plan: Some("plan_test".to_string()),
+            player_features: Some(PlayerFeaturesDto { watch_progress: Some(false), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut user = ProxyUserCredentials::from(&user_dto);
+        user.resolve_plan(&plans);
+        assert_eq!(user.player_features.max_recording_rules, 25);
+        assert!(!user.player_features.watch_progress);
+        assert!(user.player_features.event_stream);
+
+        // User overrides only max_recording_rules with no plan
+        let user_dto2 = ProxyUserCredentialsDto {
+            username: "u_no_plan".to_string(),
+            password: "p".to_string(),
+            player_features: Some(PlayerFeaturesDto { max_recording_rules: Some(5), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut user2 = ProxyUserCredentials::from(&user_dto2);
+        user2.resolve_plan(&HashMap::new());
+        assert_eq!(user2.player_features.max_recording_rules, 5);
+        assert!(!user2.player_features.watch_progress);
+        assert!(!user2.player_features.event_stream);
+    }
+
+    #[test]
+    fn player_features_re_resolution_idempotent() {
+        let plan_dto = UserPlanDto {
+            name: "plan_inherit".to_string(),
+            player_features: Some(PlayerFeaturesDto {
+                source_switch: Some(true),
+                joinable_streams: Some(true),
+                recording: Some(PlayerRecordingLevel::Private),
+                max_free_shared_joins: Some(8),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut plans = HashMap::new();
+        plans.insert("plan_inherit".to_string(), Arc::new(UserPlan::from(&plan_dto)));
+
+        let user_dto = ProxyUserCredentialsDto {
+            username: "u5".to_string(),
+            password: "p".to_string(),
+            plan: Some("plan_inherit".to_string()),
+            player_features: Some(PlayerFeaturesDto {
+                source_switch: Some(false),
+                recording: Some(PlayerRecordingLevel::Private),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut user = ProxyUserCredentials::from(&user_dto);
+        user.resolve_plan(&plans);
+        let first_resolved = user.player_features;
+        user.resolve_plan(&plans);
+        assert_eq!(user.player_features, first_resolved);
+        let saved_dto = ProxyUserCredentialsDto::from(&user);
+        assert_eq!(saved_dto.player_features, user_dto.player_features);
+    }
+
+    #[test]
+    fn api_user_permissions_exact_sets() {
+        // Level None -> empty
+        let none_features = PlayerFeatures { recording: PlayerRecordingLevel::None, ..Default::default() };
+        assert_eq!(api_user_permissions(&none_features), PermissionSet::new());
+
+        // Level Read -> RecordingRead
+        let read_features = PlayerFeatures { recording: PlayerRecordingLevel::Read, ..Default::default() };
+        assert_eq!(api_user_permissions(&read_features), Permission::RecordingRead.into());
+
+        // Level Private -> RecordingRead | RecordingCreate | RecordingManage | RecordingDelete
+        let private_features = PlayerFeatures { recording: PlayerRecordingLevel::Private, ..Default::default() };
+        let private_expected = Permission::RecordingRead
+            | Permission::RecordingCreate
+            | Permission::RecordingManage
+            | Permission::RecordingDelete;
+        assert_eq!(api_user_permissions(&private_features), private_expected);
+
+        // Level Shared -> Private set | RecordingShare
+        let shared_features = PlayerFeatures { recording: PlayerRecordingLevel::Shared, ..Default::default() };
+        let shared_expected = private_expected | Permission::RecordingShare;
+        assert_eq!(api_user_permissions(&shared_features), shared_expected);
+    }
+
+    #[test]
+    fn player_features_api_enabled_inheritance_and_effective() {
+        let test_cases = [
+            (None, None, true, None, true),
+            (None, None, false, None, false),
+            (None, Some(true), false, Some(true), true),
+            (None, Some(false), true, Some(false), false),
+            (Some(true), Some(false), false, Some(true), true),
+            (Some(false), Some(true), true, Some(false), false),
+            (Some(false), None, true, Some(false), false),
+            (Some(true), None, false, Some(true), true),
+        ];
+
+        for (user_api, plan_api, ui_enabled, expected_feature, expected_effective) in test_cases {
+            let plan_dto = UserPlanDto {
+                name: "test_plan".to_string(),
+                player_features: plan_api.map(|api| PlayerFeaturesDto { api_enabled: Some(api), ..Default::default() }),
+                ..Default::default()
+            };
+            let mut plans = HashMap::new();
+            plans.insert("test_plan".to_string(), Arc::new(UserPlan::from(&plan_dto)));
+
+            let user_dto = ProxyUserCredentialsDto {
+                username: "alice".to_string(),
+                password: "pass".to_string(),
+                ui_enabled,
+                plan: Some("test_plan".to_string()),
+                player_features: user_api.map(|api| PlayerFeaturesDto { api_enabled: Some(api), ..Default::default() }),
+                ..Default::default()
+            };
+            let mut user = ProxyUserCredentials::from(&user_dto);
+            user.resolve_plan(&plans);
+
+            assert_eq!(user.player_features.api_enabled, expected_feature);
+            assert_eq!(user.player_api_enabled(), expected_effective);
+        }
     }
 }

@@ -69,7 +69,8 @@ impl FixturePaths {
         let config_file = root.join("config.yml");
         let source_file = root.join("source.yml");
         let api_proxy_file = root.join("api-proxy.yml");
-        let mut config = render_config(tuliprox_address, &web_root, &storage_dir, &backup_dir, &history_dir, policy)?;
+        let mut config =
+            render_config(tuliprox_address, &web_root, &storage_dir, &backup_dir, &history_dir, &root, policy)?;
         if let Some(mode) = fixture_stream.hls_startup_mode {
             let _ = writeln!(config,
                 "  hls_cache:\n    cache_path: {}\n    max_concurrent_segment_fetches_per_session: 3\n    startup:\n      mode: {mode}",
@@ -82,6 +83,10 @@ impl FixturePaths {
             config.push_str(&block);
         }
         std::fs::write(&config_file, config)?;
+        if policy.is_some_and(|p| p.player_api == Some(true)) {
+            let admin_line = "admin:$argon2id$v=19$m=19456,t=2,p=1$TjNpMk1qWGMwcm5XMVNUV1BzUlZzSnFtYWFuSzJObVRINnBDVGFEdnpYejZSb3VXYmthdWYzd0ZHcG5kRWpNSQ$dt199nB/Vs2AG21XUHrNEJqCW4v11kaDt4mufXy0fWM:admin\n";
+            std::fs::write(root.join("web-users.txt"), admin_line)?;
+        }
         std::fs::write(
             &source_file,
             render_sources(run_id, origin_address, channels, policy, fixture_stream, add_xtream_output, input),
@@ -147,14 +152,29 @@ fn render_config(
     storage_dir: &Path,
     backup_dir: &Path,
     history_dir: &Path,
+    root: &Path,
     policy: Option<&PolicyContract>,
 ) -> Result<String, TestkitError> {
     let user_access_control = policy.is_some_and(|contract| contract.user_access_control);
     let grace = policy.and_then(|contract| contract.grace.as_ref());
     let grace_millis = grace.map_or(0, |contract| contract.timeout_millis);
     let grace_hold = grace.is_none_or(|contract| matches!(contract.mode, crate::oracle::GraceMode::HoldStream));
+    let player_api = policy.is_some_and(|p| p.player_api == Some(true));
+    let user_ui_enabled = policy.and_then(|p| p.user_ui_enabled).unwrap_or(player_api);
+    let web_auth_block = if player_api {
+        format!(
+            "  auth:\n    enabled: true\n    issuer: tuliprox\n    secret: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n    userfile: {}\n",
+            yaml_scalar(&root.join("web-users.txt"))
+        )
+    } else {
+        String::new()
+    };
+    let mut web_ui_block = format!("web_ui:\n  enabled: true\n  user_ui_enabled: {user_ui_enabled}\n");
+    if let Some(player_api_enabled) = policy.and_then(|p| p.player_api_enabled) {
+        let _ = writeln!(web_ui_block, "  player_api_enabled: {player_api_enabled}");
+    }
     let mut config = format!(
-        "api:\n  host: 127.0.0.1\n  port: {}\n  web_root: {}\nworking_dir: {}\nbackup_dir: {}\nuser_access_control: {user_access_control}\nupdate_on_boot: true\nlog:\n  log_level: debug\nweb_ui:\n  enabled: true\n  user_ui_enabled: false\nreverse_proxy:\n  stream:\n    grace_period_millis: {grace_millis}\n    grace_period_hold_stream: {grace_hold}\n    shared_subscriber_idle_timeout_secs: 1\n",
+        "api:\n  host: 127.0.0.1\n  port: {}\n  web_root: {}\nworking_dir: {}\nbackup_dir: {}\nuser_access_control: {user_access_control}\nupdate_on_boot: true\nlog:\n  log_level: debug\n{web_ui_block}{web_auth_block}reverse_proxy:\n  stream:\n    grace_period_millis: {grace_millis}\n    grace_period_hold_stream: {grace_hold}\n    shared_subscriber_idle_timeout_secs: 1\n",
         tuliprox_address.port(),
         yaml_scalar(web_root),
         yaml_scalar(storage_dir),
@@ -264,10 +284,11 @@ fn render_stalker_input(origin_address: SocketAddr, stalker: &FixtureStalker) ->
 /// One m3u input per failover member. Each input is served as its own origin account with
 /// the member-shaped catalog (live channels only, stable stream ids).
 fn render_failover_inputs(run_id: &str, origin_address: SocketAddr, names: &[String]) -> String {
-    names.iter().fold(String::new(), |mut rendered, name| {
+    names.iter().enumerate().fold(String::new(), |mut rendered, (idx, name)| {
+        let group_title_param = if idx == 0 { "&group_title=General" } else { "" };
         let _ = writeln!(
             rendered,
-            "  - name: {}\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}&account={name}&failover_member=true",
+            "  - name: {}\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}&account={name}&failover_member=true{group_title_param}",
             yaml_string(name)
         );
         rendered
@@ -317,9 +338,40 @@ fn render_api_proxy(tuliprox_address: SocketAddr, policy: Option<&PolicyContract
     );
     if let Some(policy) = policy {
         for (username, user) in &policy.users {
-            let _ = writeln!(
+            let mut extra = String::new();
+            if let Some(filter) = &user.filter {
+                let _ = writeln!(extra, "        filter: {}", yaml_string(filter));
+            }
+            if let Some(ui_enabled) = user.ui_enabled {
+                let _ = writeln!(extra, "        ui_enabled: {ui_enabled}");
+            } else if policy.player_api == Some(true) {
+                let _ = writeln!(extra, "        ui_enabled: true");
+            }
+            if let Some(features) = &user.player_features {
+                let mut features_block = String::new();
+                if let Some(v) = features.api_enabled {
+                    let _ = writeln!(features_block, "          api_enabled: {v}");
+                }
+                if let Some(v) = features.source_switch {
+                    let _ = writeln!(features_block, "          source_switch: {v}");
+                }
+                if let Some(v) = features.joinable_streams {
+                    let _ = writeln!(features_block, "          joinable_streams: {v}");
+                }
+                if let Some(v) = features.free_shared_joins {
+                    let _ = writeln!(features_block, "          free_shared_joins: {v}");
+                }
+                if let Some(v) = features.max_free_shared_joins {
+                    let _ = writeln!(features_block, "          max_free_shared_joins: {v}");
+                }
+                if !features_block.is_empty() {
+                    extra.push_str("        player_features:\n");
+                    extra.push_str(&features_block);
+                }
+            }
+            let _ = write!(
                 output,
-                "      - username: {}\n        password: {}\n        proxy: reverse\n        server: testkit\n        max_connections: {}\n        soft_connections: {}\n        status: Active",
+                "      - username: {}\n        password: {}\n        proxy: reverse\n        server: testkit\n        max_connections: {}\n        soft_connections: {}\n        status: Active\n{extra}",
                 yaml_string(username),
                 FIXTURE_PASSWORD,
                 user.max_connections,
@@ -682,17 +734,19 @@ mod tests {
             user_access_control: true,
             users: HashMap::from([(
                 "fixture-user".to_owned(),
-                crate::config::UserPolicy { max_connections: 1, soft_connections: 0 },
+                crate::config::UserPolicy {
+                    max_connections: 1,
+                    soft_connections: 0,
+                    filter: None,
+                    ui_enabled: None,
+                    player_features: None,
+                },
             )]),
             admission_strategies: Some(vec![crate::oracle::AdmissionStrategy::EvictUserSameIpLatest]),
-            recent_eviction_reentry_ttl_ms: None,
             hls_session_ttl_secs: Some(2),
             provider_affinity_ttl_secs: Some(6),
             hls_wrap_media_playlist: Some(false),
-            grace: None,
-            provider_max_connections: None,
-            provider_pool: Vec::new(),
-            expected_provider_slots: None,
+            ..Default::default()
         };
         let channels = HashMap::from([(
             "fixture-channel".to_owned(),
@@ -955,5 +1009,72 @@ mod tests {
         );
         assert!(source.contains("      - testkit-origin\n"), "{source}");
         assert!(!source.contains("failover_groups"), "{source}");
+    }
+
+    #[test]
+    fn render_config_user_ui_enabled_override() -> Result<(), TestkitError> {
+        let dummy_addr = SocketAddr::from(([127, 0, 0, 1], 8901));
+        let path = Path::new("/tmp");
+
+        let mut policy = PolicyContract { player_api: Some(true), ..Default::default() };
+        let cfg = render_config(dummy_addr, path, path, path, path, path, Some(&policy))?;
+        assert!(cfg.contains("web_ui:\n  enabled: true\n  user_ui_enabled: true\n"));
+
+        policy.user_ui_enabled = Some(false);
+        let cfg = render_config(dummy_addr, path, path, path, path, path, Some(&policy))?;
+        assert!(cfg.contains("web_ui:\n  enabled: true\n  user_ui_enabled: false\n"));
+
+        policy.player_api = None;
+        policy.user_ui_enabled = Some(true);
+        let cfg = render_config(dummy_addr, path, path, path, path, path, Some(&policy))?;
+        assert!(cfg.contains("web_ui:\n  enabled: true\n  user_ui_enabled: true\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn render_config_player_api_enabled_present_only_when_set() -> Result<(), TestkitError> {
+        let dummy_addr = SocketAddr::from(([127, 0, 0, 1], 8901));
+        let path = Path::new("/tmp");
+
+        let mut policy = PolicyContract { player_api: Some(true), ..Default::default() };
+        let cfg = render_config(dummy_addr, path, path, path, path, path, Some(&policy))?;
+        assert!(!cfg.contains("player_api_enabled"));
+
+        policy.player_api_enabled = Some(true);
+        let cfg = render_config(dummy_addr, path, path, path, path, path, Some(&policy))?;
+        assert!(cfg.contains("web_ui:\n  enabled: true\n  user_ui_enabled: true\n  player_api_enabled: true\n"));
+
+        policy.player_api_enabled = Some(false);
+        let cfg = render_config(dummy_addr, path, path, path, path, path, Some(&policy))?;
+        assert!(cfg.contains("web_ui:\n  enabled: true\n  user_ui_enabled: true\n  player_api_enabled: false\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn render_api_proxy_renders_api_enabled_and_valid_yaml() -> Result<(), TestkitError> {
+        let dummy_addr = SocketAddr::from(([127, 0, 0, 1], 8901));
+        let policy = PolicyContract {
+            users: HashMap::from([(
+                "viewer".to_owned(),
+                crate::config::UserPolicy {
+                    max_connections: 1,
+                    soft_connections: 0,
+                    filter: None,
+                    ui_enabled: Some(false),
+                    player_features: Some(crate::config::UserPlayerFeatures {
+                        api_enabled: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            )]),
+            player_api: Some(true),
+            ..Default::default()
+        };
+        let proxy = render_api_proxy(dummy_addr, Some(&policy));
+        assert!(proxy.contains("        ui_enabled: false\n"));
+        assert!(proxy.contains("        player_features:\n          api_enabled: true\n"));
+        let _: serde_json::Value =
+            serde_saphyr::from_str(&proxy).map_err(|e| TestkitError::Configuration(e.to_string()))?;
+        Ok(())
     }
 }

@@ -156,7 +156,7 @@ pub(super) async fn detected_catchup_hls_response(
         .await;
     app_state.active_users.clear_unbound_session_addr(&user.username, &created_session_token, &fingerprint.addr).await;
 
-    if playlist_kind == HlsPlaylistKind::Media && hls_media_playlist_wrap_enabled(app_state, target, user) {
+    if playlist_kind == HlsPlaylistKind::Media && hls_media_playlist_wrap_enabled(app_state, target, input, user) {
         let master = wrap_media_playlist(
             HlsMediaPlaylistWrap {
                 app_state,

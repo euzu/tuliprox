@@ -2,7 +2,7 @@ use crate::{
     defaults::{default_auth_error_status, is_default_auth_error_status, is_false},
     error::TuliproxError,
     foundation::get_filter,
-    model::{ClusterFlags, ProxyType, ProxyUserCredentialsDto},
+    model::{ByteSize, ClusterFlags, ProxyType, ProxyUserCredentialsDto},
     utils::{build_charset, generate_random_string_from, is_blank_optional_string, parse_duration_seconds},
 };
 use std::collections::HashSet;
@@ -26,6 +26,103 @@ impl UserPlanTrialDto {
     pub fn duration_secs(&self) -> Option<u64> { parse_duration_seconds(&self.duration, true).filter(|secs| *secs > 0) }
 }
 
+/// What a proxy API user may do with recordings. Each level includes the previous one:
+/// `read` plays and downloads visible recordings, `private` also creates and manages own
+/// private recordings, `shared` also creates shared recordings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayerRecordingLevel {
+    #[default]
+    None,
+    Read,
+    Private,
+    Shared,
+}
+
+impl PlayerRecordingLevel {
+    pub const ALL: [Self; 4] = [Self::None, Self::Read, Self::Private, Self::Shared];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Read => "read",
+            Self::Private => "private",
+            Self::Shared => "shared",
+        }
+    }
+}
+
+impl std::fmt::Display for PlayerRecordingLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
+}
+
+impl std::str::FromStr for PlayerRecordingLevel {
+    type Err = TuliproxError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "read" => Ok(Self::Read),
+            "private" => Ok(Self::Private),
+            "shared" => Ok(Self::Shared),
+            _ => Err(TuliproxError::ConfigApiProxy(format!("Invalid player recording level: {s}"))),
+        }
+    }
+}
+
+/// Player features of a plan or a user. Every field is optional: a user value overrides the
+/// plan value field by field, an unset field inherits.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerFeaturesDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_switch: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joinable_streams: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<PlayerRecordingLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_quota: Option<ByteSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_recordings: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_recording_rules: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_shared_joins: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_free_shared_joins: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_progress: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_stream: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_enabled: Option<bool>,
+}
+
+impl PlayerFeaturesDto {
+    #[must_use]
+    pub fn is_empty(&self) -> bool { self == &Self::default() }
+
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> { self.validate() }
+
+    pub fn validate(&self) -> Result<(), TuliproxError> {
+        if let Some(quota) = &self.recording_quota {
+            quota.parse_positive("player_features.recording_quota").map_err(TuliproxError::ConfigApiProxy)?;
+        }
+        for (name, is_zero) in [
+            ("max_concurrent_recordings", self.max_concurrent_recordings == Some(0)),
+            ("max_recording_rules", self.max_recording_rules == Some(0)),
+            ("max_free_shared_joins", self.max_free_shared_joins == Some(0)),
+        ] {
+            if is_zero {
+                return Err(TuliproxError::ConfigApiProxy(format!("player_features.{name} must be greater than 0")));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Reusable capability tier referenced by users via `plan: <name>`.
 /// User-level values always override plan values; unset user values inherit.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -47,6 +144,8 @@ pub struct UserPlanDto {
     pub trial: Option<UserPlanTrialDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_features: Option<PlayerFeaturesDto>,
 }
 
 impl UserPlanDto {
@@ -73,6 +172,12 @@ impl UserPlanDto {
                     "Invalid trial duration '{}' in user plan {} (expected e.g. 24h, 7d)",
                     trial.duration, self.name
                 )));
+            }
+        }
+        if let Some(features) = &mut self.player_features {
+            features.prepare()?;
+            if features.is_empty() {
+                self.player_features = None;
             }
         }
         Ok(())
@@ -559,5 +664,126 @@ mod tests {
     fn invalid_credential_generation_falls_back_to_default() {
         let bad = CredentialFieldGenDto { length: Some(0), chars: "?".to_string(), ..Default::default() };
         assert_eq!(bad.generate("A-Z0-9").len(), 6);
+    }
+
+    #[test]
+    fn player_features_dto_serde_roundtrip_snake_case() {
+        let dto = PlayerFeaturesDto {
+            source_switch: Some(true),
+            joinable_streams: Some(false),
+            recording: Some(PlayerRecordingLevel::Private),
+            recording_quota: Some(ByteSize::new("1024")),
+            max_concurrent_recordings: Some(2),
+            max_recording_rules: Some(5),
+            free_shared_joins: Some(true),
+            max_free_shared_joins: Some(3),
+            watch_progress: Some(true),
+            event_stream: Some(false),
+            api_enabled: Some(true),
+        };
+        let json = serde_json::to_string(&dto).expect("serialize should succeed");
+        assert!(json.contains("\"recording\":\"private\""));
+        let deserialized: PlayerFeaturesDto = serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(dto, deserialized);
+
+        for (level, expected_name) in [
+            (PlayerRecordingLevel::None, "none"),
+            (PlayerRecordingLevel::Read, "read"),
+            (PlayerRecordingLevel::Private, "private"),
+            (PlayerRecordingLevel::Shared, "shared"),
+        ] {
+            let json = serde_json::to_string(&level).expect("serialize level");
+            assert_eq!(json, format!("\"{expected_name}\""));
+            let parsed: PlayerRecordingLevel = serde_json::from_str(&json).expect("deserialize level");
+            assert_eq!(parsed, level);
+        }
+    }
+
+    #[test]
+    fn player_recording_level_from_str() {
+        use std::str::FromStr;
+
+        for (name, expected) in [
+            ("none", PlayerRecordingLevel::None),
+            ("read", PlayerRecordingLevel::Read),
+            ("private", PlayerRecordingLevel::Private),
+            ("shared", PlayerRecordingLevel::Shared),
+        ] {
+            assert_eq!(PlayerRecordingLevel::from_str(name).unwrap(), expected);
+            assert_eq!(name.parse::<PlayerRecordingLevel>().unwrap(), expected);
+            assert_eq!(expected.to_string(), name);
+            assert_eq!(expected.as_str(), name);
+        }
+
+        assert!("invalid".parse::<PlayerRecordingLevel>().is_err());
+        assert!("".parse::<PlayerRecordingLevel>().is_err());
+        assert!("NONE".parse::<PlayerRecordingLevel>().is_err());
+        assert!("Private".parse::<PlayerRecordingLevel>().is_err());
+    }
+
+    #[test]
+    fn player_features_dto_recording_quota_deserialization_and_validation() {
+        let yaml = "recording_quota: 20GB";
+        let dto: PlayerFeaturesDto = crate::utils::yaml_from_str(yaml).expect("YAML deserialize 20GB");
+        let quota = dto.recording_quota.as_ref().expect("quota present");
+        assert_eq!(quota.as_str(), "20GB");
+        assert_eq!(quota.parse_bytes().expect("parse 20GB").get(), 21_474_836_480);
+        assert!(dto.validate().is_ok());
+
+        let yaml_int = "recording_quota: 1024";
+        let dto_int: PlayerFeaturesDto = crate::utils::yaml_from_str(yaml_int).expect("YAML deserialize integer");
+        let quota_int = dto_int.recording_quota.as_ref().expect("quota present");
+        assert_eq!(quota_int.as_str(), "1024");
+        assert_eq!(quota_int.parse_bytes().expect("parse 1024").get(), 1024);
+        assert!(dto_int.validate().is_ok());
+
+        for bad in ["0", "0GB", "abc"] {
+            let bad_dto = PlayerFeaturesDto { recording_quota: Some(ByteSize::new(bad)), ..Default::default() };
+            let err = bad_dto.validate().unwrap_err();
+            let err_str = err.to_string();
+            assert!(
+                err_str.contains("recording_quota") && err_str.contains(&format!("got '{bad}'")),
+                "expected error to name recording_quota and include got '{bad}', got {err_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn player_features_dto_rejects_zero_numeric_fields() {
+        let zero_quota = PlayerFeaturesDto { recording_quota: Some(ByteSize::new("0")), ..Default::default() };
+        assert!(zero_quota.validate().is_err());
+
+        let zero_concurrent = PlayerFeaturesDto { max_concurrent_recordings: Some(0), ..Default::default() };
+        assert!(zero_concurrent.validate().is_err());
+
+        let zero_rules = PlayerFeaturesDto { max_recording_rules: Some(0), ..Default::default() };
+        assert!(zero_rules.validate().is_err());
+
+        let zero_joins = PlayerFeaturesDto { max_free_shared_joins: Some(0), ..Default::default() };
+        assert!(zero_joins.validate().is_err());
+    }
+
+    #[test]
+    fn player_features_dto_rejects_unknown_field() {
+        let json = r#"{"unknown_field": true}"#;
+        let res: Result<PlayerFeaturesDto, _> = serde_json::from_str(json);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn user_plan_prepare_collects_player_features_error() {
+        let mut plan = UserPlanDto {
+            name: "family".to_string(),
+            player_features: Some(PlayerFeaturesDto {
+                recording_quota: Some(ByteSize::new("0")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(plan.prepare().is_err());
+
+        let mut plans_cfg = crate::model::PlansConfigDto { plans: vec![plan] };
+        let err = plans_cfg.prepare().unwrap_err();
+        assert!(err.to_string().contains("recording_quota"));
     }
 }

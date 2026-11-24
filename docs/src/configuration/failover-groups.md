@@ -48,7 +48,8 @@ Grouping runs at the end of the target processing, after filters, renames and ma
 5. The group appears as one playlist entry. Its name, logo and EPG id come from its first member; with
    `name_strip_quality: true` the quality words are removed from the name. The members disappear from the
    playlist but keep their stable virtual ids, so old favourites and direct member requests still play (a request
-   for a member id plays the group).
+   for a member id plays the group). When playing via a member id, access control and content filters always evaluate
+   the group entry: if the group is filtered or hidden from the user, every member request is rejected with `404`.
 
 The mapping DSL can steer grouping per channel with the header field `failover_group`: a value forces the channel
 into the group with that key, an empty string (`""`) keeps the channel out of any group.

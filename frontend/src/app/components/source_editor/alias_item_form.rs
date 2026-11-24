@@ -3,9 +3,9 @@ use crate::{
         build_options, format_date_input_value, input::Input, select::Select, selection_parse_first, Card,
         DropDownSelection, TextButton, ToolAction,
     },
-    config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional,
-    config_field_optional_hide, edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_u16,
-    edit_field_text, edit_field_text_option, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_optional, config_field_optional_hide,
+    edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_u16, edit_field_text,
+    edit_field_text_option, generate_form_reducer,
     hooks::use_service_context,
     i18n::use_translation,
 };
@@ -48,6 +48,7 @@ generate_form_reducer!(
 fn stalker_alias_choice<T, F>(
     form_state: &UseReducerHandle<AliasFormState>,
     name: &'static str,
+    field_id: &'static str,
     label: String,
     selected: T,
     update: F,
@@ -57,7 +58,7 @@ where
     F: Fn(&mut StalkerInputConfigDto, T) + 'static,
 {
     let state = form_state.clone();
-    config_field_child!(label, "INPUT_FORM.STALKER_ALIAS_OVERRIDE", {
+    config_field_child!(label, field_id, {
         let options = Rc::new(build_options(T::iter(), &selected, |value| html! { value.to_string() }));
         html! {
             <Select
@@ -246,8 +247,8 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                     </div>
                 }
                 <div class="tp__config-view__cols-2">
-                  { config_field_custom!(translate.t(LABEL_PRIORITY), form_state.form.priority.to_string()) }
-                  { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), form_state.form.max_connections.to_string()) }
+                  { config_field_child!(translate.t(LABEL_PRIORITY), "CONFIG_INPUT_ALIAS.PRIORITY", { html! { <span class="tp__form-field__value">{form_state.form.priority.to_string()}</span> } }) }
+                  { config_field_child!(translate.t(LABEL_MAX_CONNECTIONS), "CONFIG_INPUT_ALIAS.MAX_CONNECTIONS", { html! { <span class="tp__form-field__value">{form_state.form.max_connections.to_string()}</span> } }) }
                 </div>
             } else {
                 <>
@@ -270,13 +271,14 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
             if props.input_type.is_stalker() {
                 <div class="tp__config-view__cols-2">
                     if props.readonly {
-                        { config_field_custom!(translate.t("LABEL.STALKER_MAC_ADDRESS"), stalker_device.mac_address.clone().unwrap_or_default()) }
-                        { config_field_custom!(translate.t("LABEL.STALKER_AUTH_MODE"), effective_stalker_auth_mode.to_string()) }
-                        { config_field_custom!(translate.t("LABEL.STALKER_MAG_PRESET"), stalker_config.mag_preset.to_string()) }
-                        { config_field_custom!(translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), stalker_config.endpoint_preference.to_string()) }
+                        { config_field_child!(translate.t("LABEL.STALKER_MAC_ADDRESS"), "STALKER_DEVICE_PROFILE.MAC_ADDRESS", { html! { <span class="tp__form-field__value">{stalker_device.mac_address.clone().unwrap_or_default()}</span> } }) }
+                        { config_field_child!(translate.t("LABEL.STALKER_AUTH_MODE"), "STALKER_INPUT_CONFIG.AUTH_MODE", { html! { <span class="tp__form-field__value">{effective_stalker_auth_mode.to_string()}</span> } }) }
+                        { config_field_child!(translate.t("LABEL.STALKER_MAG_PRESET"), "STALKER_INPUT_CONFIG.MAG_PRESET", { html! { <span class="tp__form-field__value">{stalker_config.mag_preset.to_string()}</span> } }) }
+                        { config_field_child!(translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), "STALKER_INPUT_CONFIG.ENDPOINT_PREFERENCE", { html! { <span class="tp__form-field__value">{stalker_config.endpoint_preference.to_string()}</span> } }) }
                     } else {
                         <div class="tp__form-field tp__form-field__text">
                             <Input label={translate.t("LABEL.STALKER_MAC_ADDRESS")} name="alias_stalker_mac"
+                                field_id={Some("STALKER_DEVICE_PROFILE.MAC_ADDRESS".to_string())}
                                 value={stalker_device.mac_address.clone().unwrap_or_default()}
                                 on_change={{
                                     let form_state = form_state.clone();
@@ -292,6 +294,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                         { stalker_alias_choice::<StalkerAuthMode, _>(
                             &form_state,
                             "alias_stalker_auth_mode",
+                            "STALKER_INPUT_CONFIG.AUTH_MODE",
                             translate.t("LABEL.STALKER_AUTH_MODE"),
                             effective_stalker_auth_mode,
                             |config, value| config.auth_mode = value,
@@ -299,6 +302,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                         { stalker_alias_choice::<StalkerMagPreset, _>(
                             &form_state,
                             "alias_stalker_mag_preset",
+                            "STALKER_INPUT_CONFIG.MAG_PRESET",
                             translate.t("LABEL.STALKER_MAG_PRESET"),
                             stalker_config.mag_preset,
                             |config, value| config.mag_preset = value,
@@ -306,6 +310,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                         { stalker_alias_choice::<StalkerEndpointPreference, _>(
                             &form_state,
                             "alias_stalker_endpoint_preference",
+                            "STALKER_INPUT_CONFIG.ENDPOINT_PREFERENCE",
                             translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"),
                             stalker_config.endpoint_preference,
                             |config, value| config.endpoint_preference = value,
@@ -315,9 +320,10 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
             }
 
             if props.readonly {
-                { config_field_custom!(
+                { config_field_child!(
                     translate.t(LABEL_EXP_DATE),
-                    format_date_input_value(form_state.form.exp_date)
+                    "CONFIG_INPUT_ALIAS.EXP_DATE",
+                    { html! { <span class="tp__form-field__value">{format_date_input_value(form_state.form.exp_date)}</span> } }
                 ) }
             } else {
                 { edit_field_exp_date!(form_state, translate.t(LABEL_EXP_DATE), exp_date, AliasFormAction::ExpDate, exp_date_tool_action) }

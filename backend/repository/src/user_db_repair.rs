@@ -8,7 +8,7 @@
 
 mod commands;
 use crate::{
-    api_user_recovery::{ApiUserRecovery, ApiUserRepository, StoredApiUserV7},
+    api_user_recovery::{ApiUserRecovery, ApiUserRepository, StoredApiUserV8},
     startup_migration::{create_user_db_merge_guard, load_user_records, user_db_merge_guard_path},
     storage_const::API_USER_REPAIR_BACKUP_PREFIX,
     user_repository::StoredProxyUserCredentials,
@@ -197,7 +197,7 @@ fn rebuild_from_verified_history(
 fn rebuild_from_live_records(
     db_path: &Path,
     root: &Path,
-    users: &BTreeMap<String, StoredApiUserV7>,
+    users: &BTreeMap<String, StoredApiUserV8>,
 ) -> io::Result<UserDbRepairReport> {
     let token = uuid::Uuid::new_v4();
     let name = db_path.file_name().ok_or_else(|| invalid("user database has no file name"))?;
@@ -234,9 +234,9 @@ fn rebuild_from_live_records(
         {
             return Err(invalid("fresh recovery history record count did not verify"));
         }
-        let strict = BPlusTree::<String, StoredApiUserV7>::load(&staging_db)?;
+        let strict = BPlusTree::<String, StoredApiUserV8>::load(&staging_db)?;
         if strict.len() != expected.len() {
-            return Err(invalid("staged user database is not a complete V7 database"));
+            return Err(invalid("staged user database is not a complete V8 database"));
         }
         Ok(())
     })();
@@ -313,9 +313,9 @@ fn publish_fresh_recovery(
     Ok(())
 }
 
-/// Confirms the published database loads as V7 and agrees with its recovery history.
+/// Confirms the published database loads as V8 and agrees with its recovery history.
 fn verify_published_database(db_path: &Path, expected_records: u64) -> io::Result<()> {
-    let strict = BPlusTree::<String, StoredApiUserV7>::load(db_path)?;
+    let strict = BPlusTree::<String, StoredApiUserV8>::load(db_path)?;
     if u64::try_from(strict.len()).map_err(|_| invalid("record count exceeds u64"))? != expected_records {
         return Err(invalid("published user database record count did not verify"));
     }

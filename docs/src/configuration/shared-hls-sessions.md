@@ -142,7 +142,9 @@ Manifest polling, additional access leases, retries, and a target-duration chang
 Authorized media activity renews protection through the normal media paths. Soft overlap and reclaim still apply; active
 origin work prevents displacement. An already admitted resource fetch keeps its slot throughout preparation, transfer,
 backoff, retries and required processing under one fixed overall deadline. This work right is stored on the same provider
-lease and counts no additional slot. Once it ends, only normal protection or another admitted operation remains.
+lease and counts no additional slot. Until the start delivers its first media, render-window work that is queued or
+in flight (including a segment that waits for its retry backoff) also keeps the account binding. Once it ends, only
+normal protection or another admitted operation remains.
 New independent work after normal expiry must obtain ordinary provider admission; it cannot extend an old retry right.
 After completed playback becomes idle and its protection expires, a new successful admission starts a new window at its
 first accepted manifest. Binding replacement or polling without a new allocation retains the previous anchor.
@@ -153,9 +155,11 @@ enabled custom video with an asset returns a finite manifest with accessible med
 `custom_stream_response_error_status` (default `502`); an enabled but missing asset falls back to `503`. Repeated access to
 that failed lease does not start new retries. A fresh master may start again after capacity becomes available. Cancelling
 one viewer does not terminate another viewer's shared work, and stale cleanup cannot release a successor binding.
-Running account provisioning is a provisional result and keeps Pending/Idle leases retryable, including when provisioning
-media is unavailable. Only an explicit capacity failure selects the provider-exhausted video; generic preparation failures
-use the channel-unavailable response.
+Running account provisioning is a provisional result and keeps Pending/Idle leases retryable, including when
+provisioning media is unavailable. Only an explicit capacity failure selects the provider-exhausted video; generic
+preparation failures use the channel-unavailable response. Without a usable custom video, a pending start answers
+HTTP `503 Service Unavailable` with `Retry-After: 2` while it still runs, and `custom_stream_response_error_status`
+(default `502`) after it has failed.
 
 The resource deadline is captured from the existing resource retry budget. Playlist polling, additional viewers and
 changes to target duration or timeout configuration do not renew it. Each attempt also keeps its individual timeouts.

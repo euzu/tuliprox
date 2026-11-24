@@ -24,6 +24,7 @@ async fn edit_recording_re_validates_quota_against_new_duration_atomically() {
         default_private_bytes: Some(1_000),
         per_user_bytes: HashMap::new(),
         shared_bytes: None,
+        ..Default::default()
     };
     let rec_cfg = RecordingConfig {
         headers: HashMap::new(),
@@ -179,4 +180,115 @@ async fn the_same_recording_is_admitted_when_the_disk_has_room() {
 
     assert!(result.is_ok(), "got {result:?}");
     assert_eq!(queue.scheduled.read().await.len(), 1);
+}
+
+#[tokio::test]
+async fn concurrency_limit_matrix() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+    let service = service_with_disk(dir.path(), &queue, None);
+
+    let alice_features = shared::model::PlayerFeaturesDto {
+        max_concurrent_recordings: Some(1),
+        recording: Some(shared::model::PlayerRecordingLevel::Private),
+        ..Default::default()
+    };
+
+    let api_proxy_dto = shared::model::ApiProxyConfigDto {
+        user: vec![shared::model::TargetUserDto {
+            target: "1".to_string(),
+            credentials: vec![
+                shared::model::ProxyUserCredentialsDto {
+                    username: "alice".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(alice_features),
+                    ..Default::default()
+                },
+                shared::model::ProxyUserCredentialsDto {
+                    username: "bob".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    ..Default::default()
+                },
+            ],
+        }],
+        ..Default::default()
+    };
+    service.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+
+    let alice_claims = shared::model::Claims {
+        username: "alice".to_string(),
+        iss: "tuliprox".to_string(),
+        iat: 0,
+        exp: 0,
+        roles: shared::model::RoleSet::new(),
+        permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
+        pwd_version: 0,
+        subject_id: Some(UserId::from("api:alice")),
+        permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+    };
+    let bob_claims = shared::model::Claims {
+        username: "bob".to_string(),
+        iss: "tuliprox".to_string(),
+        iat: 0,
+        exp: 0,
+        roles: shared::model::RoleSet::new(),
+        permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
+        pwd_version: 0,
+        subject_id: Some(UserId::from("api:bob")),
+        permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+    };
+
+    let now = chrono::Utc::now().timestamp() + 10_000;
+    // Task 1 for Alice: now..now+1000
+    let mut input1 = disk_test_input();
+    input1.program_start = now;
+    input1.program_end = now + 1000;
+    input1.program_title = "Show 1".to_string();
+    assert!(service.create_recording(&alice_claims, &input1).await.is_ok());
+
+    // Case 1: overlapping second own recording rejected
+    let mut input2 = disk_test_input();
+    input2.program_start = now + 500;
+    input2.program_end = now + 1500;
+    input2.program_title = "Show 2".to_string();
+    let err = service.create_recording(&alice_claims, &input2).await.err();
+    assert_eq!(err, Some(ServiceError::ConcurrencyExceeded));
+
+    // Case 2: non-overlapping accepted
+    let mut input3 = disk_test_input();
+    input3.program_start = now + 1000;
+    input3.program_end = now + 2000;
+    input3.program_title = "Show 3".to_string();
+    assert!(service.create_recording(&alice_claims, &input3).await.is_ok());
+
+    // Case 3: attaching to existing materialization of another user accepted and not counted
+    let mut input4_bob = disk_test_input();
+    input4_bob.program_start = now + 200;
+    input4_bob.program_end = now + 800;
+    input4_bob.program_title = "Show 4".to_string();
+    assert!(service.create_recording(&bob_claims, &input4_bob).await.is_ok());
+
+    let mut input4_alice = disk_test_input();
+    input4_alice.program_start = now + 200;
+    input4_alice.program_end = now + 800;
+    input4_alice.program_title = "Show 4".to_string();
+    let res = service.create_recording(&alice_claims, &input4_alice).await;
+    assert!(res.is_ok(), "attaching to existing materialization must be accepted: {res:?}");
+
+    // Case 4: terminal tasks not counted
+    {
+        let mut scheduled = queue.scheduled.write().await;
+        for task in scheduled.iter_mut() {
+            if task.recording.program_title.as_deref() == Some("Show 1") {
+                task.state = RecordingTaskState::Completed;
+            }
+        }
+    }
+    let mut input5 = disk_test_input();
+    input5.program_start = now + 100;
+    input5.program_end = now + 900;
+    input5.program_title = "Show 5".to_string();
+    assert!(service.create_recording(&alice_claims, &input5).await.is_ok());
 }

@@ -390,7 +390,7 @@ where
                         Some(snapshot)
                     }
                 };
-                adm.connection_manager.release_connection_as_kicked(&target.addr).await;
+                adm.connection_manager.release_connection_as_preempted(&target.addr).await;
                 // This request cannot wait for its own transport to close.
                 if let Some(snapshot) = pending_release {
                     let released = adm

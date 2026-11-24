@@ -6,7 +6,7 @@ use futures::{Stream, StreamExt};
 use log::error;
 use shared::{
     error::TuliproxError,
-    model::{TargetType, XtreamCluster, XtreamPlaylistItem},
+    model::{TargetType, XtreamCluster, XtreamMappingOptions, XtreamPlaylistItem},
 };
 use std::{
     collections::HashSet,
@@ -274,6 +274,20 @@ impl Stream for XtreamPlaylistIterator {
 
 type XtreamJsonStream = Pin<Box<dyn Stream<Item = Result<(String, bool), TuliproxError>> + Send>>;
 
+/// Serializes one playlist item into the JSON a `get_*_streams` response publishes.
+///
+/// Every streaming listing — the playlist iterator and synthetic entries such as
+/// recordings — must produce byte-identical documents for the same item, so the
+/// resource-host preparation and the error mapping live here once.
+pub async fn xtream_item_json(
+    item: &XtreamPlaylistItem,
+    options: &XtreamMappingOptions,
+) -> Result<String, TuliproxError> {
+    prepare_xtream_resource_hosts(item, options).await;
+    serde_json::to_string(&item.to_document(options))
+        .map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))
+}
+
 pub struct XtreamPlaylistJsonIterator {
     inner: XtreamJsonStream,
 }
@@ -306,9 +320,7 @@ impl XtreamPlaylistJsonIterator {
             let options = Arc::clone(&options);
             async move {
                 let (item, has_next) = entry?;
-                prepare_xtream_resource_hosts(&item, &options).await;
-                let json = serde_json::to_string(&item.to_document(&options))
-                    .map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
+                let json = xtream_item_json(&item, &options).await?;
                 Ok((json, has_next))
             }
         });

@@ -46,6 +46,37 @@ impl UserId {
     /// The subject of a proxy API user.
     pub fn api(username: &str) -> Self { Self::namespaced(Self::API_NAMESPACE, username) }
 
+    /// Returns the unescaped username if this subject belongs to the API namespace.
+    pub fn api_username(&self) -> Option<String> {
+        let raw = self.0.strip_prefix(Self::API_NAMESPACE)?;
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '%' {
+                let h1 = chars.next();
+                let h2 = chars.next();
+                match (h1, h2) {
+                    (Some('2'), Some('5')) => out.push('%'),
+                    (Some('2'), Some('F' | 'f')) => out.push('/'),
+                    (Some('5'), Some('C' | 'c')) => out.push('\\'),
+                    (Some('0'), Some('0')) => out.push('\0'),
+                    _ => {
+                        out.push('%');
+                        if let Some(c) = h1 {
+                            out.push(c);
+                        }
+                        if let Some(c) = h2 {
+                            out.push(c);
+                        }
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        Some(out)
+    }
+
     /// `namespace` followed by the trimmed username, with the few characters
     /// [`UserId::validate`] refuses percent-encoded. `%` is encoded too, so two
     /// different usernames can never produce the same id.
@@ -203,5 +234,15 @@ mod tests {
         // Valid names still deserialize.
         let ok: UserId = serde_json::from_str("\"web:abc\"").expect("valid");
         assert!(ok.is_web());
+    }
+
+    #[test]
+    fn api_username_inverts_api_user_id() {
+        for name in ["alice", "bob", "a/b", "a\\b", "a\0b", "50%", "user.name", "complex name!"] {
+            let id = UserId::api(name);
+            assert_eq!(id.api_username().as_deref(), Some(name.trim()));
+        }
+        assert_eq!(UserId::web("alice").api_username(), None);
+        assert_eq!(UserId::builtin_admin().api_username(), None);
     }
 }

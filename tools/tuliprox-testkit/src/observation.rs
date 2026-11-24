@@ -13,13 +13,21 @@ pub struct TuliproxObserver {
     base_url: String,
     client: reqwest::Client,
     credentials: Option<(String, String)>,
+    bearer_token: Option<String>,
 }
 
 impl TuliproxObserver {
     #[must_use]
     pub fn new(base_url: impl Into<String>, credentials: Option<(String, String)>) -> Self {
-        Self { base_url: base_url.into().trim_end_matches('/').to_owned(), client: reqwest::Client::new(), credentials }
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            client: reqwest::Client::new(),
+            credentials,
+            bearer_token: None,
+        }
     }
+
+    pub fn set_bearer_token(&mut self, token: String) { self.bearer_token = Some(token); }
 
     pub async fn config(&self) -> Result<Value, TestkitError> { self.get_json("config").await }
 
@@ -42,11 +50,15 @@ impl TuliproxObserver {
         Ok(RuntimeSnapshot { status: status?, streams: streams?, history: Value::Null })
     }
 
-    async fn get_json(&self, endpoint: &str) -> Result<Value, TestkitError> {
+    pub async fn get_json(&self, endpoint: &str) -> Result<Value, TestkitError> {
         let request = self.client.get(format!("{}/{}", self.base_url, endpoint));
-        let request = match &self.credentials {
-            Some((username, password)) => request.basic_auth(username, Some(password)),
-            None => request,
+        let request = if let Some(token) = &self.bearer_token {
+            request.bearer_auth(token)
+        } else {
+            match &self.credentials {
+                Some((username, password)) => request.basic_auth(username, Some(password)),
+                None => request,
+            }
         };
         let response = request.send().await?;
         if !response.status().is_success() {

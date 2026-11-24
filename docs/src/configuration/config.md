@@ -142,6 +142,7 @@ Logs.
 web_ui:
   enabled: true
   user_ui_enabled: true
+  player_api_enabled: true
   path: admin
   player_server: default
   kick_secs: 90
@@ -175,9 +176,10 @@ web_ui:
 ### 2.1 Web UI Parameters
 
 | Parameter                     | Type   | Default     | Technical Impact & Background                                                                                                                                                                                                                                             |
-| :---------------------------- | :----- | :---------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|:------------------------------|:-------|:------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `enabled`                     | Bool   | `true`      | Completely toggles the Web Dashboard and its REST API endpoints on or off.                                                                                                                                                                                                |
 | `user_ui_enabled`             | Bool   | `true`      | Allows standard proxy users (not just admins) to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                                              |
+| `player_api_enabled`          | Bool   | `unset`     | Enables or disables the Player API (`/api/v1/me/*`) independently from the Web UI. When unset, follows `user_ui_enabled`.                                                                                                                                                 |
 | `path`                        | String | `""`        | Base path for the UI (e.g., `admin`). Critical for reverse proxy subfolder setups so assets load from `example.com/admin/assets/`.                                                                                                                                        |
 | `player_server`               | String | `default`   | Determines which virtual server block from `api-proxy.yml` is used to construct the streaming URLs when playing a channel directly within the Web UI player.                                                                                                              |
 | `kick_secs`                   | Int    | `90`        | **Background:** When you kick a user via the Dashboard, they are not only disconnected but hard-blocked at the IP/User level for X seconds. This prevents their IPTV player's auto-reconnect logic from instantly stealing the provider slot back.                        |
@@ -1276,9 +1278,11 @@ video:
     user-agent filters or setting specific media types.
   * `organize_into_directories`: If true, recordings are filed under the playlist group of the recorded item
     (`<group>/<file>`); series episodes share one folder per series inside their group (`<group>/<series>/<file>`).
-  * `episode_pattern`: Crucial for the directory organization. It uses the mandatory Named Capture Group
-    `(?P<episode>...)` in the Regex to identify and strip the episode identifier (e.g., `S01E01`)
-    from the filename, ensuring all episodes of a show land in the same base-show folder.
+  * `episode_pattern` (optional): Regex that finds the episode marker (e.g., `S01E01`) in a filename. It is used
+    for recordings without channel, title, or series name: with `organize_into_directories`, the filename is cut
+    before the Named Capture Group `(?P<episode>...)`, or before the whole match when the pattern has no such group,
+    and the rest becomes the folder name. The default recognizes `S01E02`, `1x02`, `Season 1 Episode 2`, and
+    `Episode 2`. An invalid regex rejects the configuration.
   * `priority`: Provider priority for recordings. Lower values mean higher priority.
   * `reserve_slots_for_users`: Keeps provider headroom for normal foreground users before background-priority
     transfers

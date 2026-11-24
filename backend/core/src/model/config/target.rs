@@ -167,7 +167,7 @@ impl ProcessTargets {
     pub fn has_input(&self, tid: u16) -> bool { !self.enabled || self.inputs.is_empty() || self.inputs.contains(&tid) }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct XtreamTargetOutput {
     pub flags: XtreamTargetFlagsSet,
     pub trakt: Option<TraktConfig>,
@@ -202,7 +202,7 @@ impl From<&XtreamTargetOutput> for XtreamTargetOutputDto {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct M3uTargetOutput {
     pub filename: Option<String>,
     pub include_type_in_url: bool,

@@ -7,9 +7,10 @@ use crate::model::{
     DiskAlert, LibraryScanProgressEvent, LibraryScanSummaryStatus, MaintenanceEntries, MetadataUpdateFailure, MsgKind,
     NotificationDeadLetter, Permission, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
     PlaylistUpdateState, PluginUpdateEvent, PluginUpdateOutcome, ProviderAccountEvent, ProviderAccountState,
-    ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage,
-    ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SwitchReason, SystemInfo,
-    UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
+    ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingFinishedState,
+    RecordingLifecycleMessage, RecordingMetadata, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState,
+    StreamEndedReason, StreamProbeFailure, SwitchReason, SystemInfo, UserLifecycleEvent, UserLifecycleState,
+    WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -133,6 +134,19 @@ pub enum EventMessage {
     FailoverOverridesChanged {
         targets: Vec<String>,
     },
+    /// An active stream was ended by the server.
+    StreamEnded {
+        username: Arc<str>,
+        uid: u32,
+        virtual_id: u32,
+        reason: StreamEndedReason,
+    },
+    /// A recording finished with success or failure.
+    RecordingFinished {
+        id: String,
+        state: RecordingFinishedState,
+        metadata: Arc<RecordingMetadata>,
+    },
 }
 
 impl EventMessage {
@@ -213,6 +227,11 @@ impl EventMessage {
             Self::FailoverGroupCircuitChanged { .. } => EventKind::FailoverGroupCircuitChanged,
             Self::FailoverGroupMemberSwitched { .. } => EventKind::FailoverGroupMemberSwitched,
             Self::FailoverOverridesChanged { .. } => EventKind::FailoverOverridesChanged,
+            Self::StreamEnded { .. } => EventKind::StreamEnded,
+            Self::RecordingFinished { state, .. } => match state {
+                RecordingFinishedState::Completed => EventKind::RecordingCompleted,
+                RecordingFinishedState::Failed => EventKind::RecordingFailed,
+            },
         }
     }
 
@@ -322,7 +341,9 @@ impl EventMessage {
             | Self::FailoverGroupExhausted { .. }
             | Self::FailoverGroupCircuitChanged { .. }
             | Self::FailoverGroupMemberSwitched { .. }
-            | Self::FailoverOverridesChanged { .. } => return None,
+            | Self::FailoverOverridesChanged { .. }
+            | Self::StreamEnded { .. }
+            | Self::RecordingFinished { .. } => return None,
         })
     }
 
@@ -413,6 +434,20 @@ impl EventMessage {
                     "input_name": input_name.as_ref(),
                     "input_stream_id": input_stream_id.as_ref(),
                     "state": state_str,
+                })
+            }
+            Self::StreamEnded { username, uid, virtual_id, reason } => {
+                serde_json::json!({
+                    "username": username.as_ref(),
+                    "uid": uid,
+                    "virtual_id": virtual_id,
+                    "reason": reason,
+                })
+            }
+            Self::RecordingFinished { id, state, .. } => {
+                serde_json::json!({
+                    "id": id,
+                    "state": state,
                 })
             }
         }

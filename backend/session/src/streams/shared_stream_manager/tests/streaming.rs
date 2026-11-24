@@ -15,6 +15,27 @@ async fn subscribers_on_same_socket_do_not_replace_each_other() -> Result<(), Bo
 }
 
 #[tokio::test]
+async fn test_shared_stream_manager_subscriber_count() -> Result<(), Box<dyn std::error::Error>> {
+    let app_cfg = create_test_app_config();
+    let events = Arc::new(EventManager::new());
+    let (_, _, manager, _) = create_test_connection_manager(&app_cfg, &events);
+    let key = "group:1:42";
+    assert_eq!(manager.subscriber_count(key).await, 0);
+
+    let state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE, None, 1024, None));
+    manager.shared_streams.write().await.by_key.insert(Arc::from(key), Arc::clone(&state));
+    assert_eq!(manager.subscriber_count(key).await, 0);
+
+    let addr = "127.0.0.1:41001".parse()?;
+    state.register_subscriber(SharedSubscriberId::from_stream_uid(1), &addr, CancellationToken::new()).await;
+    assert_eq!(manager.subscriber_count(key).await, 1);
+
+    state.register_subscriber(SharedSubscriberId::from_stream_uid(2), &addr, CancellationToken::new()).await;
+    assert_eq!(manager.subscriber_count(key).await, 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn old_origin_cannot_unregister_replacement() {
     let app_cfg = create_test_app_config();
     let events = Arc::new(EventManager::new());

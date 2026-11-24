@@ -21,11 +21,11 @@ mod canonical_owner;
 pub(super) use canonical_owner::{await_hls_terminal_or_refresh, current_hls_refresh_lease};
 mod provisioning;
 mod publication;
+pub(crate) use access::hls_cache_enabled_for_user;
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub(super) use access::{
-    hls_cache_configured, hls_cache_enabled_for_target, hls_cache_enabled_for_user,
-    hls_manifest_preflight_refresh_ordering, hls_proxy_manifest, mark_hls_authorized_manifest_access,
-    mark_hls_authorized_media_access, mark_successful_canonical_manifest_activity,
+    hls_cache_configured, hls_cache_enabled_for_target, hls_manifest_preflight_refresh_ordering, hls_proxy_manifest,
+    mark_hls_authorized_manifest_access, mark_hls_authorized_media_access, mark_successful_canonical_manifest_activity,
     resolve_hls_playback_manifest_request_context, HlsAccessManifestRequestContext,
 };
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]

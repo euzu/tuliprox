@@ -3,7 +3,7 @@ use crate::{
         menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Card, Panel, Table, TableDefinition, TextButton,
         ToggleSwitch,
     },
-    config_field_custom, edit_field_text, generate_form_reducer,
+    config_field_child, edit_field_text, generate_form_reducer,
     hooks::use_service_context,
     html_if,
     i18n::use_translation,
@@ -431,7 +431,7 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                     <div class="tp__group-management-view tp__config-view-page">
                         <div class="tp__group-management-view__header tp__config-view-page__header">
                             { if is_edit {
-                                config_field_custom!(translate.t("LABEL.NAME"), form_state.form.name.clone())
+                                config_field_child!(translate.t("LABEL.NAME"), "GROUP_FORM.NAME", { html! { <span class="tp__form-field__value">{form_state.form.name.clone()}</span> } })
                             } else {
                                 edit_field_text!(form_state, translate.t("LABEL.NAME"), name, GroupFormAction::Name)
                             }}

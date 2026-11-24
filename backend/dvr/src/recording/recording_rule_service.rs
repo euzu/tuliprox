@@ -51,6 +51,8 @@ pub enum RuleServiceError {
     /// this with a reconciliation status the operator can use to
     /// decide whether to retry.
     PartialOperation { primary: String, secondary: String },
+    /// The owner has reached their maximum recording rule limit.
+    LimitExceeded,
     /// The rule uses a feature the server knows about but does not
     /// currently implement. The stable code names the feature so the
     /// frontend can render a localized, feature-specific message.
@@ -68,6 +70,7 @@ impl RuleServiceError {
             Self::NotOwner => "recording_rule_not_owner",
             Self::PersistenceFailed => "recording_persistence_failed",
             Self::PartialOperation { .. } => "recording_rule_partial_operation",
+            Self::LimitExceeded => "recording_rule_limit_exceeded",
             Self::Unsupported { feature } => match *feature {
                 "new_episode_rule" => "recording_rule_new_episode_unsupported",
                 _ => "recording_rule_unsupported",
@@ -108,10 +111,11 @@ pub fn validate_rule(rule: &RecordingRule) -> Result<(), RuleServiceError> {
 /// - create / edit / delete private rule: any user with
 ///   `recording.manage`. Owner must be the principal unless
 ///   the principal is an administrator.
-/// - create / edit / delete shared rule: administrator with
-///   `recording.manage`.
+/// - create / edit / delete shared rule: administrator or owner with
+///   `recording.share` and `recording.manage`.
 pub fn authorize_rule_action(
     has_recording_manage: bool,
+    has_recording_share: bool,
     is_admin_role: bool,
     principal_id: &UserId,
     rule: &RecordingRule,
@@ -119,17 +123,14 @@ pub fn authorize_rule_action(
     if !has_recording_manage {
         return Err(RuleServiceError::Forbidden);
     }
-    match rule.visibility {
-        RuleVisibility::Shared => {
-            if !is_admin_role {
-                return Err(RuleServiceError::SharedManagementNotAdministrator);
-            }
-        }
-        RuleVisibility::Private => {
-            if !is_admin_role && &rule.owner_id != principal_id {
-                return Err(RuleServiceError::NotOwner);
-            }
-        }
+    if is_admin_role {
+        return Ok(());
+    }
+    if &rule.owner_id != principal_id {
+        return Err(RuleServiceError::NotOwner);
+    }
+    if rule.visibility == RuleVisibility::Shared && !has_recording_share {
+        return Err(RuleServiceError::SharedManagementNotAdministrator);
     }
     Ok(())
 }
@@ -208,12 +209,6 @@ mod tests {
         }
     }
 
-    fn shared_rule() -> RecordingRule {
-        let mut r = private_rule(admin());
-        r.visibility = RuleVisibility::Shared;
-        r
-    }
-
     #[test]
     fn validate_rule_rejects_invalid_source() {
         let mut r = private_rule(user());
@@ -282,35 +277,41 @@ mod tests {
     #[test]
     fn authorize_requires_recording_manage() {
         let r = private_rule(user());
-        assert_eq!(authorize_rule_action(false, false, &user(), &r), Err(RuleServiceError::Forbidden));
+        assert_eq!(authorize_rule_action(false, false, false, &user(), &r), Err(RuleServiceError::Forbidden));
     }
 
     #[test]
     fn private_rule_owner_may_manage() {
         let r = private_rule(user());
-        assert!(authorize_rule_action(true, false, &user(), &r).is_ok());
+        assert!(authorize_rule_action(true, false, false, &user(), &r).is_ok());
     }
 
     #[test]
     fn private_rule_other_user_may_not_manage_without_admin() {
         let r = private_rule(user());
-        assert_eq!(authorize_rule_action(true, false, &other(), &r), Err(RuleServiceError::NotOwner));
+        assert_eq!(authorize_rule_action(true, false, false, &other(), &r), Err(RuleServiceError::NotOwner));
     }
 
     #[test]
     fn administrator_may_manage_any_private_rule() {
         let r = private_rule(user());
-        assert!(authorize_rule_action(true, true, &admin(), &r).is_ok());
+        assert!(authorize_rule_action(true, false, true, &admin(), &r).is_ok());
     }
 
     #[test]
-    fn shared_rule_requires_administrator() {
-        let r = shared_rule();
+    fn shared_rule_requires_administrator_or_owner_with_share_permission() {
+        let mut r = private_rule(user());
+        r.visibility = RuleVisibility::Shared;
         assert_eq!(
-            authorize_rule_action(true, false, &user(), &r),
+            authorize_rule_action(true, false, false, &user(), &r),
             Err(RuleServiceError::SharedManagementNotAdministrator)
         );
-        assert!(authorize_rule_action(true, true, &admin(), &r).is_ok());
+        // Owner with RecordingShare permission can manage their shared rule
+        assert!(authorize_rule_action(true, true, false, &user(), &r).is_ok());
+        // Another user with RecordingShare permission cannot manage a foreign shared rule
+        assert_eq!(authorize_rule_action(true, true, false, &other(), &r), Err(RuleServiceError::NotOwner));
+        // Administrator can manage any shared rule even without explicit RecordingShare
+        assert!(authorize_rule_action(true, false, true, &admin(), &r).is_ok());
     }
 
     #[test]

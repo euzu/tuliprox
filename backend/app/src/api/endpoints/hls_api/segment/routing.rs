@@ -281,7 +281,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_api_stream(
             return StatusCode::NOT_FOUND.into_response();
         };
         if !legacy_hls_route_allowed_with_cache(
-            hls_cache_enabled_for_user(&app_state, &target, &user),
+            hls_cache_enabled_for_user(&app_state, &target, &input, &user),
             decoded_hls_token.session_token.as_deref(),
             Some(session.token.as_str()),
         ) {
@@ -374,7 +374,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_api_stream_resolved(
     let mut user_session =
         app_state.active_users.get_and_update_user_session(&user.username, &lookup_session_token).await;
     if !legacy_hls_route_allowed_with_cache(
-        hls_cache_enabled_for_user(&app_state, &target, &user),
+        hls_cache_enabled_for_user(&app_state, &target, &input, &user),
         decoded_hls_token.session_token.as_deref(),
         user_session.as_ref().map(|session| session.token.as_str()),
     ) {

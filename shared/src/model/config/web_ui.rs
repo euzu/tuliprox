@@ -155,6 +155,8 @@ pub struct WebUiConfigDto {
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub user_ui_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_api_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_security_policy: Option<ContentSecurityPolicyConfigDto>,
     #[serde(default = "default_web_ui_path", skip_serializing_if = "is_blank_or_default_web_ui_path")]
     pub path: Option<String>,
@@ -177,6 +179,7 @@ impl Default for WebUiConfigDto {
         WebUiConfigDto {
             enabled: default_as_true(),
             user_ui_enabled: default_as_true(),
+            player_api_enabled: None,
             content_security_policy: None,
             path: default_web_ui_path(),
             auth: None,
@@ -194,6 +197,7 @@ impl WebUiConfigDto {
         let empty = WebUiConfigDto::default();
         self.enabled == empty.enabled
             && self.user_ui_enabled == empty.user_ui_enabled
+            && self.player_api_enabled == empty.player_api_enabled
             && !self.combine_views_stats_streams
             && self.landing_page.is_none()
             && is_blank_or_default_web_ui_path(&self.path)

@@ -36,6 +36,8 @@ pub(super) fn recording_execution_download(
     app_config: &AppConfig,
     task: &RecordingTask,
     provider_handle: Option<&tuliprox_core::model::ProviderHandle>,
+    join_shared: bool,
+    priority: Option<i8>,
 ) -> Result<RecordingTask, String> {
     let source = &task.recording.source;
     let virtual_id = source.virtual_id.parse::<u32>().map_err(|_| "Recording source virtual id invalid".to_string())?;
@@ -46,6 +48,8 @@ pub(super) fn recording_execution_download(
         virtual_id,
         source.cluster,
         provider_handle.map(|handle| handle.allocation_id),
+        join_shared,
+        priority,
     )
     .ok_or_else(|| "Recording execution URL unavailable".to_string())?;
     let mut execution = task.clone();
@@ -250,6 +254,19 @@ pub(super) async fn download_file<E: EventSink>(
             }
             let status = response.status();
             if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+                let fallback_header =
+                    response.headers().get("x-tuliprox-fallback").and_then(|value| value.to_str().ok());
+                if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    || fallback_header.is_some_and(|h| h.contains("channel_unavailable"))
+                {
+                    let retryable = is_retryable_status(status);
+                    return DownloadExecutionResult::SharedJoinUnavailable {
+                        message: format!(
+                            "Download request failed for {url} with shared join unavailable (HTTP {status})"
+                        ),
+                        retryable,
+                    };
+                }
                 if is_retryable_status(status) {
                     return DownloadExecutionResult::Retryable(format!(
                         "Download request failed for {url} with transient HTTP {status}"

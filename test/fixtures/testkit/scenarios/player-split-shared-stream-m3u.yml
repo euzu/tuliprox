@@ -1,0 +1,81 @@
+schema_version: 1
+name: player-split-shared-stream-m3u
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  playback_endpoint: m3u
+  fixture_stream:
+    share_live_hls: false
+    share_live_mpeg_ts: true
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: player-split-shared-stream-m3u
+actors:
+  - id: viewer-1
+    agent: local
+    username: viewer-1
+    user_agent: tuliprox-testkit/viewer-1
+  - id: viewer-2
+    agent: local
+    username: viewer-2
+    user_agent: tuliprox-testkit/viewer-2
+channels:
+  channel-x: { origin_marker: 17, protocol: m3u }
+steps:
+  - command_id: viewer-1-starts
+    start:
+      actor: viewer-1
+      playback_id: playback-1
+      session_group: group-1
+      channel: channel-x
+    await: { valid_frames: 2 }
+  - command_id: viewer-2-joins
+    start:
+      actor: viewer-2
+      playback_id: playback-2
+      session_group: group-2
+      channel: channel-x
+    await: { valid_frames: 2 }
+    assert_runtime:
+      active_streams: 2
+      distinct_shared_streams: 1
+      provider_connections: 1
+  - command_id: viewer-2-splits-off
+    api_request:
+      actor: viewer-2
+      method: POST
+      path: "/api/v1/me/streams/{uid}/split"
+      playback_id: playback-2
+      expect_status: 200
+      assert_body_contains: "dedicated=1"
+  - command_id: viewer-2-stops-old-playback
+    stop: { playback_id: playback-2 }
+  - command_id: viewer-2-starts-dedicated
+    start:
+      actor: viewer-2
+      playback_id: playback-2-dedicated
+      session_group: group-2-dedicated
+      url: "{last_split_url}"
+    await: { valid_frames: 2 }
+    assert_runtime:
+      active_streams: 2
+      distinct_shared_streams: 1
+      provider_connections: 2
+  - command_id: viewer-2-stops-dedicated
+    stop: { playback_id: playback-2-dedicated }
+  - command_id: viewer-1-stops
+    stop: { playback_id: playback-1 }
+policy_contract:
+  player_api: true
+  user_access_control: true
+  users:
+    viewer-1: { max_connections: 2 }
+    viewer-2:
+      max_connections: 2
+      player_features:
+        source_switch: true
+  admission_strategies: []
+  provider_max_connections: 2

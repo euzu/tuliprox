@@ -44,7 +44,9 @@ steps:
         account: input-a
         status: 404
   - command_id: wait-for-failover
-    pause_millis: 25000
+    await_origin:
+      segment_failure_before_handoff_from: input-a
+      timeout_millis: 30000
   - command_id: stop-playback
     stop: { playback_id: playback-1 }
     # The armed fault stays active, so the SUT keeps re-probing its preferred member and the last

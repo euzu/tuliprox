@@ -993,13 +993,15 @@ async fn apply_authoritative_plans(config: &AppConfig, api_proxy: &mut ApiProxyC
     };
     let plans_path_str = plans_path.to_string_lossy().to_string();
     match read_plans_file(&plans_path_str, resolve_env) {
-        Ok(Some(plans_dto)) => {
-            let plans = plans_dto.plans.iter().map(|plan| Arc::new(UserPlan::from(plan))).collect();
-            api_proxy.set_plans(plans);
-        }
+        Ok(Some(plans_dto)) => install_plans(api_proxy, &plans_dto),
         Ok(None) => {
             if let Some(legacy_plans) = read_legacy_api_proxy_plans(config, resolve_env) {
-                let migrated = PlansConfigDto { plans: legacy_plans.clone() };
+                // Validated on every read mode: an invalid plans.yml would drop all plans on the next start.
+                let mut migrated = PlansConfigDto { plans: legacy_plans };
+                if let Err(err) = migrated.prepare() {
+                    error!("Legacy plans in api-proxy.yml were not migrated: {err}");
+                    return;
+                }
                 let backup_dir = {
                     let cfg = config.config.load();
                     cfg.get_backup_dir().to_string()
@@ -1010,12 +1012,15 @@ async fn apply_authoritative_plans(config: &AppConfig, api_proxy: &mut ApiProxyC
                     }
                     Err(err) => error!("Failed to migrate plans to {plans_path_str}: {err}"),
                 }
-                let plans = legacy_plans.iter().map(|plan| Arc::new(UserPlan::from(plan))).collect();
-                api_proxy.set_plans(plans);
+                install_plans(api_proxy, &migrated);
             }
         }
         Err(err) => error!("{err}"),
     }
+}
+
+fn install_plans(api_proxy: &mut ApiProxyConfig, plans: &PlansConfigDto) {
+    api_proxy.set_plans(plans.plans.iter().map(|plan| Arc::new(UserPlan::from(plan))).collect());
 }
 
 /// Read legacy plans still embedded in api-proxy.yml (pre plans.yml split).
@@ -1929,5 +1934,212 @@ sources:
         assert!(overrides.error.as_deref().is_some_and(|error| error.contains("version")));
         assert_eq!(overrides.source, Some(FailoverSource::File(dir.path().join("failover.yml"))));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn migrate_api_user_preserves_player_features_both_directions() {
+        let temp_dir = tempdir().expect("temp dir");
+        let config_dir = temp_dir.path().join("config");
+        let home_dir = config_dir.join("home");
+        tokio::fs::create_dir_all(&home_dir).await.expect("home dir");
+
+        let config_yml = r"
+storage_dir: data
+api:
+  host: 0.0.0.0
+  port: 8901
+";
+        let source_yml = r#"
+inputs:
+  - name: demo
+    type: m3u
+    url: http://provider.example/test.m3u
+sources:
+  - inputs: [demo]
+    targets:
+      - name: default
+        filter: 'Group ~ ".*"'
+        output:
+          - type: m3u
+"#;
+        tokio::fs::create_dir_all(&config_dir).await.expect("config dir");
+        tokio::fs::write(config_dir.join("config.yml"), config_yml).await.expect("config file");
+        tokio::fs::write(config_dir.join("source.yml"), source_yml).await.expect("source file");
+
+        let mut paths = ConfigPaths {
+            home_path: home_dir.to_string_lossy().to_string(),
+            config_path: config_dir.to_string_lossy().to_string(),
+            storage_path: String::new(),
+            config_file_path: config_dir.join("config.yml").to_string_lossy().to_string(),
+            sources_file_path: config_dir.join("source.yml").to_string_lossy().to_string(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            failover_file_path: None,
+            api_proxy_file_path: config_dir.join("api-proxy.yml").to_string_lossy().to_string(),
+            custom_stream_response_path: None,
+        };
+
+        let app_config = super::read_initial_app_config(&mut paths, true, true, false).await.expect("app config");
+
+        let player_features = shared::model::PlayerFeaturesDto {
+            source_switch: Some(true),
+            joinable_streams: Some(false),
+            ..Default::default()
+        };
+
+        let mut user_cred = tuliprox_core::model::ProxyUserCredentials::default();
+        user_cred.username = "tester".to_string();
+        user_cred.password = "password123".to_string();
+        user_cred.raw_player_features = Some(player_features.clone());
+
+        let target_user = tuliprox_core::model::TargetUser {
+            target: "default".to_string(),
+            credentials: vec![std::sync::Arc::new(user_cred)],
+        };
+
+        let mut api_proxy = tuliprox_core::model::ApiProxyConfig {
+            use_user_db: true,
+            user: vec![target_user],
+            ..tuliprox_core::model::ApiProxyConfig::default()
+        };
+
+        let mut errors = Vec::new();
+        // 1. Migrate into user_db
+        super::migrate_api_user(&mut api_proxy, &app_config, &mut errors).await;
+        assert!(errors.is_empty(), "migrate to db errors: {errors:?}");
+        assert_eq!(api_proxy.user.len(), 1);
+        assert_eq!(api_proxy.user[0].credentials[0].raw_player_features, Some(player_features.clone()));
+
+        // 2. Switch use_user_db to false and migrate back to config file
+        api_proxy.use_user_db = false;
+        super::migrate_api_user(&mut api_proxy, &app_config, &mut errors).await;
+        assert!(errors.is_empty(), "migrate to config errors: {errors:?}");
+        assert_eq!(api_proxy.user.len(), 1);
+        assert_eq!(api_proxy.user[0].credentials[0].raw_player_features, Some(player_features.clone()));
+    }
+
+    fn test_app_config_with_proxy(api_proxy_path: &Path) -> tuliprox_core::model::AppConfig {
+        use arc_swap::{ArcSwap, ArcSwapAny};
+        use std::sync::Arc;
+        use tuliprox_core::{
+            model::{AppConfig, Config, MediaToolCapabilities, SourcesConfig},
+            utils::FileLockManager,
+        };
+
+        let paths = ConfigPaths {
+            home_path: String::new(),
+            config_path: api_proxy_path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            failover_file_path: None,
+            api_proxy_file_path: api_proxy_path.to_string_lossy().into_owned(),
+            custom_stream_response_path: None,
+        };
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapAny::default()),
+            plugins: Arc::default(),
+            api_proxy: Arc::new(ArcSwapAny::default()),
+            paths: Arc::new(ArcSwap::from_pointee(paths)),
+            file_locks: Arc::new(FileLockManager::default()),
+            custom_stream_response: Arc::new(ArcSwapAny::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+            failover: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_plan_with_invalid_recording_quota_is_not_migrated() {
+        let dir = tempdir().expect("temp dir");
+        let proxy_path = dir.path().join("api-proxy.yml");
+        let plans_path = dir.path().join("plans.yml");
+        let legacy_yaml = r"
+plans:
+  - name: invalid_legacy
+    player_features:
+      recording_quota: 0
+";
+        tokio::fs::write(&proxy_path, legacy_yaml).await.expect("write api-proxy.yml");
+
+        let app_config = test_app_config_with_proxy(&proxy_path);
+        let mut api_proxy = tuliprox_core::model::ApiProxyConfig::default();
+
+        super::apply_authoritative_plans(&app_config, &mut api_proxy, true).await;
+
+        assert!(!plans_path.exists());
+        assert_eq!(api_proxy.plans.len(), 0);
+
+        // A read without env resolution must not migrate invalid plans either.
+        super::apply_authoritative_plans(&app_config, &mut api_proxy, false).await;
+
+        assert!(!plans_path.exists());
+        assert_eq!(api_proxy.plans.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_plan_with_valid_recording_quota_is_migrated() {
+        let dir = tempdir().expect("temp dir");
+        let proxy_path = dir.path().join("api-proxy.yml");
+        let plans_path = dir.path().join("plans.yml");
+        let legacy_yaml = r"
+plans:
+  - name: valid_legacy
+    player_features:
+      recording_quota: 20GB
+";
+        tokio::fs::write(&proxy_path, legacy_yaml).await.expect("write api-proxy.yml");
+
+        let app_config = test_app_config_with_proxy(&proxy_path);
+        let mut api_proxy = tuliprox_core::model::ApiProxyConfig::default();
+
+        super::apply_authoritative_plans(&app_config, &mut api_proxy, true).await;
+
+        assert!(plans_path.exists());
+        let reread = super::read_plans_file(&plans_path.to_string_lossy(), true);
+        assert!(reread.is_ok());
+        let plans_dto = reread.expect("read plans").expect("plans found");
+        assert_eq!(plans_dto.plans.len(), 1);
+        assert_eq!(plans_dto.plans[0].name, "valid_legacy");
+        assert_eq!(api_proxy.plans.len(), 1);
+        assert_eq!(api_proxy.plans[0].name, "valid_legacy");
+    }
+
+    #[tokio::test]
+    async fn legacy_plan_with_empty_player_features_is_normalized_on_migration() {
+        let dir = tempdir().expect("temp dir");
+        let proxy_path = dir.path().join("api-proxy.yml");
+        let plans_path = dir.path().join("plans.yml");
+        let legacy_yaml = r"
+plans:
+  - name: empty_features_legacy
+    player_features: {}
+";
+        tokio::fs::write(&proxy_path, legacy_yaml).await.expect("write api-proxy.yml");
+
+        let app_config = test_app_config_with_proxy(&proxy_path);
+        let mut api_proxy = tuliprox_core::model::ApiProxyConfig::default();
+
+        super::apply_authoritative_plans(&app_config, &mut api_proxy, true).await;
+
+        assert!(plans_path.exists());
+        assert_eq!(api_proxy.plans.len(), 1);
+        assert_eq!(api_proxy.plans[0].name, "empty_features_legacy");
+        assert_eq!(api_proxy.plans[0].player_features, None);
+
+        let reread = super::read_plans_file(&plans_path.to_string_lossy(), true);
+        assert!(reread.is_ok());
+        let plans_dto = reread.expect("read plans").expect("plans found");
+        assert_eq!(plans_dto.plans.len(), 1);
+        assert_eq!(plans_dto.plans[0].player_features, None);
     }
 }

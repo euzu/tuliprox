@@ -1,7 +1,7 @@
 use super::auth_rejection::AuthRejection;
 use axum::{
     extract::{ConnectInfo, FromRequestParts},
-    http::request::Parts,
+    http::{request::Parts, HeaderMap},
 };
 use std::net::SocketAddr;
 
@@ -31,32 +31,12 @@ pub struct Fingerprint {
 
 impl Fingerprint {
     pub fn new(key: String, client_ip: String, addr: SocketAddr) -> Self { Self { key, client_ip, addr } }
-}
 
-impl<B> FromRequestParts<B> for Fingerprint
-where
-    B: Send + Sync,
-{
-    type Rejection = Rejection;
-
-    async fn from_request_parts(req: &mut Parts, state: &B) -> Result<Self, Self::Rejection> {
-        Self::decode_request_parts(req, state).await
-    }
-}
-
-impl Fingerprint {
-    async fn decode_request_parts<B>(req: &mut Parts, state: &B) -> Result<Self, Rejection>
-    where
-        B: Send + Sync,
-    {
-        let ConnectInfo(addr) = ConnectInfo::<SocketAddr>::from_request_parts(req, state)
-            .await
-            .map_err(|_| AuthRejection::MissingPeerAddress)?;
-
+    pub fn from_headers_and_addr(headers: &HeaderMap, addr: SocketAddr) -> Self {
         let mut user_agent = None;
         let mut forwarded_for = None;
         let mut real_ip = None;
-        for header in &req.headers {
+        for header in headers {
             if header.0.as_str().eq_ignore_ascii_case(axum::http::header::USER_AGENT.as_str()) {
                 if let Ok(val) = header.1.to_str() {
                     user_agent = validate_header(val);
@@ -80,8 +60,34 @@ impl Fingerprint {
         let ua = user_agent.unwrap_or_else(String::new);
         let key = format!("{client_ip}|{ua}");
 
-        // debug!("{key}, {client_ip}, {addr}");
+        Self::new(key, client_ip, addr)
+    }
+}
 
-        Ok(Fingerprint::new(key, client_ip, addr))
+impl<B> FromRequestParts<B> for Fingerprint
+where
+    B: Send + Sync,
+{
+    type Rejection = Rejection;
+
+    async fn from_request_parts(req: &mut Parts, state: &B) -> Result<Self, Self::Rejection> {
+        Self::decode_request_parts(req, state).await
+    }
+}
+
+impl Fingerprint {
+    async fn decode_request_parts<B>(req: &mut Parts, state: &B) -> Result<Self, Rejection>
+    where
+        B: Send + Sync,
+    {
+        if let Some(fp) = req.extensions.get::<Fingerprint>() {
+            return Ok(fp.clone());
+        }
+
+        let ConnectInfo(addr) = ConnectInfo::<SocketAddr>::from_request_parts(req, state)
+            .await
+            .map_err(|_| AuthRejection::MissingPeerAddress)?;
+
+        Ok(Self::from_headers_and_addr(&req.headers, addr))
     }
 }

@@ -1,0 +1,53 @@
+schema_version: 1
+name: player-hls-manual-switch-legacy
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: false
+    share_live_mpeg_ts: false
+  failover_groups:
+    inputs: [input-a, input-b]
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}", "--failover", "{run_directory}/failover.d"]
+    readiness_url: "{base_url}/healthcheck"
+    extra_config_files:
+      - source: fixtures/failover-group-auto.yml
+        destination: failover.d/testkit.yml
+origin:
+  run_id: player-hls-manual-switch-legacy
+actors:
+  - id: viewer
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/viewer
+channels:
+  failover-channel: { origin_marker: 17, protocol: hls }
+steps:
+  - command_id: viewer-starts
+    start:
+      actor: viewer
+      playback_id: playback-1
+      session_group: group-1
+      channel: failover-channel
+    await: { valid_frames: 2 }
+  - command_id: viewer-switches-to-input-b
+    api_request:
+      actor: viewer
+      method: POST
+      path: "/api/v1/me/streams/{uid}/failover-switch"
+      member_index: 1
+      expect_status: 200
+    assert_manifest_contains: "EXT-X-DISCONTINUITY"
+  - command_id: viewer-stops
+    stop: { playback_id: playback-1 }
+policy_contract:
+  player_api: true
+  user_access_control: true
+  users:
+    viewer:
+      max_connections: 2
+      player_features:
+        source_switch: true
+  admission_strategies: []

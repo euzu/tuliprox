@@ -6,6 +6,7 @@ use crate::{
             extract_accept_header::ExtractAcceptHeader,
             failover_api::{failover_api_register_unprotected, failover_api_register_with_permissions},
             library_api::library_api_register,
+            me_player_api::me_player_api_register,
             media_server_api::{media_server_api_register_protected, media_server_api_register_with_permissions},
             rbac_api::{rbac_api_register, rbac_api_register_unprotected},
             recording_api::{recording_api_register, recording_availability_register, recording_enabled_layer},
@@ -253,7 +254,7 @@ pub fn v1_api_register(
     }
 
     let config = app_state.app_config.config.load();
-    let mut base_router = axum::routing::Router::new();
+    let mut base_router = axum::routing::Router::new().merge(me_player_api_register(web_ui_path));
 
     if config.web_ui.as_ref().is_none_or(|c| c.user_ui_enabled) {
         base_router = base_router.merge(user_api_register(app_state, web_ui_path));
@@ -265,9 +266,9 @@ pub fn v1_api_register(
 
 #[cfg(test)]
 mod tests {
-    use super::{create_status_check, v1_api_register};
+    use super::create_status_check;
     use crate::{
-        api::model::{create_test_app_state, ConnectionKind, ConnectionParams},
+        api::model::{create_test_app_state, AppState, ConnectionKind, ConnectionParams},
         auth::{create_jwt_web_user, Fingerprint},
         model::{Config, RecordingConfig},
     };
@@ -281,6 +282,16 @@ mod tests {
     };
     use std::{borrow::Cow, net::SocketAddr};
     use tower::ServiceExt;
+
+    /// Test routers get a loopback peer address, as a real serve loop would provide.
+    fn v1_api_register(
+        web_auth_enabled: bool,
+        app_state: &std::sync::Arc<AppState>,
+        web_ui_path: &str,
+    ) -> axum::Router<std::sync::Arc<AppState>> {
+        super::v1_api_register(web_auth_enabled, app_state, web_ui_path)
+            .layer(axum::extract::connect_info::MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+    }
 
     /// A config whose DVR block is present and explicitly on or off.
     /// Built through the DTO so the `enabled` flag travels the same
@@ -335,6 +346,110 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn me_capabilities_is_reachable_with_user_ui_disabled_and_player_api_enabled() {
+        let mut config = config_with_recording_and_web_auth(false);
+        if let Some(ref mut web_ui) = config.web_ui {
+            web_ui.user_ui_enabled = false;
+            web_ui.player_api_enabled = Some(true);
+        }
+        let app_state = create_test_app_state(config);
+        let router = v1_api_register(false, &app_state, "").with_state(app_state);
+
+        let response = router
+            .oneshot(
+                Request::builder().method("GET").uri("/api/v1/me/capabilities").body(Body::empty()).expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn user_api_route_answers_403_when_user_ui_disabled_after_startup_or_for_player_only_user() {
+        use crate::auth::create_jwt_api_user;
+        use shared::model::{ApiProxyConfigDto, PlayerFeaturesDto, ProxyUserCredentialsDto, TargetUserDto, UserId};
+
+        let mut config = config_with_recording_and_web_auth(false);
+        if let Some(ref mut web_ui) = config.web_ui {
+            web_ui.user_ui_enabled = true;
+        }
+        let app_state = create_test_app_state(config);
+
+        let web_auth = app_state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
+
+        let api_proxy_dto = ApiProxyConfigDto {
+            user: vec![TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![
+                    ProxyUserCredentialsDto {
+                        username: "alice".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        ..Default::default()
+                    },
+                    ProxyUserCredentialsDto {
+                        username: "bob_player_only".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: false,
+                        player_features: Some(PlayerFeaturesDto { api_enabled: Some(true), ..Default::default() }),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = crate::model::ApiProxyConfig::from(&api_proxy_dto);
+        for tu in &mut api_proxy.user {
+            for cred in &mut tu.credentials {
+                std::sync::Arc::make_mut(cred).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        app_state.app_config.set_api_proxy(api_proxy).unwrap();
+
+        // Router built with user_ui_enabled: true
+        let router = v1_api_register(false, &app_state, "").with_state(std::sync::Arc::clone(&app_state));
+
+        let alice_token = create_jwt_api_user(&web_auth, "alice", UserId::api("alice")).unwrap();
+        let bob_token = create_jwt_api_user(&web_auth, "bob_player_only", UserId::api("bob_player_only")).unwrap();
+
+        // 1. Player-only user gets 403 on /api/v1/user/*
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/user/playlist/categories")
+                    .header("Authorization", format!("Bearer {bob_token}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // 2. Config reloaded with user_ui_enabled false -> Alice gets 403 on /api/v1/user/*
+        let mut new_config = (**app_state.app_config.config.load()).clone();
+        if let Some(ref mut web_ui) = new_config.web_ui {
+            web_ui.user_ui_enabled = false;
+        }
+        app_state.app_config.set_config(new_config).unwrap();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/user/playlist/categories")
+                    .header("Authorization", format!("Bearer {alice_token}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

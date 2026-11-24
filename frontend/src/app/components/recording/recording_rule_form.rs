@@ -457,10 +457,10 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
     let source_fields = if show_source_controls(props.existing.is_some()) {
         html! {
             <>
-                { config_field_child!(translate.t("LABEL.RECORDING_FORM_INPUT_NAME"), "rule_input_name", {
+                { config_field_child!(translate.t("LABEL.RECORDING_FORM_INPUT_NAME"), "RULE_FORM.INPUT_NAME", {
                     { input_select }
                 }) }
-                { config_field_child!(translate.t("LABEL.RECORDING_FORM_TARGET_ID"), "rule_target_id", {
+                { config_field_child!(translate.t("LABEL.RECORDING_FORM_TARGET_ID"), "RULE_FORM.TARGET_ID", {
                     { target_select }
                 }) }
                 { edit_field_text!(form_state, translate.t("LABEL.RECORDING_FORM_VIRTUAL_ID"), virtual_id, RuleFormAction::VirtualId) }
@@ -475,13 +475,13 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
             <div class="tp__rule-form__body tp__form-page__body">
                 { source_fields }
                 { edit_field_text_option!(form_state, translate.t("LABEL.RECORDING_FORM_CHANNEL_ID"), channel_id, RuleFormAction::ChannelId) }
-                { config_field_child!(translate.t("LABEL.RECORDING_RULE_KIND"), "rule_kind", {
+                { config_field_child!(translate.t("LABEL.RECORDING_RULE_KIND"), "RULE_FORM.KIND", {
                     { kind_select }
                 }) }
                 { weekly_fields }
                 { edit_field_number_u64!(form_state, translate.t("LABEL.RECORDING_FORM_PRE_ROLL"), pre_roll, RuleFormAction::PreRoll) }
                 { edit_field_number_u64!(form_state, translate.t("LABEL.RECORDING_FORM_POST_ROLL"), post_roll, RuleFormAction::PostRoll) }
-                { config_field_child!("Visibility", "rule_visibility", {
+                { config_field_child!(translate.t("LABEL.VISIBILITY"), "RULE_FORM.VISIBILITY", {
                     { visibility_select }
                 }) }
                 { edit_field_bool!(form_state, translate.t("LABEL.RECORDING_FORM_ENABLED"), enabled, RuleFormAction::Enabled) }

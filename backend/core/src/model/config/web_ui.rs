@@ -65,9 +65,12 @@ pub struct WebUiConfig {
     pub combine_views_stats_streams: bool,
     pub landing_page: Option<ViewType>,
     pub stream_info: Option<StreamInfoConfig>,
+    pub player_api_enabled: Option<bool>,
 }
 
 impl WebUiConfig {
+    pub fn player_api_enabled(&self) -> bool { self.player_api_enabled.unwrap_or(self.user_ui_enabled) }
+
     pub fn prepare(&mut self, config_path: &str) -> Result<(), TuliproxError> {
         if let Some(web_auth) = &mut self.auth {
             if web_auth.enabled {
@@ -145,6 +148,7 @@ impl From<&WebUiConfigDto> for WebUiConfig {
             combine_views_stats_streams: dto.combine_views_stats_streams,
             landing_page: dto.landing_page,
             stream_info: dto.stream_info.as_ref().map(Into::into),
+            player_api_enabled: dto.player_api_enabled,
         }
     }
 }
@@ -155,6 +159,7 @@ impl From<&WebUiConfig> for WebUiConfigDto {
         Self {
             enabled: instance.enabled,
             user_ui_enabled: instance.user_ui_enabled,
+            player_api_enabled: instance.player_api_enabled,
             content_security_policy: instance.content_security_policy.as_ref().map(Into::into),
             path: instance.path.clone(),
             auth: instance.auth.as_ref().map(Into::into),

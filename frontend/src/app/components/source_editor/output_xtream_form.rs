@@ -4,8 +4,7 @@ use crate::{
         DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton, TitledCard,
         TraktChartItemForm, TraktListItemForm,
     },
-    config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_text,
-    generate_form_reducer,
+    config_field, config_field_bool, config_field_child, edit_field_bool, edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::{
@@ -439,9 +438,10 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                             { config_field_bool!(output_form_state.form, translate.t(LABEL_SERIES), skip_series_direct_source) }
                         </div>
                     </TitledCard>
-                    { config_field_custom!(
+                    { config_field_child!(
                         translate.t(LABEL_FILTER),
-                        output_form_state.form.filter.clone().unwrap_or_default()
+                        "OUTPUT_XTREAM_FORM.FILTER",
+                        { html! { <span class="tp__form-field__value">{output_form_state.form.filter.clone().unwrap_or_default()}</span> } }
                     ) }
                 </Card>
             }
@@ -508,9 +508,10 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                     html! {
                         <>
                             { config_field_bool!(trakt_form.form, translate.t(LABEL_ENABLED), enabled) }
-                            { config_field_custom!(
+                            { config_field_child!(
                                 translate.t(LABEL_TRAKT_CATALOG_SELECTION),
-                                translate.t(trakt_catalog_selection_label_key(trakt_form.form.catalog_selection))
+                                "OUTPUT_XTREAM_FORM.TRAKT_CATALOG_SELECTION",
+                                { html! { <span class="tp__form-field__value">{translate.t(trakt_catalog_selection_label_key(trakt_form.form.catalog_selection))}</span> } }
                             ) }
                             { config_field_bool!(trakt_form.form, translate.t(LABEL_TRAKT_INCLUDE_XTREAM_BASE_CATEGORIES), include_xtream_base_categories) }
                         </>

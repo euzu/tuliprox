@@ -19,6 +19,8 @@ pub(in crate::api) struct ResolvedRecordingSource {
     pub series_name: Option<String>,
     pub extension: Option<String>,
     pub downloadable: bool,
+    pub provider_id: Option<String>,
+    pub is_group: bool,
 }
 
 macro_rules! create_player_api_for_cluster {
@@ -60,7 +62,7 @@ pub(in crate::api::endpoints) mod epg_inspect;
 pub(in crate::api::endpoints) mod epg_status;
 mod error;
 mod filter_preview;
-mod inspect_common;
+pub(in crate::api::endpoints) mod inspect_common;
 pub(in crate::api::endpoints) mod items;
 mod overrides;
 mod recording;
@@ -75,10 +77,11 @@ use self::epg::load_epg_channels_for_input;
 use self::epg::merge_epg_channels;
 #[cfg(test)]
 use self::recording::epg_channel_id_matches;
+pub(crate) use self::recording::playlist_recording_stream;
 #[cfg(test)]
 use self::recording::select_epg_channel_candidate;
 #[cfg(test)]
-use self::recording::RecordingStreamQuery;
+pub(crate) use self::recording::RecordingStreamQuery;
 #[cfg(test)]
 use self::recording::{recording_candidate, RecordingCandidateFields};
 #[cfg(test)]
@@ -101,7 +104,6 @@ use self::{
         playlist_epg_search, playlist_override_item, playlist_overrides_discard, playlist_overrides_get,
         playlist_overrides_orphans, playlist_overrides_save,
     },
-    recording::playlist_recording_stream,
     resources::{
         create_config_input_for_m3u, create_config_input_for_xtream, playlist_resolve_url, playlist_resource,
         resolve_provider_url_with_input,

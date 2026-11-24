@@ -176,7 +176,7 @@ fn finish_user_db_repair(result: std::io::Result<crate::UserDbRepairReport>) -> 
                 println!("Previous History:  UNUSABLE ({reason}); archived and replaced");
             }
             println!("Archive Created:   {}", report.backup_path.display());
-            println!("Status:            SUCCESS (complete V7 database with verified recovery history)");
+            println!("Status:            SUCCESS (complete V8 database with verified recovery history)");
             std::process::exit(0);
         }
         Err(error) => {

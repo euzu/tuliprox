@@ -409,6 +409,7 @@ pub fn PluginUpdateSettings(props: &PluginUpdateSettingsProps) -> Html {
                     { " " }{ translate.t("LABEL.PLUGIN_UPDATE_ON_BOOT") }
                 </label>
                 <Input name="plugin_boot_update_budget"
+                    field_id={Some("PLUGIN_CONFIG.BOOT_UPDATE_BUDGET".to_string())}
                     label={Some(translate.t("LABEL.PLUGIN_UPDATE_BOOT_BUDGET"))}
                     value={current.boot_update_budget.clone()}
                     on_change={Some(on_budget)} />

@@ -237,6 +237,8 @@ async fn create_recording_rejects_absent_recording_config() {
             virtual_id: "1".to_string(),
             cluster: XtreamCluster::Live,
             input_name: "input-a".to_string(),
+            provider_id: None,
+            is_group: false,
         },
         program_title: "title".to_string(),
         program_start: 0,

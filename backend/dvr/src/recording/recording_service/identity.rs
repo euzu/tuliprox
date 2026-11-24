@@ -5,36 +5,15 @@ use crate::{
 use shared::model::recording::RecordingMetadata;
 
 /// What makes two recording requests "the same thing".
-///
-/// The previous key was `(url, start_at, duration_secs)` OR `file_path`,
-/// and neither half worked:
-/// - `file_path` is disambiguated with a `_N` suffix by
-///   `reserve_recording_relative_path`, so it *never* matches an
-///   existing task and the whole disjunct was dead.
-/// - `start_at` is `now.max(scheduled_start)`, so for a
-///   currently-airing programme every request inside the window
-///   produces a different value and the same programme could be
-///   booked over and over.
-///
-/// The identity is now derived from what the user actually asked for.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum RecordingIdentity<S = String> {
-    /// Materialization of one rule occurrence. Two tasks with the same
-    /// `(rule_id, occurrence_key)` are the same recording by
-    /// definition, whatever their window looks like.
-    Occurrence { rule_id: S, occurrence_key: S },
-    /// A concrete programme on a concrete source. Deliberately free of any
-    /// owner: two users asking for the same programme are asking for the same
-    /// file, and it is recorded once and linked twice.
-    Programme { target_id: S, virtual_id: S, program_start: i64, program_end: i64 },
-    /// No programme metadata at all: every VOD and series transfer, and a
-    /// Live capture whose programme window is unknown. Falls back to the
-    /// resolved URL plus the *scheduled* (padded) window, which — unlike
-    /// `start_at` — is stable across requests inside a currently-airing
-    /// window.
-    ///
-    /// Owner-free for the same reason `Programme` is: the same URL over the
-    /// same window is the same bytes, whoever asked for them.
+    /// Live, single channel: `input_name` + provider stream id + PADDED window
+    LiveChannel { input_name: S, provider_stream_id: S, padded_start: Option<i64>, padded_end: Option<i64> },
+    /// Live, group channel (source vid is a failover group): `target_id` + group vid + padded window
+    LiveGroup { target_id: S, group_vid: S, padded_start: Option<i64>, padded_end: Option<i64> },
+    /// VOD and series episodes: `input_name` + cluster + provider stream id, no time
+    Media { input_name: S, cluster: shared::model::XtreamCluster, provider_stream_id: S },
+    /// Fallback url
     Url { url: S, scheduled_start: Option<i64>, scheduled_end: Option<i64> },
 }
 
@@ -48,20 +27,81 @@ pub fn recording_identity_key(meta: &RecordingMetadata, url: &str) -> String {
 }
 
 pub(crate) fn recording_identity<'a>(meta: &'a RecordingMetadata, url: &'a str) -> RecordingIdentity<&'a str> {
-    if let (Some(rule_id), Some(occurrence_key)) =
-        (meta.provenance.rule_id.as_deref(), meta.provenance.occurrence_key.as_deref())
+    let padded_window = {
+        if let (Some(start), Some(end)) = (meta.program_start, meta.program_end) {
+            let pre = i64::try_from(meta.pre_roll_secs).unwrap_or(i64::MAX);
+            let post = i64::try_from(meta.post_roll_secs).unwrap_or(i64::MAX);
+            (Some(start.saturating_sub(pre)), Some(end.saturating_add(post)))
+        } else {
+            (meta.scheduled_start, meta.scheduled_end)
+        }
+    };
+
+    match meta.source.cluster {
+        shared::model::XtreamCluster::Video | shared::model::XtreamCluster::Series => {
+            if let Some(ref provider_id) = meta.source.provider_id {
+                RecordingIdentity::Media {
+                    input_name: &meta.source.input_name,
+                    cluster: meta.source.cluster,
+                    provider_stream_id: provider_id.as_str(),
+                }
+            } else {
+                RecordingIdentity::Url { url, scheduled_start: meta.scheduled_start, scheduled_end: meta.scheduled_end }
+            }
+        }
+        shared::model::XtreamCluster::Live => {
+            if meta.source.is_group {
+                RecordingIdentity::LiveGroup {
+                    target_id: &meta.source.target_id,
+                    group_vid: &meta.source.virtual_id,
+                    padded_start: padded_window.0,
+                    padded_end: padded_window.1,
+                }
+            } else if let Some(ref provider_id) = meta.source.provider_id {
+                RecordingIdentity::LiveChannel {
+                    input_name: &meta.source.input_name,
+                    provider_stream_id: provider_id.as_str(),
+                    padded_start: padded_window.0,
+                    padded_end: padded_window.1,
+                }
+            } else {
+                RecordingIdentity::Url { url, scheduled_start: padded_window.0, scheduled_end: padded_window.1 }
+            }
+        }
+    }
+}
+
+/// Whether two requests share the same live stream source (F11 clip source identity).
+///
+/// For Live recordings:
+/// - Group channels match on `target_id` and `virtual_id` (the group VID).
+/// - Provider channels match on `input_name` and `provider_id`.
+/// - Fallback matches on the stream URL.
+pub fn same_live_source(
+    left_meta: &RecordingMetadata,
+    left_url: &str,
+    right_meta: &RecordingMetadata,
+    right_url: &str,
+) -> bool {
+    if left_meta.source.cluster != shared::model::XtreamCluster::Live
+        || right_meta.source.cluster != shared::model::XtreamCluster::Live
     {
-        return RecordingIdentity::Occurrence { rule_id, occurrence_key };
+        return false;
     }
-    if let (Some(program_start), Some(program_end)) = (meta.program_start, meta.program_end) {
-        return RecordingIdentity::Programme {
-            target_id: &meta.source.target_id,
-            virtual_id: &meta.source.virtual_id,
-            program_start,
-            program_end,
-        };
+    if left_meta.source.is_group && right_meta.source.is_group {
+        left_meta.source.target_id == right_meta.source.target_id
+            && left_meta.source.virtual_id == right_meta.source.virtual_id
+    } else if !left_meta.source.is_group && !right_meta.source.is_group {
+        match (&left_meta.source.provider_id, &right_meta.source.provider_id) {
+            (Some(left_pid), Some(right_pid)) => {
+                left_meta.source.input_name == right_meta.source.input_name && left_pid == right_pid
+            }
+            (None, None) => left_url == right_url,
+            _ => false,
+        }
+    } else {
+        false
     }
-    RecordingIdentity::Url { url, scheduled_start: meta.scheduled_start, scheduled_end: meta.scheduled_end }
 }
 
 fn persisted_recording_identity(task: &PersistedRecordingTask) -> RecordingIdentity<&str> {
@@ -70,33 +110,31 @@ fn persisted_recording_identity(task: &PersistedRecordingTask) -> RecordingIdent
 
 pub(super) fn candidate_has_duplicate_recording(candidate: &PersistedRecordingQueue, task: &RecordingTask) -> bool {
     let meta = &task.recording;
-    let identity = recording_identity(meta, task.url.as_str());
     let pool = recording_quota::quota_pool_for_task(task);
-    // Only the *same* principal asking twice is a duplicate. A different
-    // principal asking for the same media gets their own library entry, which
-    // attaches to the one physical file rather than producing a second.
-    let pending_match = candidate
+
+    // Rule occurrence duplicate check: the same occurrence is not scheduled twice by its rule.
+    if let (Some(rule_id), Some(occurrence_key)) =
+        (meta.provenance.rule_id.as_deref(), meta.provenance.occurrence_key.as_deref())
+    {
+        return candidate
+            .queue
+            .iter()
+            .chain(candidate.scheduled.iter())
+            .chain(candidate.active.iter())
+            .chain(candidate.finished.iter())
+            .any(|existing| {
+                recording_quota::quota_pool_for_task(existing) == pool
+                    && existing.recording.provenance.rule_id.as_deref() == Some(rule_id)
+                    && existing.recording.provenance.occurrence_key.as_deref() == Some(occurrence_key)
+            });
+    }
+
+    let identity = recording_identity(meta, task.url.as_str());
+    candidate
         .queue
         .iter()
         .chain(candidate.scheduled.iter())
         .chain(candidate.active.iter())
-        .filter(|existing| recording_quota::quota_pool_for_task(*existing) == pool)
-        .map(persisted_recording_identity)
-        .any(|existing| existing == identity);
-    if pending_match {
-        return true;
-    }
-    // Terminal tasks do not block a fresh request: after a failed or
-    // cancelled attempt the user must be able to try again, and after a
-    // successful one they may legitimately want a second copy. The one
-    // exception is a rule occurrence — re-materializing an occurrence
-    // that already ran would duplicate it on every scheduler tick.
-    if !matches!(identity, RecordingIdentity::Occurrence { .. }) {
-        return false;
-    }
-    candidate
-        .finished
-        .iter()
         .filter(|existing| recording_quota::quota_pool_for_task(*existing) == pool)
         .map(persisted_recording_identity)
         .any(|existing| existing == identity)

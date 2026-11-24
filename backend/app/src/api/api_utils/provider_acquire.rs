@@ -355,10 +355,84 @@ impl IntoResponse for StreamPlaybackOutcome {
     fn into_response(self) -> axum::response::Response { self.response }
 }
 
+pub(crate) fn shared_lookup_key<'a>(target: &ConfigTarget, source: &'a PlaybackSource<'_>) -> Cow<'a, str> {
+    match source {
+        PlaybackSource::Group { group, .. } => Cow::Owned(group_shared_key(target.id, group.group_vid.get())),
+        PlaybackSource::Single { stream_url, .. } => Cow::Borrowed(*stream_url),
+    }
+}
+
+pub(crate) async fn resolve_target_shared_lookup_key(
+    app_config: &Arc<AppConfig>,
+    playlists: &tuliprox_repository::PlaylistStorageState,
+    target: &ConfigTarget,
+    input: &Arc<ConfigInput>,
+    virtual_id: u32,
+    cluster: shared::model::XtreamCluster,
+) -> Option<String> {
+    let vid = VirtualId::new(virtual_id);
+    let resolved_target = tuliprox_repository::classify_virtual_id(app_config, playlists, target, vid).await;
+
+    let stream_url: Option<Arc<str>> = match &resolved_target {
+        tuliprox_repository::ResolvedStreamTarget::Group(_)
+        | tuliprox_repository::ResolvedStreamTarget::Member { .. } => None,
+        tuliprox_repository::ResolvedStreamTarget::Item => {
+            match tuliprox_repository::load_target_playlist_item(
+                virtual_id,
+                app_config,
+                playlists,
+                target,
+                Some(cluster),
+            )
+            .await
+            {
+                Some(tuliprox_repository::LoadedTargetPlaylistItem::Xtream(pli)) => {
+                    let sources = app_config.sources.load();
+                    let (query_path, _) = crate::api::endpoints::xtream_api::get_query_path_with_sources(
+                        "",
+                        None,
+                        &pli,
+                        sources.as_ref(),
+                    );
+                    let context = crate::api::endpoints::xtream_api::ApiStreamContext::try_from(cluster)
+                        .unwrap_or(crate::api::endpoints::xtream_api::ApiStreamContext::Live);
+                    crate::api::endpoints::xtream_api::get_xtream_player_api_stream_url(
+                        input,
+                        context,
+                        &query_path,
+                        &pli.url,
+                    )
+                    .or(Some(pli.url))
+                }
+                Some(tuliprox_repository::LoadedTargetPlaylistItem::M3u(pli)) => Some(pli.url),
+                None => None,
+            }
+        }
+    };
+
+    if matches!(resolved_target, tuliprox_repository::ResolvedStreamTarget::Item) && stream_url.is_none() {
+        return None;
+    }
+
+    let bound_prefer = match &resolved_target {
+        tuliprox_repository::ResolvedStreamTarget::Member { index, .. } => Some(*index),
+        _ => None,
+    };
+    let stream_url_ref = stream_url.as_deref().unwrap_or_default();
+    let source = crate::api::api_utils::failover_group::resolve_playback_source(
+        &resolved_target,
+        true,
+        input,
+        stream_url_ref,
+        bound_prefer,
+    );
+    Some(shared_lookup_key(target, &source).into_owned())
+}
+
 /// Admits the user session, allocates a provider connection and builds the client stream response.
 ///
 /// # Panics
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 pub(crate) async fn stream_response_with_provider_handle(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,
@@ -375,6 +449,9 @@ pub(crate) async fn stream_response_with_provider_handle(
     allow_exhausted_shared_reconnect: bool,
     grace_mode: Option<crate::api::model::GraceMode>,
     preacquired_provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
+    join_shared: bool,
+    is_free_join: bool,
+    dedicated: bool,
 ) -> StreamPlaybackOutcome {
     if let PlaybackSource::Single { input, .. } = &source {
         if blocks_new_playback(app_state, input, user, preacquired_provider_handle.is_some()) {
@@ -454,15 +531,19 @@ pub(crate) async fn stream_response_with_provider_handle(
     connection_permission = activation.admission.permission();
     connection_kind = activation.admission.kind().unwrap_or(connection_kind);
 
-    let allow_shared_reuse =
-        connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
+    // A recording whose headers change the upstream request must neither join nor publish a share.
+    let recording_request_differs = user.is_recording_proxy_user()
+        && crate::api::api_utils::auth::recording_headers_differ(&app_state.app_config, &initial_input);
+    let dedicated_active = dedicated && user.player_features.source_switch;
+    let allow_shared_reuse = !dedicated_active
+        && !recording_request_differs
+        && (connection_permission != UserConnectionPermission::Exhausted
+            || allow_exhausted_shared_reconnect
+            || is_free_join);
 
-    let shared_lookup_key: Cow<'_, str> = match &source {
-        PlaybackSource::Group { group, .. } => Cow::Owned(group_shared_key(target.id, group.group_vid.get())),
-        PlaybackSource::Single { stream_url, .. } => Cow::Borrowed(*stream_url),
-    };
+    let shared_lookup_key = shared_lookup_key(target, &source);
 
-    let share_stream = is_stream_share_enabled(item_type, target);
+    let share_stream = !dedicated_active && !recording_request_differs && is_stream_share_enabled(item_type, target);
     let mut shared_lock = if share_stream {
         let write_lock = app_state.app_config.file_locks.write_lock_str(shared_lookup_key.as_ref()).await;
 
@@ -478,6 +559,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                 session_token,
                 req_headers,
                 activation.placeholder_transition_version,
+                is_free_join,
             )
             .await
             {
@@ -500,6 +582,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                 session_token,
                 req_headers,
                 activation.placeholder_transition_version,
+                is_free_join,
             )
             .await
             {
@@ -513,7 +596,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         None
     };
 
-    if connection_permission == UserConnectionPermission::Exhausted {
+    if join_shared {
         app_state
             .active_users
             .release_unbound_session_reservation(
@@ -523,28 +606,36 @@ pub(crate) async fn stream_response_with_provider_handle(
                 activation.placeholder_transition_version.is_some(),
             )
             .await;
-        if activation.admission.is_reentry_suppressed() {
-            return StreamPlaybackOutcome::failure(reentry_suppressed_response(), FailureClass::Capacity);
-        }
-        record_connect_failed_attempt(ConnectFailedAttempt {
-            app_state,
-            fingerprint,
-            user,
-            stream_channel: stream_channel.clone(),
-            provider_name: initial_input.name.clone(),
-            req_headers,
-            reason: ConnectFailureReason::UserConnectionsExhausted,
-            failure_stage: FailureStage::Admission,
-        });
-        return StreamPlaybackOutcome::failure(
-            create_custom_video_stream_response(
-                &app_state.provider_stream_ctx(),
-                &fingerprint.addr,
-                CustomVideoStreamType::UserConnectionsExhausted,
-            )
-            .into_response(),
-            FailureClass::Capacity,
+        let response = crate::api::model::fallback_status_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            CustomVideoStreamType::ChannelUnavailable,
         );
+        return StreamPlaybackOutcome::failure(response, FailureClass::Capacity);
+    }
+
+    if connection_permission == UserConnectionPermission::Exhausted {
+        if !activation.admission.is_reentry_suppressed() {
+            record_connect_failed_attempt(ConnectFailedAttempt {
+                app_state,
+                fingerprint,
+                user,
+                stream_channel: stream_channel.clone(),
+                provider_name: initial_input.name.clone(),
+                req_headers,
+                reason: ConnectFailureReason::UserConnectionsExhausted,
+                failure_stage: FailureStage::Admission,
+            });
+        }
+        let response = release_reservation_and_exhausted_response(
+            app_state,
+            user,
+            session_token,
+            activation.placeholder_transition_version,
+            activation.admission.is_reentry_suppressed(),
+            fingerprint,
+        )
+        .await;
+        return StreamPlaybackOutcome::failure(response, FailureClass::Capacity);
     }
 
     if matches!(&source, PlaybackSource::Group { .. })
@@ -636,6 +727,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                 session_token,
                 req_headers,
                 activation.placeholder_transition_version,
+                false,
             )
             .await
             {
@@ -967,9 +1059,10 @@ pub(crate) async fn stream_response_with_provider_handle(
                 is_stream_shared = false;
             }
         }
-        let shared_subscriber_id =
-            tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid());
-        let mut pending_shared_cleanup = if is_stream_shared {
+        let shared_subscriber_id = is_stream_shared.then(|| {
+            tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid())
+        });
+        let mut pending_shared_cleanup = if let Some(shared_subscriber_id) = shared_subscriber_id {
             match SharedStreamManager::reserve_subscriber_cleanup(
                 &app_state.connection_manager,
                 shared_subscriber_id,
@@ -1101,7 +1194,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             driver => driver,
         };
         let open_failure = open_failure_class(&stream_details);
-        let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+        let outcome = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
             user,
@@ -1118,7 +1211,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         })
         .await
         {
-            Ok(stream) => stream,
+            Ok(outcome) => outcome,
             Err(error) => {
                 if created_media_session {
                     app_state.active_users.terminate_session(&user.username, session_token).await;
@@ -1152,6 +1245,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             };
             // Shared Stream response
             let shared_headers = provider_response.as_ref().map_or_else(Vec::new, |(h, _, _, _)| h.clone());
+            let shared_subscriber_id = pending_shared_cleanup.capability().subscriber_id();
             if let Some((broadcast_stream, _shared_provider, _cleanup_capability)) =
                 SharedStreamManager::register_shared_stream(
                     SharedStreamCtx {
@@ -1161,7 +1255,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                         connection_manager: &app_state.connection_manager,
                     },
                     shared_lookup_key.as_ref(),
-                    stream,
+                    outcome.stream,
                     &fingerprint.addr,
                     shared_subscriber_id,
                     shared_headers,
@@ -1170,6 +1264,8 @@ pub(crate) async fn stream_response_with_provider_handle(
                     pending_shared_cleanup,
                     connection_priority_for_kind(user, connection_kind),
                     connection_kind,
+                    &user.username,
+                    session_token,
                 )
                 .await
             {
@@ -1182,6 +1278,13 @@ pub(crate) async fn stream_response_with_provider_handle(
                 }
                 let mut response = try_unwrap_body!(response.body(axum::body::Body::from_stream(broadcast_stream)));
                 mark_response_as_uncompressed(&mut response);
+                super::attach_stream_uid_header_if_eligible(
+                    &mut response,
+                    app_state,
+                    user,
+                    item_type,
+                    outcome.stream_uid,
+                );
                 response
             } else {
                 StatusCode::BAD_REQUEST.into_response()
@@ -1280,9 +1383,10 @@ pub(crate) async fn stream_response_with_provider_handle(
                 }
             }
 
-            let body_stream = prepare_body_stream(app_state, item_type, stream);
+            let body_stream = prepare_body_stream(app_state, item_type, outcome.stream);
             let mut response = try_unwrap_body!(response.body(body_stream));
             mark_response_as_uncompressed(&mut response);
+            super::attach_stream_uid_header_if_eligible(&mut response, app_state, user, item_type, outcome.stream_uid);
             response
         };
 
@@ -1325,7 +1429,41 @@ pub(crate) async fn stream_response_with_provider_handle(
         );
     }
     StreamPlaybackOutcome::failure(
-        no_custom_video_fallback_status(&app_state.app_config).into_response(),
+        crate::api::model::fallback_status_response(
+            no_custom_video_fallback_status(&app_state.app_config),
+            CustomVideoStreamType::ChannelUnavailable,
+        ),
         FailureClass::Stream,
     )
+}
+
+/// Releases an unbound session reservation and produces the standard exhausted response,
+/// either suppressing reentry or returning the user connections exhausted custom video.
+pub(crate) async fn release_reservation_and_exhausted_response(
+    app_state: &AppState,
+    user: &ProxyUserCredentials,
+    session_token: &str,
+    placeholder_version: Option<u64>,
+    is_reentry_suppressed: bool,
+    fingerprint: &Fingerprint,
+) -> axum::response::Response {
+    app_state
+        .active_users
+        .release_unbound_session_reservation(
+            &user.username,
+            session_token,
+            placeholder_version,
+            placeholder_version.is_some(),
+        )
+        .await;
+    if is_reentry_suppressed {
+        reentry_suppressed_response()
+    } else {
+        create_custom_video_stream_response(
+            &app_state.provider_stream_ctx(),
+            &fingerprint.addr,
+            CustomVideoStreamType::UserConnectionsExhausted,
+        )
+        .into_response()
+    }
 }

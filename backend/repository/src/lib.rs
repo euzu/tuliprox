@@ -103,3 +103,4 @@ pub use override_repository::*;
 pub mod override_status;
 pub use override_status::*;
 pub mod user_settings_repository;
+pub mod watch_progress_repository;

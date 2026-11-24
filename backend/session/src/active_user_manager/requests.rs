@@ -1,9 +1,12 @@
 use super::{
     decide_connection_kind, remember_session_addr, stream_history_session_id, ActiveUserConnectionParams,
-    ActiveUserManager, PlaybackSessionRegistration, SocketRegistration, StreamRequestDetach, UserConnectionData,
-    UserConnections,
+    ActiveUserManager, PlaybackLifecycle, PlaybackSessionRegistration, SocketRegistration, StreamRequestDetach,
+    UserConnectionData, UserConnections,
 };
-use shared::{model::StreamInfo, utils::current_time_secs};
+use shared::{
+    model::{StreamInfo, UserConnectionPermission},
+    utils::current_time_secs,
+};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use tuliprox_core::utils::utc_day_from_secs;
@@ -86,6 +89,7 @@ impl ActiveUserManager {
             user_agent,
             session_token,
         } = update;
+        let is_free_join = self.is_free_subscriber(uid).await;
         let (stream_info, divergence_snapshot, connection_count_changed) = {
             let mut user_connections = self.write_connections().await;
             if let Some(requirement) = session_registration {
@@ -200,28 +204,18 @@ impl ActiveUserManager {
                     if was_preserved {
                         stream_info.preserved = false;
                     }
-                    connection_data.stream_normal_priorities.insert(stream_info.uid, priority);
                     let result = stream_info.clone();
                     stream_info.previous_session_id = None;
                     (result, was_preserved)
                 });
-            let (stream_info, divergence_snapshot) = if let Some((stream_info, was_preserved)) = existing_stream_info {
-                let effective_connection_kind = reserved_session_kind.unwrap_or(connection_kind);
+            let effective_connection_kind = reserved_session_kind.unwrap_or(connection_kind);
+            let stream_info = if let Some((stream_info, was_preserved)) = existing_stream_info {
                 connection_data.attach_stream_request(uid, stream_info.uid, fingerprint.addr);
-                if was_preserved {
+                if was_preserved && !is_free_join {
                     connection_data.increment_kind(effective_connection_kind);
                 }
-                connection_data.stream_kinds.insert(stream_info.uid, effective_connection_kind);
-                connection_data.stream_normal_priorities.insert(stream_info.uid, priority);
-                if let Some(token) = session_token {
-                    if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
-                        Self::mark_session_committed(session, effective_connection_kind);
-                    }
-                }
-                let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
-                (stream_info, divergence_snapshot)
+                stream_info
             } else {
-                let effective_connection_kind = reserved_session_kind.unwrap_or(connection_kind);
                 let country_code = self.lookup_country(&fingerprint.client_ip);
 
                 let mut stream_info = StreamInfo::new(shared::model::StreamInfoParams {
@@ -271,22 +265,30 @@ impl ActiveUserManager {
                     }
                 }
 
-                if reserved_session_kind.is_none() {
+                if !is_free_join && reserved_session_kind.is_none() {
                     connection_data.increment_kind(effective_connection_kind);
                 }
                 connection_data.streams.push(stream_info.clone());
                 connection_data.attach_stream_request(uid, stream_info.uid, fingerprint.addr);
+                Self::log_connection_added(username, &fingerprint.addr, connection_data, tracked_socket_count);
+                stream_info
+            };
+
+            if !is_free_join {
                 connection_data.stream_kinds.insert(stream_info.uid, effective_connection_kind);
-                connection_data.stream_normal_priorities.insert(stream_info.uid, priority);
-                if let Some(token) = session_token {
-                    if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
+            }
+            connection_data.stream_normal_priorities.insert(stream_info.uid, priority);
+            if let Some(token) = session_token {
+                if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
+                    if is_free_join {
+                        session.permission = UserConnectionPermission::Allowed;
+                        session.lifecycle = PlaybackLifecycle::Prepared;
+                    } else {
                         Self::mark_session_committed(session, effective_connection_kind);
                     }
                 }
-                Self::log_connection_added(username, &fingerprint.addr, connection_data, tracked_socket_count);
-                let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
-                (stream_info, divergence_snapshot)
-            };
+            }
+            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
             let connection_count_changed = connection_data.connections != previous_connection_count;
             (stream_info, divergence_snapshot, connection_count_changed)
         };

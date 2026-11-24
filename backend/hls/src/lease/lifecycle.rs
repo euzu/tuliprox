@@ -900,6 +900,29 @@ impl HlsAccessLeaseStore {
             .any(|lease| lease.proxy_session_id == *proxy_session_id && lease.permits_origin_work(now_ms))
     }
 
+    /// Returns the set of user session tokens for non-terminal leases (Pending/Idle/Activated after refresh) of the proxy session.
+    pub fn non_terminal_user_session_tokens(
+        &mut self,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> std::collections::HashSet<String> {
+        if self.refresh_access_lease_validities_for_session(proxy_session_id, now_ms).is_err() {
+            return std::collections::HashSet::new();
+        }
+        let mut tokens = std::collections::HashSet::new();
+        for lease in self.by_lease_id.values() {
+            if lease.proxy_session_id == *proxy_session_id
+                && matches!(
+                    lease.state,
+                    HlsAccessLeaseState::Pending | HlsAccessLeaseState::Idle | HlsAccessLeaseState::Activated
+                )
+            {
+                tokens.insert(lease.user_session_token.clone());
+            }
+        }
+        tokens
+    }
+
     pub fn session_snapshot(
         &mut self,
         proxy_session_id: &ProxySessionId,

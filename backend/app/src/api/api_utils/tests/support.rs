@@ -526,6 +526,8 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg
 
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
+    active_users.set_shared_stream_manager(&shared_stream_manager);
+    shared_stream_manager.set_user_manager(&active_users);
     let connection_manager = Arc::new(ConnectionManager::new(
         &active_users,
         &active_provider,
@@ -537,13 +539,18 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
+    let playlists = Arc::new(PlaylistStorageState::new());
+
     Arc::new(AppState {
         recording: crate::api::model::RecordingState::new(
             Arc::new(crate::api::model::RecordingQueue::new()),
-            crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+            crate::api::model::recording_runtime::ProviderCapacityAdapter::with_shared_stream_manager(
                 Arc::clone(&active_provider),
                 Arc::clone(&connection_manager),
                 crate::api::model::create_test_maintenance(""),
+                Arc::clone(&app_cfg),
+                Arc::clone(&playlists),
+                Arc::clone(&shared_stream_manager),
             ),
         ),
         app_config: app_cfg,
@@ -558,7 +565,7 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg
         connection_manager,
         event_manager,
         cancel_tokens: ArcSwap::from_pointee(tokens),
-        playlists: Arc::new(PlaylistStorageState::new()),
+        playlists,
         geoip,
         metadata_manager,
         auth: crate::api::model::AuthState::for_tests(),
@@ -710,5 +717,7 @@ pub(in crate::api::api_utils::tests) fn user_with_network_access(
         t_filter: None,
         t_has_unresolved_plan: false,
         t_has_invalid_filter: false,
+        player_features: tuliprox_core::model::PlayerFeatures::default(),
+        raw_player_features: None,
     }
 }

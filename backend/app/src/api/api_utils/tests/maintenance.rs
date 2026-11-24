@@ -182,6 +182,8 @@ async fn new_ts_stream_for_input_in_maintenance_gets_the_clip_without_provider_s
         crate::api::model::ConnectionKind::Normal,
         false,
         None,
+        false,
+        false,
     )
     .await
     .into_response();

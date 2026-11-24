@@ -5,7 +5,7 @@ use crate::{
         config_file::ConfigFile,
         model::AppState,
     },
-    auth::{verify_token, AuthBearer},
+    auth::AuthBearer,
     config_loader::{
         persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users,
         read_api_proxy_file_with_templates, read_plans_file, save_plans,
@@ -232,15 +232,9 @@ fn has_any_permission(permissions: PermissionSet, required: &[Permission]) -> bo
 /// kept filtering config in until the token expired. Intersecting with the live
 /// grant makes a revocation immediate without ever widening a token beyond what
 /// it was issued with.
-fn decode_permissions(app_state: &AppState, token: &str) -> Option<PermissionSet> {
-    let config = app_state.app_config.config.load();
-    let web_auth = config.web_ui.as_ref()?.auth.as_ref()?;
-    let claims = verify_token(token, web_auth.secret.as_bytes(), &web_auth.issuer)?.claims;
-    Some(
-        web_auth
-            .resolve_permissions_if_known(&claims.username)
-            .map_or(claims.permissions, |live| claims.permissions & live),
-    )
+async fn decode_permissions(app_state: &Arc<AppState>, token: &str) -> Option<PermissionSet> {
+    let claims = crate::api::auth_middleware::authenticate(app_state, token).await.ok()?;
+    Some(crate::api::auth_middleware::effective_permissions(app_state, &claims))
 }
 
 /// Reduces a server entry to the name a user record may reference.
@@ -1029,7 +1023,7 @@ async fn config(
     AuthBearer(token): AuthBearer,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    let Some(permissions) = decode_permissions(&app_state, &token) else {
+    let Some(permissions) = decode_permissions(&app_state, &token).await else {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
     if !has_any_permission(
@@ -1053,7 +1047,7 @@ async fn get_config_api_proxy_config(
     AuthBearer(token): AuthBearer,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    let Some(permissions) = decode_permissions(&app_state, &token) else {
+    let Some(permissions) = decode_permissions(&app_state, &token).await else {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
     if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::UserRead, Permission::UserWrite]) {
@@ -1194,7 +1188,7 @@ async fn get_config_plans(
     AuthBearer(token): AuthBearer,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    let Some(permissions) = decode_permissions(&app_state, &token) else {
+    let Some(permissions) = decode_permissions(&app_state, &token).await else {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
     if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::UserRead, Permission::UserWrite]) {

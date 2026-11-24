@@ -14,7 +14,7 @@ pub(in crate::api) use self::hls_provisioning::{
 };
 pub(in crate::api) use self::hls_provisioning::{
     hls_custom_video_manifest_response_for_access_lease, hls_custom_video_manifest_response_with_virtual_id,
-    hls_provisioning_discontinuity_sequence, hls_virtual_entry_redirect_response,
+    hls_custom_video_type_configured, hls_provisioning_discontinuity_sequence, hls_virtual_entry_redirect_response,
     parse_hls_panel_provisioning_segment_route_name, start_hls_panel_provisioning_once,
     try_hls_panel_provisioning_manifest_response, HlsPanelProvisioningRedirectPaths, HlsProvisioningStatus,
 };

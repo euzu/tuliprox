@@ -66,10 +66,13 @@ use self::http::send_download_request;
 use self::worker::requeue_active_download_for_capacity_wait;
 #[cfg(test)]
 use self::worker::start_recording_scheduler;
-pub use self::worker::{ensure_recording_worker_running, resume_recording_worker_if_needed, spawn_recording_services};
+pub use self::{
+    completion::fail_active_download,
+    worker::{ensure_recording_worker_running, resume_recording_worker_if_needed, spawn_recording_services},
+};
 use self::{
     completion::{
-        active_download_snapshot_for_worker, cancel_active_and_promote, fail_active_download,
+        active_download_snapshot_for_worker, cancel_active_and_promote, commit_failed_active_download,
         finish_active_and_promote, promote_ready_downloads, set_active_download_state, take_active,
         update_active_download_for_worker, write_completion_sidecar,
     },

@@ -62,6 +62,18 @@ impl VirtualIdMap {
         let url = self.playback_url(marker)?;
         extract_virtual_id_from_url(url)
     }
+
+    /// Resolve an extracted virtual ID back to its originating synthetic marker.
+    pub fn marker_from_virtual_id(&self, target_vid: u64) -> Option<u32> {
+        for (&marker, url) in &self.urls {
+            if let Ok(vid) = extract_virtual_id_from_url(url) {
+                if vid == target_vid {
+                    return Some(marker);
+                }
+            }
+        }
+        None
+    }
 }
 
 fn marker_from_extinf(line: &str) -> Option<u32> {
@@ -79,7 +91,7 @@ fn name_from_extinf(line: &str) -> Option<String> {
 
 /// Extract the numeric virtual ID from the last path segment of a URL.
 /// Query strings and file extensions (e.g. `.ts`, `.m3u8`) are stripped before parsing.
-fn extract_virtual_id_from_url(url: &str) -> Result<u64, TestkitError> {
+pub fn extract_virtual_id_from_url(url: &str) -> Result<u64, TestkitError> {
     // Drop query string
     let path = url.split('?').next().unwrap_or(url);
     // Drop file extension: find the last `.` in the last path segment only
@@ -126,6 +138,8 @@ mod tests {
         let map = VirtualIdMap::from_m3u("#EXTM3U\n#EXTINF:-1 tvg-id=\"test-17\",News\nhttp://tuliprox/m3u/abc/42\n")
             .unwrap();
         assert_eq!(map.virtual_id_from_marker(17).unwrap(), 42);
+        assert_eq!(map.marker_from_virtual_id(42), Some(17));
+        assert_eq!(map.marker_from_virtual_id(999), None);
     }
 
     #[test]

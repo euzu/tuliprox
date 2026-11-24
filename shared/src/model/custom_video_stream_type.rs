@@ -2,6 +2,11 @@ use crate::error::TuliproxError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, str::FromStr};
 
+pub const HEADER_TULIPROX_FALLBACK: &str = "x-tuliprox-fallback";
+pub const HEADER_TULIPROX_REJECTION: &str = "x-tuliprox-rejection";
+pub const HEADER_TULIPROX_STREAM_UID: &str = "x-tuliprox-stream-uid";
+pub const HEADER_TULIPROX_PLAYER_API_PATH: &str = "x-tuliprox-player-api-path";
+
 /// The reason a request is answered with a canned video clip instead of the
 /// provider stream the caller asked for.
 ///
@@ -20,20 +25,24 @@ pub enum CustomVideoStreamType {
     Maintenance,
 }
 
-impl fmt::Display for CustomVideoStreamType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            CustomVideoStreamType::ChannelUnavailable => "channel_unavailable",
-            CustomVideoStreamType::UserConnectionsExhausted => "user_connections_exhausted",
-            CustomVideoStreamType::ProviderConnectionsExhausted => "provider_connections_exhausted",
-            CustomVideoStreamType::LowPriorityPreempted => "low_priority_preempted",
-            CustomVideoStreamType::UserAccountExpired => "user_account_expired",
-            CustomVideoStreamType::Provisioning => "provisioning",
-            CustomVideoStreamType::HlsSessionOrLeaseExpired => "hls_session_or_lease_expired",
-            CustomVideoStreamType::Maintenance => "maintenance",
-        };
-        write!(f, "{s}")
+impl CustomVideoStreamType {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChannelUnavailable => "channel_unavailable",
+            Self::UserConnectionsExhausted => "user_connections_exhausted",
+            Self::ProviderConnectionsExhausted => "provider_connections_exhausted",
+            Self::LowPriorityPreempted => "low_priority_preempted",
+            Self::UserAccountExpired => "user_account_expired",
+            Self::Provisioning => "provisioning",
+            Self::HlsSessionOrLeaseExpired => "hls_session_or_lease_expired",
+            Self::Maintenance => "maintenance",
+        }
     }
+}
+
+impl fmt::Display for CustomVideoStreamType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
 }
 
 impl FromStr for CustomVideoStreamType {
@@ -59,7 +68,7 @@ impl Serialize for CustomVideoStreamType {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        serializer.serialize_str(self.as_str())
     }
 }
 impl<'de> Deserialize<'de> for CustomVideoStreamType {

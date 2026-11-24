@@ -271,6 +271,10 @@ impl ActiveUserManager {
         streams
     }
 
+    fn is_panel_visible_stream(stream: &StreamInfo) -> bool {
+        !stream.preserved || Self::should_preserve_session_stream(stream)
+    }
+
     /// Streams for the `WebUI` / `StatusCheck` snapshot.
     ///
     /// Includes preserved Catchup/HLS/DASH session rows so the panel keeps showing archive
@@ -281,7 +285,7 @@ impl ActiveUserManager {
         let mut streams = Vec::new();
         for connection_data in user_connections.by_key.values() {
             for stream in &connection_data.streams {
-                if !stream.preserved || Self::should_preserve_session_stream(stream) {
+                if Self::is_panel_visible_stream(stream) {
                     streams.push(stream.clone());
                 }
             }
@@ -289,18 +293,64 @@ impl ActiveUserManager {
         streams
     }
 
-    /// Finds a single stream by UID for status / control endpoints without cloning all active streams.
-    pub async fn find_panel_stream_by_uid(&self, uid: u32) -> Option<StreamInfo> {
+    /// Active streams belonging to a specific user, including preserved session rows.
+    pub async fn user_streams(&self, username: &str) -> Vec<StreamInfo> {
         self.gc();
         let user_connections = self.connections.read().await;
-        for connection_data in user_connections.by_key.values() {
-            for stream in &connection_data.streams {
-                if stream.uid == uid && (!stream.preserved || Self::should_preserve_session_stream(stream)) {
-                    return Some(stream.clone());
-                }
-            }
-        }
-        None
+        user_connections.by_key.get(username).map_or_else(Vec::new, |data| {
+            data.streams.iter().filter(|stream| Self::is_panel_visible_stream(stream)).cloned().collect()
+        })
+    }
+
+    /// Tests whether any active, panel-visible stream of a specific user matches `predicate`.
+    pub async fn user_has_stream(&self, username: &str, predicate: impl Fn(&StreamInfo) -> bool) -> bool {
+        self.gc();
+        let user_connections = self.connections.read().await;
+        user_connections.by_key.get(username).is_some_and(|data| {
+            data.streams.iter().any(|stream| Self::is_panel_visible_stream(stream) && predicate(stream))
+        })
+    }
+
+    /// Counts active streams belonging to a specific user where `shared_joined_existing == Some(true)`.
+    pub async fn user_shared_joins(&self, username: &str) -> u32 {
+        self.gc();
+        let user_connections = self.connections.read().await;
+        user_connections.by_key.get(username).map_or(0, |data| {
+            let count = data
+                .streams
+                .iter()
+                .filter(|stream| {
+                    Self::is_panel_visible_stream(stream) && stream.channel.shared_joined_existing == Some(true)
+                })
+                .count();
+            u32::try_from(count).unwrap_or(u32::MAX)
+        })
+    }
+
+    /// Finds a single stream by UID for status / control endpoints without cloning all active streams.
+    pub async fn find_panel_stream_by_uid(&self, uid: u32) -> Option<StreamInfo> {
+        self.find_panel_stream(|stream| stream.uid == uid).await
+    }
+
+    /// Finds a single stream by (addr, `virtual_id`) for status / control endpoints without cloning all active streams.
+    pub async fn find_panel_stream_by_addr_and_virtual_id(
+        &self,
+        addr: &SocketAddr,
+        virtual_id: u32,
+    ) -> Option<StreamInfo> {
+        self.find_panel_stream(|stream| stream.addr == *addr && stream.channel.virtual_id == virtual_id).await
+    }
+
+    /// First panel-visible stream (see [`Self::panel_streams`]) that matches `predicate`.
+    async fn find_panel_stream(&self, predicate: impl Fn(&StreamInfo) -> bool) -> Option<StreamInfo> {
+        self.gc();
+        let user_connections = self.connections.read().await;
+        user_connections
+            .by_key
+            .values()
+            .flat_map(|connection_data| connection_data.streams.iter())
+            .find(|stream| Self::is_panel_visible_stream(stream) && predicate(stream))
+            .cloned()
     }
 
     pub(super) fn log_connection_added(

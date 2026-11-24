@@ -31,6 +31,8 @@ pub enum ServiceError {
     IoError(String),
     /// Configured recording quota would be exceeded.
     QuotaExceeded,
+    /// Owner's `max_concurrent_recordings` limit would be exceeded.
+    ConcurrencyExceeded,
     /// The patch would clear `rule_id` / `occurrence_key`. Both are
     /// immutable provenance; surfacing this as `InvalidState` hid the
     /// real reason from the client.
@@ -78,6 +80,7 @@ impl ServiceError {
             Self::PersistenceFailed => "recording_persistence_failed",
             Self::IoError(_) => "recording_io_error",
             Self::QuotaExceeded => "recording_quota_exceeded",
+            Self::ConcurrencyExceeded => "recording_concurrency_exceeded",
             Self::ProvenanceImmutable => "recording_provenance_immutable",
             Self::Duplicate => "recording_duplicate",
             Self::InvalidPath => "recording_invalid_path",

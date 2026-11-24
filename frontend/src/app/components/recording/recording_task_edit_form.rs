@@ -119,24 +119,28 @@ pub fn task_edit_form(props: &TaskEditFormProps) -> Html {
         <div class="tp__task-edit-form">
             <DateTimeInput
                 name="program_start"
+                field_id={Some("RECORDING_FORM.PROGRAM_START".to_string())}
                 label={translate.t("LABEL.RECORDING_FORM_START")}
                 value={Some(*program_start)}
                 on_change={Some(on_program_start)}
             />
             <DateTimeInput
                 name="program_end"
+                field_id={Some("RECORDING_FORM.PROGRAM_END".to_string())}
                 label={translate.t("LABEL.RECORDING_FORM_END")}
                 value={Some(*program_end)}
                 on_change={Some(on_program_end)}
             />
             <NumberInput
                 name="pre_roll_secs"
+                field_id={Some("RECORDING_FORM.PRE_ROLL_SECS".to_string())}
                 label={translate.t("LABEL.RECORDING_FORM_PRE_ROLL")}
                 value={Some(*pre_roll as i64)}
                 on_change={on_pre}
             />
             <NumberInput
                 name="post_roll_secs"
+                field_id={Some("RECORDING_FORM.POST_ROLL_SECS".to_string())}
                 label={translate.t("LABEL.RECORDING_FORM_POST_ROLL")}
                 value={Some(*post_roll as i64)}
                 on_change={on_post}

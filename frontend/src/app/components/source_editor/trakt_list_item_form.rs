@@ -1,7 +1,7 @@
 use crate::{
     app::components::{build_options, select::Select, selection_parse_first, Card, DropDownSelection, TextButton},
-    config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
-    edit_field_number_u8, edit_field_text, edit_field_text_option, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_number_u8,
+    edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{TraktContentType, TraktListConfigDto};
@@ -127,7 +127,11 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
             }
 
             if props.readonly {
-                { config_field_custom!(translate.t(LABEL_TRAKT_CONTENT_TYPE), translate.t(trakt_content_type_label_key(form_state.form.content_type))) }
+                { config_field_child!(
+                    translate.t(LABEL_TRAKT_CONTENT_TYPE),
+                    "TRAKT_LIST_FORM.TRAKT_CONTENT_TYPE",
+                    { html! { <span class="tp__form-field__value">{translate.t(trakt_content_type_label_key(form_state.form.content_type))}</span> } }
+                ) }
             } else {
                 { config_field_child!(translate.t(LABEL_TRAKT_CONTENT_TYPE), "TRAKT_LIST_FORM.TRAKT_CONTENT_TYPE", {
                     let form_state_ct = form_state.clone();
@@ -153,9 +157,10 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
             }
 
             if props.readonly {
-                { config_field_custom!(
+                { config_field_child!(
                     translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD),
-                    form_state.form.fuzzy_match_threshold.to_string()
+                    "TRAKT_LIST_CONFIG.FUZZY_MATCH_THRESHOLD",
+                    { html! { <span class="tp__form-field__value">{form_state.form.fuzzy_match_threshold.to_string()}</span> } }
                 ) }
             } else {
                 { edit_field_number_u8!(form_state, translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD), fuzzy_match_threshold, TraktListFormAction::FuzzyMatchThreshold) }

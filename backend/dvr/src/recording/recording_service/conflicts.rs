@@ -65,7 +65,11 @@ impl RecordingService {
     }
 }
 
-pub fn quota_limits_from_config(config: Option<&tuliprox_core::model::RecordingQuotaConfig>) -> QuotaLimits {
+#[allow(clippy::implicit_hasher)]
+pub fn quota_limits_from_config(
+    config: Option<&tuliprox_core::model::RecordingQuotaConfig>,
+    plan_user_bytes: HashMap<UserId, u64>,
+) -> QuotaLimits {
     let mut per_user_bytes = HashMap::new();
     if let Some(config) = config {
         for (user_id, bytes) in &config.per_user_bytes {
@@ -74,10 +78,11 @@ pub fn quota_limits_from_config(config: Option<&tuliprox_core::model::RecordingQ
         QuotaLimits {
             default_private_bytes: config.default_private_bytes,
             per_user_bytes,
+            plan_user_bytes,
             shared_bytes: config.shared_bytes,
         }
     } else {
-        QuotaLimits::default()
+        QuotaLimits { plan_user_bytes, ..QuotaLimits::default() }
     }
 }
 

@@ -23,6 +23,10 @@ user:
     max_connections: 0
     status: Active
     soft_connections: 0
+#   player_features:
+#     source_switch: true
+#     joinable_streams: true
+#     recording: private             # Overrides plan: none | read | private | shared
   - username: vpn-only
     password: vpnsecret
     proxy: reverse
@@ -46,3 +50,7 @@ user:
     max_connections: 0
     status: Active
     soft_connections: 0
+#   player_features:
+#     source_switch: true
+#     joinable_streams: true
+#     recording: private             # Overrides plan: none | read | private | shared

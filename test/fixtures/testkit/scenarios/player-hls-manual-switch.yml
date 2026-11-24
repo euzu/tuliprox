@@ -1,0 +1,88 @@
+schema_version: 1
+name: player-hls-manual-switch
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: true
+    share_live_mpeg_ts: false
+    hls_startup_mode: conservative
+  failover_groups:
+    inputs: [input-a, input-b]
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}", "--failover", "{run_directory}/failover.d"]
+    readiness_url: "{base_url}/healthcheck"
+    extra_config_files:
+      - source: fixtures/failover-group-auto.yml
+        destination: failover.d/testkit.yml
+origin:
+  run_id: player-hls-manual-switch
+  hls_profile:
+    prefix_delay_millis: 1000
+    window_segments: 6
+    missing_head_segments: 0
+actors:
+  - id: viewer-1
+    agent: local
+    username: viewer-1
+    user_agent: tuliprox-testkit/viewer-1
+  - id: viewer-2
+    agent: local
+    username: viewer-2
+    user_agent: tuliprox-testkit/viewer-2
+channels:
+  failover-channel: { origin_marker: 17, protocol: hls }
+steps:
+  - command_id: viewer-1-starts
+    start:
+      actor: viewer-1
+      playback_id: playback-1
+      session_group: group-1
+      channel: failover-channel
+    await: { valid_frames: 2 }
+  - command_id: viewer-2-joins
+    start:
+      actor: viewer-2
+      playback_id: playback-2
+      session_group: group-2
+      channel: failover-channel
+    await: { valid_frames: 2 }
+  - command_id: switch-refused-two-viewers
+    api_request:
+      actor: viewer-1
+      method: POST
+      path: "/api/v1/me/streams/{uid}/failover-switch"
+      member_index: 1
+      expect_status: 409
+      assert_body_contains: "shared_stream_switch_refused"
+  - command_id: viewer-2-stops-via-api
+    api_request:
+      actor: viewer-2
+      method: DELETE
+      path: "/api/v1/me/streams/{uid}"
+      playback_id: playback-2
+      expect_status: 204
+  - command_id: viewer-1-switches-to-input-b
+    api_request:
+      actor: viewer-1
+      method: POST
+      path: "/api/v1/me/streams/{uid}/failover-switch"
+      member_index: 1
+      expect_status: 200
+    assert_manifest_contains: "EXT-X-DISCONTINUITY"
+  - command_id: viewer-1-stops
+    stop: { playback_id: playback-1 }
+policy_contract:
+  player_api: true
+  user_access_control: true
+  users:
+    viewer-1:
+      max_connections: 2
+      player_features:
+        source_switch: true
+    viewer-2:
+      max_connections: 2
+      player_features:
+        source_switch: true
+  admission_strategies: []

@@ -1,14 +1,14 @@
 use super::{
     acquire_result_after_wait, acquire_result_for_control, active_download_snapshot_for_worker,
     background_download_should_wait, broadcast_required_worker_mutation, broadcast_worker_mutation,
-    cancel_active_and_promote, capacities_have_free_slot, commit_acquired_download, continue_after_pause,
-    download_file, fail_active_download, finish_active_and_promote, mark_recording_metadata_notification,
+    cancel_active_and_promote, capacities_have_free_slot, commit_acquired_download, commit_failed_active_download,
+    continue_after_pause, download_file, finish_active_and_promote, mark_recording_metadata_notification,
     preemption_reason_for, prepare_active_retry, promote_ready_downloads, publish_recording_change,
     recording_deadline_instant, recording_execution_download, refresh_recording_progress, refused_before_start,
     requeue_active_download_for_retry, set_active_download_state, should_exit_worker_after_preempt,
     spawn_recording_notification_after_persist, take_active, wait_for_provider_slot, write_completion_sidecar,
-    ProviderAcquireResult, ProviderCapacities, QuotaGate, RetryCommit, DOWNLOAD_PREEMPTED_REASON,
-    LIVE_CAPACITY_WINDOW_CLOSED, MAINTENANCE_REASON, RECORDING_PROGRESS_UPDATE_INTERVAL,
+    ProviderAcquireResult, ProviderCapacities, QuotaGate, RecordingNotificationPlan, RetryCommit,
+    DOWNLOAD_PREEMPTED_REASON, LIVE_CAPACITY_WINDOW_CLOSED, MAINTENANCE_REASON, RECORDING_PROGRESS_UPDATE_INTERVAL,
 };
 use crate::recording::{
     recording_capacity::RecordingCapacityPort,
@@ -23,7 +23,7 @@ use crate::recording::{
     },
 };
 use log::{debug, error, info, warn};
-use shared::model::{EventSink, RecordingKind};
+use shared::model::{EventMessage, EventSink, RecordingFinishedState, RecordingKind};
 use std::{collections::HashMap, path::Path, sync::Arc};
 use tokio::{time, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -32,14 +32,38 @@ use tuliprox_core::{
     utils::{request, request::create_client},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DownloadExecutionResult {
     Completed,
     Paused,
     Cancelled,
     Preempted,
+    SharedJoinUnavailable { message: String, retryable: bool },
     Retryable(String),
     Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DownloadRetryDecision<'a> {
+    Retry(&'a str),
+    Failed(&'a str),
+}
+
+pub(super) fn download_retry_decision(result: &DownloadExecutionResult) -> Option<DownloadRetryDecision<'_>> {
+    match result {
+        DownloadExecutionResult::Retryable(err)
+        | DownloadExecutionResult::SharedJoinUnavailable { message: err, retryable: true } => {
+            Some(DownloadRetryDecision::Retry(err.as_str()))
+        }
+        DownloadExecutionResult::Failed(err)
+        | DownloadExecutionResult::SharedJoinUnavailable { message: err, retryable: false } => {
+            Some(DownloadRetryDecision::Failed(err.as_str()))
+        }
+        DownloadExecutionResult::Completed
+        | DownloadExecutionResult::Paused
+        | DownloadExecutionResult::Cancelled
+        | DownloadExecutionResult::Preempted => None,
+    }
 }
 
 pub(super) async fn requeue_active_download_for_capacity_wait(
@@ -70,6 +94,32 @@ pub(super) async fn requeue_active_download_for_capacity_wait(
         mutate_optional(download_queue, mutation).await?
     };
     Ok(result.unwrap_or(false))
+}
+
+async fn fail_active_download_worker<E: EventSink + Clone>(
+    dq: &RecordingQueue,
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    event_manager: &E,
+    uuid: &str,
+    reason: &str,
+) -> Result<bool, QueueMutationError> {
+    let clone_metadata = event_manager.has_event_receivers();
+    let committed = commit_failed_active_download(dq, uuid, reason, clone_metadata).await?;
+    if let Some(commit) = committed {
+        spawn_recording_notification_after_persist(app_config, client, commit.notification, true);
+        publish_recording_change(event_manager);
+        if let Some(metadata) = commit.metadata {
+            event_manager.emit(EventMessage::RecordingFinished {
+                id: uuid.to_string(),
+                state: RecordingFinishedState::Failed,
+                metadata,
+            });
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
@@ -144,6 +194,7 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                 info!("Starting download worker for active download {} ({})", active.uuid, active.filename);
             }
             tokio::spawn(async move {
+                let mut attempt_shared_join = true;
                 'worker: loop {
                     // One read: the uuid, pause flag and live window must describe
                     // the same task.
@@ -152,21 +203,54 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                             // A retry or a requeue of a recording that already ran is not a new
                             // start; maintenance only refuses new ones.
                             let first_start = !download.recording.provider_started;
-                            (download.paused, recording_deadline_instant(download), first_start)
+                            (
+                                download.paused,
+                                recording_deadline_instant(download),
+                                first_start,
+                                download.kind,
+                                download.recording.source.clone(),
+                                download.file_path.clone(),
+                            )
                         });
-                    if let Some((paused, window_deadline, first_start)) = active_head {
+                    if let Some((paused, window_deadline, first_start, download_kind, source, file_path)) = active_head
+                    {
                         if paused {
                             break;
                         }
 
+                        let (input_name, priority) =
+                            dq.active_scheduling_priority(&worker_uuid).await.unwrap_or((None, 0i8));
+
+                        let should_try_shared_join =
+                            attempt_shared_join && first_start && download_kind == RecordingKind::Live && {
+                                let sources = app_config.sources.load();
+                                sources
+                                    .get_target_by_name(&source.target_id)
+                                    .and_then(|t| t.options.as_ref())
+                                    .is_some_and(shared::model::ConfigTargetOptions::share_live_mpeg_ts_enabled)
+                            };
+
+                        let can_join_shared = if should_try_shared_join {
+                            let virtual_id = source.virtual_id.parse::<u32>().unwrap_or(0);
+                            capacity
+                                .shared_stream_available(
+                                    &source.target_id,
+                                    &source.input_name,
+                                    virtual_id,
+                                    source.cluster,
+                                )
+                                .await
+                        } else {
+                            false
+                        };
+
                         // Acquire a provider connection slot for this download.
                         // If the provider is at capacity, wait in the priority queue until signalled.
                         // Never proceeds without a slot when input_name is set — account bans otherwise.
-                        let provider_acquire_result = {
-                            let (input_name, priority) =
-                                dq.active_scheduling_priority(&worker_uuid).await.unwrap_or((None, 0i8));
-                            // Only live work has a window deadline; a transfer waits as long as it takes.
-                            if let Some(input_name) = input_name {
+                        let (provider_acquire_result, joined_shared) = if can_join_shared {
+                            (ProviderAcquireResult::Acquired(None), true)
+                        } else {
+                            let acquire_res = if let Some(input_name) = input_name {
                                 loop {
                                     if let Some(stopped) = acquire_result_for_control(*control_signal.read().await) {
                                         break stopped;
@@ -223,7 +307,8 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                 }
                             } else {
                                 ProviderAcquireResult::Acquired(None)
-                            }
+                            };
+                            (acquire_res, false)
                         };
 
                         let provider_handle = match provider_acquire_result {
@@ -254,22 +339,32 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                             ProviderAcquireResult::WindowClosed => {
                                 // No slot was ever acquired, so there is nothing
                                 // to release and nothing was written.
-                                if let Err(err) = broadcast_required_worker_mutation(
+                                if let Err(err) = fail_active_download_worker(
+                                    &dq,
+                                    &app_config,
+                                    &client,
                                     &event_manager,
-                                    fail_active_download(&dq, &worker_uuid, LIVE_CAPACITY_WINDOW_CLOSED).await,
-                                    "live capacity window closed",
-                                ) {
+                                    &worker_uuid,
+                                    LIVE_CAPACITY_WINDOW_CLOSED,
+                                )
+                                .await
+                                {
                                     error!("Download worker commit failed: {err}");
                                     break 'worker;
                                 }
                                 continue;
                             }
                             ProviderAcquireResult::Maintenance => {
-                                if let Err(err) = broadcast_required_worker_mutation(
+                                if let Err(err) = fail_active_download_worker(
+                                    &dq,
+                                    &app_config,
+                                    &client,
                                     &event_manager,
-                                    fail_active_download(&dq, &worker_uuid, MAINTENANCE_REASON).await,
-                                    "input maintenance",
-                                ) {
+                                    &worker_uuid,
+                                    MAINTENANCE_REASON,
+                                )
+                                .await
+                                {
                                     error!("Download worker commit failed: {err}");
                                     break 'worker;
                                 }
@@ -318,12 +413,18 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                             // Last point before a destination is opened.
                             if let Some(reason) = refused_before_start(&dq, &app_config, &worker_uuid).await {
                                 capacity.release(provider_handle).await;
-                                match fail_active_download(&dq, &worker_uuid, reason).await {
-                                    Ok(_) => publish_recording_change(&event_manager),
-                                    Err(err) => {
-                                        error!("Download worker commit failed: {err}");
-                                        break 'worker;
-                                    }
+                                if let Err(err) = fail_active_download_worker(
+                                    &dq,
+                                    &app_config,
+                                    &client,
+                                    &event_manager,
+                                    &worker_uuid,
+                                    reason,
+                                )
+                                .await
+                                {
+                                    error!("Download worker commit failed: {err}");
+                                    break 'worker;
                                 }
                                 continue;
                             }
@@ -333,6 +434,8 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                         &app_config,
                                         &download,
                                         provider_handle.as_ref(),
+                                        false,
+                                        None,
                                     ) {
                                         Ok(execution) => execution,
                                         Err(error) => break 'http_execution DownloadExecutionResult::Failed(error),
@@ -354,6 +457,8 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                         &app_config,
                                         &download,
                                         provider_handle.as_ref(),
+                                        joined_shared,
+                                        Some(priority),
                                     ) {
                                         Ok(execution_download) => execution_download,
                                         Err(err) => break 'recording_execution DownloadExecutionResult::Failed(err),
@@ -408,6 +513,9 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                         RecordingExecutionResult::Paused => DownloadExecutionResult::Paused,
                                         RecordingExecutionResult::Cancelled => DownloadExecutionResult::Cancelled,
                                         RecordingExecutionResult::Preempted => DownloadExecutionResult::Preempted,
+                                        RecordingExecutionResult::SharedJoinUnavailable { message, retryable } => {
+                                            DownloadExecutionResult::SharedJoinUnavailable { message, retryable }
+                                        }
                                         RecordingExecutionResult::Retryable(err) => {
                                             DownloadExecutionResult::Retryable(err)
                                         }
@@ -426,6 +534,34 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                             handle.get_close_reason() == tuliprox_core::model::ProviderCloseReason::PriorityPreempted
                         }) {
                             execution_result = DownloadExecutionResult::Preempted;
+                        }
+
+                        if joined_shared {
+                            let failed_with_503 =
+                                matches!(&execution_result, DownloadExecutionResult::SharedJoinUnavailable { .. });
+                            // Later attempts never try the shared join again.
+                            attempt_shared_join = false;
+                            let progress_path = recording_partial_path(&file_path);
+                            // Restart on an own slot only when the join captured nothing: a
+                            // shared stream that ended mid-recording keeps its partial file
+                            // and goes through the normal retry handling below.
+                            let captured_nothing =
+                                tokio::fs::metadata(&progress_path).await.map_or(true, |meta| meta.len() == 0);
+                            if failed_with_503 && captured_nothing {
+                                let _ = tokio::fs::remove_file(&progress_path).await;
+                                let _ = mutate_optional(&dq, |candidate| {
+                                    if let Some(active) =
+                                        candidate.active.iter_mut().find(|task| task.uuid == worker_uuid)
+                                    {
+                                        active.recording.provider_started = false;
+                                        Ok(Some(true))
+                                    } else {
+                                        Ok(None)
+                                    }
+                                })
+                                .await;
+                                continue 'worker;
+                            }
                         }
 
                         match execution_result {
@@ -454,26 +590,39 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                 let completion_limits = app_config.config.load().recording().map(|recording| {
                                     crate::recording::recording_service::quota_limits_from_config(
                                         recording.quota.as_ref(),
+                                        app_config.live_api_user_recording_quotas(),
                                     )
                                 });
+                                let mut completed_meta = None;
                                 let committed =
                                     finish_active_and_promote(&dq, &worker_uuid, completion_limits.as_ref(), |fd| {
                                         fd.finished = true;
                                         fd.paused = false;
-                                        fd.state = RecordingTaskState::Completed;
                                         fd.size = measured_bytes;
-                                        fd.error = None;
                                         fd.next_retry_at = None;
                                         let meta = &mut fd.recording;
                                         meta.measured_bytes = measured_bytes;
                                         meta.reserved_bytes = 0;
                                         meta.completed_at = Some(chrono::Utc::now().timestamp());
                                         meta.partial_relative_path = None;
-                                        mark_recording_metadata_notification(
-                                            &mut fd.recording,
-                                            LifecycleEvent::Completed,
-                                            None,
-                                        )
+                                        if fd.cancelled_by_owner {
+                                            fd.state = RecordingTaskState::Cancelled;
+                                            fd.error = Some("Cancelled by user".to_string());
+                                            RecordingNotificationPlan::empty()
+                                        } else {
+                                            fd.state = RecordingTaskState::Completed;
+                                            fd.error = None;
+                                            completed_meta = if event_manager.has_event_receivers() {
+                                                Some(Arc::new(fd.recording.clone()))
+                                            } else {
+                                                None
+                                            };
+                                            mark_recording_metadata_notification(
+                                                &mut fd.recording,
+                                                LifecycleEvent::Completed,
+                                                None,
+                                            )
+                                        }
                                     })
                                     .await;
                                 match committed {
@@ -485,6 +634,13 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                             true,
                                         );
                                         publish_recording_change(&event_manager);
+                                        if let Some(meta) = completed_meta {
+                                            event_manager.emit(EventMessage::RecordingFinished {
+                                                id: worker_uuid.clone(),
+                                                state: RecordingFinishedState::Completed,
+                                                metadata: meta,
+                                            });
+                                        }
                                     }
                                     Ok(None) => {}
                                     Err(err) => {
@@ -553,146 +709,149 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                     break;
                                 }
                             }
-                            DownloadExecutionResult::Retryable(err) => {
-                                capacity.release(provider_handle).await;
-                                let err = redact_url_tokens(&err);
-                                warn!("Recording transfer encountered a transient failure: {err}");
-                                let retry_commit = prepare_active_retry(&dq, &worker_uuid, &download_cfg, &err).await;
-                                let retry_delay_secs = match retry_commit {
-                                    Ok(Some(RetryCommit::Waiting { delay_secs, attempts })) => {
-                                        debug!("Download retry attempt {attempts} scheduled in {delay_secs}s");
-                                        publish_recording_change(&event_manager);
-                                        delay_secs
-                                    }
-                                    Ok(Some(RetryCommit::Failed(notification))) => {
-                                        spawn_recording_notification_after_persist(
-                                            &app_config,
-                                            &client,
-                                            notification,
-                                            true,
-                                        );
-                                        publish_recording_change(&event_manager);
-                                        if dq.active.read().await.iter().any(|task| task.uuid == worker_uuid) {
-                                            continue;
+                            other => match download_retry_decision(&other) {
+                                Some(DownloadRetryDecision::Retry(err)) => {
+                                    capacity.release(provider_handle).await;
+                                    let err = redact_url_tokens(err);
+                                    warn!("Recording transfer encountered a transient failure: {err}");
+                                    let retry_commit = prepare_active_retry(
+                                        &dq,
+                                        &worker_uuid,
+                                        &download_cfg,
+                                        &err,
+                                        event_manager.has_event_receivers(),
+                                    )
+                                    .await;
+                                    let retry_delay_secs = match retry_commit {
+                                        Ok(Some(RetryCommit::Waiting { delay_secs, attempts })) => {
+                                            debug!("Download retry attempt {attempts} scheduled in {delay_secs}s");
+                                            publish_recording_change(&event_manager);
+                                            delay_secs
                                         }
-                                        break;
-                                    }
-                                    Ok(None) => break,
-                                    Err(err) => {
-                                        error!("Failed to persist retry state: {err}");
-                                        break;
-                                    }
-                                };
-                                let mut retry_sleep = Box::pin(time::sleep(Duration::from_secs(retry_delay_secs)));
-                                let retry_wait_outcome = loop {
-                                    tokio::select! {
-                                        () = &mut retry_sleep => break DownloadExecutionResult::Retryable(String::new()),
-                                        () = control_notify.notified() => {
-                                            match *control_signal.read().await {
-                                                RecordingControl::Pause => break DownloadExecutionResult::Paused,
-                                                RecordingControl::Cancel => break DownloadExecutionResult::Cancelled,
-                                                RecordingControl::Restart => break DownloadExecutionResult::Preempted,
-                                                RecordingControl::None => {}
+                                        Ok(Some(RetryCommit::Failed { notification, metadata })) => {
+                                            spawn_recording_notification_after_persist(
+                                                &app_config,
+                                                &client,
+                                                notification,
+                                                true,
+                                            );
+                                            publish_recording_change(&event_manager);
+                                            if let Some(meta) = metadata {
+                                                event_manager.emit(EventMessage::RecordingFinished {
+                                                    id: worker_uuid.clone(),
+                                                    state: RecordingFinishedState::Failed,
+                                                    metadata: meta,
+                                                });
+                                            }
+                                            if dq.active.read().await.iter().any(|task| task.uuid == worker_uuid) {
+                                                continue;
+                                            }
+                                            break;
+                                        }
+                                        Ok(None) => break,
+                                        Err(err) => {
+                                            error!("Failed to persist retry state: {err}");
+                                            break;
+                                        }
+                                    };
+                                    let mut retry_sleep = Box::pin(time::sleep(Duration::from_secs(retry_delay_secs)));
+                                    let retry_wait_outcome = loop {
+                                        tokio::select! {
+                                            () = &mut retry_sleep => break DownloadExecutionResult::Retryable(String::new()),
+                                            () = control_notify.notified() => {
+                                                match *control_signal.read().await {
+                                                    RecordingControl::Pause => break DownloadExecutionResult::Paused,
+                                                    RecordingControl::Cancel => break DownloadExecutionResult::Cancelled,
+                                                    RecordingControl::Restart => break DownloadExecutionResult::Preempted,
+                                                    RecordingControl::None => {}
+                                                }
                                             }
                                         }
-                                    }
-                                };
+                                    };
 
-                                match retry_wait_outcome {
-                                    DownloadExecutionResult::Retryable(_) => {
-                                        if let Err(err) = broadcast_required_worker_mutation(
-                                            &event_manager,
-                                            requeue_active_download_for_retry(&dq, &worker_uuid, true).await,
-                                            "retry requeue",
-                                        ) {
-                                            error!("Download worker commit failed: {err}");
-                                            break 'worker;
+                                    match retry_wait_outcome {
+                                        DownloadExecutionResult::Retryable(_)
+                                        | DownloadExecutionResult::SharedJoinUnavailable { retryable: true, .. } => {
+                                            if let Err(err) = broadcast_required_worker_mutation(
+                                                &event_manager,
+                                                requeue_active_download_for_retry(&dq, &worker_uuid, true).await,
+                                                "retry requeue",
+                                            ) {
+                                                error!("Download worker commit failed: {err}");
+                                                break 'worker;
+                                            }
                                         }
-                                    }
-                                    DownloadExecutionResult::Paused => {
-                                        if let Err(err) = broadcast_required_worker_mutation(
-                                            &event_manager,
-                                            set_active_download_state(
-                                                &dq,
-                                                &worker_uuid,
-                                                RecordingTaskState::Paused,
-                                                None,
-                                                true,
-                                            )
-                                            .await,
-                                            "paused retry state",
-                                        ) {
-                                            error!("Download worker commit failed: {err}");
-                                            break 'worker;
+                                        DownloadExecutionResult::Paused => {
+                                            if let Err(err) = broadcast_required_worker_mutation(
+                                                &event_manager,
+                                                set_active_download_state(
+                                                    &dq,
+                                                    &worker_uuid,
+                                                    RecordingTaskState::Paused,
+                                                    None,
+                                                    true,
+                                                )
+                                                .await,
+                                                "paused retry state",
+                                            ) {
+                                                error!("Download worker commit failed: {err}");
+                                                break 'worker;
+                                            }
+                                            break;
                                         }
-                                        break;
-                                    }
-                                    DownloadExecutionResult::Cancelled => {
-                                        if let Err(err) = broadcast_required_worker_mutation(
-                                            &event_manager,
-                                            cancel_active_and_promote(&dq, &worker_uuid).await,
-                                            "cancelled retry state",
-                                        ) {
-                                            error!("Download worker commit failed: {err}");
-                                            break 'worker;
+                                        DownloadExecutionResult::Cancelled => {
+                                            if let Err(err) = broadcast_required_worker_mutation(
+                                                &event_manager,
+                                                cancel_active_and_promote(&dq, &worker_uuid).await,
+                                                "cancelled retry state",
+                                            ) {
+                                                error!("Download worker commit failed: {err}");
+                                                break 'worker;
+                                            }
                                         }
-                                    }
-                                    DownloadExecutionResult::Completed | DownloadExecutionResult::Failed(_) => {}
-                                    DownloadExecutionResult::Preempted => {
-                                        if let Err(err) = broadcast_required_worker_mutation(
-                                            &event_manager,
-                                            requeue_active_download_for_capacity_wait(
-                                                &dq,
-                                                &worker_uuid,
-                                                "Reloading download service configuration",
-                                                true,
-                                                Some(RecordingControl::Restart),
-                                            )
-                                            .await,
-                                            "configuration-reload retry requeue",
-                                        ) {
-                                            error!("Download worker commit failed: {err}");
-                                            break 'worker;
+                                        DownloadExecutionResult::Completed
+                                        | DownloadExecutionResult::Failed(_)
+                                        | DownloadExecutionResult::SharedJoinUnavailable { retryable: false, .. } => {}
+                                        DownloadExecutionResult::Preempted => {
+                                            if let Err(err) = broadcast_required_worker_mutation(
+                                                &event_manager,
+                                                requeue_active_download_for_capacity_wait(
+                                                    &dq,
+                                                    &worker_uuid,
+                                                    "Reloading download service configuration",
+                                                    true,
+                                                    Some(RecordingControl::Restart),
+                                                )
+                                                .await,
+                                                "configuration-reload retry requeue",
+                                            ) {
+                                                error!("Download worker commit failed: {err}");
+                                                break 'worker;
+                                            }
+                                            break;
                                         }
-                                        break;
                                     }
                                 }
-                            }
-                            DownloadExecutionResult::Failed(err) => {
-                                capacity.release(provider_handle).await;
-                                let err = redact_url_tokens(&err);
-                                warn!("Download failed permanently: {err}");
-                                let committed = finish_active_and_promote(&dq, &worker_uuid, None, |fd| {
-                                    fd.finished = true;
-                                    fd.paused = false;
-                                    fd.next_retry_at = None;
-                                    fd.error = Some(err.clone());
-                                    fd.state = RecordingTaskState::Failed;
-                                    fd.recording.reserved_bytes = 0;
-                                    mark_recording_metadata_notification(
-                                        &mut fd.recording,
-                                        LifecycleEvent::Failed,
-                                        Some(err),
+                                Some(DownloadRetryDecision::Failed(err)) => {
+                                    capacity.release(provider_handle).await;
+                                    let err = redact_url_tokens(err);
+                                    warn!("Download failed permanently: {err}");
+                                    if let Err(commit_err) = fail_active_download_worker(
+                                        &dq,
+                                        &app_config,
+                                        &client,
+                                        &event_manager,
+                                        &worker_uuid,
+                                        &err,
                                     )
-                                })
-                                .await;
-                                match committed {
-                                    Ok(Some(notification)) => {
-                                        spawn_recording_notification_after_persist(
-                                            &app_config,
-                                            &client,
-                                            notification,
-                                            true,
-                                        );
-                                        publish_recording_change(&event_manager);
-                                    }
-                                    Ok(None) => {}
-                                    Err(commit_err) => {
+                                    .await
+                                    {
                                         error!("Failed to persist failed download state: {commit_err}");
                                         break 'worker;
                                     }
                                 }
-                            }
+                                None => {}
+                            },
                         }
                     } else {
                         break;
@@ -836,4 +995,38 @@ pub(super) fn start_recording_scheduler<E: EventSink + Clone + 'static>(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_retry_decision_maps_execution_result_to_retry_or_failed() {
+        let unavail_failed = DownloadExecutionResult::SharedJoinUnavailable {
+            message: "HTTP 404 Not Found channel_unavailable".to_string(),
+            retryable: false,
+        };
+        let unavail_retry = DownloadExecutionResult::SharedJoinUnavailable {
+            message: "HTTP 503 Service Unavailable".to_string(),
+            retryable: true,
+        };
+        let regular_retry = DownloadExecutionResult::Retryable("Connection timed out".to_string());
+        let regular_failed = DownloadExecutionResult::Failed("HTTP 404 Not Found".to_string());
+
+        assert_eq!(
+            download_retry_decision(&unavail_failed),
+            Some(DownloadRetryDecision::Failed("HTTP 404 Not Found channel_unavailable"))
+        );
+        assert_eq!(
+            download_retry_decision(&unavail_retry),
+            Some(DownloadRetryDecision::Retry("HTTP 503 Service Unavailable"))
+        );
+        assert_eq!(download_retry_decision(&regular_retry), Some(DownloadRetryDecision::Retry("Connection timed out")));
+        assert_eq!(download_retry_decision(&regular_failed), Some(DownloadRetryDecision::Failed("HTTP 404 Not Found")));
+        assert_eq!(download_retry_decision(&DownloadExecutionResult::Completed), None);
+        assert_eq!(download_retry_decision(&DownloadExecutionResult::Paused), None);
+        assert_eq!(download_retry_decision(&DownloadExecutionResult::Cancelled), None);
+        assert_eq!(download_retry_decision(&DownloadExecutionResult::Preempted), None);
+    }
 }

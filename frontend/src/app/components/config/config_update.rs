@@ -79,6 +79,7 @@ fn update_webui_field(config: &mut ConfigDto, web_ui_cfg: WebUiConfigDto, modifi
         let existing = config.web_ui.as_mut().unwrap();
         existing.enabled = web_ui_cfg.enabled;
         existing.user_ui_enabled = web_ui_cfg.user_ui_enabled;
+        existing.player_api_enabled = web_ui_cfg.player_api_enabled;
         existing.combine_views_stats_streams = web_ui_cfg.combine_views_stats_streams;
         existing.landing_page = web_ui_cfg.landing_page;
 
@@ -262,6 +263,7 @@ mod tests {
         let mcp = McpConfigDto {
             enabled: true,
             read_only: false,
+            player_tools: shared::model::McpPlayerTools::Off,
             allowed_origins: vec!["https://claude.ai".to_string()],
             max_response_bytes: 4096,
             plugin_tools: false,
@@ -297,6 +299,7 @@ mod tests {
         let mcp = McpConfigDto {
             enabled: true,
             read_only: false,
+            player_tools: shared::model::McpPlayerTools::Off,
             allowed_origins: vec!["https://claude.ai".to_string()],
             max_response_bytes: 4096,
             plugin_tools: false,
@@ -374,6 +377,7 @@ mod tests {
                 WebUiConfigDto {
                     enabled: false,
                     user_ui_enabled: false,
+                    player_api_enabled: Some(false),
                     auth: Some(WebAuthConfigDto::default()),
                     content_security_policy: Some(ContentSecurityPolicyConfigDto::default()),
                     ..Default::default()
@@ -384,6 +388,7 @@ mod tests {
         let web_ui = config.web_ui.expect("webui config should be preserved");
         assert!(!web_ui.enabled);
         assert!(!web_ui.user_ui_enabled);
+        assert_eq!(web_ui.player_api_enabled, Some(false));
         assert_eq!(web_ui.path.as_deref(), Some("/dashboard"));
         assert_eq!(web_ui.player_server.as_deref(), Some("http://player.local"));
         assert_eq!(web_ui.auth.as_ref().map(|auth| auth.secret.as_str()), Some("top-secret"));
@@ -663,7 +668,10 @@ mod tests {
 
     #[test]
     fn update_config_round_trips_explicit_recording_and_cleans_empty_nested_blocks() {
-        let quota = RecordingQuotaConfigDto { shared_bytes: Some(1024), ..RecordingQuotaConfigDto::default() };
+        let quota = RecordingQuotaConfigDto {
+            shared: Some(shared::model::ByteSize::new("1024")),
+            ..RecordingQuotaConfigDto::default()
+        };
         let recording = RecordingConfigDto {
             retention: Some(RecordingRetentionConfigDto::default()),
             disk: Some(RecordingDiskConfigDto::default()),

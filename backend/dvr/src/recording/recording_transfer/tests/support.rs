@@ -32,7 +32,7 @@ pub(in crate::recording::recording_transfer::tests) fn scheduled_task(
     let meta = RecordingMetadata::new_live(
         RecordingOwner::User(UserId::from("web:alice")),
         RecordingVisibility::Private,
-        RecordingSource::new("t1", "v1", "in1"),
+        RecordingSource::new("t1", "v1", "in1").with_provider_id(Some("v1".to_string())),
         program_start,
         program_start + duration_secs,
         0,
@@ -42,6 +42,7 @@ pub(in crate::recording::recording_transfer::tests) fn scheduled_task(
         media_identity: String::new(),
         partition: RecordingPartition::default(),
         uuid: "task".to_string(),
+        vod_id: 0,
         kind,
         file_dir: PathBuf::from("/tmp"),
         file_path: PathBuf::from("/tmp/capture.ts"),
@@ -58,6 +59,8 @@ pub(in crate::recording::recording_transfer::tests) fn scheduled_task(
         retry_attempts: 0,
         next_retry_at: None,
         recording: meta,
+        clip: None,
+        cancelled_by_owner: false,
     })
     .expect("valid fixture")
 }
@@ -283,6 +286,7 @@ impl ConcurrentLiveFixture {
                 task.priority = 5;
                 task.input_name = Some(Arc::from("provider"));
                 task.recording.source.virtual_id = (42 + index).to_string();
+                task.recording.source.provider_id = Some((42 + index).to_string());
                 task.recording.source.input_name = "provider".to_string();
                 task.file_dir = dir.path().to_path_buf();
                 task.file_path = dir.path().join(format!("live-{index}.ts"));

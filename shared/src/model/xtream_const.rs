@@ -25,6 +25,19 @@ pub const XC_PROP_BACKDROP_PATH: &str = "backdrop_path";
 pub const XC_PROP_COVER: &str = "cover";
 pub const XC_TAG_CATEGORY_NAME: &str = "category_name";
 
+/// First stream id a recording is assigned in the Xtream VOD namespace of an API user.
+/// Xtream players parse stream ids as signed 32-bit integers, so the whole range stays
+/// below `i32::MAX`; no playlist virtual id reaches it because those count from one.
+pub const RECORDING_VOD_ID_BASE: u32 = 1_000_000_000;
+
+/// Category id under which API users find their recordings in the VOD category list.
+/// Reserved: when a provider category already carries it, that category wins and the
+/// synthetic one is omitted.
+pub const RECORDINGS_VOD_CATEGORY_ID: u32 = 2_000_000_000;
+
+/// Display name of the synthetic recording category.
+pub const RECORDINGS_VOD_CATEGORY_NAME: &str = "Recordings";
+
 pub const VIDEO_STREAM_FIELDS: [&str; 14] = [
     "release_date",
     "cast",

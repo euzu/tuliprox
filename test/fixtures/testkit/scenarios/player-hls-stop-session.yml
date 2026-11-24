@@ -1,0 +1,56 @@
+schema_version: 1
+name: player-hls-stop-session
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: true
+    share_live_mpeg_ts: false
+    hls_startup_mode: conservative
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: player-hls-stop-session
+  hls_profile:
+    prefix_delay_millis: 1000
+    window_segments: 6
+    missing_head_segments: 0
+actors:
+  - id: viewer
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/viewer
+channels:
+  hls-channel: { origin_marker: 17, protocol: hls }
+steps:
+  - command_id: start-hls
+    start:
+      actor: viewer
+      playback_id: hls-play
+      session_group: group-1
+      channel: hls-channel
+      expect_evicted: true
+    await: { valid_frames: 2 }
+  - command_id: stop-via-api
+    api_request:
+      actor: viewer
+      method: DELETE
+      path: "/api/v1/me/streams/{uid}"
+      playback_id: hls-play
+      expect_status: 204
+  - command_id: verify-terminal-manifest
+    api_request:
+      actor: viewer
+      method: GET
+      url: "{last_playback_url}"
+      expect_status: 404
+      assert_headers:
+        x-tuliprox-fallback: hls_session_or_lease_expired
+policy_contract:
+  player_api: true
+  user_access_control: true
+  users:
+    viewer: { max_connections: 2 }
+  admission_strategies: []

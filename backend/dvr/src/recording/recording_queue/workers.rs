@@ -46,7 +46,7 @@ impl RecordingQueue {
     ) {
         lock_unpoisoned(&self.workers).retain(|uuid, worker| {
             queued.iter().chain(scheduled).chain(active).any(|task| task.uuid == *uuid)
-                || !worker.running.try_read().is_ok_and(|running| !*running)
+                || worker.running.try_read().is_ok_and(|running| *running)
         });
     }
 
@@ -100,11 +100,16 @@ impl RecordingQueue {
         let _mutation = self.mutation_guard.lock().await;
         if let Some(worker) = self.existing_worker(uuid) {
             *worker.running.write().await = false;
-            let queued = self.queue.lock().await.iter().any(|task| task.uuid == uuid);
-            let active = self.active.read().await.iter().any(|task| task.uuid == uuid);
-            if !queued && !active {
-                lock_unpoisoned(&self.workers).remove(uuid);
-            }
+            let queued = self.queue.lock().await;
+            let scheduled = self.scheduled.read().await;
+            let active = self.active.read().await;
+            lock_unpoisoned(&self.workers).retain(|k, w| {
+                if Arc::ptr_eq(w, &worker) {
+                    queued.iter().chain(scheduled.iter()).chain(active.iter()).any(|task| task.uuid == *k)
+                } else {
+                    true
+                }
+            });
         }
         // A resume/requeue may have raced the previous worker's final iteration.
         self.queue_changed.notify_one();

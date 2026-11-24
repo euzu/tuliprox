@@ -341,7 +341,8 @@ mod tests {
             group_failover: None,
         })
         .await
-        .expect("test stream admission should succeed");
+        .expect("test stream admission should succeed")
+        .stream;
         Response::new(Body::from_stream(stream))
     }
 

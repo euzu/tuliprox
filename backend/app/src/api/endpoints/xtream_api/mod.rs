@@ -7,22 +7,26 @@ use crate::{
             admission_failure_response, blocks_new_playback, coalesce_byte_stream, create_api_proxy_user,
             create_catchup_session_key, create_m3u_catchup_session_key, create_playback_session_fingerprint,
             create_session_fingerprint, empty_json_response_as_array, empty_json_response_as_object,
+            evaluate_free_join,
             failover_group::{archive_member_order, handle_stream_failure_for_group, resolve_playback_source},
             force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
-            get_user_target_by_credentials, internal_server_error, is_running_playback, is_seekable_media_request,
-            is_session_based_playback, is_stream_share_enabled, local_stream_response, maintenance_rejection_response,
+            get_user_target_by_credentials, internal_server_error, is_dedicated_requested, is_running_playback,
+            is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
+            maintenance_rejection_response, recording_vod_applies, recording_vod_documents, recording_vod_info,
             redirect, redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
-            resource_proxy_response, resource_redirect_or_proxy, separate_number_and_remainder,
+            resource_proxy_response, resource_redirect_or_proxy, separate_number_and_remainder, serve_recording_vod,
             should_allow_exhausted_shared_reconnect, stream_response, stream_response_with_provider_handle,
-            try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams,
+            try_option_bad_request, try_result_bad_request, try_unwrap_body, visible_recording_by_vod_id,
+            AppendRecordingVod, RedirectParams,
         },
         endpoints::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
                 hls_custom_video_manifest_response, m3u_archive_epg_reference_ts,
-                m3u_catchup_epg_reference_from_session_token, user_allows_entry_content, HlsEntryOutputScope,
-                HlsEntryStreamContext, HlsRequestStage,
+                m3u_catchup_epg_reference_from_session_token, user_allows_entry_filter, user_allows_entry_output,
+                HlsEntryOutputScope, HlsEntryStreamContext, HlsRequestStage,
             },
+            recording_api::AppRecordingVisibility,
             xmltv_api::{get_empty_epg_response, get_epg_path_for_target_by_type, serve_short_epg},
         },
         model::{
@@ -36,7 +40,7 @@ use crate::{
         xtream::{self, create_vod_info_from_item},
     },
     model::{
-        xtream_mapping_option_from_target_options, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource,
+        xtream_mapping_option_from_target_options, AppConfig, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource,
         ProxyUserCredentials,
     },
     repository::{
@@ -63,9 +67,10 @@ use shared::{
     defaults::{HLS_EXT, TS_EXT},
     error::TuliproxError,
     model::{
-        create_stream_channel_with_type, ConnectFailureReason, PlaylistEntry, PlaylistItemType, ProxyType,
-        ShortEpgResultDto, StreamProperties, TargetType, UserConnectionPermission, VirtualId, XtreamCluster,
-        XtreamPlaylistItem,
+        create_stream_channel_with_type,
+        xtream_const::{RECORDINGS_VOD_CATEGORY_ID, RECORDING_VOD_ID_BASE},
+        ConnectFailureReason, PlaylistEntry, PlaylistItemType, ProxyType, ShortEpgResultDto, StreamProperties,
+        TargetType, UserConnectionPermission, VirtualId, XtreamCluster, XtreamPlaylistItem,
     },
     utils::{
         deserialize_as_string, extract_extension_from_url, generate_provider_playlist_uuid, sanitize_sensitive_info,
@@ -227,11 +232,15 @@ async fn get_user_info(user: &ProxyUserCredentials, app_state: &AppState) -> Opt
     let server_info = app_state.app_config.get_user_server_info(user)?;
     let active_connections = app_state.active_users.user_connections(&user.username).await;
 
+    let config = app_state.app_config.config.load();
+    let player_api_path = crate::api::auth_middleware::player_api_path(&config, user);
+
     Some(XtreamAuthorizationResponse::new(
         &server_info,
         user,
         active_connections,
-        app_state.app_config.config.load().user_access_control,
+        config.user_access_control,
+        player_api_path,
     ))
 }
 
@@ -273,7 +282,6 @@ async fn lookup_catchup_parent_virtual_id(
     .ok()?
 }
 
-#[allow(clippy::too_many_lines)]
 async fn xtream_player_api_stream(
     fingerprint: &Fingerprint,
     req_headers: &HeaderMap,
@@ -281,6 +289,20 @@ async fn xtream_player_api_stream(
     api_req: &UserApiRequest,
     stream_req: ApiStreamRequest<'_>,
     user_target: Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)>,
+) -> impl IntoResponse + Send {
+    xtream_player_api_stream_with_query(fingerprint, req_headers, app_state, api_req, stream_req, user_target, None)
+        .await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn xtream_player_api_stream_with_query(
+    fingerprint: &Fingerprint,
+    req_headers: &HeaderMap,
+    app_state: &Arc<AppState>,
+    api_req: &UserApiRequest,
+    stream_req: ApiStreamRequest<'_>,
+    user_target: Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)>,
+    raw_query: Option<&str>,
 ) -> impl IntoResponse + Send {
     // if log::log_enabled!(log::Level::Debug) {
     //     debug!(
@@ -358,6 +380,18 @@ async fn xtream_player_api_stream(
             ResolvedStreamTarget::Group(group) => member_to_xtream_item(group, 0),
             ResolvedStreamTarget::Member { group, index } => member_to_xtream_item(group, *index),
             ResolvedStreamTarget::Item => {
+                // The id belongs to no playlist entry. A recording id may still answer;
+                // `None` means no recording to serve, so the regular fallback below runs.
+                if stream_req.context == ApiStreamContext::Movie
+                    && req_virtual_id >= RECORDING_VOD_ID_BASE
+                    && recording_vod_applies(app_state, &user, &target)
+                {
+                    if let Some(response) =
+                        serve_recording_vod(fingerprint, req_headers, app_state, &user, &target, req_virtual_id).await
+                    {
+                        return response;
+                    }
+                }
                 error!("Failed to read xtream item for stream id {req_virtual_id}: {err}");
                 if is_hls_manifest_request {
                     return hls_custom_video_manifest_response(
@@ -376,6 +410,23 @@ async fn xtream_player_api_stream(
                 .into_response();
             }
         },
+    };
+
+    // The content filter judges the requested entry once: for a member VID the group's playlist entry, never the
+    // member rows that timeshift candidates or member playback are built from.
+    let content_allowed = if user.t_filter.is_none() {
+        true
+    } else {
+        crate::api::api_utils::failover_group::content_filter_item_for_xtream(
+            &resolved_target,
+            &pli,
+            &app_state.app_config,
+            &app_state.playlists,
+            &target,
+            None,
+        )
+        .await
+        .is_some_and(|item| user_allows_entry_filter(&user, item.as_ref()))
     };
 
     let candidates: Vec<XtreamPlaylistItem> =
@@ -417,7 +468,7 @@ async fn xtream_player_api_stream(
             } else {
                 HlsEntryOutputScope::ItemType(pli.item_type)
             };
-        let output_allowed = user_allows_entry_content(&user, output_scope, &pli);
+        let output_allowed = content_allowed && user_allows_entry_output(&user, output_scope);
         if !output_allowed {
             if is_last {
                 if is_hls_manifest_request {
@@ -728,7 +779,13 @@ async fn xtream_player_api_stream(
             virtual_id.get(),
             session_url.as_ref(),
         );
-        if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
+        let may_free_join =
+            evaluate_free_join(app_state, &user, connection_permission, is_stream_share_enabled(item_type, &target))
+                .await;
+        if connection_permission == UserConnectionPermission::Exhausted
+            && !allow_exhausted_shared_reconnect
+            && !may_free_join
+        {
             if connection_admission.is_reentry_suppressed() {
                 return reentry_suppressed_response();
             }
@@ -838,6 +895,7 @@ async fn xtream_player_api_stream(
             .map(|b| b.member_index);
         let source = resolve_playback_source(&resolved_target, is_live, &input, &stream_url, bound_prefer);
 
+        let dedicated = is_dedicated_requested(raw_query);
         let outcome = stream_response(
             fingerprint,
             app_state,
@@ -853,6 +911,8 @@ async fn xtream_player_api_stream(
             connection_kind,
             allow_exhausted_shared_reconnect,
             grace_mode,
+            may_free_join,
+            dedicated,
         )
         .await;
 
@@ -875,17 +935,14 @@ async fn xtream_player_api_stream(
     last_response.unwrap_or_else(|| axum::http::StatusCode::BAD_REQUEST.into_response())
 }
 
-pub(crate) fn get_query_path(
+pub(crate) fn get_query_path_with_sources(
     action_path: &str,
     stream_ext: Option<&str>,
     pli: &XtreamPlaylistItem,
-    app_state: &Arc<AppState>,
+    sources: &tuliprox_core::model::SourcesConfig,
 ) -> (String, String) {
     let discard_extension = if pli.item_type.is_live() {
-        app_state
-            .app_config
-            .sources
-            .load()
+        sources
             .get_input_by_name(&pli.input_name)
             .as_ref()
             .is_some_and(|i| i.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension))
@@ -910,6 +967,16 @@ pub(crate) fn get_query_path(
         concat_string!(path.as_ref(), "/", &provider_id, &extension)
     };
     (query_path, extension)
+}
+
+pub(crate) fn get_query_path(
+    action_path: &str,
+    stream_ext: Option<&str>,
+    pli: &XtreamPlaylistItem,
+    app_state: &Arc<AppState>,
+) -> (String, String) {
+    let sources = app_state.app_config.sources.load();
+    get_query_path_with_sources(action_path, stream_ext, pli, sources.as_ref())
 }
 
 fn resolve_xtream_playback_extension(stream_ext: Option<&str>, pli: &XtreamPlaylistItem) -> Option<String> {
@@ -1058,6 +1125,8 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
         InternalPlaybackSource::WebUi,
         stream_req,
         None,
+        false,
+        None,
     )
     .await
     .into_response()
@@ -1068,7 +1137,7 @@ pub(in crate::api) enum InternalPlaybackSource {
     Recording(Arc<ConfigInput>),
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
     fingerprint: &Fingerprint,
     req_headers: &HeaderMap,
@@ -1077,6 +1146,8 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
     source: InternalPlaybackSource,
     stream_req: ApiStreamRequest<'_>,
     provider_allocation_id: Option<u64>,
+    join_shared: bool,
+    priority: Option<i8>,
 ) -> impl IntoResponse + Send {
     if stream_req.access_token
         && !verify_access_token(
@@ -1146,11 +1217,14 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
 
-        let user = if is_recording {
+        let mut user = if is_recording {
             crate::api::api_utils::create_recording_proxy_user(app_state)
         } else {
             create_api_proxy_user(app_state)
         };
+        if let Some(p) = priority {
+            user.priority = p;
+        }
 
         if pli.item_type.is_local() {
             let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id.get(), false);
@@ -1288,6 +1362,9 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             false,
             None,
             preacquired_provider_handle,
+            join_shared,
+            false,
+            false,
         )
         .await;
 
@@ -1380,17 +1457,19 @@ macro_rules! create_xtream_player_api_stream {
         async fn $fn_name(
             fingerprint: Fingerprint,
             req_headers: HeaderMap,
+            axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
             axum::extract::Path((username, password, stream_id)): axum::extract::Path<(String, String, String)>,
             axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
             axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
         ) -> impl IntoResponse + Send {
-            xtream_player_api_stream(
+            xtream_player_api_stream_with_query(
                 &fingerprint,
                 &req_headers,
                 &app_state,
                 &api_req,
                 ApiStreamRequest::from($context, &username, &password, &stream_id, ""),
                 None,
+                raw_query.as_deref(),
             )
             .await
             .into_response()
@@ -1572,6 +1651,37 @@ pub async fn xtream_get_stream_info_response(
         xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, Some(cluster))
             .await
     else {
+        // A recording published under this id answers when no playlist item does. Only
+        // the reserved id range is consulted, so provider movie ids keep their path.
+        if cluster == XtreamCluster::Video
+            && virtual_id >= RECORDING_VOD_ID_BASE
+            && recording_vod_applies(app_state, user, target)
+        {
+            let visibility = AppRecordingVisibility::new(app_state);
+            if let Some(entry) = visible_recording_by_vod_id(app_state, user, virtual_id, &visibility).await {
+                match target.get_xtream_output() {
+                    Some(xtream_output) => {
+                        let options = xtream_mapping_option_from_target_options(
+                            target,
+                            xtream_output,
+                            &app_state.app_config,
+                            user,
+                            app_state.get_encrypt_secret(),
+                        );
+                        match options.and_then(|options| recording_vod_info(&entry, &options)) {
+                            Ok(content) => {
+                                return try_unwrap_body!(axum::response::Response::builder()
+                                    .status(axum::http::StatusCode::OK)
+                                    .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.as_ref())
+                                    .body(axum::body::Body::from(content)));
+                            }
+                            Err(err) => error!("Failed to build recording VOD info for {}: {err}", entry.uuid),
+                        }
+                    }
+                    None => error!("Target {} has no xtream output for recording VOD info", target.name),
+                }
+            }
+        }
         return empty_stream_info_response(cluster);
     };
 
@@ -1641,7 +1751,7 @@ pub async fn xtream_get_stream_info_response(
                 {
                     return try_unwrap_body!(axum::response::Response::builder()
                         .status(axum::http::StatusCode::OK)
-                        .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+                        .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.as_ref())
                         .body(axum::body::Body::from(content)));
                 }
             }
@@ -1654,7 +1764,7 @@ pub async fn xtream_get_stream_info_response(
             let content = create_vod_info_from_item(&pli, configured_container_extension);
             try_unwrap_body!(axum::response::Response::builder()
                 .status(axum::http::StatusCode::OK)
-                .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+                .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.as_ref())
                 .body(axum::body::Body::from(content)))
         }
         XtreamCluster::Live | XtreamCluster::Series => {
@@ -1744,7 +1854,7 @@ async fn xtream_get_short_epg(
                         {
                             Ok((content, _)) => (
                                 axum::http::StatusCode::OK,
-                                [(axum::http::header::CONTENT_TYPE.to_string(), mime::APPLICATION_JSON.to_string())],
+                                [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.as_ref())],
                                 content,
                             )
                                 .into_response(),
@@ -1790,38 +1900,88 @@ async fn xtream_player_api_handle_content_action(
     } else {
         None
     };
-    match xtream_read_playlist_categories(&app_state.app_config, target_name, cluster).await {
-        Ok(content) => {
-            let filter =
-                user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
-            match serde_json::from_str::<Vec<XtreamCategoryEntry>>(&content) {
-                Ok(mut categories) => {
-                    if let Some(fltr) = filter {
-                        categories.retain(|category| fltr.contains(&category.category_id));
+    // The collision check reads the provider categories before any user filter:
+    // whether the provider owns the reserved recording id must not depend on which
+    // categories this particular user is allowed to see.
+    let (mut categories, provider_owns_recording_category) =
+        match xtream_read_playlist_categories(&app_state.app_config, target_name, cluster).await {
+            Ok(content) => {
+                let filter =
+                    user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
+                match serde_json::from_str::<Vec<XtreamCategoryEntry>>(&content) {
+                    Ok(mut categories) => {
+                        let provider_owns_recording_category = provider_publishes_reserved_vod_category(&categories);
+                        if let Some(fltr) = filter {
+                            categories.retain(|category| fltr.contains(&category.category_id));
+                        }
+                        // Hide categories fully filtered out by the user's content filter.
+                        if let Some(visible) = crate::api::endpoints::user_visibility::collect_visible_category_ids(
+                            &app_state.app_config,
+                            target,
+                            cluster,
+                            user,
+                        )
+                        .await
+                        {
+                            categories.retain(|category| {
+                                category.category_id.parse::<u32>().is_ok_and(|id| visible.contains(&id))
+                            });
+                        }
+                        (categories, provider_owns_recording_category)
                     }
-                    // Hide categories fully filtered out by the user's content filter.
-                    if let Some(visible) = crate::api::endpoints::user_visibility::collect_visible_category_ids(
-                        &app_state.app_config,
-                        target,
-                        cluster,
-                        user,
-                    )
-                    .await
-                    {
-                        categories.retain(|category| {
-                            category.category_id.parse::<u32>().is_ok_and(|id| visible.contains(&id))
-                        });
+                    Err(err) => {
+                        error!("Failed to parse {cluster} categories for target '{target_name}': {err}");
+                        (Vec::new(), false)
                     }
-                    return Some(axum::Json(categories).into_response());
                 }
-                Err(err) => error!("Failed to parse {cluster} categories for target '{target_name}': {err}"),
             }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => error!("Failed to read {cluster} categories for target '{target_name}': {err}"),
-    }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
+            Err(err) => {
+                error!("Failed to read {cluster} categories for target '{target_name}': {err}");
+                (Vec::new(), false)
+            }
+        };
 
-    Some(api_utils::empty_json_list_response().into_response())
+    // Appended after the filters: the recording category is reserved for the
+    // synthetic entries, and a provider category carrying the same id wins.
+    if cluster == XtreamCluster::Video
+        && !provider_owns_recording_category
+        && recording_vod_applies(app_state, user, target)
+    {
+        categories.push(XtreamCategoryEntry {
+            category_id: RECORDINGS_VOD_CATEGORY_ID.to_string(),
+            category_name: shared::model::xtream_const::RECORDINGS_VOD_CATEGORY_NAME.to_string(),
+            parent_id: 0,
+        });
+    }
+    if categories.is_empty() {
+        return Some(api_utils::empty_json_list_response().into_response());
+    }
+    Some(axum::Json(categories).into_response())
+}
+
+/// Whether a provider category list contains the reserved recording category ID.
+///
+/// Invariant: the provider always wins. If the provider already publishes a
+/// category with the reserved id, synthetic recordings yield to it — in the
+/// category list and in the stream listing alike, judged on the same unfiltered
+/// list.
+fn provider_publishes_reserved_vod_category(categories: &[XtreamCategoryEntry]) -> bool {
+    categories.iter().any(|category| category.category_id.parse::<u32>() == Ok(RECORDINGS_VOD_CATEGORY_ID))
+}
+
+/// The same collision check for a caller that has not read the categories yet.
+///
+/// A category file that cannot be read or parsed answers `false`: without a
+/// provider category the reserved id is free.
+async fn target_vod_categories_contain_reserved_id(app_config: &AppConfig, target_name: &str) -> bool {
+    let Ok(content) = xtream_read_playlist_categories(app_config, target_name, XtreamCluster::Video).await else {
+        return false;
+    };
+    let Ok(categories) = serde_json::from_str::<Vec<XtreamCategoryEntry>>(&content) else {
+        return false;
+    };
+    provider_publishes_reserved_vod_category(&categories)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1856,6 +2016,27 @@ async fn xtream_get_catchup_response(
 
     let classified = classify_virtual_id(&app_state.app_config, &app_state.playlists, target, pli.virtual_id).await;
     let group_parent_vid = classified.group().map(|g| g.group_vid);
+    // Content filter: hidden items expose no catch-up table either, so a
+    // plan-tier-restricted user cannot probe hidden channels via catchup.
+    let content_allowed = if user.t_filter.is_none() {
+        true
+    } else {
+        crate::api::api_utils::failover_group::content_filter_item_for_xtream(
+            &classified,
+            &pli,
+            &app_state.app_config,
+            &app_state.playlists,
+            target,
+            None,
+        )
+        .await
+        .is_some_and(|item| user_allows_entry_filter(user, item.as_ref()))
+    };
+
+    if !content_allowed {
+        return axum::Json(json!(ShortEpgResultDto::default())).into_response();
+    }
+
     if let Some(group) = classified.group() {
         let start_ts = if start_time.is_empty() {
             chrono::Utc::now().timestamp()
@@ -1866,12 +2047,6 @@ async fn xtream_get_catchup_response(
         if let Some(&best_idx) = order.first() {
             pli = member_to_xtream_item(group, best_idx);
         }
-    }
-
-    // Content filter: hidden items expose no catch-up table either, so a
-    // plan-tier-restricted user cannot probe hidden channels via catchup.
-    if !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli))) {
-        return axum::Json(json!(ShortEpgResultDto::default())).into_response();
     }
 
     let input = try_option_bad_request!(app_state.app_config.get_input_by_name(&pli.input_name));
@@ -1978,7 +2153,7 @@ async fn xtream_get_catchup_response(
         |result| {
             try_unwrap_body!(axum::response::Response::builder()
                 .status(axum::http::StatusCode::OK)
-                .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+                .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.as_ref())
                 .body(result))
         },
     )
@@ -2037,7 +2212,7 @@ async fn xtream_player_api(
     }
 
     // Process specific playlist actions
-    let (skip_live, skip_vod, skip_series) =
+    let (skip_live_input, skip_vod_input, skip_series_input) =
         if let Some(inputs) = app_state.app_config.get_inputs_for_target(&target.name) {
             inputs.iter().fold((true, true, true), |acc, i| {
                 let (live, vod, series) = acc;
@@ -2050,9 +2225,10 @@ async fn xtream_player_api(
         } else {
             (false, false, false)
         };
-    let skip_live = skip_live || !user.allows_cluster(XtreamCluster::Live);
-    let skip_vod = skip_vod || !user.allows_cluster(XtreamCluster::Video);
-    let skip_series = skip_series || !user.allows_cluster(XtreamCluster::Series);
+    let vod_cluster_blocked = !user.allows_cluster(XtreamCluster::Video);
+    let skip_live = skip_live_input || !user.allows_cluster(XtreamCluster::Live);
+    let skip_vod = skip_vod_input || vod_cluster_blocked;
+    let skip_series = skip_series_input || !user.allows_cluster(XtreamCluster::Series);
 
     match action {
         crate::model::XC_ACTION_GET_ACCOUNT_INFO => {
@@ -2075,8 +2251,11 @@ async fn xtream_player_api(
             );
         }
         crate::model::XC_ACTION_GET_VOD_INFO => {
+            let is_recording_vod = api_req.vod_id.trim().parse::<u32>().is_ok_and(|id| id >= RECORDING_VOD_ID_BASE)
+                && recording_vod_applies(app_state, &user, &target);
+            let skip_vod_info = vod_cluster_blocked || (skip_vod_input && !is_recording_vod);
             skip_json_response_if_flag_set!(
-                skip_vod,
+                skip_vod_info,
                 xtream_get_stream_info_response(app_state, &user, &target, api_req.vod_id.trim(), XtreamCluster::Video)
                     .await
             );
@@ -2109,6 +2288,36 @@ async fn xtream_player_api(
         xtream_player_api_handle_content_action(app_state, &target, action, category_id, &user).await
     {
         return response.into_response();
+    }
+
+    // Recordings are only gathered for the VOD listing, and only behind the gate. The
+    // gate is cheap; it compares fields and reads no recording state.
+    let recordings_listed = action == crate::model::XC_ACTION_GET_VOD_STREAMS
+        && (category_id.is_none() || category_id == Some(RECORDINGS_VOD_CATEGORY_ID))
+        && recording_vod_applies(app_state, &user, &target);
+    let mut recording_vod_documents = if recordings_listed {
+        let documents = recording_vod_documents(app_state, &user, &target).await.unwrap_or_else(|err| {
+            error!("Failed to build recording VOD entries for target {}: {err}", target.name);
+            Vec::new()
+        });
+        if !documents.is_empty() && target_vod_categories_contain_reserved_id(&app_state.app_config, &target.name).await
+        {
+            None
+        } else {
+            Some(documents)
+        }
+    } else {
+        None
+    };
+
+    // A category that only holds recordings is answered without scanning the playlist.
+    if category_id == Some(RECORDINGS_VOD_CATEGORY_ID) {
+        if let Some(documents) = recording_vod_documents.take() {
+            let empty_base = stream::empty::<Result<(String, bool), TuliproxError>>();
+            return xtream_json_entries_response(xtream_create_content_stream(AppendRecordingVod::new(
+                empty_base, documents,
+            )));
+        }
     }
 
     let result = match action {
@@ -2152,30 +2361,46 @@ async fn xtream_player_api(
     };
 
     match result {
-        Some(result_iter) => {
-            match result_iter {
-                Ok(xtream_iter) => {
-                    // Convert the iterator into a stream of `Bytes`
-                    let content_stream = xtream_create_content_stream(xtream_iter);
-                    try_unwrap_body!(axum::response::Response::builder()
-                        .status(axum::http::StatusCode::OK)
-                        .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
-                        .body(axum::body::Body::from_stream(content_stream)))
-                }
-                Err(err) => {
-                    error!("Failed response for xtream target: {} action: {} error: {}", target.name, action, err);
-                    get_user_info(&user, app_state).await.map_or_else(
-                        || axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
-                        |info| axum::response::Json(info).into_response(),
-                    )
-                }
+        Some(result_iter) => match result_iter {
+            Ok(xtream_iter) => match recording_vod_documents {
+                Some(documents) => xtream_json_entries_response(xtream_create_content_stream(AppendRecordingVod::new(
+                    xtream_iter,
+                    documents,
+                ))),
+                None => xtream_json_entries_response(xtream_create_content_stream(xtream_iter)),
+            },
+            Err(err) => {
+                error!("Failed response for xtream target: {} action: {} error: {}", target.name, action, err);
+                get_user_info(&user, app_state).await.map_or_else(
+                    || axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                    |info| axum::response::Json(info).into_response(),
+                )
             }
-        }
-        None => {
+        },
+        None => match recording_vod_documents {
+            // The playlist part honours `SkipVod`; the recording part does not, so a
+            // skipped playlist still answers with the recordings alone.
+            Some(documents) => {
+                let empty_base = stream::empty::<Result<(String, bool), TuliproxError>>();
+                xtream_json_entries_response(xtream_create_content_stream(AppendRecordingVod::new(
+                    empty_base, documents,
+                )))
+            }
             // Some players fail on NoContent, so we return an empty array
-            api_utils::empty_json_list_response().into_response()
-        }
+            None => api_utils::empty_json_list_response().into_response(),
+        },
     }
+}
+
+/// The `get_streams` response for a stream of JSON array entries.
+fn xtream_json_entries_response<S>(content_stream: S) -> axum::response::Response
+where
+    S: Stream<Item = Result<Bytes, String>> + Send + 'static,
+{
+    try_unwrap_body!(axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.as_ref())
+        .body(axum::body::Body::from_stream(content_stream)))
 }
 
 fn xtream_create_content_stream<S>(xtream_iter: S) -> impl Stream<Item = Result<Bytes, String>>

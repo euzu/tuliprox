@@ -1,14 +1,14 @@
 use crate::{
     app::components::{
-        config::use_emit_mapped, input::Input, number_input::UnsignedInputError, Card, DropDownOption,
-        DropDownSelection, FieldLabel, KeyValueEditor, Select, ToggleSwitch,
+        config::use_emit_mapped, input::Input, number_input::UnsignedInputError, parse_positive_byte_size, Card,
+        DropDownOption, DropDownSelection, FieldLabel, KeyValueEditor, Select, ToggleSwitch, MSG_BYTE_SIZE_INVALID,
     },
     generate_form_reducer,
     i18n::use_translation,
     use_default_form_reducer,
 };
 use shared::model::{
-    RecordingConfigDto, RecordingContainerFormat, RecordingDiskConfigDto, RecordingNotificationConfigDto,
+    ByteSize, RecordingConfigDto, RecordingContainerFormat, RecordingDiskConfigDto, RecordingNotificationConfigDto,
     RecordingQuotaConfigDto, RecordingRetentionConfigDto,
 };
 use std::{collections::HashMap, rc::Rc};
@@ -59,9 +59,9 @@ generate_form_reducer!(
     state: RecordingQuotaFormState { form: RecordingQuotaConfigDto },
     action_name: RecordingQuotaFormAction,
     fields {
-        DefaultPrivateBytes => default_private_bytes: Option<u64>,
-        PerUserBytes => per_user_bytes: HashMap<String, u64>,
-        SharedBytes => shared_bytes: Option<u64>,
+        DefaultPrivate => default_private: Option<ByteSize>,
+        PerUser => per_user: HashMap<String, ByteSize>,
+        Shared => shared: Option<ByteSize>,
     }
 );
 
@@ -112,21 +112,38 @@ pub fn assemble_recording_config(
     direct
 }
 
-pub fn quota_entries_to_strings(entries: &HashMap<String, u64>) -> HashMap<String, String> {
+/// Maps a recording descriptor id to a stable help explanation id by card / DTO group.
+fn field_help_id(id: &str) -> String {
+    match id {
+        "default_private" | "shared" | "per_user" => format!("RECORDING_QUOTA_CONFIG.{}", id.to_ascii_uppercase()),
+        "keep_last_per_channel" | "delete_after_days" | "sweep_interval_secs" => {
+            format!("RECORDING_RETENTION_CONFIG.{}", id.to_ascii_uppercase())
+        }
+        "high_water_percent" | "low_water_percent" | "cleanup_interval_secs" | "safety_bytes" => {
+            format!("RECORDING_DISK_CONFIG.{}", id.to_ascii_uppercase())
+        }
+        "outbox_buffer" | "max_attempts" | "backoff_initial_secs" | "backoff_max_secs" => {
+            format!("RECORDING_NOTIFICATION_CONFIG.{}", id.to_ascii_uppercase())
+        }
+        _ => format!("RECORDING_CONFIG.{}", id.to_ascii_uppercase()),
+    }
+}
+
+pub fn quota_entries_to_strings(entries: &HashMap<String, ByteSize>) -> HashMap<String, String> {
     entries.iter().map(|(user, bytes)| (user.clone(), bytes.to_string())).collect()
 }
 
 pub fn quota_entries_from_strings(
     entries: &HashMap<String, String>,
-) -> Result<HashMap<String, u64>, QuotaEntryParseError> {
+) -> Result<HashMap<String, ByteSize>, QuotaEntryParseError> {
     entries
         .iter()
         .map(|(user, bytes)| {
-            bytes
-                .trim()
-                .parse::<u64>()
-                .map(|bytes| (user.clone(), bytes))
-                .map_err(|_| QuotaEntryParseError { user: user.clone() })
+            if parse_positive_byte_size(bytes).is_ok_and(|b| b.is_some()) {
+                Ok((user.clone(), ByteSize::new(bytes.trim())))
+            } else {
+                Err(QuotaEntryParseError { user: user.clone() })
+            }
         })
         .collect()
 }
@@ -185,9 +202,9 @@ pub const RECORDING_FIELDS: [RecordingFieldDescriptor; 27] = [
         label: "LABEL.RECORDING_FALLBACK_BYTES_PER_MINUTE",
         card: 1,
     },
-    RecordingFieldDescriptor { id: "default_private_bytes", label: "LABEL.RECORDING_DEFAULT_PRIVATE_BYTES", card: 3 },
-    RecordingFieldDescriptor { id: "per_user_bytes", label: "LABEL.RECORDING_PER_USER_BYTES", card: 3 },
-    RecordingFieldDescriptor { id: "shared_bytes", label: "LABEL.RECORDING_SHARED_BYTES", card: 3 },
+    RecordingFieldDescriptor { id: "default_private", label: "LABEL.RECORDING_DEFAULT_PRIVATE_BYTES", card: 3 },
+    RecordingFieldDescriptor { id: "per_user", label: "LABEL.RECORDING_PER_USER_BYTES", card: 3 },
+    RecordingFieldDescriptor { id: "shared", label: "LABEL.RECORDING_SHARED_BYTES", card: 3 },
     RecordingFieldDescriptor { id: "outbox_buffer", label: "LABEL.RECORDING_OUTBOX_BUFFER", card: 4 },
     RecordingFieldDescriptor { id: "max_attempts", label: "LABEL.RECORDING_MAX_ATTEMPTS", card: 4 },
     RecordingFieldDescriptor { id: "backoff_initial_secs", label: "LABEL.RECORDING_BACKOFF_INITIAL_SECS", card: 4 },
@@ -333,10 +350,8 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
             "cleanup_interval_secs" => disk_state.form.cleanup_interval_secs.map(|v| v.to_string()).unwrap_or_default(),
             "safety_bytes" => disk_state.form.safety_bytes.map(|v| v.to_string()).unwrap_or_default(),
             "fallback_bytes_per_minute" => direct_state.form.fallback_bytes_per_minute.to_string(),
-            "default_private_bytes" => {
-                quota_state.form.default_private_bytes.map(|v| v.to_string()).unwrap_or_default()
-            }
-            "shared_bytes" => quota_state.form.shared_bytes.map(|v| v.to_string()).unwrap_or_default(),
+            "default_private" => quota_state.form.default_private.as_ref().map(ToString::to_string).unwrap_or_default(),
+            "shared" => quota_state.form.shared.as_ref().map(ToString::to_string).unwrap_or_default(),
             "outbox_buffer" => notification_state.form.outbox_buffer.to_string(),
             "max_attempts" => notification_state.form.max_attempts.to_string(),
             "backoff_initial_secs" => notification_state.form.backoff_initial_secs.to_string(),
@@ -347,15 +362,15 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
             "enabled" | "organize_into_directories" => html! {
                 <div class="tp__form-field tp__form-field__bool">
                     <ToggleSwitch value={if field.id == "enabled" { direct_state.form.enabled } else { direct_state.form.organize_into_directories }} readonly={true} />
-                    <FieldLabel label={label} field_id={field.id} />
+                    <FieldLabel label={label} field_id={field_help_id(field.id)} />
                 </div>
             },
-            "per_user_bytes" => html! {
-                <KeyValueEditor label={Some(label)} entries={quota_entries_to_strings(&quota_state.form.per_user_bytes)} />
+            "per_user" => html! {
+                <KeyValueEditor label={Some(label)} field_id={Some(field_help_id(field.id))} entries={quota_entries_to_strings(&quota_state.form.per_user)} />
             },
             _ => html! {
                 <div class="tp__form-field tp__form-field__text">
-                    <FieldLabel label={label} field_id={field.id} />
+                    <FieldLabel label={label} field_id={field_help_id(field.id)} />
                     <span class="tp__form-field__value">{value}</span>
                 </div>
             },
@@ -370,6 +385,7 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
             html! {
                 <crate::app::components::number_input::NumberInput
                     name={field.id}
+                    field_id={Some(field_help_id(field.id))}
                     label={Some(label.clone())}
                     u64_value={value}
                     on_change_u64={Some(on_change)}
@@ -380,18 +396,39 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
                 />
             }
         };
+        // Quota sizes keep the typed text and show an inline error until it parses as a size > 0.
+        let byte_size = |value: Option<&ByteSize>, on_change: Callback<Option<ByteSize>>| {
+            let error = value
+                .filter(|size| parse_positive_byte_size(size.as_str()).is_err())
+                .map(|_| translate.t(MSG_BYTE_SIZE_INVALID));
+            html! {
+                <div class="tp__form-field tp__form-field__text">
+                    <Input
+                        name={field.id}
+                        field_id={Some(field_help_id(field.id))}
+                        label={Some(label.clone())}
+                        value={value.map(|size| size.as_str().to_string()).unwrap_or_default()}
+                        error={error}
+                        on_change={Some(Callback::from(move |text: String| {
+                            let text = text.trim();
+                            on_change.emit((!text.is_empty()).then(|| ByteSize::new(text)));
+                        }))}
+                    />
+                </div>
+            }
+        };
         let content = match field.id {
             "enabled" => {
                 let state = direct_state.clone();
-                html! { <div class="tp__form-field tp__form-field__bool"><ToggleSwitch value={state.form.enabled} readonly={false} on_change={Callback::from(move |value| state.dispatch(RecordingConfigFormAction::Enabled(value)))} /><FieldLabel label={label} field_id={field.id} /></div> }
+                html! { <div class="tp__form-field tp__form-field__bool"><ToggleSwitch value={state.form.enabled} readonly={false} on_change={Callback::from(move |value| state.dispatch(RecordingConfigFormAction::Enabled(value)))} /><FieldLabel label={label} field_id={field_help_id(field.id)} /></div> }
             }
             "organize_into_directories" => {
                 let state = direct_state.clone();
-                html! { <div class="tp__form-field tp__form-field__bool"><ToggleSwitch value={state.form.organize_into_directories} readonly={false} on_change={Callback::from(move |value| state.dispatch(RecordingConfigFormAction::OrganizeIntoDirectories(value)))} /><FieldLabel label={label} field_id={field.id} /></div> }
+                html! { <div class="tp__form-field tp__form-field__bool"><ToggleSwitch value={state.form.organize_into_directories} readonly={false} on_change={Callback::from(move |value| state.dispatch(RecordingConfigFormAction::OrganizeIntoDirectories(value)))} /><FieldLabel label={label} field_id={field_help_id(field.id)} /></div> }
             }
             "priority" => {
                 let state = direct_state.clone();
-                html! { <crate::app::components::number_input::NumberInput name={field.id} label={Some(label)} value={Some(i64::from(state.form.priority))} min_i64={Some(i64::from(i8::MIN))} max_i64={Some(i64::from(i8::MAX))} on_change={Callback::from(move |value: Option<i64>| { if let Some(value) = value.and_then(|value| i8::try_from(value).ok()) { state.dispatch(RecordingConfigFormAction::Priority(value)); } })} /> }
+                html! { <crate::app::components::number_input::NumberInput name={field.id} field_id={Some(field_help_id(field.id))} label={Some(label)} value={Some(i64::from(state.form.priority))} min_i64={Some(i64::from(i8::MIN))} max_i64={Some(i64::from(i8::MAX))} on_change={Callback::from(move |value: Option<i64>| { if let Some(value) = value.and_then(|value| i8::try_from(value).ok()) { state.dispatch(RecordingConfigFormAction::Priority(value)); } })} /> }
             }
             "container_format" => {
                 let state = direct_state.clone();
@@ -412,7 +449,7 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
                     })
                     .collect(),
                 );
-                html! { <><FieldLabel label={label} field_id={field.id} /><Select name={field.id} options={options} on_select={Callback::from(move |(_, selection)| { if let DropDownSelection::Single(id) = selection { if let Some(container) = recording_container_from_id(&id) { state.dispatch(RecordingConfigFormAction::ContainerFormat(container)); } } })} /></> }
+                html! { <><FieldLabel label={label} field_id={field_help_id(field.id)} /><Select name={field.id} options={options} on_select={Callback::from(move |(_, selection)| { if let DropDownSelection::Single(id) = selection { if let Some(container) = recording_container_from_id(&id) { state.dispatch(RecordingConfigFormAction::ContainerFormat(container)); } } })} /></> }
             }
             "directory" | "timezone" | "filename_template" | "episode_pattern" => {
                 let state = direct_state.clone();
@@ -424,7 +461,7 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
                 }
                 .unwrap_or_default();
                 let id = field.id;
-                html! { <Input name={id} label={Some(label)} value={value} hint_key={(id == "filename_template").then(|| "VIDEO_CONFIG.RECORDING_FILENAME_TEMPLATE".to_string())} on_change={Some(Callback::from(move |value: String| { let value = (!value.is_empty()).then_some(value); match id { "directory" => state.dispatch(RecordingConfigFormAction::Directory(value)), "timezone" => state.dispatch(RecordingConfigFormAction::Timezone(value)), "episode_pattern" => state.dispatch(RecordingConfigFormAction::EpisodePattern(value)), _ => state.dispatch(RecordingConfigFormAction::FilenameTemplate(value)), } }))} /> }
+                html! { <Input name={id} field_id={Some(field_help_id(id))} label={Some(label)} value={value} on_change={Some(Callback::from(move |value: String| { let value = (!value.is_empty()).then_some(value); match id { "directory" => state.dispatch(RecordingConfigFormAction::Directory(value)), "timezone" => state.dispatch(RecordingConfigFormAction::Timezone(value)), "episode_pattern" => state.dispatch(RecordingConfigFormAction::EpisodePattern(value)), _ => state.dispatch(RecordingConfigFormAction::FilenameTemplate(value)), } }))} /> }
             }
             "default_pre_roll_secs" => {
                 let state = direct_state.clone();
@@ -594,31 +631,26 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
                     }),
                 )
             }
-            "default_private_bytes" => {
+            "default_private" => {
                 let state = quota_state.clone();
-                unsigned(
-                    state.form.default_private_bytes,
-                    true,
-                    None,
-                    None,
-                    Callback::from(move |v| state.dispatch(RecordingQuotaFormAction::DefaultPrivateBytes(v))),
+                byte_size(
+                    quota_state.form.default_private.as_ref(),
+                    Callback::from(move |v| state.dispatch(RecordingQuotaFormAction::DefaultPrivate(v))),
                 )
             }
-            "shared_bytes" => {
+            "shared" => {
                 let state = quota_state.clone();
-                unsigned(
-                    state.form.shared_bytes,
-                    true,
-                    None,
-                    None,
-                    Callback::from(move |v| state.dispatch(RecordingQuotaFormAction::SharedBytes(v))),
+                byte_size(
+                    quota_state.form.shared.as_ref(),
+                    Callback::from(move |v| state.dispatch(RecordingQuotaFormAction::Shared(v))),
                 )
             }
-            "per_user_bytes" => {
+            "per_user" => {
                 let state = quota_state.clone();
                 let on_error = props.on_error.clone();
-                let quota_error = translate.t("MESSAGES.RECORDING.INVALID_QUOTA");
-                html! { <KeyValueEditor label={Some(label)} entries={quota_entries_to_strings(&state.form.per_user_bytes)} readonly={false} key_placeholder={translate.t("LABEL.RECORDING_QUOTA_USER")} value_placeholder={translate.t("LABEL.RECORDING_QUOTA_BYTES")} validate_entry={Some(Callback::from(move |(_, value): (String, String)| { if value.trim().parse::<u64>().is_ok() { true } else { on_error.emit(quota_error.clone()); false } }))} on_change={Callback::from(move |entries| { if let Ok(entries) = quota_entries_from_strings(&entries) { state.dispatch(RecordingQuotaFormAction::PerUserBytes(entries)); } })} /> }
+                let quota_error = translate.t(MSG_BYTE_SIZE_INVALID);
+                let user_error = translate.t("MESSAGES.RECORDING.INVALID_QUOTA_USER");
+                html! { <KeyValueEditor label={Some(label)} field_id={Some(field_help_id("per_user"))} entries={quota_entries_to_strings(&state.form.per_user)} readonly={false} key_placeholder={translate.t("LABEL.RECORDING_QUOTA_USER")} value_placeholder={translate.t("LABEL.RECORDING_QUOTA_BYTES")} validate_entry={Some(Callback::from(move |(user, value): (String, String)| { if shared::model::UserId::validate(user.trim()).is_err() { on_error.emit(user_error.clone()); false } else if parse_positive_byte_size(&value).is_ok_and(|v| v.is_some()) { true } else { on_error.emit(quota_error.clone()); false } }))} on_change={Callback::from(move |entries| { if let Ok(entries) = quota_entries_from_strings(&entries) { state.dispatch(RecordingQuotaFormAction::PerUser(entries)); } })} /> }
             }
             "outbox_buffer" => {
                 let state = notification_state.clone();
@@ -761,9 +793,9 @@ mod tests {
                 safety_bytes: Some(29),
             }),
             quota: Some(RecordingQuotaConfigDto {
-                default_private_bytes: Some(31),
-                per_user_bytes: HashMap::from([("alice".to_string(), 37)]),
-                shared_bytes: Some(41),
+                default_private: Some(ByteSize::new("31")),
+                per_user: HashMap::from([("alice".to_string(), ByteSize::new("37"))]),
+                shared: Some(ByteSize::new("41")),
             }),
             notifications: Some(RecordingNotificationConfigDto {
                 outbox_buffer: 43,
@@ -862,7 +894,11 @@ mod tests {
 
     #[test]
     fn quota_string_entries_round_trip_full_u64_range() {
-        let entries = HashMap::from([("zero".to_string(), 0), ("max".to_string(), u64::MAX)]);
+        let entries = HashMap::from([
+            ("alice".to_string(), ByteSize::new("1")),
+            ("bob".to_string(), ByteSize::new("20GB")),
+            ("carol".to_string(), ByteSize::new("1024")),
+        ]);
         let strings = quota_entries_to_strings(&entries);
 
         assert_eq!(quota_entries_from_strings(&strings), Ok(entries));
@@ -876,6 +912,11 @@ mod tests {
         ]);
 
         assert!(quota_entries_from_strings(&entries).is_err());
+
+        let zero_entries =
+            HashMap::from([("valid".to_string(), "42".to_string()), ("zero".to_string(), "0".to_string())]);
+
+        assert!(quota_entries_from_strings(&zero_entries).is_err());
     }
 
     #[test]
@@ -916,9 +957,9 @@ mod tests {
             "cleanup_interval_secs",
             "safety_bytes",
             "fallback_bytes_per_minute",
-            "default_private_bytes",
-            "per_user_bytes",
-            "shared_bytes",
+            "default_private",
+            "per_user",
+            "shared",
             "outbox_buffer",
             "max_attempts",
             "backoff_initial_secs",
@@ -932,7 +973,7 @@ mod tests {
 
     #[test]
     fn recording_ui_translation_keys_exist_in_every_locale() {
-        const KEYS: [&str; 33] = [
+        const KEYS: [&str; 34] = [
             "LABEL.RECORDING_GENERAL",
             "LABEL.ORGANIZE_INTO_DIRECTORIES",
             "LABEL.EPISODE_PATTERN",
@@ -962,10 +1003,11 @@ mod tests {
             "LABEL.RECORDING_BACKOFF_MAX_SECS",
             "LABEL.RECORDING_QUOTA_USER",
             "LABEL.RECORDING_QUOTA_BYTES",
-            "EXPLANATION.VIDEO_CONFIG.RECORDING_FILENAME_TEMPLATE",
+            "EXPLANATION.RECORDING_CONFIG.FILENAME_TEMPLATE",
             "MESSAGES.RECORDING.INVALID_UNSIGNED",
             "MESSAGES.RECORDING.INVALID_RANGE",
-            "MESSAGES.RECORDING.INVALID_QUOTA",
+            "MESSAGES.VALIDATION.BYTE_SIZE_INVALID",
+            "MESSAGES.RECORDING.INVALID_QUOTA_USER",
         ];
         const LOCALES: [(&str, &str); 3] = [
             ("en", include_str!("../../../../public/assets/i18n/en.json")),
@@ -1141,7 +1183,7 @@ mod browser_tests {
                 assert!(wrapper.query_selector("input[type=\"checkbox\"]")?.is_some());
             }
             (true, "container_format") => assert!(wrapper.query_selector(".tp__select")?.is_some()),
-            (true, "per_user_bytes") => {
+            (true, "per_user") => {
                 let entries = wrapper
                     .query_selector(".tp__keyvalue-editor__entries")?
                     .and_then(|entries| entries.text_content())
@@ -1160,7 +1202,7 @@ mod browser_tests {
             (false, "enabled" | "organize_into_directories") => {
                 assert!(wrapper.query_selector("input[type=\"checkbox\"]:disabled")?.is_some());
             }
-            (false, "per_user_bytes") => {
+            (false, "per_user") => {
                 let value = wrapper
                     .query_selector(".tp__keyvalue-editor")?
                     .and_then(|entries| entries.text_content())

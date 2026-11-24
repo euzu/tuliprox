@@ -1,6 +1,6 @@
 use crate::api::{
     api_utils::json_or_bin_response,
-    auth_middleware::{rejection_for, settings_owner, validator_authenticated, VerifiedClaims},
+    auth_middleware::{rejection_for, settings_owner, validator_authenticated, ApiUserAccess, VerifiedClaims},
     model::AppState,
 };
 use axum::{
@@ -41,15 +41,17 @@ fn layout_response(layout: &TableLayoutPreferencesDto, etag: &str, headers: &Hea
 fn owner(
     state: &AppState,
     claims: Option<&Extension<VerifiedClaims>>,
+    fingerprint: &crate::auth::Fingerprint,
 ) -> Result<SettingsOwner, crate::auth::AuthError> {
-    settings_owner(state, claims.map(|c| &c.0 .0))
+    settings_owner(state, claims.map(|c| &c.0 .0), ApiUserAccess::WebUi, fingerprint)
 }
 
 async fn current_owner(
     state: &AppState,
     claims: Option<&Extension<VerifiedClaims>>,
+    fingerprint: &crate::auth::Fingerprint,
 ) -> Result<SettingsOwner, crate::auth::AuthError> {
-    let owner = owner(state, claims)?;
+    let owner = owner(state, claims, fingerprint)?;
     if let Some(claims) = claims {
         if state.auth.token_revocations.is_revoked(&claims.0 .0).await {
             return Err(crate::auth::AuthError::Revoked);
@@ -97,9 +99,10 @@ struct SettingsAccess {
 async fn resolve_settings_access(
     state: &AppState,
     claims: Option<&Extension<VerifiedClaims>>,
+    fingerprint: &crate::auth::Fingerprint,
     write: bool,
 ) -> Result<SettingsAccess, SettingsAccessError> {
-    let owner = owner(state, claims).map_err(SettingsAccessError::Auth)?;
+    let owner = owner(state, claims, fingerprint).map_err(SettingsAccessError::Auth)?;
     let config_path = state.app_config.paths.load().config_path.clone();
     let path = settings_path(std::path::Path::new(&config_path), &owner).map_err(SettingsAccessError::Settings)?;
     let guard = if write {
@@ -107,7 +110,7 @@ async fn resolve_settings_access(
     } else {
         SettingsGuard::Read { _guard: state.app_config.file_locks.read_lock(&path).await }
     };
-    let current = current_owner(state, claims).await.map_err(SettingsAccessError::Auth)?;
+    let current = current_owner(state, claims, fingerprint).await.map_err(SettingsAccessError::Auth)?;
     if current != owner || state.app_config.paths.load().config_path != config_path {
         return Err(SettingsAccessError::Settings(SettingsError::OwnerMismatch));
     }
@@ -116,10 +119,11 @@ async fn resolve_settings_access(
 
 async fn get_settings(
     State(state): State<Arc<AppState>>,
+    fingerprint: crate::auth::Fingerprint,
     claims: Option<Extension<VerifiedClaims>>,
     headers: HeaderMap,
 ) -> Response {
-    let access = match resolve_settings_access(&state, claims.as_ref(), false).await {
+    let access = match resolve_settings_access(&state, claims.as_ref(), &fingerprint, false).await {
         Ok(access) => access,
         Err(error) => return error.response(&headers),
     };
@@ -136,6 +140,7 @@ async fn get_settings(
 
 async fn get_table(
     State(state): State<Arc<AppState>>,
+    fingerprint: crate::auth::Fingerprint,
     claims: Option<Extension<VerifiedClaims>>,
     Path(table): Path<String>,
     headers: HeaderMap,
@@ -143,7 +148,7 @@ async fn get_table(
     if let Err(err) = validate_settings_table(&table) {
         return error_response(err, &headers);
     }
-    let access = match resolve_settings_access(&state, claims.as_ref(), false).await {
+    let access = match resolve_settings_access(&state, claims.as_ref(), &fingerprint, false).await {
         Ok(access) => access,
         Err(error) => return error.response(&headers),
     };
@@ -160,6 +165,7 @@ async fn get_table(
 
 async fn mutate_table(
     state: Arc<AppState>,
+    fingerprint: &crate::auth::Fingerprint,
     claims: Option<Extension<VerifiedClaims>>,
     table: String,
     headers: HeaderMap,
@@ -193,7 +199,7 @@ async fn mutate_table(
     } else {
         None
     };
-    let access = match resolve_settings_access(&state, claims.as_ref(), true).await {
+    let access = match resolve_settings_access(&state, claims.as_ref(), fingerprint, true).await {
         Ok(access) => access,
         Err(error) => return error.response(&headers),
     };
@@ -206,13 +212,14 @@ async fn mutate_table(
 
 async fn put_table(
     State(state): State<Arc<AppState>>,
+    fingerprint: crate::auth::Fingerprint,
     claims: Option<Extension<VerifiedClaims>>,
     Path(table): Path<String>,
     request: Request,
 ) -> Response {
     let (parts, body) = request.into_parts();
     match to_bytes(body, SETTINGS_MAX_REQUEST_BYTES).await {
-        Ok(body) => mutate_table(state, claims, table, parts.headers, Some(body)).await,
+        Ok(body) => mutate_table(state, &fingerprint, claims, table, parts.headers, Some(body)).await,
         Err(err) => {
             let mut source = std::error::Error::source(&err);
             let mut oversized = false;
@@ -235,11 +242,12 @@ async fn put_table(
 
 async fn delete_table(
     State(state): State<Arc<AppState>>,
+    fingerprint: crate::auth::Fingerprint,
     claims: Option<Extension<VerifiedClaims>>,
     Path(table): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    mutate_table(state, claims, table, headers, None).await
+    mutate_table(state, &fingerprint, claims, table, headers, None).await
 }
 
 pub fn user_settings_api_register(state: &Arc<AppState>) -> Router<Arc<AppState>> {
@@ -267,6 +275,13 @@ mod tests {
     };
     use tower::ServiceExt;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// Test routers get a loopback peer address, as a real serve loop would provide.
+    fn test_app(state: &Arc<AppState>) -> Router {
+        user_settings_api_register(state)
+            .with_state(Arc::clone(state))
+            .layer(axum::extract::connect_info::MockConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345))))
+    }
 
     fn configure_path(state: &AppState, dir: &std::path::Path) {
         let mut paths = (**state.app_config.paths.load()).clone();
@@ -299,7 +314,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let state = create_test_app_state(Config::default());
         configure_path(&state, dir.path());
-        let router = user_settings_api_register(&state).with_state(state);
+        let router = test_app(&state);
         assert!(!dir.path().join("user_settings").exists());
         for table in [
             "future.inventory".to_owned(),
@@ -355,7 +370,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let state = create_test_app_state(Config::default());
         configure_path(&state, dir.path());
-        let router = user_settings_api_register(&state).with_state(state);
+        let router = test_app(&state);
         let etag = table_etag(&router, "future.table").await?;
         for table in ["x".repeat(shared::model::SETTINGS_MAX_ID_BYTES + 1), "future.%0Atable".into()] {
             for method in ["GET", "PUT", "DELETE"] {
@@ -374,7 +389,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let state = create_test_app_state(Config::default());
         configure_path(&state, dir.path());
-        let router = user_settings_api_register(&state).with_state(state.clone());
+        let router = test_app(&state);
         let response = router.clone().oneshot(Request::builder().uri("/me/settings").body(Body::empty())?).await?;
         assert_eq!(response.status(), StatusCode::OK);
         let dto: UserSettingsDto = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await?)?;
@@ -450,7 +465,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let state = create_test_app_state(Config::default());
         configure_path(&state, dir.path());
-        let router = user_settings_api_register(&state).with_state(state);
+        let router = test_app(&state);
         let etag = table_etag(&router, "users").await?;
         for message in ["stream interrupted", "length limit reported by transport"] {
             let body =
@@ -480,7 +495,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let state = create_test_app_state(Config::default());
         configure_path(&state, dir.path());
-        let router = user_settings_api_register(&state).with_state(state);
+        let router = test_app(&state);
         let valid = format!("\"{}\"", "a".repeat(64));
         for method in ["PUT", "DELETE"] {
             for values in [
@@ -541,7 +556,7 @@ mod tests {
         let mismatched_token = token("Bob", UserId::web("Alice"))?;
         let state = create_test_app_state(config);
         configure_path(&state, dir.path());
-        let router = user_settings_api_register(&state).with_state(state);
+        let router = test_app(&state);
         let request = |method: &str, uri: &str, token: &str, etag: Option<&str>, body: Body| {
             let mut request =
                 Request::builder().method(method).uri(uri).header(header::AUTHORIZATION, format!("Bearer {token}"));
@@ -661,7 +676,7 @@ mod tests {
             }],
             ..Default::default()
         }))));
-        let router = user_settings_api_register(&state).with_state(state.clone());
+        let router = test_app(&state);
         let request = |token: &str| {
             Request::builder()
                 .uri("/me/settings")
@@ -743,6 +758,55 @@ mod tests {
         assert!(!api_path.exists());
         state.app_config.api_proxy.store(None);
         assert_eq!(router.clone().oneshot(request(&api_token)?).await?.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settings_route_refuses_player_only_user_with_403() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let web_ui = WebUiConfigDto {
+            enabled: true,
+            user_ui_enabled: true,
+            player_api_enabled: Some(true),
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "settings-test".into(),
+                secret: "settings-test-secret".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = Config { web_ui: Some((&web_ui).into()), ..Default::default() };
+        let state = create_test_app_state(config);
+        configure_path(&state, dir.path());
+
+        state.app_config.api_proxy.store(Some(Arc::new(ApiProxyConfig::from(&ApiProxyConfigDto {
+            user: vec![TargetUserDto {
+                target: "default".into(),
+                credentials: vec![ProxyUserCredentialsDto {
+                    username: "Alice".into(),
+                    ui_enabled: false,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        api_enabled: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        }))));
+
+        let web_auth = state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
+        let api_token = create_jwt_api_user(&web_auth, "Alice", UserId::api("Alice"))?;
+
+        let router = test_app(&state);
+        let request = Request::builder()
+            .uri("/me/settings")
+            .header(header::AUTHORIZATION, format!("Bearer {api_token}"))
+            .body(Body::empty())?;
+
+        let response = router.oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
         Ok(())
     }
 }

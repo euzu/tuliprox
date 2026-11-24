@@ -1,11 +1,14 @@
-use crate::{ActiveProviderManager, CleanupEvent};
+use crate::{ActiveProviderManager, ActiveUserManager, CleanupEvent};
 use bytes::Bytes;
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Debug,
     net::SocketAddr,
     pin::Pin,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 use tokio::{
     sync::{oneshot, Mutex, Notify, RwLock},
@@ -79,9 +82,17 @@ struct ReceiverStreamWrapper<S> {
 }
 
 #[derive(Clone, Debug)]
-struct SharedSubscriber {
-    addr: SocketAddr,
-    cancel_token: CancellationToken,
+pub(super) struct SharedSubscriber {
+    pub(super) addr: SocketAddr,
+    pub(super) cancel_token: CancellationToken,
+    pub(super) username: Arc<str>,
+    pub(super) session_token: Arc<str>,
+    pub(super) free_join: bool,
+}
+
+impl SharedSubscriber {
+    /// A paid holder keeps the stream: a counted viewer or a recording (F10). Free joiners (E7) do not.
+    pub(super) fn is_paid_holder(&self) -> bool { !self.free_join }
 }
 
 struct BufferedChunk {
@@ -133,12 +144,62 @@ pub struct SharedStreamState {
 struct SharedStreamsRegister {
     by_key: HashMap<Arc<str>, Arc<SharedStreamState>>,
     key_by_subscriber: HashMap<SubscriberId, Arc<str>>,
+    free_join_owner_by_subscriber: HashMap<SubscriberId, Arc<str>>,
+    free_joins_by_user: HashMap<Arc<str>, u32>,
+    live_free_joins: Arc<AtomicUsize>,
+}
+
+impl SharedStreamsRegister {
+    fn try_reserve_free_join(&mut self, subscriber_id: SubscriberId, username: &str, max: u32) -> bool {
+        let current = self.free_joins_by_user.get(username).copied().unwrap_or(0);
+        if current >= max {
+            return false;
+        }
+        self.record_free_join(subscriber_id, username);
+        true
+    }
+
+    fn record_free_join(&mut self, subscriber_id: SubscriberId, username: &str) {
+        let user_key: Arc<str> = Arc::from(username);
+        *self.free_joins_by_user.entry(Arc::clone(&user_key)).or_default() += 1;
+        if self.free_join_owner_by_subscriber.insert(subscriber_id, user_key).is_none() {
+            self.live_free_joins.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    pub(super) fn remove_stream(&mut self, stream_url: &str) -> Option<Arc<SharedStreamState>> {
+        let removed_subs: Vec<SubscriberId> = self
+            .key_by_subscriber
+            .iter()
+            .filter(|(_, url)| url.as_ref() == stream_url)
+            .map(|(sub_id, _)| *sub_id)
+            .collect();
+        for sub_id in removed_subs {
+            self.remove_free_join_for_subscriber(sub_id);
+        }
+        self.key_by_subscriber.retain(|_, url| url.as_ref() != stream_url);
+        self.by_key.remove(stream_url)
+    }
+
+    fn remove_free_join_for_subscriber(&mut self, subscriber_id: SubscriberId) {
+        if let Some(user_key) = self.free_join_owner_by_subscriber.remove(&subscriber_id) {
+            if let Some(count) = self.free_joins_by_user.get_mut(&user_key) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.free_joins_by_user.remove(&user_key);
+                }
+            }
+            self.live_free_joins.fetch_sub(1, Ordering::Release);
+        }
+    }
 }
 
 pub struct SharedStreamManager {
     provider_manager: Arc<ActiveProviderManager>,
     shared_streams: RwLock<SharedStreamsRegister>,
     meter_uids: std::sync::Mutex<HashMap<Arc<str>, SharedMeterEntry>>,
+    pub(super) user_manager: tokio::sync::OnceCell<std::sync::Weak<ActiveUserManager>>,
+    live_free_joins: Arc<AtomicUsize>,
     #[cfg(test)]
     pub(crate) test_preflight_barrier: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }

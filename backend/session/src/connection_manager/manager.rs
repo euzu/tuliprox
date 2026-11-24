@@ -7,7 +7,8 @@ use super::{
 use crate::{ActiveProviderManager, ActiveUserManager, EventManager, ManagedProviderHandle, SharedStreamManager};
 use arc_swap::ArcSwapOption;
 use shared::model::{
-    ActiveUserConnectionChange, ConnectFailureReason, DisconnectReason, EventMessage, FailureStage, StreamInfo,
+    ActiveUserConnectionChange, ConnectFailureReason, DisconnectReason, EventMessage, FailureStage, StreamEndedReason,
+    StreamInfo,
 };
 use std::{
     collections::HashMap,
@@ -129,13 +130,27 @@ impl ConnectionManager {
         release_connection_with_reason(self, addr, reason, true).await;
     }
 
-    pub async fn release_connection_as_kicked(&self, addr: &SocketAddr) -> bool {
-        self.release_user_sessions_only(addr).await;
+    pub(crate) async fn release_connection_with_end_reason(
+        &self,
+        addr: &SocketAddr,
+        reason: StreamEndedReason,
+    ) -> bool {
+        self.release_user_sessions_with_reason(addr, reason).await;
+        // The transport close keeps the kicked reason for every server-side termination; the
+        // finer reason is carried by the disconnect record and the `StreamEnded` event.
         let closed = self.close_connection_with_reason(addr, DisconnectReason::ClientKicked);
         if !closed {
             self.release_provider_deferred(addr).await;
         }
         closed
+    }
+
+    pub async fn release_connection_as_kicked(&self, addr: &SocketAddr) -> bool {
+        self.release_connection_with_end_reason(addr, StreamEndedReason::Kicked).await
+    }
+
+    pub async fn release_connection_as_preempted(&self, addr: &SocketAddr) -> bool {
+        self.release_connection_with_end_reason(addr, StreamEndedReason::Preempted).await
     }
 
     /// Releases the provider connection for `addr` after `tcp_close_notify` is notified.
@@ -157,6 +172,10 @@ impl ConnectionManager {
     /// slot while the old connection is still draining buffered data.
     /// Note: `release_connection_as_kicked` (called internally) already handles divergence checking.
     pub async fn release_user_sessions_only(&self, addr: &SocketAddr) {
+        self.release_user_sessions_with_reason(addr, StreamEndedReason::Kicked).await;
+    }
+
+    pub async fn release_user_sessions_with_reason(&self, addr: &SocketAddr, reason: StreamEndedReason) {
         let removed = self.user_manager.release_connection_as_kicked(addr).await;
         // Mirrors the kicked-specific steps from `release_connection_parts`.
         // Provider release and capacity notification are deferred via `release_provider_deferred`.
@@ -176,11 +195,21 @@ impl ConnectionManager {
             emit_disconnect_record(
                 &self.history_writer,
                 stream_info,
+                // Stream history keeps the established kicked reason for every server-side
+                // termination; the finer reason is only carried by the `StreamEnded` event.
                 DisconnectReason::ClientKicked,
                 &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
                 None,
                 None,
             );
+            if self.event_manager.has_event_receivers() {
+                self.event_manager.send_event(EventMessage::StreamEnded {
+                    username: Arc::from(stream_info.username.as_str()),
+                    uid: stream_info.uid,
+                    virtual_id: stream_info.channel.virtual_id,
+                    reason,
+                });
+            }
         }
         if removed.addr_removed && !removed.removed_streams.is_empty() {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));

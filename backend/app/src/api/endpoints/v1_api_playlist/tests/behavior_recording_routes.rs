@@ -60,6 +60,8 @@ async fn stable_recording_route_rejects_target_and_input_from_different_sources(
             target_name: "stable-target".to_string(),
             input_name: "input-b".to_string(),
             provider_allocation_id: None,
+            join_shared: None,
+            priority: None,
         }),
         State(app_state),
         axum::http::HeaderMap::new(),

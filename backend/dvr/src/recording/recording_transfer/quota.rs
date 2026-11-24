@@ -36,7 +36,10 @@ impl QuotaGate<'_> {
         let Some(recording_cfg) = config.recording() else {
             return Ok(SizeAdmission { byte_cap: None, siblings_refused: false });
         };
-        let limits = crate::recording::recording_service::quota_limits_from_config(recording_cfg.quota.as_ref());
+        let limits = crate::recording::recording_service::quota_limits_from_config(
+            recording_cfg.quota.as_ref(),
+            self.app_config.live_api_user_recording_quotas(),
+        );
         // Measured before the mutation: it is a syscall.
         let free = crate::recording::recording_disk::free_bytes_for(Path::new(&recording_cfg.directory));
         let safety = recording_cfg.disk.as_ref().and_then(|disk| disk.safety_bytes).unwrap_or(0);
@@ -184,7 +187,10 @@ pub(super) async fn refused_before_start(
     let charge = crate::recording::recording_quota::charge_for_task(subject);
     let others = || tasks.iter().filter(|task| task.uuid != uuid);
 
-    let limits = crate::recording::recording_service::quota_limits_from_config(recording_cfg.quota.as_ref());
+    let limits = crate::recording::recording_service::quota_limits_from_config(
+        recording_cfg.quota.as_ref(),
+        app_config.live_api_user_recording_quotas(),
+    );
     let pool = crate::recording::recording_quota::quota_pool_for_task(subject);
     let used = crate::recording::recording_quota::used_bytes_in_pool(others(), &pool);
     if matches!(

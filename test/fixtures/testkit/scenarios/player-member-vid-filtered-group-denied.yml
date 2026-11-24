@@ -1,0 +1,50 @@
+schema_version: 1
+name: player-member-vid-filtered-group-denied
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: false
+    share_live_mpeg_ts: false
+  failover_groups:
+    inputs: [input-a, input-b]
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: player-member-vid-filtered-group-denied
+actors:
+  - id: unfiltered-viewer
+    agent: local
+    username: unfiltered-viewer
+    user_agent: tuliprox-testkit/unfiltered-viewer
+    client_ip: { mode: forwarded, value: 10.50.0.10 }
+  - id: filtered-viewer
+    agent: local
+    username: filtered-viewer
+    user_agent: tuliprox-testkit/filtered-viewer
+    client_ip: { mode: forwarded, value: 10.50.0.11 }
+channels:
+  group-channel: { origin_marker: 17, protocol: m3u }
+steps:
+  - command_id: request-filtered-member-vid
+    expect:
+      http_error: 502
+    start:
+      actor: filtered-viewer
+      playback_id: playback-filtered
+      session_group: group-filtered
+      channel: group-channel
+      member_index: 1
+    assert_origin:
+      max_active_tcp: 0
+policy_contract:
+  user_access_control: true
+  users:
+    unfiltered-viewer:
+      max_connections: 1
+    filtered-viewer:
+      max_connections: 1
+      filter: 'Group != "General"'
+  admission_strategies: []

@@ -15,6 +15,7 @@ pub enum RecordingExecutionResult {
     Paused,
     Cancelled,
     Preempted,
+    SharedJoinUnavailable { message: String, retryable: bool },
     Retryable(String),
     Failed(String),
 }
@@ -107,9 +108,17 @@ fn is_retryable_ffmpeg_failure_message(message: &str) -> bool {
     RETRYABLE_FFMPEG_PHRASES.iter().any(|phrase| msg.contains(phrase))
 }
 
+fn is_shared_join_unavailable_message(message: &str) -> bool {
+    let msg = strip_url_tokens(message);
+    msg.contains("channel_unavailable") || msg.contains("503 service unavailable")
+}
+
 fn classify_ffmpeg_failure(stderr: &[u8]) -> RecordingExecutionResult {
     let summary = stderr_summary(stderr);
-    if is_retryable_ffmpeg_failure_message(&summary) {
+    let retryable = is_retryable_ffmpeg_failure_message(&summary);
+    if is_shared_join_unavailable_message(&summary) {
+        RecordingExecutionResult::SharedJoinUnavailable { message: summary, retryable }
+    } else if retryable {
         RecordingExecutionResult::Retryable(summary)
     } else {
         RecordingExecutionResult::Failed(summary)
@@ -239,6 +248,15 @@ async fn spawn_retrying_busy_executable(
     }
 }
 
+async fn sample_and_append_time_index(index_path: Option<&Path>, file_path: &Path) {
+    if let Some(path) = index_path {
+        let now_ts = chrono::Utc::now().timestamp();
+        let file_size = tokio::fs::metadata(file_path).await.map_or(0, |m| m.len());
+        let _ = crate::recording::recording_sidecar::append_time_index_entry(path, now_ts, file_size).await;
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 pub async fn run_recording_with_binary(
     ffmpeg_binary: &Path,
     download: &RecordingTask,
@@ -294,9 +312,18 @@ pub async fn run_recording_with_binary(
     let mut stdin = child.stdin.take();
     let mut wait_future = Box::pin(child.wait_with_output());
 
+    let is_mpegts = container_format == RecordingContainerFormat::Mpegts;
+    let index_path =
+        if is_mpegts { Some(crate::recording::recording_sidecar::time_index_path(&download.file_path)) } else { None };
+    let mut index_interval = tokio::time::interval(Duration::from_secs(1));
+    index_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             biased;
+            _ = index_interval.tick(), if is_mpegts => {
+                sample_and_append_time_index(index_path.as_deref(), &partial_path).await;
+            }
             () = async {
                 if let Some(token) = cancel_token {
                     token.cancelled().await;
@@ -324,12 +351,16 @@ pub async fn run_recording_with_binary(
                             let _ = input.write_all(b"q\n").await;
                             drop(input);
                         }
-                        return finalize_stopped_recording(
+                        let res = finalize_stopped_recording(
                             timeout(Duration::from_secs(10), &mut wait_future).await,
                             &partial_path,
                             &download.file_path,
                         )
                         .await;
+                        if is_mpegts {
+                            sample_and_append_time_index(index_path.as_deref(), &download.file_path).await;
+                        }
+                        return res;
                     }
                     RecordingControl::Pause => {
                         cleanup_partial(&partial_path).await;
@@ -345,10 +376,14 @@ pub async fn run_recording_with_binary(
             output = &mut wait_future => {
                 match output {
                     Ok(output) if output.status.success() => {
-                        return match tuliprox_core::utils::finalize_no_replace(&partial_path, &download.file_path).await {
+                        let res = match tuliprox_core::utils::finalize_no_replace(&partial_path, &download.file_path).await {
                             Ok(()) => RecordingExecutionResult::Completed,
                             Err(err) => RecordingExecutionResult::Failed(format!("Failed to finalize recording: {err}")),
                         };
+                        if is_mpegts {
+                            sample_and_append_time_index(index_path.as_deref(), &download.file_path).await;
+                        }
+                        return res;
                     }
                     Ok(output) => return classify_ffmpeg_failure(&output.stderr),
                     Err(err) => return RecordingExecutionResult::Failed(format!("Failed to wait for ffmpeg: {err}")),
@@ -356,6 +391,127 @@ pub async fn run_recording_with_binary(
             }
         }
     }
+}
+
+pub use tuliprox_mpegts::packet::CLIP_HEADER_LEN;
+
+/// Resolve the data file path for reading recording contents.
+/// If `file_path` exists, returns it; otherwise falls back to
+/// `recording_partial_path(file_path)` so in-progress live recordings
+/// can have their header and clip offsets read before finalization.
+pub fn resolve_recording_data_path(file_path: &Path) -> PathBuf {
+    if file_path.is_file() {
+        file_path.to_path_buf()
+    } else {
+        let partial = recording_partial_path(file_path);
+        if partial.is_file() {
+            partial
+        } else {
+            file_path.to_path_buf()
+        }
+    }
+}
+
+/// Read the MPEG-TS header for a clip from `file_path`.
+/// Resolves the data file (final file if it exists, else partial file).
+/// Scans the head of the file for PAT and PMT packets using
+/// `tuliprox_mpegts::packet::parse_pat_pmt_metadata` and returns
+/// exactly 376 bytes (`CLIP_HEADER_LEN`): the PAT packet followed by the PMT packet.
+pub fn read_clip_header_sync(file_path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let data_path = resolve_recording_data_path(file_path);
+    let mut file = std::fs::File::open(&data_path)?;
+    let file_len = file.metadata()?.len();
+    let head_read_len = usize::try_from(file_len).unwrap_or(usize::MAX).min(65536);
+    if head_read_len < tuliprox_mpegts::packet::TS_PACKET_SIZE {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "File too small for MPEG-TS header"));
+    }
+    let mut head_buf = vec![0u8; head_read_len];
+    file.read_exact(&mut head_buf)?;
+
+    let info = tuliprox_mpegts::packet::parse_pat_pmt_metadata(&head_buf)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing PAT or PMT metadata"))?;
+
+    let pkt_size = tuliprox_mpegts::packet::TS_PACKET_SIZE;
+    if info.pat_offset + pkt_size > head_buf.len() || info.pmt_offset + pkt_size > head_buf.len() {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "PAT or PMT packet exceeds read buffer"));
+    }
+
+    let mut header = Vec::with_capacity(tuliprox_mpegts::packet::CLIP_HEADER_LEN);
+    header.extend_from_slice(&head_buf[info.pat_offset..info.pat_offset + pkt_size]);
+    header.extend_from_slice(&head_buf[info.pmt_offset..info.pmt_offset + pkt_size]);
+    Ok(header)
+}
+
+/// Asynchronous wrapper for `read_clip_header_sync`.
+pub async fn read_clip_header(file_path: &Path) -> std::io::Result<Vec<u8>> {
+    let path = file_path.to_path_buf();
+    tokio::task::spawn_blocking(move || read_clip_header_sync(&path)).await.map_err(std::io::Error::other)?
+}
+
+/// Compute start and end byte offsets for a clip in an MPEG-TS recording file.
+///
+/// Start offset: last index sample <= `start_ts`, then scan forward in the file
+/// (max 10 s of data, or 5 MB) to the next TS packet that starts a video IDR;
+/// fallback: the TS packet boundary.
+/// End offset: first index sample >= `end_ts`, rounded up to a 188-byte boundary
+/// relative to the sync offset.
+pub async fn compute_clip_offsets(file_path: &Path, start_ts: i64, end_ts: i64) -> std::io::Result<(u64, u64)> {
+    let path = file_path.to_path_buf();
+    tokio::task::spawn_blocking(move || compute_clip_offsets_sync(&path, start_ts, end_ts))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// Synchronous version of `compute_clip_offsets` using `std::fs::File`,
+/// safe to call within synchronous queue mutations.
+pub fn compute_clip_offsets_sync(file_path: &Path, start_ts: i64, end_ts: i64) -> std::io::Result<(u64, u64)> {
+    use std::io::{Read, Seek};
+
+    let index_path = crate::recording::recording_sidecar::time_index_path(file_path);
+    let index = crate::recording::recording_sidecar::read_time_index_sync(&index_path)?;
+    let rough_start = index.iter().rfind(|e| e.unix_secs <= start_ts).map_or(0, |e| e.file_size);
+
+    let data_path = resolve_recording_data_path(file_path);
+    let mut file = std::fs::File::open(&data_path)?;
+    let file_len = file.metadata()?.len();
+    if file_len == 0 {
+        return Ok((0, 0));
+    }
+
+    let head_read_len = usize::try_from(file_len).unwrap_or(usize::MAX).min(65536);
+    let mut head_buf = vec![0u8; head_read_len];
+    file.read_exact(&mut head_buf)?;
+    let sync_offset = u64::try_from(tuliprox_mpegts::packet::ts_sync_offset(&head_buf).unwrap_or(0)).unwrap_or(0);
+    let program_info = tuliprox_mpegts::packet::parse_pat_pmt_metadata(&head_buf);
+
+    let scan_start = rough_start.min(file_len);
+    let scan_len = usize::try_from(file_len.saturating_sub(scan_start)).unwrap_or(usize::MAX).min(5_000_000);
+    file.seek(std::io::SeekFrom::Start(scan_start))?;
+    let mut scan_buf = vec![0u8; scan_len];
+    file.read_exact(&mut scan_buf)?;
+
+    let start_offset = if let Some(info) = program_info {
+        if let Some(idr_rel) =
+            tuliprox_mpegts::packet::find_idr_packet_offset(&scan_buf, info.video_pid, info.video_stream_type)
+        {
+            scan_start + u64::try_from(idr_rel).unwrap_or(0)
+        } else {
+            scan_start + u64::try_from(tuliprox_mpegts::packet::ts_sync_offset(&scan_buf).unwrap_or(0)).unwrap_or(0)
+        }
+    } else {
+        scan_start + u64::try_from(tuliprox_mpegts::packet::ts_sync_offset(&scan_buf).unwrap_or(0)).unwrap_or(0)
+    };
+
+    let sample_end = index.iter().find(|e| e.unix_secs >= end_ts).map_or(file_len, |e| e.file_size);
+
+    let rel = sample_end.saturating_sub(sync_offset);
+    let rem = rel % 188;
+    let rounded = if rem == 0 { sample_end } else { sample_end + (188 - rem) };
+    let end_offset = rounded.min(file_len).max(start_offset);
+
+    Ok((start_offset, end_offset))
 }
 
 /// Compute the partial-file path the worker uses for safe no-clobber
@@ -447,6 +603,7 @@ mod tests {
         let (file_dir, file_path, filename) = unique_recording_output();
         RecordingTask {
             uuid: "id".to_string(),
+            vod_id: 0,
             file_dir,
             file_path,
             filename,
@@ -471,6 +628,9 @@ mod tests {
                 0,
                 0,
             ),
+            clip: None,
+            media_identity: None,
+            cancelled_by_owner: false,
         }
     }
 
@@ -492,6 +652,43 @@ mod tests {
         let result = classify_ffmpeg_failure(b"Connection timed out\nConversion failed!\n");
 
         assert_eq!(result, RecordingExecutionResult::Retryable("Connection timed out".to_string()));
+    }
+
+    #[test]
+    fn classify_ffmpeg_failure_marks_shared_join_503_and_fallback_as_typed_variant() {
+        let res_503 = classify_ffmpeg_failure(b"Last message\nServer returned 503 Service Unavailable\n");
+        assert_eq!(
+            res_503,
+            RecordingExecutionResult::SharedJoinUnavailable {
+                message: "Server returned 503 Service Unavailable".to_string(),
+                retryable: true,
+            }
+        );
+
+        let res_fallback = classify_ffmpeg_failure(b"Last message\nchannel_unavailable\n");
+        assert_eq!(
+            res_fallback,
+            RecordingExecutionResult::SharedJoinUnavailable {
+                message: "channel_unavailable".to_string(),
+                retryable: false,
+            }
+        );
+
+        let res_fallback_retryable =
+            classify_ffmpeg_failure(b"Last message\nchannel_unavailable: Connection timed out\n");
+        assert_eq!(
+            res_fallback_retryable,
+            RecordingExecutionResult::SharedJoinUnavailable {
+                message: "channel_unavailable: Connection timed out".to_string(),
+                retryable: true,
+            }
+        );
+
+        let res_timeout = classify_ffmpeg_failure(b"Last message\nConnection timed out\n");
+        assert_eq!(res_timeout, RecordingExecutionResult::Retryable("Connection timed out".to_string()));
+
+        let res_404 = classify_ffmpeg_failure(b"Last message\nHTTP error 404 Not Found\n");
+        assert_eq!(res_404, RecordingExecutionResult::Failed("HTTP error 404 Not Found".to_string()));
     }
 
     #[test]

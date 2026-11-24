@@ -7,7 +7,10 @@
 
 use super::{
     mcp_redact::{redact_json_body, REDACT_BODY_LIMIT},
-    mcp_tools::{plugin_tools, McpTool, McpToolKind, McpToolMethod, McpToolRef, OwnedMcpTool, ToolView},
+    mcp_tools::{
+        plugin_tools, CallerContext, McpAudience, McpTool, McpToolKind, McpToolMethod, McpToolRef, OwnedMcpTool,
+        ToolView,
+    },
 };
 use crate::{
     api::{auth_middleware::validator_authenticated, endpoints::v1_api::API_V1_PATH, model::AppState},
@@ -23,30 +26,56 @@ use axum::{
 use http_body_util::BodyExt;
 use log::{info, warn};
 use serde_json::{json, Map, Value};
-use shared::{model::PluginRpcErrorDto, utils::concat_path_leading_slash};
+use shared::{
+    model::{McpPlayerTools, PluginRpcErrorDto},
+    utils::concat_path_leading_slash,
+};
 use std::{fmt::Write as _, sync::Arc};
 use tower::ServiceExt;
 
 const MCP_PATH: &str = "mcp";
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// `InitializeResult.instructions`: a short usage guide shown to the client.
-const MCP_INSTRUCTIONS: &str = "\
-Tuliprox is an IPTV playlist proxy and processor. These tools inspect its configuration, streams and stored playlists.
-Playlist workflow: call list_playlist_sources first (targets and inputs are addressed by NAME), then query_playlist_items \
-for one target or input and one cluster (live, video, series). Reading is always safe: only stored data is read and no \
-provider is contacted.
-Paging: results carry total_matched (all matches), returned and has_more. Request the next page with \
+macro_rules! mcp_shared_instructions {
+    () => {
+        "Paging: results carry total_matched (all matches), returned and has_more. Request the next page with \
 offset = offset + returned while has_more is true. limit is clamped (items 500). Narrow with search, group, fields. \
-skipped_records > 0 means unreadable stored records are missing from the listing.
-Secrets: provider URLs and credentials are never returned and any secret-like value is redacted.
-Debug EPG: query_playlist_items with epg_status=unmatched (or missing_id) finds items whose EPG id is not in the EPG \
+skipped_records > 0 means unreadable stored records are missing from the listing.\n\
+Secrets: provider URLs and credentials are never returned and any secret-like value is redacted."
+    };
+}
+
+/// `InitializeResult.instructions`: a short usage guide shown to administrators and web clients.
+const MCP_INSTRUCTIONS: &str = concat!(
+    "Tuliprox is an IPTV playlist proxy and processor. These tools inspect its configuration, streams and stored playlists.\n",
+    "Playlist workflow: call list_playlist_sources first (targets and inputs are addressed by NAME), then query_playlist_items \
+for one target or input and one cluster (live, video, series). Reading is always safe: only stored data is read and no \
+provider is contacted.\n",
+    mcp_shared_instructions!(),
+    "\nDebug EPG: query_playlist_items with epg_status=unmatched (or missing_id) finds items whose EPG id is not in the EPG \
 database; query_target_epg_channels with issue=unreferenced, expired, no_programmes, not_current or no_title finds broken \
 EPG channels; get_target_epg_channel shows the programmes of one channel. An empty EPG result with a `note` means no \
-EPG data exists, not that everything is fine.
-Media servers (plex, emby, jellyfin, silo): list_media_server_libraries and get_media_server_status contact the \
-server once; refresh_media_server_input only queues an update. query_playlist_items reads their stored catalog.
-The server is read-only by default; update tools are listed only when write access is enabled.";
+EPG data exists, not that everything is fine.\n",
+    "Media servers (plex, emby, jellyfin, silo): list_media_server_libraries and get_media_server_status contact the \
+server once; refresh_media_server_input only queues an update. query_playlist_items reads their stored catalog.\n",
+    "The server is read-only by default; update tools are listed only when write access is enabled."
+);
+
+/// `InitializeResult.instructions`: usage guide shown to playlist API users.
+const MCP_PLAYER_INSTRUCTIONS: &str = concat!(
+    "Tuliprox is an IPTV playlist proxy and processor. These tools inspect and control your personal player streams, channels and recordings.\n",
+    "Player workflow: discover capabilities with me_capabilities first, search channels with me_search_channels, \
+and inspect programme guides with me_get_epg.\n",
+    mcp_shared_instructions!(),
+    "\nStreams: me_list_streams lists active playback streams; me_stop_stream disconnects an active stream. \
+me_list_joinable lists shared live streams you can join without extra connections. \
+Failover and sources: me_list_sources lists failover members, me_switch_source switches an active stream source, \
+and me_split_stream splits a shared stream session.\n",
+    "Recordings: me_list_recordings lists visible recordings and tasks; me_recording_conflicts previews capacity and scheduling conflicts. \
+Schedule recordings with me_record_program, cancel with me_cancel_recording, or remove with me_delete_recording. \
+Recurring rules: me_list_rules lists rules, me_create_rule schedules a weekly timeslot rule, and me_delete_rule deletes a rule.\n",
+    "Write tools appear only when player_tools is set to write."
+);
 
 const PARSE_ERROR: i32 = -32700;
 const INVALID_REQUEST: i32 = -32600;
@@ -126,6 +155,10 @@ impl McpState {
         self.read_only || self.app_state.app_config.config.load().mcp.as_ref().is_none_or(|mcp| mcp.read_only)
     }
 
+    fn player_tools(&self) -> McpPlayerTools {
+        self.app_state.app_config.config.load().mcp.as_ref().map_or(McpPlayerTools::Off, |mcp| mcp.player_tools)
+    }
+
     /// The tools of this request. The plugin tools need all three switches:
     /// `mcp.plugin_tools` is read here, the export's `mcp: true` and the admin's
     /// approval by the plugin host, so each is re-checked on every list and call.
@@ -158,11 +191,18 @@ where
         .layer(Extension(state))
 }
 
-async fn mcp_post(Extension(state): Extension<Arc<McpState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn mcp_post(
+    Extension(state): Extension<Arc<McpState>>,
+    fingerprint: crate::auth::Fingerprint,
+    verified_claims: Option<Extension<crate::api::auth_middleware::VerifiedClaims>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if !origin_allowed(&headers, &state.allowed_origins) {
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": "Origin not allowed" }))).into_response();
     }
-    match handle_message(&state, &headers, &body).await {
+    let verified = verified_claims.as_ref().map(|Extension(c)| &c.0);
+    match handle_message(&state, &headers, &body, verified, &fingerprint).await {
         Some(reply) => axum::Json(reply).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
     }
@@ -209,7 +249,13 @@ fn rpc_error(id: &Value, code: i32, message: impl Into<String>) -> Value {
 }
 
 /// `None` means "notification, answer 202 without a body".
-async fn handle_message(state: &McpState, headers: &HeaderMap, body: &[u8]) -> Option<Value> {
+async fn handle_message(
+    state: &McpState,
+    headers: &HeaderMap,
+    body: &[u8],
+    verified_claims: Option<&shared::model::Claims>,
+    fingerprint: &crate::auth::Fingerprint,
+) -> Option<Value> {
     let message: Value = match serde_json::from_slice(body) {
         Ok(message) => message,
         Err(err) => return Some(rpc_error(&Value::Null, PARSE_ERROR, format!("Parse error: {err}"))),
@@ -235,12 +281,27 @@ async fn handle_message(state: &McpState, headers: &HeaderMap, body: &[u8]) -> O
     let params = message.get("params");
 
     Some(match method {
-        "initialize" => rpc_result(id, initialize_result(params)),
+        "initialize" => {
+            let caller = resolve_caller(state, headers, verified_claims, fingerprint).await;
+            rpc_result(id, initialize_result(params, &caller))
+        }
         "ping" => rpc_result(id, json!({})),
         "tools/list" => {
-            rpc_result(id, json!({ "tools": tools_list(&state.tool_view().await, state.effective_read_only()) }))
+            let caller = resolve_caller(state, headers, verified_claims, fingerprint).await;
+            rpc_result(
+                id,
+                json!({
+                    "tools": tools_list_for_caller(
+                        &state.tool_view().await,
+                        state.effective_read_only(),
+                        state.player_tools(),
+                        &caller,
+                        &state.app_state,
+                    )
+                }),
+            )
         }
-        "tools/call" => match call_tool(state, headers, params).await {
+        "tools/call" => match call_tool(state, headers, params, verified_claims, fingerprint).await {
             Ok(result) => rpc_result(id, result),
             Err(message) => rpc_error(id, INVALID_PARAMS, message),
         },
@@ -248,18 +309,89 @@ async fn handle_message(state: &McpState, headers: &HeaderMap, body: &[u8]) -> O
     })
 }
 
-fn initialize_result(params: Option<&Value>) -> Value {
+async fn resolve_caller(
+    state: &McpState,
+    headers: &HeaderMap,
+    verified_claims: Option<&shared::model::Claims>,
+    fingerprint: &crate::auth::Fingerprint,
+) -> CallerContext {
+    let enabled = state
+        .app_state
+        .app_config
+        .config
+        .load()
+        .web_ui
+        .as_ref()
+        .and_then(|ui| ui.auth.as_ref())
+        .is_some_and(|auth| auth.enabled);
+    if !enabled {
+        return CallerContext::NoAuth;
+    }
+    let claims = if let Some(claims) = verified_claims {
+        claims.clone()
+    } else {
+        let Ok(crate::auth::AuthBearer(token)) = crate::auth::AuthBearer::from_headers(headers) else {
+            return CallerContext::NoAuth;
+        };
+        let Ok(claims) = crate::api::auth_middleware::authenticate(&state.app_state, &token).await else {
+            return CallerContext::NoAuth;
+        };
+        claims
+    };
+    if claims.subject_id.as_ref().is_some_and(shared::model::UserId::is_api) {
+        if let Ok(ctx) = crate::api::auth_middleware::api_user_context(&state.app_state, claims, fingerprint) {
+            return CallerContext::ApiUser {
+                effective_permissions: ctx.claims.permissions,
+                claims: ctx.claims,
+                user: ctx.user,
+                target: ctx.target,
+            };
+        }
+        return CallerContext::Denied;
+    }
+    CallerContext::WebUser
+}
+
+fn initialize_result(params: Option<&Value>, caller: &CallerContext) -> Value {
     let requested = params.and_then(|params| params.get("protocolVersion")).and_then(Value::as_str);
+    let instructions = match caller {
+        CallerContext::ApiUser { .. } => MCP_PLAYER_INSTRUCTIONS,
+        CallerContext::WebUser | CallerContext::NoAuth | CallerContext::Denied => MCP_INSTRUCTIONS,
+    };
     json!({
         "protocolVersion": negotiate_protocol_version(requested),
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "tuliprox", "version": VERSION },
-        "instructions": MCP_INSTRUCTIONS,
+        "instructions": instructions,
     })
 }
 
+#[cfg(test)]
 fn tools_list(view: &ToolView, read_only: bool) -> Vec<Value> {
     view.visible(read_only)
+        .map(|tool| {
+            let mut entry = json!({
+                "name": tool.name(),
+                "description": tool.description(),
+                "inputSchema": tool.schema(),
+                "annotations": tool_annotations(&tool),
+            });
+            if let Some(schema) = tool.output_schema() {
+                entry["outputSchema"] = schema;
+            }
+            entry
+        })
+        .collect()
+}
+
+fn tools_list_for_caller(
+    view: &ToolView,
+    admin_read_only: bool,
+    player_tools: McpPlayerTools,
+    caller: &CallerContext,
+    app_state: &AppState,
+) -> Vec<Value> {
+    view.visible_for_caller(caller, admin_read_only, player_tools, app_state)
         .map(|tool| {
             let mut entry = json!({
                 "name": tool.name(),
@@ -300,21 +432,42 @@ fn tool_annotations(tool: &McpToolRef<'_>) -> Value {
 
 /// `Err` is a JSON-RPC protocol error (-32602); everything the REST route
 /// answers, failures included, is an `isError` tool result instead.
-async fn call_tool(state: &McpState, headers: &HeaderMap, params: Option<&Value>) -> Result<Value, String> {
-    call_tool_in(state, &state.tool_view().await, headers, params).await
+async fn call_tool(
+    state: &McpState,
+    headers: &HeaderMap,
+    params: Option<&Value>,
+    verified_claims: Option<&shared::model::Claims>,
+    fingerprint: &crate::auth::Fingerprint,
+) -> Result<Value, String> {
+    call_tool_in(state, &state.tool_view().await, headers, params, verified_claims, fingerprint).await
+}
+
+/// Rejects arguments the tool schema does not declare, so every tool answers a typo the same way.
+fn reject_unknown_args(schema: &Value, args: &Map<String, Value>) -> Result<(), String> {
+    let properties = schema.get("properties").and_then(Value::as_object);
+    if let Some(unknown) = args.keys().find(|key| !properties.is_some_and(|props| props.contains_key(*key))) {
+        return Err(format!("Unknown argument '{unknown}'"));
+    }
+    Ok(())
 }
 
 /// [`call_tool`] over `view`, the tools resolved for this request.
+#[allow(clippy::too_many_lines)]
 async fn call_tool_in(
     state: &McpState,
     view: &ToolView,
     headers: &HeaderMap,
     params: Option<&Value>,
+    verified_claims: Option<&shared::model::Claims>,
+    fingerprint: &crate::auth::Fingerprint,
 ) -> Result<Value, String> {
     let params = params.and_then(Value::as_object).ok_or("params must be an object")?;
     let name = params.get("name").and_then(Value::as_str).ok_or("params.name is required")?;
-    let tool = view.find(name).ok_or_else(|| format!("Unknown tool: {name}"))?;
-    if state.effective_read_only() && tool.kind() == McpToolKind::Write {
+    let caller = resolve_caller(state, headers, verified_claims, fingerprint).await;
+    let tool = view
+        .find_for_caller(name, &caller, state.effective_read_only(), state.player_tools(), &state.app_state)
+        .ok_or_else(|| format!("Unknown tool: {name}"))?;
+    if tool.audience() == McpAudience::Admin && state.effective_read_only() && tool.kind() == McpToolKind::Write {
         return Err(format!("Tool '{name}' is not available in read-only mode"));
     }
     let arguments = match params.get("arguments") {
@@ -327,9 +480,193 @@ async fn call_tool_in(
         }
         Some(_) => return Ok(tool_result(true, "arguments must be an object")),
     };
-    let tool_request = match tool {
-        McpToolRef::Builtin(tool) => build_tool_request(tool, arguments, &state.api_prefix),
-        McpToolRef::Plugin(tool) => Ok(build_plugin_request(tool, arguments, &state.api_prefix)),
+
+    if tool.is_internal() {
+        let CallerContext::ApiUser { claims, .. } = &caller else {
+            return Ok(tool_result(true, "Unauthorized"));
+        };
+        let response =
+            crate::api::endpoints::recording_api::recording_snapshot_response(&state.app_state, claims).await;
+        let val = serde_json::to_value(&response).unwrap_or(Value::Null);
+        let raw_text = serde_json::to_string(&val).unwrap_or_default();
+        let max_bytes = state.max_response_bytes;
+        let truncated = raw_text.len() > max_bytes;
+        let text = body_to_text(raw_text.as_bytes(), max_bytes);
+        let mut result = tool_result(false, &text);
+        if !truncated && val.is_object() {
+            result["structuredContent"] = val;
+        }
+        return Ok(result);
+    }
+
+    let empty = Map::new();
+    let args = arguments.unwrap_or(&empty);
+    let mut idempotency_key = None;
+    let tool_request = if tool.name() == "me_record_program" {
+        if let Err(err) = reject_unknown_args(&tool.schema(), args) {
+            return Ok(tool_result(true, &err));
+        }
+        let CallerContext::ApiUser { target, claims, .. } = &caller else {
+            return Ok(tool_result(true, "Unauthorized"));
+        };
+        let vid = match required_u64(args, "vid") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let program_start = match required_i64(args, "program_start") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let program_end = match required_i64(args, "program_end") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let title = match required_str(args, "title") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let visibility = args.get("visibility").and_then(Value::as_str).unwrap_or("private");
+        let pre_roll_secs = args.get("pre_roll_secs").and_then(Value::as_u64);
+        let post_roll_secs = args.get("post_roll_secs").and_then(Value::as_u64);
+
+        let mut body = json!({
+            "source": {
+                "target_id": target.name,
+                "virtual_id": vid.to_string(),
+                "cluster": "Live",
+                "input_name": ""
+            },
+            "program_title": title,
+            "program_start": program_start,
+            "program_end": program_end,
+            "visibility": visibility,
+        });
+        if let Some(pre) = pre_roll_secs {
+            body["pre_roll_secs"] = json!(pre);
+        }
+        if let Some(post) = post_roll_secs {
+            body["post_roll_secs"] = json!(post);
+        }
+
+        let subject_str = claims.subject_id.as_ref().map_or_else(|| claims.username.clone(), ToString::to_string);
+        let args_json = serde_json::to_string(args).unwrap_or_default();
+        idempotency_key = Some(blake3::hash(format!("{subject_str}:{args_json}").as_bytes()).to_hex().to_string());
+
+        let body_bytes = serde_json::to_vec(&body).map_err(|err| format!("Failed to encode arguments: {err}"))?;
+        Ok(ToolRequest { uri: format!("{}{}", state.api_prefix, tool.path()), body: Some(body_bytes) })
+    } else if tool.name() == "me_recording_conflicts" {
+        if let Err(err) = reject_unknown_args(&tool.schema(), args) {
+            return Ok(tool_result(true, &err));
+        }
+        let CallerContext::ApiUser { target, .. } = &caller else {
+            return Ok(tool_result(true, "Unauthorized"));
+        };
+        let vid = match required_u64(args, "vid") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let program_start = match required_i64(args, "program_start") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let program_end = match required_i64(args, "program_end") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let pre_roll = args.get("pre_roll_secs").and_then(Value::as_u64).unwrap_or(0);
+        let post_roll = args.get("post_roll_secs").and_then(Value::as_u64).unwrap_or(0);
+        let priority = args.get("priority").and_then(Value::as_i64).unwrap_or(0);
+        let padded_start = program_start.saturating_sub(pre_roll.cast_signed());
+        let padded_end = program_end.saturating_add(post_roll.cast_signed());
+
+        let body = json!({
+            "source": {
+                "target_name": target.name,
+                "virtual_id": vid.to_string(),
+                "input_name": ""
+            },
+            "candidate": {
+                "padded_start": padded_start,
+                "padded_end": padded_end,
+                "pre_roll_secs": pre_roll,
+                "post_roll_secs": post_roll,
+                "priority": priority
+            }
+        });
+
+        let body_bytes = serde_json::to_vec(&body).map_err(|err| format!("Failed to encode arguments: {err}"))?;
+        Ok(ToolRequest { uri: format!("{}{}", state.api_prefix, tool.path()), body: Some(body_bytes) })
+    } else if tool.name() == "me_create_rule" {
+        if let Err(err) = reject_unknown_args(&tool.schema(), args) {
+            return Ok(tool_result(true, &err));
+        }
+        let CallerContext::ApiUser { target, .. } = &caller else {
+            return Ok(tool_result(true, "Unauthorized"));
+        };
+        let vid = match required_u64(args, "vid") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let weekday = match required_u64(args, "weekday") {
+            Ok(v) => {
+                if !(1..=7).contains(&v) {
+                    return Ok(tool_result(true, "Argument 'weekday' must be between 1 and 7"));
+                }
+                v
+            }
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let local_start_time = match required_str(args, "local_start_time") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let duration_secs = match required_u64(args, "duration_secs") {
+            Ok(v) => v,
+            Err(e) => return Ok(tool_result(true, &e)),
+        };
+        let timezone = args.get("timezone").and_then(Value::as_str).unwrap_or("UTC");
+        let visibility = args.get("visibility").and_then(Value::as_str);
+        let pre_roll_secs = args.get("pre_roll_secs").and_then(Value::as_u64);
+        let post_roll_secs = args.get("post_roll_secs").and_then(Value::as_u64);
+
+        let mut body = json!({
+            "target_id": target.name,
+            "virtual_id": vid.to_string(),
+            "input_name": "",
+            "body": {
+                "kind": "weekly_timeslot",
+                "weekday": weekday,
+                "local_start_time": local_start_time,
+                "duration_secs": duration_secs,
+                "timezone": timezone,
+            }
+        });
+        if let Some(vis) = visibility {
+            body["visibility"] = json!(vis);
+        }
+        if let Some(pre) = pre_roll_secs {
+            body["pre_roll_secs"] = json!(pre);
+        }
+        if let Some(post) = post_roll_secs {
+            body["post_roll_secs"] = json!(post);
+        }
+
+        let body_bytes = serde_json::to_vec(&body).map_err(|err| format!("Failed to encode arguments: {err}"))?;
+        Ok(ToolRequest { uri: format!("{}{}", state.api_prefix, tool.path()), body: Some(body_bytes) })
+    } else if tool.name() == "me_delete_rule" {
+        let mut defaulted_args = arguments.cloned().unwrap_or_default();
+        if !defaulted_args.contains_key("future") {
+            defaulted_args.insert("future".to_string(), Value::String("retain".to_string()));
+        }
+        match tool {
+            McpToolRef::Builtin(tool) => build_tool_request(tool, Some(&defaulted_args), &state.api_prefix),
+            McpToolRef::Plugin(tool) => Ok(build_plugin_request(tool, Some(&defaulted_args), &state.api_prefix)),
+        }
+    } else {
+        match tool {
+            McpToolRef::Builtin(tool) => build_tool_request(tool, arguments, &state.api_prefix),
+            McpToolRef::Plugin(tool) => Ok(build_plugin_request(tool, arguments, &state.api_prefix)),
+        }
     };
     let tool_request = match tool_request {
         Ok(tool_request) => tool_request,
@@ -343,6 +680,9 @@ async fn call_tool_in(
     if let Some(authorization) = headers.get(header::AUTHORIZATION) {
         request = request.header(header::AUTHORIZATION, authorization);
     }
+    if let Some(idempotency) = idempotency_key {
+        request = request.header("Idempotency-Key", idempotency);
+    }
     let body = match tool_request.body {
         Some(body) => {
             request = request.header(header::CONTENT_TYPE, "application/json");
@@ -350,9 +690,12 @@ async fn call_tool_in(
         }
         None => Body::empty(),
     };
-    let Ok(request) = request.body(body) else {
+    let Ok(mut request) = request.body(body) else {
         return Ok(tool_result(true, "Failed to build request"));
     };
+    // The dispatched request has no socket of its own; the caller's fingerprint carries the real peer address
+    // so the routes apply the same network-access rules as to the MCP request itself.
+    request.extensions_mut().insert(fingerprint.clone());
 
     let response = match state.router.clone().oneshot(request).await {
         Ok(response) => response,
@@ -368,7 +711,11 @@ async fn call_tool_in(
         McpToolRef::Plugin(_) => retry_after_secs(response.headers()),
         McpToolRef::Builtin(_) => None,
     };
-    let text = if !tool.redact_secrets() {
+    let text = if tool.name() == "me_split_stream" && status.is_success() {
+        let bytes = read_capped(response.into_body(), max_bytes).await;
+        let raw_text = body_to_text(&bytes, max_bytes);
+        redact_split_stream_json(&raw_text)
+    } else if !tool.redact_secrets() {
         let bytes = read_capped(response.into_body(), max_bytes).await;
         body_to_text(&bytes, max_bytes)
     } else if status.is_success() {
@@ -477,6 +824,43 @@ fn retry_after_secs(headers: &HeaderMap) -> Option<u64> {
     headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim().parse().ok()
 }
 
+/// Redacts user password from reconnect URL in `me_split_stream` tool response.
+fn redact_split_stream_json(text: &str) -> String {
+    let Ok(mut val) = serde_json::from_str::<Value>(text) else {
+        return text.to_string();
+    };
+    if let Some(url_val) = val.get_mut("url") {
+        if let Some(url_str) = url_val.as_str() {
+            let redacted = redact_xtream_live_password(url_str);
+            *url_val = Value::String(redacted);
+        }
+    }
+    serde_json::to_string(&val).unwrap_or_else(|_| text.to_string())
+}
+
+/// Replaces the password segment in `/live/{username}/{password}/{filename}` with `***`.
+fn redact_xtream_live_password(url: &str) -> String {
+    let (head, query) = match url.split_once('?') {
+        Some((h, q)) => (h, Some(q)),
+        None => (url, None),
+    };
+    let marker = "/live/";
+    if let Some(idx) = head.find(marker) {
+        let prefix = &head[..idx + marker.len()];
+        let rest = &head[idx + marker.len()..];
+        let mut parts = rest.splitn(3, '/');
+        if let (Some(username), Some(_password), Some(filename)) = (parts.next(), parts.next(), parts.next()) {
+            let mut out = format!("{prefix}{username}/***/{filename}");
+            if let Some(q) = query {
+                out.push('?');
+                out.push_str(q);
+            }
+            return out;
+        }
+    }
+    url.to_string()
+}
+
 /// The JSON of an rpc error body, redacted like a result; empty when the body is
 /// not a `PluginRpcErrorDto` (the permission layers answer in other shapes).
 fn plugin_error_text(body: &[u8], max_bytes: usize) -> String {
@@ -491,6 +875,18 @@ fn plugin_error_text(body: &[u8], max_bytes: usize) -> String {
 
 fn tool_result(is_error: bool, text: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+}
+
+fn required_u64(args: &Map<String, Value>, key: &str) -> Result<u64, String> {
+    args.get(key).and_then(Value::as_u64).ok_or_else(|| format!("Missing required argument '{key}'"))
+}
+
+fn required_i64(args: &Map<String, Value>, key: &str) -> Result<i64, String> {
+    args.get(key).and_then(Value::as_i64).ok_or_else(|| format!("Missing required argument '{key}'"))
+}
+
+fn required_str<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
+    args.get(key).and_then(Value::as_str).ok_or_else(|| format!("Missing required argument '{key}'"))
 }
 
 /// Reads at most `max + 1` bytes: the extra byte tells the caller the body
@@ -548,10 +944,7 @@ fn build_tool_request(
     let empty = Map::new();
     let arguments = arguments.unwrap_or(&empty);
     let schema = tool.schema();
-    let properties = schema.get("properties").and_then(Value::as_object);
-    if let Some(unknown) = arguments.keys().find(|key| !properties.is_some_and(|props| props.contains_key(*key))) {
-        return Err(format!("Unknown argument '{unknown}'"));
-    }
+    reject_unknown_args(&schema, arguments)?;
     let required = schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
     for field in required {
         if arguments.get(field).is_none_or(Value::is_null) {
@@ -563,7 +956,7 @@ fn build_tool_request(
     let rest = arguments.iter().filter(|(key, value)| !used.contains(&key.as_str()) && !value.is_null());
 
     match tool.method {
-        McpToolMethod::Get => {
+        McpToolMethod::Get | McpToolMethod::Delete => {
             let mut query = url::form_urlencoded::Serializer::new(String::new());
             for (key, value) in rest {
                 match value {
@@ -654,6 +1047,7 @@ mod tests {
         model::{Config, WebAuthConfig, WebUiUser},
     };
     use shared::model::{Permission, WebAuthConfigDto, WebUiConfigDto};
+    use std::net::SocketAddr;
     use tower::ServiceExt;
 
     fn args(value: Value) -> Map<String, Value> {
@@ -705,11 +1099,22 @@ mod tests {
 
     fn bearer(token: &str) -> String { format!("Bearer {token}") }
 
+    /// Test routers get a loopback peer address, as a real serve loop would provide.
+    fn mock_peer() -> axum::extract::connect_info::MockConnectInfo<SocketAddr> {
+        axum::extract::connect_info::MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345)))
+    }
+
     fn mcp_router(config: Config) -> Router {
         let web_auth_enabled = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).is_some();
         let app_state = create_test_app_state(config);
+        // The MCP state keeps its own clone of the v1 router for tool dispatch, so both
+        // routers need the peer address: the endpoint extracts it, the dispatched
+        // request inherits it from the v1 router's layer.
         let v1 = v1_api_register(web_auth_enabled, &app_state, "");
-        mcp_api_register_if_enabled::<()>(&v1, &app_state, web_auth_enabled, "").expect("mcp enabled").with_state(())
+        mcp_api_register_if_enabled::<()>(&v1, &app_state, web_auth_enabled, "")
+            .expect("mcp enabled")
+            .with_state(())
+            .layer(mock_peer())
     }
 
     async fn post(router: &Router, body: &str, extra: &[(&str, &str)]) -> (StatusCode, Value) {
@@ -717,15 +1122,17 @@ mod tests {
         for (name, value) in extra {
             request = request.header(*name, *value);
         }
-        let response = router
-            .clone()
-            .oneshot(request.body(Body::from(body.to_owned())).expect("request"))
-            .await
-            .expect("response");
+        let mut req = request.body(Body::from(body.to_owned())).expect("request");
+        req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let response = router.clone().oneshot(req).await.expect("response");
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
         let value = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).expect("json body") };
         (status, value)
+    }
+
+    fn test_fingerprint() -> crate::auth::Fingerprint {
+        crate::auth::Fingerprint::from_headers_and_addr(&HeaderMap::new(), SocketAddr::from(([127, 0, 0, 1], 12345)))
     }
 
     fn rpc(id: u32, method: &str, params: Value) -> String {
@@ -815,7 +1222,9 @@ mod tests {
                 assert!(properties.contains_key(name), "{} path placeholder {name} undeclared", tool.name);
                 rest = after;
             }
-            assert!(tool.path.starts_with('/'));
+            if !tool.is_internal {
+                assert!(tool.path.starts_with('/'));
+            }
             assert_ne!(tool.description, "");
         }
     }
@@ -1344,17 +1753,63 @@ mod tests {
         assert_eq!(instructions, MCP_INSTRUCTIONS);
         assert_ne!(instructions.trim(), "");
         assert!(instructions.len() <= 1500, "instructions are too long: {}", instructions.len());
+
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+        let alice_headers = auth_headers(&env.alice_token);
+        let reply_alice = handle_message(
+            &env.state,
+            &alice_headers,
+            rpc(2, "initialize", json!({})).as_bytes(),
+            None,
+            &test_fingerprint(),
+        )
+        .await
+        .unwrap();
+        let player_instructions = reply_alice["result"]["instructions"].as_str().expect("player instructions");
+        assert_eq!(player_instructions, MCP_PLAYER_INSTRUCTIONS);
+        assert_ne!(player_instructions.trim(), "");
+        assert!(player_instructions.len() <= 1500, "player instructions are too long: {}", player_instructions.len());
     }
+
+    const PLAYER_INSTRUCTION_TOOLS: [&str; 17] = [
+        "me_capabilities",
+        "me_search_channels",
+        "me_get_epg",
+        "me_list_streams",
+        "me_stop_stream",
+        "me_list_sources",
+        "me_switch_source",
+        "me_split_stream",
+        "me_list_joinable",
+        "me_list_recordings",
+        "me_record_program",
+        "me_cancel_recording",
+        "me_delete_recording",
+        "me_recording_conflicts",
+        "me_list_rules",
+        "me_create_rule",
+        "me_delete_rule",
+    ];
 
     #[test]
     fn instructions_only_name_existing_tools() {
         for name in PLAYLIST_TOOLS {
-            assert!(MCP_INSTRUCTIONS.contains(name), "instructions do not mention {name}");
+            assert!(MCP_INSTRUCTIONS.contains(name), "admin instructions do not mention {name}");
         }
         for word in MCP_INSTRUCTIONS.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
             let looks_like_tool = ["list_", "query_", "get_", "update_"].iter().any(|prefix| word.starts_with(prefix));
             if looks_like_tool && !word.ends_with('_') {
-                assert!(find_tool(word).is_some(), "instructions name unknown tool {word}");
+                assert!(find_tool(word).is_some(), "admin instructions name unknown tool {word}");
+            }
+        }
+        for name in PLAYER_INSTRUCTION_TOOLS {
+            assert!(MCP_PLAYER_INSTRUCTIONS.contains(name), "player instructions do not mention {name}");
+        }
+        for word in MCP_PLAYER_INSTRUCTIONS.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            let looks_like_tool =
+                ["me_", "list_", "query_", "get_", "update_"].iter().any(|prefix| word.starts_with(prefix));
+            if looks_like_tool && !word.ends_with('_') {
+                assert!(find_tool(word).is_some(), "player instructions name unknown tool {word}");
             }
         }
     }
@@ -1882,7 +2337,8 @@ mod tests {
         let config = config_with_mcp(false, enabled(true));
         let app_state = create_test_app_state(config);
         let v1 = v1_api_register(false, &app_state, "ui");
-        let router = mcp_api_register_if_enabled::<()>(&v1, &app_state, false, "ui").unwrap().with_state(());
+        let router =
+            mcp_api_register_if_enabled::<()>(&v1, &app_state, false, "ui").unwrap().with_state(()).layer(mock_peer());
         let response = router
             .oneshot(
                 Request::builder()
@@ -1911,7 +2367,9 @@ mod tests {
     }
 
     async fn call_stub(state: &McpState, name: &str) -> Value {
-        handle_message(state, &HeaderMap::new(), call(name, json!({})).as_bytes()).await.expect("reply")
+        handle_message(state, &HeaderMap::new(), call(name, json!({})).as_bytes(), None, &test_fingerprint())
+            .await
+            .expect("reply")
     }
 
     #[tokio::test]
@@ -2013,7 +2471,7 @@ mod tests {
 
     async fn call_plugin(state: &McpState, view: &ToolView, name: &str, arguments: Value) -> Result<Value, String> {
         let params = json!({ "name": name, "arguments": arguments });
-        call_tool_in(state, view, &HeaderMap::new(), Some(&params)).await
+        call_tool_in(state, view, &HeaderMap::new(), Some(&params), None, &test_fingerprint()).await
     }
 
     fn listed(view: &ToolView, read_only: bool) -> Vec<String> {
@@ -2052,7 +2510,8 @@ mod tests {
         assert!(!asked.get(), "the plugin host is not asked while mcp.plugin_tools is off");
         assert!(view.find("plugin_demo_ping").is_none());
         assert!(!listed(&view, false).contains(&"plugin_demo_ping".to_string()));
-        assert_eq!(listed(&view, false).len(), MCP_TOOLS.len());
+        let admin_tool_count = MCP_TOOLS.iter().filter(|t| t.audience == McpAudience::Admin).count();
+        assert_eq!(listed(&view, false).len(), admin_tool_count);
     }
 
     #[tokio::test]
@@ -2535,7 +2994,10 @@ mod tests {
         assert_eq!(tool["outputSchema"], json!({ "type": "object" }));
 
         let params = json!({ "name": "plugin_ui_demo_echo", "arguments": { "input": "living-room", "query": "news" } });
-        let reply = call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params)).await.expect("reply");
+        let reply =
+            call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params), None, &test_fingerprint())
+                .await
+                .expect("reply");
         assert_eq!(reply["isError"], false, "{reply}");
         let parsed: Value = serde_json::from_str(result_text(&reply)).expect("the guest's answer");
         assert_eq!(parsed["echo"]["args"], json!({ "query": "news" }));
@@ -2577,8 +3039,16 @@ mod tests {
             ("m3u-input", "no configured plugin input is named `m3u-input`"),
         ] {
             let params = json!({ "name": "plugin_ui_demo_echo", "arguments": { "input": name } });
-            let reply =
-                call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params)).await.expect("reply");
+            let reply = call_tool_in(
+                &fixture.state,
+                &fixture.view,
+                &HeaderMap::new(),
+                Some(&params),
+                None,
+                &test_fingerprint(),
+            )
+            .await
+            .expect("reply");
             assert_eq!(reply["isError"], true, "{name}: {reply}");
             let text = result_text(&reply);
             assert!(text.contains("400"), "{name}: {text}");
@@ -2599,7 +3069,10 @@ mod tests {
                 }
             }
         });
-        let reply = call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params)).await.expect("reply");
+        let reply =
+            call_tool_in(&fixture.state, &fixture.view, &HeaderMap::new(), Some(&params), None, &test_fingerprint())
+                .await
+                .expect("reply");
         assert_eq!(reply["isError"], true);
         let text = result_text(&reply);
         assert!(text.contains("input_draft"), "{text}");
@@ -2649,7 +3122,7 @@ mod tests {
             let params = json!({ "name": name, "arguments": { "input": "emby_input" } });
             let state = &state;
             let view = &view;
-            async move { call_tool_in(state, view, &HeaderMap::new(), Some(&params)).await }
+            async move { call_tool_in(state, view, &HeaderMap::new(), Some(&params), None, &test_fingerprint()).await }
         };
 
         let reply = call_media("list_media_server_libraries").await.expect("tool result");
@@ -2668,7 +3141,9 @@ mod tests {
         assert_eq!(reply["structuredContent"]["reachable"], true);
 
         let params = json!({ "name": "refresh_media_server_input", "arguments": { "input": "emby_input", "action": "refresh" } });
-        let err = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params)).await.expect_err("read-only");
+        let err = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params), None, &test_fingerprint())
+            .await
+            .expect_err("read-only");
         assert!(err.contains("read-only"), "{err}");
         server.abort();
     }
@@ -2697,7 +3172,9 @@ mod tests {
         let view = state.tool_view().await;
 
         let params = json!({ "name": "refresh_media_server_input", "arguments": { "input": "emby_input", "action": "refresh" } });
-        let reply = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params)).await.expect("tool result");
+        let reply = call_tool_in(&state, &view, &HeaderMap::new(), Some(&params), None, &test_fingerprint())
+            .await
+            .expect("tool result");
 
         assert_eq!(reply["isError"], false, "{reply}");
         assert!(reply["structuredContent"]["run_id"].is_string(), "{reply}");
@@ -2709,5 +3186,709 @@ mod tests {
                 action: shared::model::InputUpdateAction::Provider(InputRefreshPolicy::REFRESH)
             })
         );
+    }
+
+    struct McpPlayerTestEnv {
+        _dir: tempfile::TempDir,
+        app_state: Arc<AppState>,
+        state: McpState,
+        view: ToolView,
+        alice_token: String,
+        carol_token: String,
+        admin_token: String,
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn setup_mcp_player_test_env(player_tools: shared::model::McpPlayerTools) -> McpPlayerTestEnv {
+        let dir = tempfile::TempDir::new().unwrap();
+        let web_auth_dto = WebAuthConfigDto {
+            enabled: true,
+            issuer: "test".to_string(),
+            secret: "test-secret".to_string(),
+            ..Default::default()
+        };
+        let web_ui_dto = WebUiConfigDto {
+            enabled: true,
+            auth: Some(web_auth_dto.clone()),
+            user_ui_enabled: true,
+            ..Default::default()
+        };
+        let mcp_dto =
+            shared::model::McpConfigDto { enabled: true, read_only: true, player_tools, ..Default::default() };
+        let recording_dto = shared::model::RecordingConfigDto { enabled: true, ..Default::default() };
+        let recording_runtime = crate::model::RecordingConfig::from(&recording_dto);
+        let config = Config {
+            video: Some(crate::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(recording_runtime),
+            }),
+            storage_dir: dir.path().to_string_lossy().to_string(),
+            web_ui: Some((&web_ui_dto).into()),
+            mcp: Some(McpConfig::from(mcp_dto.clone())),
+            ..Default::default()
+        };
+        let mut app_state = create_test_app_state(config);
+        let persistent_queue = Arc::new(
+            tuliprox_dvr::recording::recording_queue::RecordingQueue::new_persistent(dir.path(), dir.path()).unwrap(),
+        );
+        Arc::get_mut(&mut app_state).expect("unique app state").recording.queue = persistent_queue;
+
+        let target = Arc::new(crate::model::ConfigTarget {
+            managed_channels: Vec::new(),
+            curation: None,
+            id: 1,
+            enabled: true,
+            name: "main".into(),
+            options: Some(shared::model::ConfigTargetOptions {
+                failover_groups: Some(shared::model::FailoverGroupsTargetConfig {
+                    enabled: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            sort: None,
+            filter: tuliprox_core::model::StagedFilter::default(),
+            output: vec![crate::model::TargetOutput::M3u(crate::model::M3uTargetOutput {
+                filename: None,
+                include_type_in_url: false,
+                mask_redirect_url: false,
+                filter: None,
+            })],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::default(),
+            favourites: None,
+            processing_order: shared::model::ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        let input = Arc::new(crate::model::ConfigInput { id: 1, name: "input-a".into(), ..Default::default() });
+        let sources = crate::model::SourcesConfig {
+            inputs: vec![Arc::clone(&input)],
+            sources: vec![crate::model::ConfigSource {
+                inputs: vec!["input-a".into()],
+                targets: vec![Arc::clone(&target)],
+            }],
+            ..Default::default()
+        };
+        app_state.app_config.sources.store(Arc::new(sources));
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "alice".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        max_connections: 5,
+                        filter: None,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            source_switch: Some(true),
+                            joinable_streams: Some(true),
+                            recording: Some(shared::model::PlayerRecordingLevel::Private),
+                            recording_quota: Some(shared::model::ByteSize::new("10000000000")),
+                            max_concurrent_recordings: Some(2),
+                            free_shared_joins: Some(true),
+                            max_free_shared_joins: Some(3),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    shared::model::ProxyUserCredentialsDto {
+                        username: "carol".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        max_connections: 2,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            source_switch: Some(false),
+                            joinable_streams: Some(false),
+                            recording: None,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = crate::model::ApiProxyConfig::from(&api_proxy_dto);
+        for tu in &mut api_proxy.user {
+            for cred in &mut tu.credentials {
+                Arc::make_mut(cred).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        app_state.app_config.set_api_proxy(api_proxy).unwrap();
+
+        let web_auth = app_state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
+        let alice_token =
+            crate::auth::create_jwt_api_user(&web_auth, "alice", shared::model::UserId::api("alice")).unwrap();
+        let carol_token =
+            crate::auth::create_jwt_api_user(&web_auth, "carol", shared::model::UserId::api("carol")).unwrap();
+        let admin_token = create_jwt_web_user(
+            &web_auth,
+            "admin",
+            Permission::UserWrite | Permission::SystemRead | Permission::PlaylistRead,
+            0,
+            shared::model::UserId::web("admin"),
+        )
+        .unwrap();
+
+        let v1 = v1_api_register(true, &app_state, "").with_state(Arc::clone(&app_state));
+        let state = McpState::new(v1, &McpConfig::from(mcp_dto), true, "", Arc::clone(&app_state));
+        let view = state.tool_view().await;
+
+        McpPlayerTestEnv { _dir: dir, app_state, state, view, alice_token, carol_token, admin_token }
+    }
+
+    async fn seed_test_channel(app_state: &Arc<AppState>, vid: u32, name: &str, group: &str) {
+        use shared::model::{
+            M3uPlaylistItem, PlaylistItem, PlaylistItemHeader, PlaylistItemType, VirtualId, XtreamCluster,
+        };
+        use tuliprox_repository::{
+            bplustree::BPlusTree, ensure_target_storage_path, m3u_get_file_path_for_db, TargetPlaylistStorage,
+        };
+        let mut tree = BPlusTree::new();
+        let pli = PlaylistItem {
+            header: PlaylistItemHeader {
+                virtual_id: VirtualId::new(vid),
+                input_name: Arc::from("input-a"),
+                name: Arc::from(name),
+                group: Arc::from(group),
+                title: Arc::from(name),
+                url: Arc::from(format!("http://example.com/{vid}.ts")),
+                item_type: PlaylistItemType::Live,
+                xtream_cluster: XtreamCluster::Live,
+                ..PlaylistItemHeader::default()
+            },
+        };
+        let item = M3uPlaylistItem::from(&pli);
+        tree.insert(vid, item);
+
+        let storage_path = ensure_target_storage_path(&app_state.app_config.config.load(), "main").await.unwrap();
+        let db_path = m3u_get_file_path_for_db(&storage_path);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        tree.store(&db_path).unwrap();
+
+        app_state
+            .playlists
+            .data
+            .write()
+            .await
+            .insert("main".to_string(), TargetPlaylistStorage { m3u: Some(tree), xtream: None, id_mapping: None });
+    }
+
+    fn auth_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        headers
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tools_list_caller_matrix() {
+        let env_write = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+
+        let req = rpc(1, "tools/list", json!({}));
+
+        // 1. Web admin sees no player tools, all admin tools
+        let admin_headers = auth_headers(&env_write.admin_token);
+        let reply_admin =
+            handle_message(&env_write.state, &admin_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
+        let tools_admin = reply_admin["result"]["tools"].as_array().unwrap();
+        let admin_names: Vec<String> = tools_admin.iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert!(!admin_names.iter().any(|n| n.starts_with("me_")));
+        assert!(admin_names.contains(&"get_status".to_string()));
+
+        // 2. API user Alice (all features on, player_tools = Write) sees exact list of 16 player tools, 0 admin tools
+        let alice_headers = auth_headers(&env_write.alice_token);
+        let reply_alice =
+            handle_message(&env_write.state, &alice_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
+        let tools_alice = reply_alice["result"]["tools"].as_array().unwrap();
+        let mut alice_names: Vec<String> =
+            tools_alice.iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        alice_names.sort();
+        let mut expected_player_write = vec![
+            "me_cancel_recording".to_string(),
+            "me_capabilities".to_string(),
+            "me_create_rule".to_string(),
+            "me_delete_recording".to_string(),
+            "me_delete_rule".to_string(),
+            "me_get_epg".to_string(),
+            "me_list_joinable".to_string(),
+            "me_list_recordings".to_string(),
+            "me_list_rules".to_string(),
+            "me_list_sources".to_string(),
+            "me_list_streams".to_string(),
+            "me_record_program".to_string(),
+            "me_recording_conflicts".to_string(),
+            "me_search_channels".to_string(),
+            "me_split_stream".to_string(),
+            "me_stop_stream".to_string(),
+            "me_switch_source".to_string(),
+        ];
+        expected_player_write.sort();
+        assert_eq!(alice_names, expected_player_write);
+
+        // 3. API user Alice with player_tools = Read sees only read tools (9 tools, 0 write tools)
+        let env_read = setup_mcp_player_test_env(shared::model::McpPlayerTools::Read).await;
+        let reply_read =
+            handle_message(&env_read.state, &alice_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
+        let tools_read = reply_read["result"]["tools"].as_array().unwrap();
+        let mut alice_read_names: Vec<String> =
+            tools_read.iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        alice_read_names.sort();
+        let mut expected_player_read = vec![
+            "me_capabilities".to_string(),
+            "me_get_epg".to_string(),
+            "me_list_joinable".to_string(),
+            "me_list_recordings".to_string(),
+            "me_list_rules".to_string(),
+            "me_list_sources".to_string(),
+            "me_list_streams".to_string(),
+            "me_recording_conflicts".to_string(),
+            "me_search_channels".to_string(),
+        ];
+        expected_player_read.sort();
+        assert_eq!(alice_read_names, expected_player_read);
+
+        // 4. API user Carol with features off sees only the 5 featureless tools
+        let carol_headers = auth_headers(&env_write.carol_token);
+        let reply_carol =
+            handle_message(&env_write.state, &carol_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
+        let tools_carol = reply_carol["result"]["tools"].as_array().unwrap();
+        let mut carol_names: Vec<String> =
+            tools_carol.iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        carol_names.sort();
+        let mut expected_carol = vec![
+            "me_capabilities".to_string(),
+            "me_get_epg".to_string(),
+            "me_list_streams".to_string(),
+            "me_search_channels".to_string(),
+            "me_stop_stream".to_string(),
+        ];
+        expected_carol.sort();
+        assert_eq!(carol_names, expected_carol);
+
+        // 5. API user with player_tools = Off sees 0 tools
+        let env_off = setup_mcp_player_test_env(shared::model::McpPlayerTools::Off).await;
+        let reply_off =
+            handle_message(&env_off.state, &alice_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
+        let tools_off = reply_off["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools_off.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tools_call_hidden_returns_unknown_tool() {
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+
+        let alice_headers = auth_headers(&env.alice_token);
+        let admin_headers = auth_headers(&env.admin_token);
+        let carol_headers = auth_headers(&env.carol_token);
+
+        // API user calling admin tool -> Unknown tool
+        let params = json!({ "name": "get_status", "arguments": {} });
+        let err = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Unknown tool: get_status");
+
+        // Web admin calling player tool -> Unknown tool
+        let params = json!({ "name": "me_capabilities", "arguments": {} });
+        let err = call_tool_in(&env.state, &env.view, &admin_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Unknown tool: me_capabilities");
+
+        // Carol (source_switch disabled) calling me_list_sources -> Unknown tool
+        let params = json!({ "name": "me_list_sources", "arguments": { "vid": 100 } });
+        let err = call_tool_in(&env.state, &env.view, &carol_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Unknown tool: me_list_sources");
+
+        // When player_tools = Read, calling write tool me_record_program -> Unknown tool
+        let env_read = setup_mcp_player_test_env(shared::model::McpPlayerTools::Read).await;
+        let params = json!({
+            "name": "me_record_program",
+            "arguments": {
+                "vid": 100,
+                "program_start": 1_740_000_000,
+                "program_end": 1_740_003_600,
+                "title": "News"
+            }
+        });
+        let err =
+            call_tool_in(&env_read.state, &env_read.view, &alice_headers, Some(&params), None, &test_fingerprint())
+                .await
+                .unwrap_err();
+        assert_eq!(err, "Unknown tool: me_record_program");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_end_to_end_search_epg_record_with_idempotency() {
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+        seed_test_channel(&env.app_state, 100, "News Channel", "News").await;
+
+        let alice_headers = auth_headers(&env.alice_token);
+
+        // 1. me_search_channels
+        let params = json!({ "name": "me_search_channels", "arguments": { "query": "News" } });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], false);
+        let channels: Vec<shared::model::UserChannelDto> =
+            serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].virtual_id, 100);
+
+        // 2. me_get_epg (empty EPG DB returns [] but succeeds)
+        let params = json!({
+            "name": "me_get_epg",
+            "arguments": {
+                "vid": 100,
+                "from": "1740000000",
+                "to": "1740003600"
+            }
+        });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], false);
+
+        // 3. me_record_program -> creates exactly 1 recording
+        let start = chrono::Utc::now().timestamp() + 3_600;
+        let end = start + 3_600;
+        let record_args = json!({
+            "vid": 100,
+            "program_start": start,
+            "program_end": end,
+            "title": "Morning News"
+        });
+        let params = json!({ "name": "me_record_program", "arguments": record_args });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], false, "me_record_program reply: {reply:?}");
+        assert_eq!(env.app_state.recording.queue.scheduled.read().await.len(), 1);
+
+        // 4. Calling me_record_program a second time with exact same arguments is idempotent -> still 1 recording
+        let reply2 = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply2["isError"], false, "reply2: {reply2:?}");
+        assert_eq!(env.app_state.recording.queue.scheduled.read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_me_list_recordings_json_equals_websocket_snapshot() {
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+        seed_test_channel(&env.app_state, 100, "News Channel", "News").await;
+
+        let alice_headers = auth_headers(&env.alice_token);
+
+        // Record a program
+        let start = chrono::Utc::now().timestamp() + 3_600;
+        let end = start + 3_600;
+        let record_args = json!({
+            "vid": 100,
+            "program_start": start,
+            "program_end": end,
+            "title": "Morning News"
+        });
+        let params = json!({ "name": "me_record_program", "arguments": record_args });
+        let _ = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+
+        // Call me_list_recordings
+        let params = json!({ "name": "me_list_recordings", "arguments": {} });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], false);
+
+        // Obtain snapshot directly as websocket handler does
+        let mut claims = crate::api::auth_middleware::authenticate(&env.app_state, &env.alice_token).await.unwrap();
+        claims.permissions = crate::api::auth_middleware::effective_permissions(&env.app_state, &claims);
+        let ws_msg = crate::api::endpoints::recording_api::recording_snapshot_response(&env.app_state, &claims).await;
+        let ws_json = serde_json::to_string(&ws_msg).unwrap();
+
+        let tool_text = reply["content"][0]["text"].as_str().unwrap();
+        assert_eq!(tool_text, ws_json);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_expired_api_user_sees_no_tools() {
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+        let mut config = (*env.app_state.app_config.config.load_full()).clone();
+        config.user_access_control = true;
+        env.app_state.app_config.config.store(Arc::new(config));
+
+        let mut api_proxy = (*env.app_state.app_config.api_proxy.load_full().unwrap()).clone();
+        for tu in &mut api_proxy.user {
+            for cred in &mut tu.credentials {
+                if cred.username == "alice" {
+                    Arc::make_mut(cred).exp_date = Some(1); // epoch 1s: expired in 1970
+                }
+            }
+        }
+        env.app_state.app_config.set_api_proxy(api_proxy).unwrap();
+
+        let alice_headers = auth_headers(&env.alice_token);
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {}
+        });
+        let reply = handle_message(&env.state, &alice_headers, req.to_string().as_bytes(), None, &test_fingerprint())
+            .await
+            .unwrap();
+        let tools = reply["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 0, "expired API user must see 0 MCP tools");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_player_rule_tools() {
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+        seed_test_channel(&env.app_state, 100, "News Channel", "News").await;
+
+        let alice_headers = auth_headers(&env.alice_token);
+
+        // 1. Create a weekly timeslot rule via me_create_rule
+        let create_args = json!({
+            "vid": 100,
+            "weekday": 1,
+            "local_start_time": "20:00",
+            "duration_secs": 3600,
+            "visibility": "private"
+        });
+        let params = json!({ "name": "me_create_rule", "arguments": create_args });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], false);
+        let rule_json: Value = serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+        let rule_id = rule_json["id"].as_str().unwrap().to_string();
+        assert_ne!(rule_id, "");
+        assert_eq!(rule_json["source"]["virtual_id"], "100");
+        assert_eq!(rule_json["visibility"], "private");
+
+        // 2. List rules via me_list_rules
+        let params = json!({ "name": "me_list_rules", "arguments": {} });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], false);
+        let rules_list: Vec<Value> = serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(rules_list.iter().any(|r| r["id"] == rule_id));
+
+        // 3. Delete rule via me_delete_rule
+        let delete_args = json!({ "id": rule_id });
+        let params = json!({ "name": "me_delete_rule", "arguments": delete_args });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], false);
+
+        // 4. Verify rule is gone via me_list_rules
+        let params = json!({ "name": "me_list_rules", "arguments": {} });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], false);
+        let rules_list_after: Vec<Value> = serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(!rules_list_after.iter().any(|r| r["id"] == rule_id));
+
+        // 5. Verify Carol (no recording feature) cannot see rule tools
+        let carol_headers = auth_headers(&env.carol_token);
+        let req = rpc(2, "tools/list", json!({}));
+        let reply_carol =
+            handle_message(&env.state, &carol_headers, req.as_bytes(), None, &test_fingerprint()).await.unwrap();
+        let carol_tools = reply_carol["result"]["tools"].as_array().unwrap();
+        assert!(!carol_tools
+            .iter()
+            .any(|t| t["name"] == "me_create_rule" || t["name"] == "me_list_rules" || t["name"] == "me_delete_rule"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_me_delete_rule_encodes_id_and_query() {
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+        let alice_headers = auth_headers(&env.alice_token);
+
+        let delete_args = json!({ "id": "rule/slash?question", "future": "retain" });
+        let params = json!({ "name": "me_delete_rule", "arguments": delete_args });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], true);
+        let text = reply["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("recording_rule_unknown"), "Expected recording_rule_unknown but got: {text}");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_player_split_stream() {
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+        let alice_headers = auth_headers(&env.alice_token);
+
+        // Call me_split_stream with non-existent uid -> tool executes endpoint and returns 404 (isError: true)
+        let params = json!({ "name": "me_split_stream", "arguments": { "uid": 9999 } });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], true);
+
+        // Carol (no source_switch feature) calling me_split_stream -> rejected / unavailable
+        let carol_headers = auth_headers(&env.carol_token);
+        let reply_carol =
+            call_tool_in(&env.state, &env.view, &carol_headers, Some(&params), None, &test_fingerprint()).await;
+        assert!(reply_carol.is_err(), "Carol without source_switch must not find me_split_stream");
+
+        // Active shared stream with 2 subscribers for Alice -> success with password redacted in URL
+        let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let fp = crate::auth::Fingerprint::new("fp".into(), "127.0.0.1".into(), addr);
+        let channel = shared::model::StreamChannel {
+            target_id: 1,
+            virtual_id: 100,
+            provider_id: 1,
+            input_name: "test-in".into(),
+            item_type: shared::model::PlaylistItemType::Live,
+            cluster: shared::model::XtreamCluster::Live,
+            group: "test-group".into(),
+            title: "Test Stream".into(),
+            url: "http://example.com/stream.ts".into(),
+            shared: true,
+            shared_joined_existing: Some(true),
+            ..Default::default()
+        };
+        let connection = crate::api::model::ConnectionParams {
+            meter_uid: 1,
+            username: "alice",
+            max_connections: 5,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fp,
+            provider: "test-prov".into(),
+            stream_channel: &channel,
+            user_agent: "test-ua".into(),
+            session_token: None,
+        };
+        let _ = env.app_state.connection_manager.update_connection(connection).await;
+        let streams = env.app_state.active_users.user_streams("alice").await;
+        let uid = streams[0].uid;
+        let key = crate::api::api_utils::failover_group::group_shared_key(1, 100);
+        env.app_state.shared_stream_manager.set_test_subscriber_count(&key, 2).await;
+
+        let params_success = json!({ "name": "me_split_stream", "arguments": { "uid": uid } });
+        let reply_success =
+            call_tool_in(&env.state, &env.view, &alice_headers, Some(&params_success), None, &test_fingerprint())
+                .await
+                .unwrap();
+        assert_eq!(reply_success["isError"], false);
+        let text = reply_success["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("/m3u-stream/live/alice/***/100.ts?dedicated=1"),
+            "Password must be redacted in text: {text}"
+        );
+        assert!(!text.contains("pass"), "Plain password must not leak in text: {text}");
+        let structured = &reply_success["structuredContent"];
+        assert_eq!(structured["url"], "/m3u-stream/live/alice/***/100.ts?dedicated=1");
+        assert_eq!(structured["reconnect_required"], true);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_me_record_program_rejects_unknown_argument() {
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Write).await;
+        seed_test_channel(&env.app_state, 100, "News Channel", "News").await;
+
+        let alice_headers = auth_headers(&env.alice_token);
+        let start = chrono::Utc::now().timestamp() + 3_600;
+        let end = start + 3_600;
+        let record_args = json!({
+            "vid": 100,
+            "program_start": start,
+            "program_end": end,
+            "title": "Morning News",
+            "bogus_arg": "invalid"
+        });
+        let params = json!({ "name": "me_record_program", "arguments": record_args });
+        let reply = call_tool_in(&env.state, &env.view, &alice_headers, Some(&params), None, &test_fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(reply["isError"], true);
+        assert_eq!(reply["content"][0]["text"], "Unknown argument 'bogus_arg'");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_api_user_enforces_network_access() {
+        use shared::model::NetworkAccessDto;
+
+        let env = setup_mcp_player_test_env(shared::model::McpPlayerTools::Read).await;
+        // Restrict alice to 10.0.0.0/8
+        {
+            let mut api_proxy = (*env.app_state.app_config.api_proxy.load_full().unwrap()).clone();
+            for target_user in &mut api_proxy.user {
+                for cred in &mut target_user.credentials {
+                    if cred.username == "alice" {
+                        Arc::make_mut(cred).network_access =
+                            Some(tuliprox_core::model::NetworkAccess::from(&NetworkAccessDto {
+                                allowed_countries: None,
+                                allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+                            }));
+                    }
+                }
+            }
+            env.app_state.app_config.set_api_proxy(api_proxy).unwrap();
+        }
+
+        let v1 = crate::api::endpoints::v1_api::v1_api_register(true, &env.app_state, "");
+        let router = mcp_api_register_if_enabled::<()>(&v1, &env.app_state, true, "").unwrap();
+
+        // 1. HTTP route: Alice from denied IP gets 403 Forbidden
+        let mut denied_req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", env.alice_token))
+            .body(Body::from(rpc(1, "tools/list", json!({}))))
+            .unwrap();
+        denied_req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([192, 168, 1, 1], 12345))));
+        let denied_resp = router.clone().oneshot(denied_req).await.unwrap();
+        assert_eq!(denied_resp.status(), StatusCode::FORBIDDEN);
+
+        // 2. HTTP route: Alice from allowed IP gets 200 OK
+        let mut allowed_req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", env.alice_token))
+            .body(Body::from(rpc(1, "tools/list", json!({}))))
+            .unwrap();
+        allowed_req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 12345))));
+        let allowed_resp = router.oneshot(allowed_req).await.unwrap();
+        assert_eq!(allowed_resp.status(), StatusCode::OK);
+
+        // 3. Direct resolve_caller: denied fingerprint yields CallerContext::Denied
+        let denied_headers = auth_headers(&env.alice_token);
+        let fp_denied = crate::auth::Fingerprint::from_headers_and_addr(
+            &HeaderMap::new(),
+            SocketAddr::from(([192, 168, 1, 1], 12345)),
+        );
+        let caller_denied = resolve_caller(&env.state, &denied_headers, None, &fp_denied).await;
+        assert!(matches!(caller_denied, CallerContext::Denied));
+
+        // 4. Direct resolve_caller: allowed fingerprint yields CallerContext::ApiUser
+        let allowed_headers = auth_headers(&env.alice_token);
+        let fp_allowed = crate::auth::Fingerprint::from_headers_and_addr(
+            &HeaderMap::new(),
+            SocketAddr::from(([10, 0, 0, 1], 12345)),
+        );
+        let caller_allowed = resolve_caller(&env.state, &allowed_headers, None, &fp_allowed).await;
+        assert!(matches!(caller_allowed, CallerContext::ApiUser { .. }));
     }
 }

@@ -3,7 +3,7 @@ use crate::{
         endpoints::v1_api::create_status_check,
         model::{AppState, EventMessage},
     },
-    auth::{validate_token_claims, TokenVerifier},
+    auth::{validate_token_claims, Fingerprint, TokenVerifier},
 };
 use axum::{
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -62,19 +62,21 @@ impl From<io::Error> for WebSocketApiError {
 // WebSocket upgrade handler
 async fn websocket_handler(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    fingerprint: Fingerprint,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     trace!("Websocket connected");
-    ws.on_upgrade(move |socket| handle_socket(socket, app_state, false))
+    ws.on_upgrade(move |socket| handle_socket(socket, app_state, false, fingerprint))
 }
 
 // WebSocket upgrade handler
 async fn websocket_handler_auth(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    fingerprint: Fingerprint,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     trace!("Websocket connected");
-    ws.on_upgrade(move |socket| handle_socket(socket, app_state, true))
+    ws.on_upgrade(move |socket| handle_socket(socket, app_state, true, fingerprint))
 }
 
 pub fn ws_api_register(web_auth_enabled: bool, web_ui_path: &str) -> axum::Router<Arc<AppState>> {
@@ -94,6 +96,8 @@ fn set_websocket_auth(mem: &mut ProtocolHandlerMemory, auth_token: String, claim
     mem.permissions = claims.permissions;
     mem.role = if claims.is_admin() { UserRole::Admin } else { UserRole::User };
     mem.subject_id = claims.subject_id.as_ref().map(|u| u.0.clone());
+    mem.username = Some(claims.username.clone());
+    mem.roles = claims.roles;
     mem.token = Some(auth_token);
     true
 }
@@ -102,17 +106,19 @@ fn set_no_auth_websocket_identity(mem: &mut ProtocolHandlerMemory, auth_token: O
     mem.permissions = PERM_ALL;
     mem.role = UserRole::Admin;
     mem.subject_id = Some(UserId::BUILTIN_ADMIN_NAMESPACE.to_string());
+    mem.username = Some("admin".to_string());
+    mem.roles = RoleSet::ADMIN;
     mem.token = auth_token;
 }
 
 fn websocket_claims(mem: &ProtocolHandlerMemory) -> Option<Claims> {
     let subject_id = mem.subject_id.as_ref().map(|subject| UserId::from(subject.clone()))?;
     Some(Claims {
-        username: "__ws__".to_string(),
+        username: mem.username.clone().unwrap_or_else(|| "__ws__".to_string()),
         iss: "tuliprox".to_string(),
         iat: 0,
         exp: i64::MAX,
-        roles: if mem.role == UserRole::Admin { RoleSet::ADMIN } else { RoleSet::new() },
+        roles: mem.roles,
         permissions: mem.permissions,
         pwd_version: 0,
         subject_id: Some(subject_id),
@@ -203,6 +209,7 @@ async fn handle_protocol_message(
     app_state: &Arc<AppState>,
     auth_required: bool,
     verifier: Option<&TokenVerifier>,
+    fingerprint: &Fingerprint,
 ) -> Option<ProtocolMessage> {
     if let Message::Binary(bytes) = msg {
         match ProtocolMessage::from_bytes(bytes) {
@@ -260,11 +267,7 @@ async fn handle_protocol_message(
                 }
             }
             Ok(ProtocolMessage::RecordingSnapshotRequest) => {
-                if let Some(claims) = websocket_claims(mem) {
-                    Some(recording_frame_for_session(app_state, &claims).await)
-                } else {
-                    Some(ProtocolMessage::Unauthorized)
-                }
+                Some(recording_frame_for_session(app_state, mem, fingerprint).await)
             }
             Ok(ProtocolMessage::StreamMeterSubscribe) => {
                 handle_stream_meter_subscribe(mem, app_state, auth_required);
@@ -344,6 +347,7 @@ async fn handle_incoming_message(
     app_state: &Arc<AppState>,
     auth_required: bool,
     verifier: Option<&TokenVerifier>,
+    fingerprint: &Fingerprint,
 ) -> Result<(), WebSocketApiError> {
     let msg = result?;
 
@@ -358,7 +362,7 @@ async fn handle_incoming_message(
             Ok(())
         }
         ProtocolHandler::Default(mem) => {
-            let msg = handle_protocol_message(msg, mem, app_state, auth_required, verifier).await;
+            let msg = handle_protocol_message(msg, mem, app_state, auth_required, verifier, fingerprint).await;
             match msg {
                 None => Ok(()),
                 Some(protocol_msg) => {
@@ -375,53 +379,82 @@ async fn handle_incoming_message(
 
 /// The frame to send a session that asked for recordings.
 ///
-/// Three outcomes, and the distinction is the point:
+/// Authentication and live permissions are re-evaluated before every frame
+/// so that revoked tokens and withdrawn permissions take effect immediately.
 ///
-/// - the DVR is switched off, or the token is too old to trust →
-///   `RecordingWsError { code }`, so the client can act. Both used to
-///   come back as an empty task list, indistinguishable from "you have
-///   no recordings";
-/// - the principal has no `recording.read` → an empty snapshot, which is
-///   the honest answer and needs no error;
-/// - otherwise → the session-filtered snapshot.
-async fn recording_frame_for_session(app_state: &AppState, claims: &Claims) -> ProtocolMessage {
-    use crate::api::model::recording::recording_ws::{recording_view_denial, RecordingViewDenial};
+/// Possible outcomes:
+/// - `Unauthorized`: missing or invalid token, or unauthenticated session.
+/// - `RecordingWsError("recording_token_refresh_required")`: token schema is stale and must be refreshed.
+/// - `RecordingWsError("recording_disabled")`: recording feature is disabled globally.
+/// - `RecordingWsError("recording_forbidden")`: caller is not permitted to view recordings.
+/// - `RecordingSnapshotResponse`: snapshot of current recording tasks and quotas for the caller.
+async fn recording_frame_for_session(
+    app_state: &Arc<AppState>,
+    mem: &ProtocolHandlerMemory,
+    fingerprint: &Fingerprint,
+) -> ProtocolMessage {
+    let config = app_state.app_config.config.load();
+    let web_auth_enabled = config.web_ui.as_ref().and_then(|w| w.auth.as_ref()).is_some_and(|auth| auth.enabled);
 
-    // `recording.enabled: false` gates the REST routes and the
-    // schedulers; the socket has to agree, or a client would keep
-    // receiving live recording data while every REST call answered
-    // `501 recording_disabled`.
+    let claims = if web_auth_enabled {
+        let Some(token) = mem.token.as_deref() else {
+            return ProtocolMessage::Unauthorized;
+        };
+        let mut claims = match crate::api::auth_middleware::authenticate(app_state, token).await {
+            Ok(claims) => claims,
+            Err(crate::auth::AuthError::StaleSchema) => {
+                return ProtocolMessage::RecordingWsError { code: "recording_token_refresh_required".to_string() };
+            }
+            Err(_) => {
+                return ProtocolMessage::Unauthorized;
+            }
+        };
+        claims.permissions = crate::api::auth_middleware::effective_permissions(app_state, &claims);
+        claims
+    } else if mem.token.as_deref() == Some(TOKEN_NO_AUTH)
+        || mem.subject_id.as_deref() == Some(UserId::BUILTIN_ADMIN_NAMESPACE)
+    {
+        let Some(claims) = websocket_claims(mem) else {
+            return ProtocolMessage::Unauthorized;
+        };
+        claims
+    } else {
+        return ProtocolMessage::Unauthorized;
+    };
+
     if !crate::api::model::recording::recording_supervisor::recording_enabled(&app_state.app_config) {
         return ProtocolMessage::RecordingWsError { code: "recording_disabled".to_string() };
     }
-    if let Some(RecordingViewDenial::TokenRefreshRequired) = recording_view_denial(claims) {
-        return ProtocolMessage::RecordingWsError {
-            code: RecordingViewDenial::TokenRefreshRequired.code().to_string(),
-        };
+    if let Some(denial) = crate::api::model::recording::recording_ws::recording_view_denial(&claims) {
+        return ProtocolMessage::RecordingWsError { code: denial.code().to_string() };
     }
-    let snapshot = crate::api::model::recording::recording_ws::recording_snapshot(
-        &app_state.recording.queue,
-        claims,
-        &app_state.app_config,
-    )
-    .await;
-    ProtocolMessage::RecordingSnapshotResponse {
-        revision: snapshot.revision,
-        available: snapshot.available,
-        quota: snapshot.quota,
-        tasks: snapshot.tasks,
+    if claims.subject_id.as_ref().is_some_and(UserId::is_api) {
+        match crate::api::auth_middleware::validate_api_user(
+            app_state,
+            &claims,
+            crate::api::auth_middleware::ApiUserAccess::Any,
+            fingerprint,
+        ) {
+            Ok(_) => {}
+            Err(crate::auth::AuthError::Forbidden) => {
+                return ProtocolMessage::RecordingWsError { code: "recording_forbidden".to_string() };
+            }
+            Err(_) => {
+                return ProtocolMessage::Unauthorized;
+            }
+        }
     }
+    crate::api::endpoints::recording_api::recording_snapshot_response(app_state, &claims).await
 }
 
 async fn send_recording_snapshot_event(
-    app_state: &AppState,
+    app_state: &Arc<AppState>,
     socket: &mut WebSocket,
     mem: &ProtocolHandlerMemory,
+    fingerprint: &Fingerprint,
 ) -> Result<(), WebSocketApiError> {
-    if let Some(claims) = websocket_claims(mem) {
-        let frame = recording_frame_for_session(app_state, &claims).await;
-        send_event_response(socket, frame, "Recording snapshot event").await?;
-    }
+    let frame = recording_frame_for_session(app_state, mem, fingerprint).await;
+    send_event_response(socket, frame, "Recording snapshot event").await?;
     Ok(())
 }
 
@@ -554,7 +587,9 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         | EventMessage::FailoverGroupMemberSelected { .. }
         | EventMessage::FailoverGroupExhausted { .. }
         | EventMessage::FailoverGroupCircuitChanged { .. }
-        | EventMessage::FailoverGroupMemberSwitched { .. } => return None,
+        | EventMessage::FailoverGroupMemberSwitched { .. }
+        | EventMessage::StreamEnded { .. }
+        | EventMessage::RecordingFinished { .. } => return None,
     })
 }
 
@@ -564,6 +599,7 @@ async fn handle_event_message(
     event: EventMessage,
     handler: &ProtocolHandler,
     progress_throttle: &mut RecordingProgressThrottle,
+    fingerprint: &Fingerprint,
 ) -> Result<(), WebSocketApiError> {
     let ProtocolHandler::Default(mem) = handler else {
         return Ok(());
@@ -576,7 +612,7 @@ async fn handle_event_message(
     // is enforced by `recording_ws` rather than by this socket.
     if matches!(event, EventMessage::RecordingChanged) {
         progress_throttle.note_full_snapshot(std::time::Instant::now());
-        return send_recording_snapshot_event(app_state, socket, mem).await;
+        return send_recording_snapshot_event(app_state, socket, mem, fingerprint).await;
     }
 
     // Progress-only snapshots are throttled; a skipped tick is
@@ -584,7 +620,7 @@ async fn handle_event_message(
     // current state at send time. A state transition is never throttled.
     if matches!(event, EventMessage::RecordingProgress) {
         if progress_throttle.should_send(std::time::Instant::now()) {
-            return send_recording_snapshot_event(app_state, socket, mem).await;
+            return send_recording_snapshot_event(app_state, socket, mem, fingerprint).await;
         }
         return Ok(());
     }
@@ -605,7 +641,7 @@ async fn send_event_response(
 }
 
 // WebSocket communication logic
-async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_required: bool) {
+async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_required: bool, fingerprint: Fingerprint) {
     let verifier = get_token_verifier(&app_state, auth_required);
 
     let mut event_rx = app_state.event_manager.get_event_channel();
@@ -617,7 +653,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
         tokio::select! {
             maybe_msg = socket.recv() => {
                 if let Some(msg) = maybe_msg {
-                    if let Err(e) = handle_incoming_message(msg, &mut socket, &mut handler, &app_state, auth_required, verifier.as_ref()).await {
+                    if let Err(e) = handle_incoming_message(msg, &mut socket, &mut handler, &app_state, auth_required, verifier.as_ref(), &fingerprint).await {
                         trace!("WebSocket message handling error: {e}");
                         break;
                     }
@@ -629,7 +665,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
             event_result = event_rx.recv() => {
                 match event_result {
                     Ok(event) => {
-                        if let Err(e) = handle_event_message(&app_state, &mut socket, event, &handler, &mut progress_throttle).await {
+                        if let Err(e) = handle_event_message(&app_state, &mut socket, event, &handler, &mut progress_throttle, &fingerprint).await {
                             trace!("Failed to send ws event: {e}");
                             break;
                         }
@@ -702,10 +738,21 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
 async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool {
     match cmd {
         UserCommand::Kick(addr, virtual_id, _secs) => {
-            // secs could be later used for different kick configurations. Currently, we only have 1.
             let kick_secs =
                 app_state.app_config.config.load().web_ui.as_ref().map_or_else(default_kick_secs, |wc| wc.kick_secs);
-            app_state.connection_manager.kick_connection(&addr, virtual_id, kick_secs).await
+            let maybe_stream =
+                app_state.active_users.find_panel_stream_by_addr_and_virtual_id(&addr, virtual_id.get()).await;
+            if let Some(stream) = maybe_stream {
+                crate::api::api_utils::kick_stream(
+                    app_state,
+                    &stream,
+                    kick_secs,
+                    shared::model::StreamEndedReason::Kicked,
+                )
+                .await
+            } else {
+                app_state.connection_manager.kick_connection(&addr, virtual_id, kick_secs).await
+            }
         }
     }
 }
@@ -713,11 +760,12 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 #[cfg(test)]
 mod tests {
     use super::{
-        main_event_receive_error_action, set_no_auth_websocket_identity, set_websocket_auth, to_protocol_message,
-        websocket_can_receive_runtime_events, websocket_claims, MainEventReceiveErrorAction, RecordingProgressThrottle,
-        RECORDING_PROGRESS_MIN_GAP,
+        handle_protocol_message, main_event_receive_error_action, set_no_auth_websocket_identity, set_websocket_auth,
+        to_protocol_message, websocket_can_receive_runtime_events, websocket_claims, Fingerprint,
+        MainEventReceiveErrorAction, RecordingProgressThrottle, RECORDING_PROGRESS_MIN_GAP,
     };
-    use crate::api::model::EventMessage;
+    use crate::{api::model::EventMessage, auth::TokenVerifier};
+    use axum::extract::ws::Message;
     use shared::model::{
         AuthAuditEvent, AuthAuditOutcome, Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel,
         LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
@@ -762,7 +810,7 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 35] = [
+        const NOT_ON_THE_WIRE: [EventKind; 36] = [
             EventKind::ConnectionDenied,
             EventKind::PluginUpdateAvailable,
             EventKind::PluginUpdateApplied,
@@ -798,6 +846,7 @@ mod tests {
             EventKind::FailoverGroupExhausted,
             EventKind::FailoverGroupCircuitChanged,
             EventKind::FailoverGroupMemberSwitched,
+            EventKind::StreamEnded,
         ];
 
         for (event, kind) in sample_event_of_every_kind() {
@@ -1028,6 +1077,12 @@ mod tests {
             plugin_update(shared::model::PluginUpdateOutcome::Available),
             plugin_update(shared::model::PluginUpdateOutcome::Applied),
             plugin_update(shared::model::PluginUpdateOutcome::Failed),
+            EventMessage::StreamEnded {
+                username: "u".into(),
+                uid: 1,
+                virtual_id: 1,
+                reason: shared::model::StreamEndedReason::Kicked,
+            },
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples
@@ -1103,6 +1158,301 @@ mod tests {
         assert_eq!(snapshot_claims.permissions, claims.permissions);
         assert_eq!(snapshot_claims.roles, claims.roles);
         assert_eq!(snapshot_claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn websocket_recording_snapshot_authentication_and_live_permissions() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let recording_dto = shared::model::RecordingConfigDto { enabled: true, ..Default::default() };
+        let recording_runtime = crate::model::RecordingConfig::from(&recording_dto);
+        let alice_pwd_version = crate::model::WebAuthConfig::pwd_version_from_hash("alice-secret");
+        let admin_pwd_version = crate::model::WebAuthConfig::pwd_version_from_hash("admin-secret");
+        let web_ui_dto = shared::model::WebUiConfigDto {
+            auth: Some(shared::model::WebAuthConfigDto {
+                enabled: true,
+                issuer: "test".to_string(),
+                secret: "0123456789abcdef0123456789abcdef".to_string(),
+                ..shared::model::WebAuthConfigDto::default()
+            }),
+            user_ui_enabled: true,
+            ..shared::model::WebUiConfigDto::default()
+        };
+        let mut web_ui = crate::model::WebUiConfig::from(&web_ui_dto);
+        if let Some(auth) = web_ui.auth.as_mut() {
+            auth.t_users = Some(vec![
+                crate::model::WebUiUser {
+                    username: "alice".to_string(),
+                    password_hash: "alice-secret".to_string(),
+                    groups: vec!["admin".to_string()],
+                },
+                crate::model::WebUiUser {
+                    username: "admin_valid".to_string(),
+                    password_hash: "admin-secret".to_string(),
+                    groups: vec!["admin".to_string()],
+                },
+            ]);
+        }
+        let config = crate::model::Config {
+            video: Some(crate::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(recording_runtime),
+            }),
+            web_ui: Some(web_ui),
+            ..crate::model::Config::default()
+        };
+        let state = Arc::new(crate::api::model::create_test_app_state(config));
+        let web_auth = state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
+        let verifier = TokenVerifier::from_config(&web_auth);
+
+        let make_api_proxy = |level: shared::model::PlayerRecordingLevel| {
+            let api_proxy_dto = shared::model::ApiProxyConfigDto {
+                user: vec![shared::model::TargetUserDto {
+                    target: "main".to_string(),
+                    credentials: vec![shared::model::ProxyUserCredentialsDto {
+                        username: "api_player".to_string(),
+                        password: "pass".to_string(),
+                        ui_enabled: true,
+                        player_features: Some(shared::model::PlayerFeaturesDto {
+                            recording: Some(level),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                }],
+                ..Default::default()
+            };
+            let mut api_proxy = crate::model::ApiProxyConfig::from(&api_proxy_dto);
+            for tu in &mut api_proxy.user {
+                for cred in &mut tu.credentials {
+                    Arc::make_mut(cred).resolve_plan(&std::collections::HashMap::new());
+                }
+            }
+            api_proxy
+        };
+        state.app_config.set_api_proxy(make_api_proxy(shared::model::PlayerRecordingLevel::Private)).unwrap();
+
+        // 1. Authenticate, revoke subject, send RecordingSnapshotRequest -> no task data, error frame (fails before fix)
+        let fp = Fingerprint::new("fp".into(), "127.0.0.1".into(), "127.0.0.1:12345".parse()?);
+        let alice_token =
+            crate::auth::create_jwt_web_user(&web_auth, "alice", PERM_ALL, alice_pwd_version, UserId::web("alice"))?;
+        let mut mem_alice = ProtocolHandlerMemory::default();
+        let auth_res = handle_protocol_message(
+            Message::Binary(ProtocolMessage::Auth(alice_token.clone()).to_bytes()?),
+            &mut mem_alice,
+            &state,
+            true,
+            Some(&verifier),
+            &fp,
+        )
+        .await;
+        assert!(matches!(auth_res, Some(ProtocolMessage::Authorized)));
+
+        // Revoke alice's subject
+        state.auth.token_revocations.revoke_subject(&UserId::web("alice"), i64::MAX).await?;
+
+        let snapshot_res = handle_protocol_message(
+            Message::Binary(ProtocolMessage::RecordingSnapshotRequest.to_bytes()?),
+            &mut mem_alice,
+            &state,
+            true,
+            Some(&verifier),
+            &fp,
+        )
+        .await;
+        // Fails before fix: returns Some(RecordingSnapshotResponse { .. }) instead of error frame
+        assert!(
+            !matches!(snapshot_res, Some(ProtocolMessage::RecordingSnapshotResponse { .. })),
+            "revoked subject must not receive task data"
+        );
+        assert!(
+            matches!(snapshot_res, Some(ProtocolMessage::Unauthorized | ProtocolMessage::RecordingWsError { .. })),
+            "revoked subject must receive an error frame, got: {snapshot_res:?}"
+        );
+
+        // 2. Withdraw recording for an API user in live config -> next snapshot is recording_forbidden
+        let api_token = crate::auth::create_jwt_api_user(&web_auth, "api_player", UserId::api("api_player"))?;
+        let mut mem_api = ProtocolHandlerMemory::default();
+        let auth_res = handle_protocol_message(
+            Message::Binary(ProtocolMessage::Auth(api_token).to_bytes()?),
+            &mut mem_api,
+            &state,
+            true,
+            Some(&verifier),
+            &fp,
+        )
+        .await;
+        assert!(matches!(auth_res, Some(ProtocolMessage::Authorized)));
+
+        // Withdraw recording permission in live config
+        state.app_config.set_api_proxy(make_api_proxy(shared::model::PlayerRecordingLevel::None)).unwrap();
+
+        let snapshot_res = handle_protocol_message(
+            Message::Binary(ProtocolMessage::RecordingSnapshotRequest.to_bytes()?),
+            &mut mem_api,
+            &state,
+            true,
+            Some(&verifier),
+            &fp,
+        )
+        .await;
+        assert!(
+            matches!(
+                snapshot_res,
+                Some(ProtocolMessage::RecordingWsError { ref code }) if code == "recording_forbidden"
+            ),
+            "expected recording_forbidden error frame, got: {snapshot_res:?}"
+        );
+
+        // 3. Unchanged case: valid web admin still gets the snapshot
+        let admin_token = crate::auth::create_jwt_web_user(
+            &web_auth,
+            "admin_valid",
+            PERM_ALL,
+            admin_pwd_version,
+            UserId::web("admin_valid"),
+        )?;
+        let mut mem_admin = ProtocolHandlerMemory::default();
+        let auth_res = handle_protocol_message(
+            Message::Binary(ProtocolMessage::Auth(admin_token).to_bytes()?),
+            &mut mem_admin,
+            &state,
+            true,
+            Some(&verifier),
+            &fp,
+        )
+        .await;
+        assert!(matches!(auth_res, Some(ProtocolMessage::Authorized)));
+
+        let snapshot_res = handle_protocol_message(
+            Message::Binary(ProtocolMessage::RecordingSnapshotRequest.to_bytes()?),
+            &mut mem_admin,
+            &state,
+            true,
+            Some(&verifier),
+            &fp,
+        )
+        .await;
+        assert!(
+            matches!(snapshot_res, Some(ProtocolMessage::RecordingSnapshotResponse { .. })),
+            "valid web admin must get snapshot, got: {snapshot_res:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_websocket_recording_snapshot_enforces_api_user_network_access(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use shared::model::NetworkAccessDto;
+
+        let recording_dto = shared::model::RecordingConfigDto { enabled: true, ..Default::default() };
+        let recording_runtime = crate::model::RecordingConfig::from(&recording_dto);
+        let web_ui_dto = shared::model::WebUiConfigDto {
+            auth: Some(shared::model::WebAuthConfigDto {
+                enabled: true,
+                issuer: "test".to_string(),
+                secret: "0123456789abcdef0123456789abcdef".to_string(),
+                ..shared::model::WebAuthConfigDto::default()
+            }),
+            user_ui_enabled: true,
+            player_api_enabled: Some(true),
+            ..shared::model::WebUiConfigDto::default()
+        };
+        let web_ui = crate::model::WebUiConfig::from(&web_ui_dto);
+        let config = crate::model::Config {
+            video: Some(crate::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(recording_runtime),
+            }),
+            web_ui: Some(web_ui),
+            ..crate::model::Config::default()
+        };
+        let state = Arc::new(crate::api::model::create_test_app_state(config));
+        let web_auth = state.app_config.config.load().web_ui.as_ref().unwrap().auth.as_ref().unwrap().clone();
+        let verifier = TokenVerifier::from_config(&web_auth);
+
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            user: vec![shared::model::TargetUserDto {
+                target: "main".to_string(),
+                credentials: vec![shared::model::ProxyUserCredentialsDto {
+                    username: "api_player".to_string(),
+                    password: "pass".to_string(),
+                    ui_enabled: true,
+                    player_features: Some(shared::model::PlayerFeaturesDto {
+                        recording: Some(shared::model::PlayerRecordingLevel::Private),
+                        ..Default::default()
+                    }),
+                    network_access: Some(NetworkAccessDto {
+                        allowed_countries: None,
+                        allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+                    }),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut api_proxy = crate::model::ApiProxyConfig::from(&api_proxy_dto);
+        for tu in &mut api_proxy.user {
+            for cred in &mut tu.credentials {
+                Arc::make_mut(cred).resolve_plan(&std::collections::HashMap::new());
+            }
+        }
+        state.app_config.set_api_proxy(api_proxy)?;
+
+        let api_token = crate::auth::create_jwt_api_user(&web_auth, "api_player", UserId::api("api_player"))?;
+
+        // 1. Authenticate with in-band Auth frame
+        let mut mem = ProtocolHandlerMemory::default();
+        let denied_fp = Fingerprint::new("denied".into(), "192.168.1.1".into(), "192.168.1.1:55000".parse()?);
+        let auth_res = handle_protocol_message(
+            Message::Binary(ProtocolMessage::Auth(api_token.clone()).to_bytes()?),
+            &mut mem,
+            &state,
+            true,
+            Some(&verifier),
+            &denied_fp,
+        )
+        .await;
+        assert!(matches!(auth_res, Some(ProtocolMessage::Authorized)));
+
+        // 2. Denied peer address gets no snapshot (forbidden frame)
+        let denied_res = handle_protocol_message(
+            Message::Binary(ProtocolMessage::RecordingSnapshotRequest.to_bytes()?),
+            &mut mem,
+            &state,
+            true,
+            Some(&verifier),
+            &denied_fp,
+        )
+        .await;
+        assert!(
+            matches!(
+                denied_res,
+                Some(ProtocolMessage::RecordingWsError { ref code }) if code == "recording_forbidden"
+            ),
+            "denied address must get recording_forbidden, got: {denied_res:?}"
+        );
+
+        // 3. Allowed peer address gets snapshot
+        let allowed_fp = Fingerprint::new("allowed".into(), "10.0.0.1".into(), "10.0.0.1:55000".parse()?);
+        let allowed_res = handle_protocol_message(
+            Message::Binary(ProtocolMessage::RecordingSnapshotRequest.to_bytes()?),
+            &mut mem,
+            &state,
+            true,
+            Some(&verifier),
+            &allowed_fp,
+        )
+        .await;
+        assert!(
+            matches!(allowed_res, Some(ProtocolMessage::RecordingSnapshotResponse { .. })),
+            "allowed address must get snapshot, got: {allowed_res:?}"
+        );
+
+        Ok(())
     }
 
     #[test]

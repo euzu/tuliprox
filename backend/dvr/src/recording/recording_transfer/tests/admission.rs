@@ -147,6 +147,7 @@ async fn a_file_of_unknown_size_is_checked_against_waiting_quotas_when_it_comple
     let limits = crate::recording::recording_quota::QuotaLimits {
         default_private_bytes: Some(16),
         per_user_bytes: [(UserId::from("web:alice"), 1 << 20)].into_iter().collect(),
+        plan_user_bytes: std::collections::HashMap::default(),
         shared_bytes: None,
     };
     finish_active_and_promote(&queue, "alice", Some(&limits), |done| {

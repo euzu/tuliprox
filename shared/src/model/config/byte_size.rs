@@ -50,6 +50,21 @@ impl ByteSize {
     }
 
     pub fn parse_bytes(&self) -> Result<Bytes, String> { parse_size_base_2(self.0.as_str()).map(Bytes::new) }
+
+    /// Resolves a size that must be greater than 0 (quotas). The error names `key` and the given value.
+    pub fn parse_positive(&self, key: &str) -> Result<u64, String> {
+        match parse_size_base_2(self.0.trim()) {
+            Ok(0) => Err(format!("{key} must be greater than 0, got '{}'", self.0)),
+            Ok(bytes) => Ok(bytes),
+            Err(reason) => Err(format!("{key} must be a size such as 20GB or 500MB ({reason}), got '{}'", self.0)),
+        }
+    }
+}
+
+/// Parses a size such as `20GB` or `1024`; `None` when it does not parse or resolves to 0.
+#[must_use]
+pub fn parse_positive_size(value: &str) -> Option<u64> {
+    parse_size_base_2(value.trim()).ok().filter(|bytes| *bytes > 0)
 }
 
 impl From<String> for ByteSize {
@@ -132,6 +147,24 @@ mod tests {
         let written = ByteSize::new("10MB");
         assert_eq!(written.as_str(), "10MB");
         assert_eq!(written.parse_bytes().expect("10MB parses"), Bytes::new(10_485_760));
+    }
+
+    #[test]
+    fn parse_positive_accepts_sizes_and_explains_rejections() {
+        assert_eq!(ByteSize::new("20GB").parse_positive("q"), Ok(21_474_836_480));
+        assert_eq!(ByteSize::new(" 1024 ").parse_positive("q"), Ok(1024));
+        assert_eq!(ByteSize::new("0GB").parse_positive("q"), Err("q must be greater than 0, got '0GB'".to_string()));
+        assert_eq!(
+            ByteSize::new("abc").parse_positive("q"),
+            Err("q must be a size such as 20GB or 500MB (Invalid size: ABC), got 'abc'".to_string())
+        );
+        assert_eq!(
+            ByteSize::new("99999999TB").parse_positive("q"),
+            Err("q must be a size such as 20GB or 500MB (Size too large: 99999999TB), got '99999999TB'".to_string())
+        );
+        assert_eq!(super::parse_positive_size(" 500MB "), Some(524_288_000));
+        assert_eq!(super::parse_positive_size("0"), None);
+        assert_eq!(super::parse_positive_size("20G"), None);
     }
 
     #[test]

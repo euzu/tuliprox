@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, Mutex as StdMutex,
     },
 };
@@ -40,8 +40,12 @@ impl PersistedRecordingQueue {
     }
 
     /// Rebuild the four partitions from a repository snapshot.
-    pub(super) fn from_records(records: Vec<PersistedRecordingTask>, revision: QueueRevision) -> Self {
-        let mut restored = Self { revision, ..Self::default() };
+    pub(super) fn from_records(
+        records: Vec<PersistedRecordingTask>,
+        revision: QueueRevision,
+        next_vod_id: u32,
+    ) -> Self {
+        let mut restored = Self { revision, next_vod_id, ..Self::default() };
         for task in records {
             match task.partition {
                 RecordingPartition::Scheduled => restored.scheduled.push(task),
@@ -78,19 +82,20 @@ impl RecordingQueue {
             repository,
             slot_waiters: Arc::new(RecordingSlotWaitQueue::new()),
             revision: Arc::new(AtomicU64::new(0)),
+            vod_id_counter: Arc::new(AtomicU32::new(0)),
             mutation_guard: Arc::new(Mutex::new(())),
         }
     }
 
     pub fn to_persisted(task: &RecordingTask) -> PersistedRecordingTask {
         PersistedRecordingTask {
-            media_identity: crate::recording::recording_service::recording_identity_key(
-                &task.recording,
-                task.url.as_str(),
-            ),
+            media_identity: task.media_identity.clone().unwrap_or_else(|| {
+                crate::recording::recording_service::recording_identity_key(&task.recording, task.url.as_str())
+            }),
             // Overwritten from the owning partition when the candidate is flattened.
             partition: RecordingPartition::default(),
             uuid: task.uuid.clone(),
+            vod_id: task.vod_id,
             kind: task.kind,
             file_dir: task.file_dir.clone(),
             file_path: task.file_path.clone(),
@@ -107,6 +112,8 @@ impl RecordingQueue {
             retry_attempts: task.retry_attempts,
             next_retry_at: task.next_retry_at,
             recording: task.recording.clone(),
+            clip: task.clip.clone(),
+            cancelled_by_owner: task.cancelled_by_owner,
         }
     }
 
@@ -114,6 +121,7 @@ impl RecordingQueue {
         let url = reqwest::Url::parse(&task.url).map_err(|e| PersistedError::InvalidUrl(e.to_string()))?;
         Ok(RecordingTask {
             uuid: task.uuid,
+            vod_id: task.vod_id,
             kind: task.kind,
             file_dir: task.file_dir,
             file_path: task.file_path,
@@ -130,6 +138,9 @@ impl RecordingQueue {
             retry_attempts: task.retry_attempts,
             next_retry_at: task.next_retry_at,
             recording: task.recording,
+            clip: task.clip,
+            media_identity: (!task.media_identity.is_empty()).then_some(task.media_identity),
+            cancelled_by_owner: task.cancelled_by_owner,
         })
     }
 
@@ -183,6 +194,10 @@ impl RecordingQueue {
         let Some(repository) = self.repository.clone() else {
             return Ok(());
         };
+        // Loading is a queue-wide state replacement: it must not interleave with a
+        // mutation, and assigning ids to records written before the id existed is part
+        // of the same step.
+        let _mutation = self.mutation_guard.lock().await;
         let snapshot = tokio::task::spawn_blocking(move || {
             let mut guard = repository.lock().map_err(|_| poisoned_repository())?;
             guard.load()
@@ -190,7 +205,16 @@ impl RecordingQueue {
         .await
         .map_err(std::io::Error::other)??;
 
-        let persisted = PersistedRecordingQueue::from_records(snapshot.tasks, QueueRevision(snapshot.queue_revision));
+        let mut persisted = PersistedRecordingQueue::from_records(
+            snapshot.tasks,
+            QueueRevision(snapshot.queue_revision),
+            snapshot.next_vod_id,
+        );
+        let (next_vod_id, assigned) = persisted.assign_missing_vod_ids();
+        if assigned {
+            let records = persisted.to_records();
+            self.commit_records(persisted.revision.0, records, None).await?;
+        }
 
         let invalid = |err: PersistedError| std::io::Error::new(std::io::ErrorKind::InvalidData, err);
         let mut queue = VecDeque::with_capacity(persisted.queue.len());
@@ -234,6 +258,7 @@ impl RecordingQueue {
             }
         }
         *self.active.write().await = paused;
+        self.vod_id_counter.store(next_vod_id, Ordering::SeqCst);
         lock_unpoisoned(&self.workers).clear();
         Ok(())
     }

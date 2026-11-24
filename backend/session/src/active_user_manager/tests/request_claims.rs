@@ -191,4 +191,6 @@ async fn shared_hls_rows_stay_separate_per_device_and_per_shared_stream() {
     register_shared_segment(&manager, 63, 55063, &shared_hls_channel(3012, 82), "tok-device-a").await;
 
     assert_eq!(manager.panel_streams().await.len(), 3);
+    assert_eq!(manager.user_streams("user1").await.len(), 3);
+    assert_eq!(manager.user_streams("nonexistent").await.len(), 0);
 }

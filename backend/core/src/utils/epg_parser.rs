@@ -1,5 +1,5 @@
 use crate::model::{AppConfig, ConfigTarget, ProxyUserCredentials};
-use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use shared::model::PlaylistItemType;
 use std::sync::Arc;
@@ -83,18 +83,24 @@ pub fn parse_xmltv_time(t: &str) -> Option<i64> {
     DateTime::parse_from_str(t, "%Y%m%d%H%M%S %z").ok().map(|dt| dt.with_timezone(&Utc).timestamp())
 }
 
-pub fn format_xmltv_time_utc(ts: i64, time_shift: &EpgTimeShift) -> String {
-    let Some(dt) = Utc.timestamp_opt(ts, 0).single() else {
-        return String::new();
-    };
+fn shift_datetime(ts: i64, time_shift: &EpgTimeShift) -> Option<DateTime<FixedOffset>> {
+    let dt = Utc.timestamp_opt(ts, 0).single()?;
     match time_shift {
-        EpgTimeShift::None => dt.format("%Y%m%d%H%M%S %z").to_string(),
-        EpgTimeShift::Fixed(minutes) => match chrono::FixedOffset::east_opt(minutes * 60) {
-            Some(offset) => dt.with_timezone(&offset).format("%Y%m%d%H%M%S %z").to_string(),
-            None => dt.format("%Y%m%d%H%M%S %z").to_string(),
+        EpgTimeShift::None => Some(dt.fixed_offset()),
+        EpgTimeShift::Fixed(minutes) => match FixedOffset::east_opt(minutes * 60) {
+            Some(offset) => Some(dt.with_timezone(&offset)),
+            None => Some(dt.fixed_offset()),
         },
-        EpgTimeShift::TimeZone(tz) => dt.with_timezone(tz).format("%Y%m%d%H%M%S %z").to_string(),
+        EpgTimeShift::TimeZone(tz) => Some(dt.with_timezone(tz).fixed_offset()),
     }
+}
+
+pub fn format_xmltv_time_utc(ts: i64, time_shift: &EpgTimeShift) -> String {
+    shift_datetime(ts, time_shift).map_or_else(String::new, |dt| dt.format("%Y%m%d%H%M%S %z").to_string())
+}
+
+pub fn format_iso_time_with_timeshift(ts: i64, time_shift: &EpgTimeShift) -> String {
+    shift_datetime(ts, time_shift).map_or_else(String::new, |dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 pub fn apply_timeshift(date_str: &str, shift: &EpgTimeShift) -> String {
@@ -237,5 +243,13 @@ mod tests {
         let shifted = apply_timeshift(&date_str, &shift);
         // +1 hour = +3600 seconds
         assert_eq!(shifted, (ts + 3600).to_string());
+    }
+
+    #[test]
+    fn test_format_iso_time_with_timeshift() {
+        let ts = 1_700_000_000_i64; // 2023-11-14T22:13:20Z
+        assert_eq!(format_iso_time_with_timeshift(ts, &EpgTimeShift::None), "2023-11-14T22:13:20Z");
+        assert_eq!(format_iso_time_with_timeshift(ts, &EpgTimeShift::Fixed(60)), "2023-11-14T23:13:20+01:00");
+        assert_eq!(format_iso_time_with_timeshift(ts, &EpgTimeShift::Fixed(-120)), "2023-11-14T20:13:20-02:00");
     }
 }

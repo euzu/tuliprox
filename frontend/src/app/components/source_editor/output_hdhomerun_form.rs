@@ -3,7 +3,7 @@ use crate::{
         build_options, config::HasFormData, select::Select, selection_parse_first, BlockId, BlockInstance, Card,
         DropDownSelection, EditMode, SourceEditorContext, TextButton,
     },
-    config_field, config_field_child, config_field_custom, edit_field_text, generate_form_reducer,
+    config_field, config_field_child, edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{HdHomeRunTargetOutputDto, TargetOutputDto, TargetType};
@@ -91,12 +91,17 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
                 <Card class="tp__config-view__card">
                     { config_field!(output_form_state.form, translate.t(LABEL_DEVICE), device) }
                     { config_field!(output_form_state.form, translate.t(LABEL_USERNAME), username) }
-                    { config_field_custom!(
+                    { config_field_child!(
                         translate.t(LABEL_USE_OUTPUT),
-                        output_form_state
-                            .form
-                            .use_output
-                            .map_or_else(|| TargetType::M3u.to_string(), |output| output.to_string())
+                        "OUTPUT_HDHOMERUN_FORM.USE_OUTPUT",
+                        { html! {
+                            <span class="tp__form-field__value">
+                                { output_form_state
+                                    .form
+                                    .use_output
+                                    .map_or_else(|| TargetType::M3u.to_string(), |output| output.to_string()) }
+                            </span>
+                        } }
                     ) }
                 </Card>
             }

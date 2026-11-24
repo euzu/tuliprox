@@ -584,7 +584,8 @@ async fn run_controlled_agent(controller: &str, agent_id: AgentId, run_id: RunId
                     PlaybackEvent::CommandAccepted { command_id },
                 )
                 .await?;
-                match start_held_playback(playback_id.0.clone(), &target_run_id, &url, marker, frames, &headers).await?
+                match start_held_playback(playback_id.0.clone(), &target_run_id, &url, marker, frames, &headers, None)
+                    .await?
                 {
                     Ok(held) => {
                         let term_tx_clone = term_tx.clone();
@@ -793,12 +794,19 @@ async fn serve_origin(
 /// playlist merging several inputs of this origin does not carry each movie once per input,
 /// and a stable `xui-id` per channel, because HLS entry URLs have no numeric id a member
 /// reference (input name plus provider stream id) could use.
-fn catalog_m3u(state: &OriginState, host: &str, account: Option<&str>, failover_member: bool) -> String {
+fn catalog_m3u(
+    state: &OriginState,
+    host: &str,
+    account: Option<&str>,
+    failover_member: bool,
+    group_title: Option<&str>,
+) -> String {
     let account_query = account.map_or_else(String::new, |account| format!("&token={account}"));
     let mut catalog = String::from("#EXTM3U\n");
     for marker in state.markers.iter() {
         let member_id = if failover_member { format!(" xui-id=\"{marker}\"") } else { String::new() };
-        let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-{marker}\"{member_id},Test channel {marker}");
+        let group_attr = group_title.map_or_else(String::new, |g| format!(" group-title=\"{g}\""));
+        let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-{marker}\"{member_id}{group_attr},Test channel {marker}");
         let path = if state.hls_markers.contains(marker) {
             format!("hls/{marker}/index.m3u8")
         } else {
@@ -924,9 +932,10 @@ async fn catalog(
 ) -> impl IntoResponse {
     let host = headers.get(header::HOST).and_then(|value| value.to_str().ok()).unwrap_or("127.0.0.1");
     let failover_member = query.get("failover_member").is_some_and(|value| value == "true");
+    let group_title = query.get("group_title").map(String::as_str);
     (
         [(header::CONNECTION, "close")],
-        catalog_m3u(&state, host, query.get("account").map(String::as_str), failover_member),
+        catalog_m3u(&state, host, query.get("account").map(String::as_str), failover_member, group_title),
     )
 }
 
@@ -1697,13 +1706,15 @@ async fn run_agent(
 /// Keep the HTTP body consumed after proving its frame identity.  Retaining the
 /// request alone is not sufficient: a bounded proxy buffer could otherwise make
 /// the upstream session disappear before the following admission request.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_agent_until_released(
     url: String,
     expected_run_id: RunId,
     expected_marker: u32,
     required_frames: u64,
     headers: BTreeMap<String, String>,
-    ready: oneshot::Sender<()>,
+    assert_headers: Option<BTreeMap<String, String>>,
+    ready: oneshot::Sender<Option<String>>,
     mut release: oneshot::Receiver<()>,
 ) -> Result<PlaybackOutcome, TestkitError> {
     let client = reqwest::Client::builder().http1_only().pool_max_idle_per_host(0).build()?;
@@ -1721,6 +1732,18 @@ async fn run_agent_until_released(
         Ok(res) => res,
         Err(err) => return Ok(PlaybackOutcome::TransportError { message: err.to_string() }),
     };
+    if let Some(expected_headers) = &assert_headers {
+        for (key, expected_val) in expected_headers {
+            let actual_val = response.headers().get(key).and_then(|v| v.to_str().ok());
+            if actual_val != Some(expected_val.as_str()) {
+                return Ok(PlaybackOutcome::TransportError {
+                    message: format!(
+                        "header assertion failed for {key}: expected '{expected_val}', got '{actual_val:?}'"
+                    ),
+                });
+            }
+        }
+    }
     let status = response.status().as_u16();
     if !response.status().is_success() {
         return Ok(if is_rejection_http_status(status, response.headers()) {
@@ -1789,7 +1812,7 @@ async fn run_agent_until_released(
                     received_frames += 1;
                     if received_frames >= required_frames {
                         if let Some(ready) = ready.take() {
-                            let _ = ready.send(());
+                            let _ = ready.send(None);
                         }
                     }
                 }
@@ -1798,13 +1821,15 @@ async fn run_agent_until_released(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_hls_until_released(
     url: String,
     expected_run_id: RunId,
     expected_marker: u32,
     required_frames: u64,
     headers: BTreeMap<String, String>,
-    ready: oneshot::Sender<()>,
+    assert_headers: Option<BTreeMap<String, String>>,
+    ready: oneshot::Sender<Option<String>>,
     mut release: oneshot::Receiver<()>,
 ) -> Result<PlaybackOutcome, TestkitError> {
     let mut ready = Some(ready);
@@ -1814,6 +1839,30 @@ async fn run_hls_until_released(
         Ok(playlist_url) => playlist_url,
         Err(err) => return Ok(PlaybackOutcome::TransportError { message: err.to_string() }),
     };
+    if let Some(expected_headers) = &assert_headers {
+        let client = reqwest::Client::builder().http1_only().build()?;
+        let mut req = client.get(playlist_url.clone());
+        for (k, v) in &headers {
+            req = req.header(k, v);
+        }
+        if let Ok(res) = req.send().await {
+            for (key, expected_val) in expected_headers {
+                let actual_val = res.headers().get(key).and_then(|v| v.to_str().ok());
+                if actual_val != Some(expected_val.as_str()) {
+                    return Ok(PlaybackOutcome::TransportError {
+                        message: format!(
+                            "HLS manifest header assertion failed for {key}: expected '{expected_val}', got '{actual_val:?}'"
+                        ),
+                    });
+                }
+            }
+            if is_rejection_http_status(res.status().as_u16(), res.headers()) {
+                return Ok(PlaybackOutcome::AdmissionRejected {
+                    reason: RejectionReason::HttpStatus(res.status().as_u16()),
+                });
+            }
+        }
+    }
     loop {
         tokio::select! {
             _ = &mut release => {
@@ -1825,10 +1874,18 @@ async fn run_hls_until_released(
             }
             result = read_playlist(&mut playlist_url, &expected_run_id, expected_marker, required_frames, &headers) => {
                 if let Err(err) = result {
-                    return Ok(PlaybackOutcome::TransportError { message: err.to_string() });
+                    return Ok(if ready.is_none() {
+                        PlaybackOutcome::StreamInterrupted {
+                            frames: required_frames,
+                            bytes: 0,
+                            message: err.to_string(),
+                        }
+                    } else {
+                        PlaybackOutcome::TransportError { message: err.to_string() }
+                    });
                 }
                 if let Some(ready) = ready.take() {
-                    let _ = ready.send(());
+                    let _ = ready.send(Some(playlist_url.to_string()));
                 }
             }
         }
@@ -1849,6 +1906,7 @@ struct HeldPlayback {
     playback_id: String,
     release: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<Result<PlaybackOutcome, TestkitError>>,
+    resolved_url: Option<String>,
 }
 
 fn matches_expected_eviction(
@@ -2219,7 +2277,7 @@ async fn start_held_vod_playback(
                     Err(err) => Err(TestkitError::Protocol(format!("task error: {err}"))),
                 }
             } else {
-                Ok(Ok(HeldPlayback { playback_id, release: release_tx, task }))
+                Ok(Ok(HeldPlayback { playback_id, release: release_tx, task, resolved_url: None }))
             }
         }
         Ok(Err(_)) => match task.await {
@@ -2242,6 +2300,7 @@ async fn start_held_playback(
     marker: u32,
     frames: u64,
     headers: &BTreeMap<String, String>,
+    assert_headers: Option<BTreeMap<String, String>>,
 ) -> Result<Result<HeldPlayback, PlaybackOutcome>, TestkitError> {
     let (ready_tx, ready_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
@@ -2252,6 +2311,7 @@ async fn start_held_playback(
             marker,
             frames,
             headers.clone(),
+            assert_headers,
             ready_tx,
             release_rx,
         ))
@@ -2262,12 +2322,13 @@ async fn start_held_playback(
             marker,
             frames,
             headers.clone(),
+            assert_headers,
             ready_tx,
             release_rx,
         ))
     };
     match tokio::time::timeout(Duration::from_secs(10), ready_rx).await {
-        Ok(Ok(())) => Ok(Ok(HeldPlayback { playback_id, release: release_tx, task })),
+        Ok(Ok(resolved_url)) => Ok(Ok(HeldPlayback { playback_id, release: release_tx, task, resolved_url })),
         Ok(Err(_)) => match task.await {
             Ok(Ok(outcome)) => Ok(Err(outcome)),
             Ok(Err(error)) => Err(error),
@@ -2509,7 +2570,25 @@ async fn run_controller_scenario(
             ))
         }
     };
-    let observer = TuliproxObserver::new(api_base_url, credentials);
+    let mut observer = TuliproxObserver::new(api_base_url, credentials);
+    if scenario.policy_contract.as_ref().is_some_and(|c| c.player_api == Some(true)) {
+        let client = reqwest::Client::new();
+        let login_res = client
+            .post(format!("{}/auth/token", scenario.tuliprox.base_url.trim_end_matches('/')))
+            .json(&serde_json::json!({
+                "username": "admin",
+                "password": "admin"
+            }))
+            .send()
+            .await;
+        if let Ok(res) = login_res {
+            if let Ok(body) = res.json::<serde_json::Value>().await {
+                if let Some(token) = body.get("token").and_then(|t| t.as_str()) {
+                    observer.set_bearer_token(token.to_owned());
+                }
+            }
+        }
+    }
     let policy_hash = match observer.config().await {
         Ok(config) => {
             if let Some(contract) = &scenario.policy_contract {
@@ -2591,8 +2670,20 @@ async fn run_controller_scenario(
                     url::form_urlencoded::byte_serialize(user.as_bytes()).collect::<String>(),
                     fixture_password(),
                 );
-                let vids = discover_virtual_ids(&playlist_url, &required_markers, &required_vod).await?;
-                map.insert(user, vids);
+                let user_has_filter = scenario
+                    .policy_contract
+                    .as_ref()
+                    .and_then(|p| p.users.get(&user))
+                    .is_some_and(|u| u.filter.is_some());
+                match discover_virtual_ids(&playlist_url, &required_markers, &required_vod).await {
+                    Ok(vids) => {
+                        map.insert(user, vids);
+                    }
+                    Err(_) if user_has_filter => {
+                        // Filtered users are expected to not have all markers in their playlist.
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
         map
@@ -2600,7 +2691,7 @@ async fn run_controller_scenario(
         HashMap::new()
     };
     if scenario.tuliprox.failover_groups.is_some() {
-        wait_for_failover_groups(&scenario.tuliprox.base_url).await?;
+        wait_for_failover_groups(&observer).await?;
     }
     let origin_observer = origin_control_url.map(OriginObserver::new);
     let controller_state = start_controller_transport(agent_listen, &scenario.name).await?;
@@ -2721,18 +2812,12 @@ async fn discover_virtual_ids(
 /// The playlist output is written before the failover group store is published. A playback that
 /// starts in between is classified as a plain channel, so group scenarios wait for the store of
 /// the fixture target `testkit` (see `bootstrap.rs`).
-async fn wait_for_failover_groups(base_url: &str) -> Result<(), TestkitError> {
-    let url = format!("{}/api/v1/failover/groups?target=testkit", base_url.trim_end_matches('/'));
+async fn wait_for_failover_groups(observer: &TuliproxObserver) -> Result<(), TestkitError> {
     let deadline = tokio::time::Instant::now() + PLAYLIST_DISCOVERY_TIMEOUT;
-    let client = reqwest::Client::new();
     loop {
-        let last_reason = match client.get(&url).send().await {
-            Ok(response) if response.status().is_success() => match response.json::<serde_json::Value>().await {
-                Ok(body) if body["groups"].as_array().is_some_and(|groups| !groups.is_empty()) => return Ok(()),
-                Ok(_) => "failover group list is empty".to_owned(),
-                Err(error) => error.to_string(),
-            },
-            Ok(response) => format!("failover group list returned {}", response.status()),
+        let last_reason = match observer.get_json("failover/groups?target=testkit").await {
+            Ok(body) if body["groups"].as_array().is_some_and(|groups| !groups.is_empty()) => return Ok(()),
+            Ok(_) => "failover group list is empty".to_owned(),
             Err(error) => error.to_string(),
         };
         if tokio::time::Instant::now() >= deadline {
@@ -3020,13 +3105,7 @@ async fn check_stalker_assertions<'a>(
     any_failed: &mut bool,
     observations_incomplete: &mut bool,
 ) {
-    if assert_origin.stalker_handshakes_at_least.is_none()
-        && assert_origin.stalker_create_links_at_least.is_none()
-        && assert_origin.stalker_token_refusals_at_least.is_none()
-        && assert_origin.stalker_create_link_markers.is_none()
-        && assert_origin.stalker_descriptor_markers.is_none()
-        && assert_origin.stalker_raw_command_markers.is_none()
-    {
+    if !stalker_assertions_present(assert_origin) {
         return;
     }
     let Ok(stats) = obs.stalker_stats(origin_run_id).await else {
@@ -3075,6 +3154,191 @@ async fn check_stalker_assertions<'a>(
     }
 }
 
+fn origin_stats_needed(condition: &tuliprox_testkit::config::AssertOrigin) -> bool {
+    condition.max_active_tcp.is_some() || condition.max_active_body.is_some() || condition.active_body.is_some()
+}
+
+fn origin_events_needed(condition: &tuliprox_testkit::config::AssertOrigin) -> bool {
+    condition.no_evictions.is_some()
+        || condition.no_limit_rejections.is_some()
+        || condition.latest_request_account.is_some()
+        || condition.latest_segment_account.is_some()
+        || condition.segment_failure_before_handoff_from.is_some()
+}
+
+fn stalker_assertions_present(condition: &tuliprox_testkit::config::AssertOrigin) -> bool {
+    condition.stalker_handshakes_at_least.is_some()
+        || condition.stalker_create_links_at_least.is_some()
+        || condition.stalker_token_refusals_at_least.is_some()
+        || condition.stalker_create_link_markers.is_some()
+        || condition.stalker_descriptor_markers.is_some()
+        || condition.stalker_raw_command_markers.is_some()
+}
+
+fn stalker_condition_matches(
+    assert_origin: &tuliprox_testkit::config::AssertOrigin,
+    stats: &StalkerPortalStats,
+) -> bool {
+    if assert_origin.stalker_handshakes_at_least.is_some_and(|expected| stats.handshakes < expected) {
+        return false;
+    }
+    if assert_origin.stalker_create_links_at_least.is_some_and(|expected| stats.create_links < expected) {
+        return false;
+    }
+    if assert_origin.stalker_token_refusals_at_least.is_some_and(|expected| stats.token_refusals < expected) {
+        return false;
+    }
+    if let Some(expected) = assert_origin.stalker_create_link_markers.as_ref() {
+        let mut exp = expected.clone();
+        exp.sort_unstable();
+        exp.dedup();
+        if exp != stats.resolved_markers {
+            return false;
+        }
+    }
+    if let Some(expected) = assert_origin.stalker_descriptor_markers.as_ref() {
+        let mut exp = expected.clone();
+        exp.sort_unstable();
+        exp.dedup();
+        if exp != stats.resolved_descriptor_markers {
+            return false;
+        }
+    }
+    if let Some(expected) = assert_origin.stalker_raw_command_markers.as_ref() {
+        let mut exp = expected.clone();
+        exp.sort_unstable();
+        exp.dedup();
+        if exp != stats.resolved_raw_command_markers {
+            return false;
+        }
+    }
+    true
+}
+
+fn origin_condition_matches(
+    assert_origin: &tuliprox_testkit::config::AssertOrigin,
+    marker: Option<u32>,
+    stats: Option<&OriginStats>,
+    events: &[OriginEvent],
+    stalker_stats: Option<&StalkerPortalStats>,
+) -> bool {
+    if let Some(stats) = stats {
+        if let Some(max_tcp) = assert_origin.max_active_tcp {
+            if stats.max_active_tcp_connections > max_tcp {
+                return false;
+            }
+        }
+        if let Some(max_body) = assert_origin.max_active_body {
+            if stats.max_active_body_connections > max_body {
+                return false;
+            }
+        }
+        if let Some(act_body) = assert_origin.active_body {
+            if stats.active_body_connections != act_body {
+                return false;
+            }
+        }
+    } else if origin_stats_needed(assert_origin) {
+        return false;
+    }
+
+    if assert_origin.no_evictions == Some(true)
+        && events.iter().any(|e| matches!(e.kind, OriginEventKind::EvictionTriggered { .. }))
+    {
+        return false;
+    }
+    if assert_origin.no_limit_rejections == Some(true)
+        && events.iter().any(|e| matches!(e.kind, OriginEventKind::LimitRejected { .. }))
+    {
+        return false;
+    }
+    if let Some(expected) = assert_origin.latest_request_account.as_deref() {
+        if latest_account(events, marker, false) != Some(Some(expected)) {
+            return false;
+        }
+    }
+    if let Some(expected) = assert_origin.latest_segment_account.as_deref() {
+        if latest_account(events, marker, true) != Some(Some(expected)) {
+            return false;
+        }
+    }
+    if let Some(failed_account) = assert_origin.segment_failure_before_handoff_from.as_deref() {
+        if !segment_failure_precedes_handoff(events, marker, failed_account) {
+            return false;
+        }
+    }
+    if stalker_assertions_present(assert_origin) {
+        let Some(s_stats) = stalker_stats else {
+            return false;
+        };
+        if !stalker_condition_matches(assert_origin, s_stats) {
+            return false;
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_origin_condition<'a>(
+    step_id: &'a str,
+    await_origin: &tuliprox_testkit::config::AwaitOrigin,
+    obs: &OriginObserver,
+    origin_run_id: &str,
+    events: &mut Vec<(&'a str, &'static str)>,
+    any_failed: &mut bool,
+    observations_incomplete: &mut bool,
+) {
+    let timeout = Duration::from_millis(
+        await_origin.timeout_millis.unwrap_or(tuliprox_testkit::config::AwaitOrigin::DEFAULT_TIMEOUT_MILLIS),
+    );
+    let deadline = tokio::time::Instant::now() + timeout;
+    let needs_stats = origin_stats_needed(&await_origin.condition);
+    let needs_events = origin_events_needed(&await_origin.condition);
+    let needs_stalker = stalker_assertions_present(&await_origin.condition);
+
+    loop {
+        let stats = if needs_stats { obs.stats(origin_run_id).await.ok() } else { None };
+        let evts = if needs_events { obs.events(origin_run_id).await.ok() } else { None };
+        let stalker = if needs_stalker { obs.stalker_stats(origin_run_id).await.ok() } else { None };
+
+        let fetch_successful = (!needs_stats || stats.is_some())
+            && (!needs_events || evts.is_some())
+            && (!needs_stalker || stalker.is_some());
+
+        if fetch_successful
+            && origin_condition_matches(
+                &await_origin.condition,
+                None,
+                stats.as_ref(),
+                evts.as_deref().unwrap_or(&[]),
+                stalker.as_ref(),
+            )
+        {
+            events.push((step_id, "origin_condition_satisfied"));
+            return;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            check_origin_assertions(
+                step_id,
+                None,
+                &await_origin.condition,
+                obs,
+                origin_run_id,
+                events,
+                any_failed,
+                observations_incomplete,
+            )
+            .await;
+            *any_failed = true;
+            events.push((step_id, "origin_condition_timeout"));
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Verifies the SUT's user-side accounting (`active_users`, `active_user_connections`)
 /// after a step, polling briefly so an in-flight cleanup does not fail the check.
 async fn check_runtime_assertions<'a>(
@@ -3110,7 +3374,14 @@ async fn check_runtime_assertions<'a>(
                 } else {
                     (assertions.active_streams.is_none(), assertions.distinct_shared_streams.is_none())
                 };
-            if (users_ok && connections_ok && streams_ok && shared_ok) || tokio::time::Instant::now() >= deadline {
+            let provider_ok = if let Some(expected) = assertions.provider_connections {
+                provider_slot_count(&status).is_ok_and(|slots| slots == expected)
+            } else {
+                true
+            };
+            if (users_ok && connections_ok && streams_ok && shared_ok && provider_ok)
+                || tokio::time::Instant::now() >= deadline
+            {
                 if !streams_ok {
                     *any_failed = true;
                     events.push((step_id, "runtime_active_streams_mismatch"));
@@ -3127,6 +3398,10 @@ async fn check_runtime_assertions<'a>(
                     *any_failed = true;
                     events.push((step_id, "runtime_active_user_connections_mismatch"));
                 }
+                if !provider_ok {
+                    *any_failed = true;
+                    events.push((step_id, "runtime_provider_connections_mismatch"));
+                }
                 return;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -3137,6 +3412,39 @@ async fn check_runtime_assertions<'a>(
         } else {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+}
+
+async fn check_manifest_assertion<'a>(
+    http_client: &reqwest::Client,
+    manifest_url: &str,
+    expected_content: &str,
+    step_id: &'a str,
+    events: &mut Vec<(&'a str, &'static str)>,
+    any_failed: &mut bool,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut last_body = String::new();
+    let mut matched = false;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(resp) = http_client.get(manifest_url).send().await {
+            let body = resp.text().await.unwrap_or_default();
+            if body.contains(expected_content) {
+                matched = true;
+                break;
+            }
+            last_body = body;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if matched {
+        events.push((step_id, "assert_manifest_success"));
+    } else {
+        eprintln!(
+            "step {step_id} assert_manifest_contains failed: expected to contain '{expected_content}', got: {last_body}"
+        );
+        *any_failed = true;
+        events.push((step_id, "assert_manifest_mismatch"));
     }
 }
 
@@ -3158,6 +3466,12 @@ async fn execute_scenario_steps<'a>(
     let mut playback_users = HashMap::new();
     let mut seen_stream_uids = HashSet::new();
     let mut playback_session_ids = HashMap::new();
+    let mut actor_tokens: HashMap<String, String> = HashMap::new();
+    let mut actor_playbacks: HashMap<String, String> = HashMap::new();
+    let mut last_playback_url = String::new();
+    let mut last_split_url = String::new();
+    let mut playback_urls: HashMap<String, String> = HashMap::new();
+    let http_client = reqwest::Client::new();
     let mut admission_oracles = scenario.policy_contract.as_ref().map(|contract| {
         contract
             .users
@@ -3188,6 +3502,28 @@ async fn execute_scenario_steps<'a>(
                 events.push((step.command_id.as_str(), "paused"));
                 continue;
             }
+            if let Some(await_origin) = &step.await_origin {
+                let Some(obs) = origin_observer else {
+                    observations_incomplete = true;
+                    events.push((step.command_id.as_str(), "origin_observer_missing"));
+                    continue;
+                };
+                let origin_run_id = scenario
+                    .origin
+                    .as_ref()
+                    .map_or_else(|| RunId::new(&scenario.name), |origin| RunId::new(&origin.run_id));
+                wait_for_origin_condition(
+                    step.command_id.as_str(),
+                    await_origin,
+                    obs,
+                    &origin_run_id.0,
+                    &mut events,
+                    &mut any_failed,
+                    &mut observations_incomplete,
+                )
+                .await;
+                continue;
+            }
             if let Some(fault) = &step.origin_fault {
                 let Some(obs) = origin_observer else {
                     observations_incomplete = true;
@@ -3205,6 +3541,186 @@ async fn execute_scenario_steps<'a>(
                 } else if let Some(clear_id) = &fault.clear {
                     obs.clear_fault(&origin_run_id.0, clear_id).await?;
                     events.push((step.command_id.as_str(), "origin_fault_cleared"));
+                }
+                continue;
+            }
+            if let Some(api_req) = &step.api_request {
+                let actor = scenario
+                    .actors
+                    .iter()
+                    .find(|a| a.id == api_req.actor)
+                    .ok_or_else(|| TestkitError::Configuration(format!("unknown actor {}", api_req.actor)))?;
+                let username = actor.username.as_deref().unwrap_or(&actor.id);
+                let token = match actor_tokens.entry(username.to_owned()) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let login_res = http_client
+                            .post(format!("{}/auth/token", scenario.tuliprox.base_url.trim_end_matches('/')))
+                            .json(&serde_json::json!({
+                                "username": username,
+                                "password": fixture_password()
+                            }))
+                            .send()
+                            .await
+                            .map_err(|e| TestkitError::Protocol(format!("actor login failed: {e}")))?;
+                        if !login_res.status().is_success() {
+                            return Err(TestkitError::Protocol(format!(
+                                "actor {username} login returned {}",
+                                login_res.status()
+                            )));
+                        }
+                        let body: serde_json::Value = login_res
+                            .json()
+                            .await
+                            .map_err(|e| TestkitError::Protocol(format!("cannot parse login response: {e}")))?;
+                        let token = body
+                            .get("token")
+                            .and_then(|t| t.as_str())
+                            .ok_or_else(|| TestkitError::Protocol("missing token in login response".to_owned()))?
+                            .to_owned();
+                        entry.insert(token.clone());
+                        token
+                    }
+                };
+                let mut path = api_req.path.clone().unwrap_or_default();
+                if path.contains("{uid}") {
+                    let streams_res = http_client
+                        .get(format!("{}/api/v1/me/streams", scenario.tuliprox.base_url.trim_end_matches('/')))
+                        .bearer_auth(&token)
+                        .send()
+                        .await
+                        .map_err(|e| TestkitError::Protocol(format!("cannot get /me/streams: {e}")))?;
+                    let streams: Vec<serde_json::Value> = streams_res.json().await.unwrap_or_default();
+                    let stream_uid = streams.first().and_then(|s| s.get("uid")).and_then(serde_json::Value::as_u64);
+                    if let Some(uid) = stream_uid {
+                        path = path.replace("{uid}", &uid.to_string());
+                    }
+                }
+                let mut url = if let Some(url) = &api_req.url {
+                    url.clone()
+                } else {
+                    format!("{}{path}", scenario.tuliprox.base_url.trim_end_matches('/'))
+                };
+                if url.contains("{last_playback_url}") {
+                    url = url.replace("{last_playback_url}", &last_playback_url);
+                }
+                let mut request_builder = match api_req.method.to_uppercase().as_str() {
+                    "GET" => http_client.get(&url),
+                    "POST" => http_client.post(&url),
+                    "DELETE" => http_client.delete(&url),
+                    "PUT" => http_client.put(&url),
+                    method => return Err(TestkitError::Configuration(format!("unsupported method {method}"))),
+                };
+                request_builder = request_builder.bearer_auth(&token);
+
+                let mut body = api_req.body.clone();
+                if let Some(member_idx) = api_req.member_index {
+                    if let Ok(groups) = observer.get_json("failover/groups?target=testkit").await {
+                        let groups_list = groups.get("groups").and_then(|g| g.as_array()).or_else(|| groups.as_array());
+                        if let Some(member_vid) = groups_list
+                            .and_then(|arr| arr.first())
+                            .and_then(|g| g.get("members"))
+                            .and_then(|m| m.as_array())
+                            .and_then(|arr| arr.get(member_idx))
+                            .and_then(|m| m.get("member_vid"))
+                            .and_then(serde_json::Value::as_u64)
+                        {
+                            let mut obj = body.unwrap_or_else(|| serde_json::json!({}));
+                            if let Some(map) = obj.as_object_mut() {
+                                map.insert("member_vid".to_owned(), serde_json::json!(member_vid));
+                            }
+                            body = Some(obj);
+                        }
+                    }
+                }
+                if let Some(body) = body {
+                    request_builder = request_builder.json(&body);
+                }
+                let response = request_builder
+                    .send()
+                    .await
+                    .map_err(|e| TestkitError::Protocol(format!("api_request failed: {e}")))?;
+                let status = response.status().as_u16();
+                let expected_status = api_req.expect_status.unwrap_or(200);
+                if status != expected_status {
+                    eprintln!(
+                        "api_request step {} failed: expected status {expected_status}, got {status}",
+                        step.command_id
+                    );
+                    any_failed = true;
+                    events.push((step.command_id.as_str(), "api_status_mismatch"));
+                }
+                if let Some(assert_headers) = &api_req.assert_headers {
+                    for (k, v) in assert_headers {
+                        let actual = response.headers().get(k).and_then(|val| val.to_str().ok());
+                        if actual != Some(v.as_str()) {
+                            eprintln!("api_request header mismatch for {k}: expected {v}, got {actual:?}");
+                            any_failed = true;
+                            events.push((step.command_id.as_str(), "api_header_mismatch"));
+                        }
+                    }
+                }
+                if api_req.assert_body_contains.is_some() || path.contains("/split") {
+                    let text = response.text().await.unwrap_or_default();
+                    if let Some(expected_body) = &api_req.assert_body_contains {
+                        if !text.contains(expected_body) {
+                            eprintln!("api_request body did not contain '{expected_body}': {text}");
+                            any_failed = true;
+                            events.push((step.command_id.as_str(), "api_body_mismatch"));
+                        }
+                    }
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(url_str) = json.get("url").and_then(|v| v.as_str()) {
+                            let resolved = if url_str.starts_with('/') {
+                                format!("{}{url_str}", scenario.tuliprox.base_url.trim_end_matches('/'))
+                            } else {
+                                url_str.to_owned()
+                            };
+                            resolved.clone_into(&mut last_split_url);
+                        }
+                    }
+                }
+                if api_req.method.eq_ignore_ascii_case("DELETE") && path.contains("/me/streams/") && status == 204 {
+                    if let Some(oracles) = admission_oracles.as_mut() {
+                        if let Some(oracle) = oracles.get_mut(username) {
+                            if let Some(pid) = actor_playbacks.get(username) {
+                                let _ = oracle.release(pid);
+                                expected_terminations.insert(pid.clone());
+                            }
+                        }
+                    }
+                    if let Some(pid) = &api_req.playback_id {
+                        expected_terminations.insert(pid.clone());
+                    }
+                }
+                events.push((step.command_id.as_str(), "api_request_success"));
+
+                if let Some(expected_manifest) = &step.assert_manifest_contains {
+                    let target_url = actor_playbacks
+                        .get(&api_req.actor)
+                        .and_then(|pid| playback_urls.get(pid))
+                        .unwrap_or(&last_playback_url);
+                    check_manifest_assertion(
+                        &http_client,
+                        target_url,
+                        expected_manifest,
+                        step.command_id.as_str(),
+                        &mut events,
+                        &mut any_failed,
+                    )
+                    .await;
+                }
+
+                if let Some(runtime) = &step.assert_runtime {
+                    check_runtime_assertions(
+                        step.command_id.as_str(),
+                        runtime,
+                        observer,
+                        &mut events,
+                        &mut any_failed,
+                        &mut observations_incomplete,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -3298,8 +3814,53 @@ async fn execute_scenario_steps<'a>(
                 .or_else(|| step.await_condition.as_ref().and_then(|condition| condition.valid_frames))
                 .unwrap_or(1);
             let url_owned: String;
-            let url = if let Some(url) = start.url.as_deref() {
-                url
+            let url = if let Some(member_idx) = start.member_index {
+                let groups_val = observer.get_json("failover/groups?target=testkit").await?;
+                let groups_list = groups_val.get("groups").and_then(|g| g.as_array()).or_else(|| groups_val.as_array());
+                let member_vid = groups_list
+                    .and_then(|arr| arr.first())
+                    .and_then(|g| g.get("members"))
+                    .and_then(|m| m.as_array())
+                    .and_then(|arr| arr.get(member_idx))
+                    .and_then(|m| m.get("member_vid"))
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        TestkitError::Configuration(format!("member_index {member_idx} not found in failover group"))
+                    })?;
+                let channel_name = start.channel.as_deref().unwrap_or("default");
+                let channel_def = scenario
+                    .channels
+                    .get(channel_name)
+                    .ok_or_else(|| TestkitError::Configuration(format!("unknown channel {channel_name}")))?;
+                let vids = virtual_ids_by_user
+                    .get("")
+                    .or_else(|| virtual_ids_by_user.values().next())
+                    .ok_or_else(|| TestkitError::Configuration("no virtual ids found".to_owned()))?;
+                let group_url = vids.playback_url(channel_def.origin_marker)?;
+                let group_vid = tuliprox_testkit::discovery::extract_virtual_id_from_url(group_url)?;
+                let mut member_url = group_url.replace(&format!("/{group_vid}."), &format!("/{member_vid}."));
+                if let Some(user) = actor.username.as_deref() {
+                    for existing_actor in &scenario.actors {
+                        if let Some(existing_user) = existing_actor.username.as_deref() {
+                            if existing_user != user {
+                                member_url = member_url.replace(&format!("/{existing_user}/"), &format!("/{user}/"));
+                            }
+                        }
+                    }
+                }
+                url_owned = member_url;
+                &url_owned
+            } else if let Some(url) = start.url.as_deref() {
+                url_owned = if url.contains("{last_split_url}") {
+                    url.replace("{last_split_url}", &last_split_url)
+                } else if url.contains("{base_url}") {
+                    url.replace("{base_url}", scenario.tuliprox.base_url.trim_end_matches('/'))
+                } else if url.starts_with('/') {
+                    format!("{}{url}", scenario.tuliprox.base_url.trim_end_matches('/'))
+                } else {
+                    url.to_owned()
+                };
+                &url_owned
             } else {
                 let vids = if let Some(username) = actor.username.as_deref() {
                     virtual_ids_by_user.get(username).or_else(|| virtual_ids_by_user.get(""))
@@ -3335,14 +3896,24 @@ async fn execute_scenario_steps<'a>(
                     &url_owned
                 }
             };
+            url.clone_into(&mut last_playback_url);
+            if let Some(username) = actor.username.as_deref() {
+                actor_playbacks.insert(username.to_owned(), start.playback_id.clone());
+            }
             let marker = if is_vod {
                 0
             } else {
-                start
-                    .channel
-                    .as_deref()
-                    .and_then(|channel| scenario.channels.get(channel))
-                    .map_or_else(|| marker_from_url(url), |channel| Ok(channel.origin_marker))?
+                start.channel.as_deref().and_then(|channel| scenario.channels.get(channel)).map_or_else(
+                    || {
+                        let parsed = marker_from_url(url)?;
+                        let resolved = virtual_ids_by_user
+                            .values()
+                            .find_map(|vmap| vmap.marker_from_virtual_id(u64::from(parsed)))
+                            .unwrap_or(parsed);
+                        Ok::<u32, TestkitError>(resolved)
+                    },
+                    |channel| Ok::<u32, TestkitError>(channel.origin_marker),
+                )?
             };
             admission_order = admission_order.saturating_add(1);
             let mut evicted_victim = None;
@@ -3394,7 +3965,28 @@ async fn execute_scenario_steps<'a>(
                 // suppressed retry intentionally diverges from its eviction prediction.
                 // The concrete SUT outcome is asserted through `step.expect`.
                 let reentry_suppression = matches!(step.expect, ExpectedPlayback::Suppressed);
-                if step.expect != oracle_expected && !provider_limited_rejection && !reentry_suppression {
+                let filter_rejection = scenario
+                    .policy_contract
+                    .as_ref()
+                    .and_then(|p| p.users.get(username))
+                    .and_then(|up| up.filter.as_ref())
+                    .is_some()
+                    && step.expect.is_rejected();
+                let free_shared_join = scenario
+                    .policy_contract
+                    .as_ref()
+                    .and_then(|p| p.users.get(username))
+                    .and_then(|up| up.player_features.as_ref())
+                    .and_then(|pf| pf.free_shared_joins)
+                    .unwrap_or(false)
+                    && step.expect.is_streaming()
+                    && oracle_expected == ExpectedPlayback::Rejected;
+                if step.expect != oracle_expected
+                    && !provider_limited_rejection
+                    && !reentry_suppression
+                    && !filter_rejection
+                    && !free_shared_join
+                {
                     return Err(TestkitError::Configuration(format!(
                         "step {} expects {:?}, but policy oracle expects {:?}",
                         step.command_id, step.expect, oracle_expected
@@ -3435,10 +4027,22 @@ async fn execute_scenario_steps<'a>(
                         Err(outcome) => Some(outcome),
                     }
                 } else {
-                    match start_held_playback(start.playback_id.clone(), &origin_run_id, url, marker, frames, &headers)
-                        .await?
+                    match start_held_playback(
+                        start.playback_id.clone(),
+                        &origin_run_id,
+                        url,
+                        marker,
+                        frames,
+                        &headers,
+                        start.assert_headers.clone().or_else(|| step.assert_headers.clone()),
+                    )
+                    .await?
                     {
                         Ok(held) => {
+                            if let Some(resolved) = &held.resolved_url {
+                                last_playback_url.clone_from(resolved);
+                                playback_urls.insert(start.playback_id.clone(), resolved.clone());
+                            }
                             held_playbacks.insert(start.playback_id.clone(), held);
                             Some(PlaybackOutcome::Streaming { frames, bytes: 0 })
                         }
@@ -3554,6 +4158,17 @@ async fn execute_scenario_steps<'a>(
             } else {
                 observations_incomplete = true;
                 events.push((start.playback_id.as_str(), "runtime_observation_unavailable"));
+            }
+            if let Some(expected_manifest) = &step.assert_manifest_contains {
+                check_manifest_assertion(
+                    &http_client,
+                    &last_playback_url,
+                    expected_manifest,
+                    step.command_id.as_str(),
+                    &mut events,
+                    &mut any_failed,
+                )
+                .await;
             }
             if let Some(runtime) = &step.assert_runtime {
                 check_runtime_assertions(
@@ -4242,7 +4857,7 @@ mod tests {
     async fn catalog_exposes_each_configured_marker() {
         let mut state = test_origin_state("catalog-run");
         state.markers = Arc::new(vec![17, 19]);
-        let document = catalog_m3u(&state, "127.0.0.1", None, false);
+        let document = catalog_m3u(&state, "127.0.0.1", None, false, None);
         assert!(document.contains("tvg-id=\"test-17\""));
         assert!(document.contains("tvg-id=\"test-19\""));
         assert!(document.contains("run=catalog-run"));
@@ -4252,10 +4867,10 @@ mod tests {
     async fn failover_member_catalog_omits_vod_and_carries_stable_ids() {
         let mut state = test_origin_state("catalog-run");
         state.markers = Arc::new(vec![17]);
-        let full = catalog_m3u(&state, "127.0.0.1", Some("input-a"), false);
+        let full = catalog_m3u(&state, "127.0.0.1", Some("input-a"), false, None);
         assert!(full.contains("test-vod-movie.mkv"));
         assert!(!full.contains("xui-id"));
-        let member = catalog_m3u(&state, "127.0.0.1", Some("input-a"), true);
+        let member = catalog_m3u(&state, "127.0.0.1", Some("input-a"), true, None);
         assert!(member.contains("tvg-id=\"test-17\" xui-id=\"17\",Test channel 17"));
         assert!(member.contains("token=input-a"));
         assert!(!member.contains("test-vod"));
@@ -4267,7 +4882,7 @@ mod tests {
         let mut state = test_origin_state("hls-run");
         state.markers = Arc::new(vec![17, 19]);
         state.hls_markers = Arc::new(HashSet::from([17]));
-        let document = catalog_m3u(&state, "127.0.0.1", Some("account-b"), false);
+        let document = catalog_m3u(&state, "127.0.0.1", Some("account-b"), false, None);
         assert!(document.contains("/hls/17/index.m3u8?run=hls-run&token=account-b"));
         assert!(document.contains("/live/19.ts?run=hls-run&token=account-b"));
         let response = hls(
@@ -5061,5 +5676,113 @@ mod tests {
 
         assert!(!any_failed);
         assert!(!observations_incomplete);
+    }
+
+    #[tokio::test]
+    async fn wait_for_origin_condition_matches_and_records_event() {
+        use axum::routing::get;
+        let events_payload = vec![OriginEvent::new(
+            1,
+            "test-run",
+            OriginEventKind::RequestStarted {
+                conn_id: 1,
+                request_id: 1,
+                method: "GET".to_owned(),
+                path: "/hls/17/3.ts".to_owned(),
+                range: None,
+                user_agent: None,
+                account: Some("input-b".to_owned()),
+            },
+        )];
+        let app = Router::new()
+            .route("/v1/runs/test-run/stats", get(|| async { Json(OriginStats::default()) }))
+            .route("/v1/runs/test-run/events", get(move || async move { Json(events_payload.clone()) }));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let obs = OriginObserver::new(&format!("http://127.0.0.1:{port}"));
+        let mut events = Vec::new();
+        let mut any_failed = false;
+        let mut observations_incomplete = false;
+        let await_origin = tuliprox_testkit::config::AwaitOrigin {
+            timeout_millis: Some(1000),
+            condition: tuliprox_testkit::config::AssertOrigin {
+                latest_segment_account: Some("input-b".to_owned()),
+                ..Default::default()
+            },
+        };
+
+        wait_for_origin_condition(
+            "wait-step",
+            &await_origin,
+            &obs,
+            "test-run",
+            &mut events,
+            &mut any_failed,
+            &mut observations_incomplete,
+        )
+        .await;
+
+        assert!(!any_failed);
+        assert!(!observations_incomplete);
+        assert_eq!(events, vec![("wait-step", "origin_condition_satisfied")]);
+    }
+
+    #[tokio::test]
+    async fn wait_for_origin_condition_times_out_and_records_failure() {
+        use axum::routing::get;
+        let events_payload = vec![OriginEvent::new(
+            1,
+            "test-run",
+            OriginEventKind::RequestStarted {
+                conn_id: 1,
+                request_id: 1,
+                method: "GET".to_owned(),
+                path: "/hls/17/3.ts".to_owned(),
+                range: None,
+                user_agent: None,
+                account: Some("input-a".to_owned()),
+            },
+        )];
+        let app = Router::new()
+            .route("/v1/runs/test-run/stats", get(|| async { Json(OriginStats::default()) }))
+            .route("/v1/runs/test-run/events", get(move || async move { Json(events_payload.clone()) }));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let obs = OriginObserver::new(&format!("http://127.0.0.1:{port}"));
+        let mut events = Vec::new();
+        let mut any_failed = false;
+        let mut observations_incomplete = false;
+        let await_origin = tuliprox_testkit::config::AwaitOrigin {
+            timeout_millis: Some(100),
+            condition: tuliprox_testkit::config::AssertOrigin {
+                latest_segment_account: Some("input-b".to_owned()),
+                ..Default::default()
+            },
+        };
+
+        wait_for_origin_condition(
+            "wait-step",
+            &await_origin,
+            &obs,
+            "test-run",
+            &mut events,
+            &mut any_failed,
+            &mut observations_incomplete,
+        )
+        .await;
+
+        assert!(any_failed);
+        assert!(events.contains(&("wait-step", "origin_condition_timeout")));
+        assert!(events.contains(&("wait-step", "origin_segment_account_mismatch")));
     }
 }

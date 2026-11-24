@@ -1,12 +1,54 @@
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
+    time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
 
+/// Errors that can occur during a manual failover switch operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwitchError {
+    NotActive,
+    InProgress,
+    MemberNotFound,
+    Cooldown {
+        retry_after: Duration,
+    },
+    /// The current member slot was preempted by the provider manager.
+    Preempted,
+    /// The target member failed to open; playback stayed on the current member.
+    TargetFailedRestored,
+    /// The target member failed to open and the current member could not be restored.
+    TargetFailedUnrestored,
+    ChannelClosed,
+    RespondentDropped,
+    Timeout,
+}
+
+impl std::fmt::Display for SwitchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotActive => write!(f, "Stream runtime failover driver not active or not found"),
+            Self::InProgress => write!(f, "Switch already in progress"),
+            Self::MemberNotFound => write!(f, "Target member not found in group"),
+            Self::Cooldown { .. } => write!(f, "Switch cooldown active"),
+            Self::Preempted => write!(f, "Stream member preempted"),
+            Self::TargetFailedRestored => write!(f, "Failed to open target member; returned to current member"),
+            Self::TargetFailedUnrestored => {
+                write!(f, "Failed to open target member and failed to restore current member")
+            }
+            Self::ChannelClosed => write!(f, "Stream driver channel closed"),
+            Self::RespondentDropped => write!(f, "Switch respondent dropped"),
+            Self::Timeout => write!(f, "Switch operation timed out"),
+        }
+    }
+}
+
+impl std::error::Error for SwitchError {}
+
 pub(crate) struct ManualSwitchCommand {
     pub target_member_vid: u32,
-    pub respondent: oneshot::Sender<Result<(), String>>,
+    pub respondent: oneshot::Sender<Result<(), SwitchError>>,
 }
 
 pub(crate) type SwitchSender = mpsc::UnboundedSender<ManualSwitchCommand>;
@@ -92,7 +134,7 @@ impl FailoverSwitchRegistry {
         target_id: u16,
         group_vid: u32,
         target_member_vid: u32,
-    ) -> Result<(), String> {
+    ) -> Result<(), SwitchError> {
         let sender = if is_shared {
             self.shared
                 .read()
@@ -108,18 +150,18 @@ impl FailoverSwitchRegistry {
         };
 
         let Some(sender) = sender else {
-            return Err("Stream runtime failover driver not active or not found".to_string());
+            return Err(SwitchError::NotActive);
         };
 
         let (resp_tx, resp_rx) = oneshot::channel();
         sender
             .send(ManualSwitchCommand { target_member_vid, respondent: resp_tx })
-            .map_err(|_| "Stream driver channel closed".to_string())?;
+            .map_err(|_| SwitchError::ChannelClosed)?;
 
         tokio::time::timeout(std::time::Duration::from_secs(10), resp_rx)
             .await
-            .map_err(|_| "Switch operation timed out".to_string())?
-            .map_err(|_| "Switch respondent dropped".to_string())?
+            .map_err(|_| SwitchError::Timeout)?
+            .map_err(|_| SwitchError::RespondentDropped)?
     }
 }
 

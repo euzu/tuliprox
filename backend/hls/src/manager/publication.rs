@@ -1043,6 +1043,14 @@ impl HlsProxyManager {
         self.access_leases.write().await.active_access_lease_count_for_session(proxy_session_id, now_ms)
     }
 
+    pub async fn non_terminal_user_session_tokens_for_proxy_session(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> std::collections::HashSet<String> {
+        self.access_leases.write().await.non_terminal_user_session_tokens(proxy_session_id, now_ms)
+    }
+
     pub async fn has_usable_access_lease_for_session(&self, proxy_session_id: &ProxySessionId, now_ms: u64) -> bool {
         self.access_leases.write().await.has_usable_access_lease_for_session(proxy_session_id, now_ms)
     }

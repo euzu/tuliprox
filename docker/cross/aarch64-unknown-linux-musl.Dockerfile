@@ -1,2 +1,2 @@
 # Pinned cross image for `cross build` (see Cross.toml). Dependabot updates the digest.
-FROM ghcr.io/cross-rs/aarch64-unknown-linux-musl:main@sha256:4664c353d6be72ac7ffbf163ebc546060fb4c7bf5e527ff9b18b823727646400
+FROM ghcr.io/cross-rs/aarch64-unknown-linux-musl:main@sha256:8b7fd8ef9ea82f0687baeeec281e1bc2667d84d5f4d65c8720636f1a2daf9c2f

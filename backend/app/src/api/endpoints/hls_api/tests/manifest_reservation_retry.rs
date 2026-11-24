@@ -156,14 +156,22 @@ async fn pending_clients_share_reservation_retry_without_consuming_active_playba
             account_runtime: None,
         };
         let old_binding = session.read().await.origin_account_binding.clone().unwrap();
-        // The held guard must be the only old-generation I/O: a background fetch that joined the same slot would
+        let held_binding = tuliprox_hls::api::HlsOriginAccountBinding::rebound(
+            old_binding.input_name.clone(),
+            old_binding.account_name.clone(),
+            old_binding.session_owner.clone(),
+            old_binding.generation + 1,
+            super::super::current_time_millis(),
+        );
+        session.write().await.origin_account_binding = Some(held_binding.clone());
+        // The held guard must be the only held I/O: a background fetch that joined the same slot would
         // outlive the release and keep denying the pending clients.
         let old_guard = loop {
             wait_for_origin_io_idle(&session).await;
             let guard = tuliprox_hls::api::begin_hls_origin_account_io_bounded(
                 &io,
                 &session,
-                &old_binding,
+                &held_binding,
                 Duration::from_secs(1),
             )
             .await
@@ -179,13 +187,7 @@ async fn pending_clients_share_reservation_retry_without_consuming_active_playba
             }
             drop(guard);
         };
-        session.write().await.origin_account_binding = Some(tuliprox_hls::api::HlsOriginAccountBinding::rebound(
-            old_binding.input_name,
-            old_binding.account_name,
-            old_binding.session_owner,
-            old_binding.generation + 1,
-            super::super::current_time_millis(),
-        ));
+        session.write().await.origin_account_binding = Some(old_binding);
         for id in ["pending-one", "pending-two"] {
             prepare_pending_test_hls_access_lease(&app, &proxy, &HlsAccessLeaseId(id.into())).await;
         }
@@ -341,23 +343,18 @@ async fn transient_real_provider_reservation_recovers_same_request_all_modes() {
             };
             let old_guard = if io_conflict {
                 let binding = session.read().await.origin_account_binding.clone().unwrap();
+                let mut competing_binding = binding.clone();
+                competing_binding.session_owner = "hls-cache:competing".to_string();
+                session.write().await.origin_account_binding = Some(competing_binding.clone());
                 let guard = tuliprox_hls::api::begin_hls_origin_account_io_bounded(
                     &origin_io,
                     &session,
-                    &binding,
+                    &competing_binding,
                     Duration::from_secs(1),
                 )
                 .await
                 .unwrap();
-                let current = session.read().await.origin_account_binding.clone().unwrap();
-                let replacement = tuliprox_hls::api::HlsOriginAccountBinding::rebound(
-                    Arc::clone(&current.input_name),
-                    Arc::clone(&current.account_name),
-                    current.session_owner.clone(),
-                    current.generation + 1,
-                    super::super::current_time_millis(),
-                );
-                session.write().await.origin_account_binding = Some(replacement);
+                session.write().await.origin_account_binding = Some(binding);
                 Some(guard)
             } else {
                 app.active_provider.refresh_provider_reservation(&input.name, "foreign-playback", 60);
@@ -467,7 +464,7 @@ async fn failed_start_before_and_after_publication_have_identical_fallback() {
                 };
                 assert_eq!(
                     response.status(),
-                    if video { StatusCode::OK } else { StatusCode::NOT_FOUND },
+                    if video { StatusCode::OK } else { StatusCode::BAD_GATEWAY },
                     "{mode:?} video={video} fail_before={fail_before}"
                 );
             }

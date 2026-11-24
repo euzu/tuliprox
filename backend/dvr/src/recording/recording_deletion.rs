@@ -19,12 +19,14 @@
 //! security log).
 
 use crate::recording::recording_queue::{
-    PersistedRecordingQueue, PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask,
-    RecordingTaskState,
+    CancelledEnclosingAction, PersistedRecordingQueue, PersistedRecordingTask, QueueMutationError, RecordingQueue,
+    RecordingTask, RecordingTaskState,
 };
 use shared::model::{DeletionPreviousState, RecordingMetadata};
 use std::path::{Path, PathBuf};
 use tuliprox_core::utils::{no_follow_existing, safe_unlink};
+
+static COMPACTING_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Errors that can occur during the three phases.
 #[derive(Debug, thiserror::Error)]
@@ -134,6 +136,16 @@ pub struct DeletionTarget {
     pub still_referenced: bool,
 }
 
+/// Returns the four paths associated with a recording: the main file, `.partial`, sidecar, and time index.
+pub fn recording_file_and_sidecar_paths(file_path: &Path) -> [PathBuf; 4] {
+    [
+        file_path.to_path_buf(),
+        crate::recording_worker::recording_partial_path(file_path),
+        crate::recording::recording_sidecar::sidecar_path(file_path),
+        crate::recording::recording_sidecar::time_index_path(file_path),
+    ]
+}
+
 impl DeletionTarget {
     /// The files this deletion may unlink: none while another entry holds
     /// the media, otherwise both the final file and its `.partial`.
@@ -146,8 +158,202 @@ impl DeletionTarget {
         if self.still_referenced {
             return Vec::new();
         }
-        vec![self.file_path.clone(), crate::recording_worker::recording_partial_path(&self.file_path)]
+        Vec::from(recording_file_and_sidecar_paths(&self.file_path))
     }
+}
+
+/// Compact a recording file when only clip entries remain.
+///
+/// Copies PAT+PMT packets from the beginning of the file, followed by the union
+/// of all clip byte ranges, into a temporary `.compacting` file, renames atomically,
+/// and updates the clip offsets in the queue.
+#[allow(clippy::too_many_lines)]
+pub async fn maybe_compact_clips(queue: &RecordingQueue, file_path: &Path) -> Result<bool, DeletionError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    let file_tasks = queue.committed_tasks_for_file(file_path).await;
+    if file_tasks.is_empty() {
+        return Ok(false);
+    }
+    if file_tasks.iter().any(|t| t.clip.is_none()) {
+        return Ok(false);
+    }
+    let mut clip_ranges = Vec::new();
+    for t in &file_tasks {
+        let Some(ref clip) = t.clip else {
+            return Ok(false);
+        };
+        let (Some(start), Some(end)) = (clip.start_offset, clip.end_offset) else {
+            return Ok(false);
+        };
+        clip_ranges.push((t.uuid.clone(), start, end));
+    }
+    if clip_ranges.is_empty() {
+        return Ok(false);
+    }
+
+    clip_ranges.sort_by_key(|(_, start, _)| *start);
+    let min_start = clip_ranges.iter().map(|(_, s, _)| *s).min().unwrap_or(0);
+    let max_end = clip_ranges.iter().map(|(_, _, e)| *e).max().unwrap_or(min_start);
+    let union_len = max_end.saturating_sub(min_start);
+
+    let header = match crate::recording::recording_worker::read_clip_header(file_path).await {
+        Ok(h) => h,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(DeletionError::DeleteFailed(e)),
+    };
+
+    let file_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
+    let ext = file_path.extension().and_then(|s| s.to_str()).unwrap_or("ts");
+    let new_filename = format!("{file_stem}_compacted.{ext}");
+    let compacted_path = file_path.with_file_name(&new_filename);
+
+    let seq = COMPACTING_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let staging_filename = format!(".{file_stem}.{pid}.{seq}.compacting");
+    let staging_path = file_path.with_file_name(&staging_filename);
+
+    {
+        let mut src = match tokio::fs::File::open(file_path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(DeletionError::DeleteFailed(e)),
+        };
+        let mut dst = match tokio::fs::File::create(&staging_path).await {
+            Ok(f) => f,
+            Err(e) => return Err(DeletionError::DeleteFailed(e)),
+        };
+
+        if let Err(e) = dst.write_all(&header).await {
+            let _ = tokio::fs::remove_file(&staging_path).await;
+            return Err(DeletionError::DeleteFailed(e));
+        }
+
+        if let Err(e) = src.seek(std::io::SeekFrom::Start(min_start)).await {
+            let _ = tokio::fs::remove_file(&staging_path).await;
+            return Err(DeletionError::DeleteFailed(e));
+        }
+
+        let mut remaining = union_len;
+        let mut buf = vec![0u8; 64 * 1024];
+        while remaining > 0 {
+            let to_read = usize::try_from(remaining).unwrap_or(usize::MAX).min(buf.len());
+            let n = match src.read(&mut buf[..to_read]).await {
+                Ok(0) => {
+                    let _ = tokio::fs::remove_file(&staging_path).await;
+                    return Err(DeletionError::DeleteFailed(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Source file shorter than clip range",
+                    )));
+                }
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&staging_path).await;
+                    return Err(DeletionError::DeleteFailed(e));
+                }
+            };
+            if let Err(e) = dst.write_all(&buf[..n]).await {
+                let _ = tokio::fs::remove_file(&staging_path).await;
+                return Err(DeletionError::DeleteFailed(e));
+            }
+            remaining -= n as u64;
+        }
+        if let Err(e) = dst.flush().await {
+            let _ = tokio::fs::remove_file(&staging_path).await;
+            return Err(DeletionError::DeleteFailed(e));
+        }
+        if let Err(e) = dst.sync_all().await {
+            let _ = tokio::fs::remove_file(&staging_path).await;
+            return Err(DeletionError::DeleteFailed(e));
+        }
+    }
+
+    if let Err(e) = tokio::fs::rename(&staging_path, &compacted_path).await {
+        let _ = tokio::fs::remove_file(&staging_path).await;
+        return Err(DeletionError::DeleteFailed(e));
+    }
+
+    let clip_header_len = crate::recording::CLIP_HEADER_LEN as u64;
+    let new_offsets: std::collections::HashMap<String, (u64, u64)> = clip_ranges
+        .iter()
+        .map(|(uuid, s, e)| {
+            let new_start = clip_header_len + (s - min_start);
+            let new_end = clip_header_len + (e - min_start);
+            (uuid.clone(), (new_start, new_end))
+        })
+        .collect();
+
+    // The compacted file describes itself like any finished recording, so an
+    // orphan scan can still identify it.
+    let old_sidecar_path = crate::recording::recording_sidecar::sidecar_path(file_path);
+    if let Ok(mut sidecar) = crate::recording::recording_sidecar::read_sidecar(&old_sidecar_path).await {
+        sidecar.relative_path =
+            Path::new(&sidecar.relative_path).with_file_name(&new_filename).to_string_lossy().into_owned();
+        sidecar.size_bytes = header.len() as u64 + union_len;
+        if let Err(err) = crate::recording::recording_sidecar::write_sidecar(&compacted_path, &sidecar).await {
+            let _ = tokio::fs::remove_file(&compacted_path).await;
+            let _ = tokio::fs::remove_file(&staging_path).await;
+            return Err(DeletionError::DeleteFailed(err));
+        }
+    }
+
+    let commit_res = crate::recording::recording_queue::mutate(queue, |candidate| {
+        // Every entry still on the old file must be one of the compacted clips;
+        // an entry that appeared since the snapshot would lose its file.
+        let still_on_file = candidate
+            .finished
+            .iter()
+            .chain(candidate.scheduled.iter())
+            .chain(candidate.active.iter())
+            .chain(candidate.queue.iter())
+            .filter(|t| t.file_path == file_path)
+            .all(|t| new_offsets.contains_key(&t.uuid));
+        if !still_on_file {
+            return Err(crate::recording::recording_queue::QueueMutationError::MutationSkipped);
+        }
+        for t in candidate
+            .finished
+            .iter_mut()
+            .chain(candidate.scheduled.iter_mut())
+            .chain(candidate.active.iter_mut())
+            .chain(candidate.queue.iter_mut())
+        {
+            if let Some((new_s, new_e)) = new_offsets.get(&t.uuid) {
+                t.file_path.clone_from(&compacted_path);
+                t.filename.clone_from(&new_filename);
+                if let Some(ref rel) = t.recording.relative_path {
+                    let rel_path = Path::new(rel);
+                    t.recording.relative_path =
+                        Some(rel_path.with_file_name(&new_filename).to_string_lossy().into_owned());
+                }
+                if let Some(ref mut clip) = t.clip {
+                    clip.start_offset = Some(*new_s);
+                    clip.end_offset = Some(*new_e);
+                    clip.header_bytes = Some(header.clone());
+                }
+                let new_size = (new_e - new_s) + clip_header_len;
+                t.size = new_size;
+                t.total_size = Some(new_size);
+                t.recording.measured_bytes = new_size;
+            }
+        }
+        Ok(())
+    })
+    .await;
+
+    if let Err(err) = commit_res {
+        let _ = tokio::fs::remove_file(&compacted_path).await;
+        let _ = tokio::fs::remove_file(&staging_path).await;
+        let _ = tokio::fs::remove_file(crate::recording::recording_sidecar::sidecar_path(&compacted_path)).await;
+        return Err(DeletionError::DeleteFailed(std::io::Error::other(format!(
+            "Compaction queue mutation failed: {err:?}"
+        ))));
+    }
+
+    let _ = tokio::fs::remove_file(file_path).await;
+    let _ = tokio::fs::remove_file(crate::recording::recording_sidecar::time_index_path(file_path)).await;
+    let _ = tokio::fs::remove_file(&old_sidecar_path).await;
+    Ok(true)
 }
 
 /// Mark the recording as `Deleting` under the queue mutation boundary,
@@ -318,19 +524,50 @@ pub async fn execute_deletion(
     unlink_owned_file(&path).await
 }
 
+/// Unlink the recorded file, its partial, its sidecar, and its index if they exist.
+pub async fn unlink_recording_file_and_sidecars(file_path: &Path) {
+    for path in recording_file_and_sidecar_paths(file_path) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+/// Apply actions from settled cancelled enclosing recordings (compaction or deletion).
+pub async fn apply_cancelled_enclosing_action(queue: &RecordingQueue, action: CancelledEnclosingAction) {
+    for file in action.files_to_compact {
+        if let Err(err) = maybe_compact_clips(queue, &file).await {
+            log::warn!("Failed to compact clips for cancelled enclosing file {}: {err}", file.display());
+        }
+    }
+    for file in action.files_to_delete {
+        unlink_recording_file_and_sidecars(&file).await;
+    }
+}
+
 /// Remove the task from the queue under a new mutation
 /// boundary. Called after the file is gone (or was already missing).
-pub async fn finalize_deletion(queue: &RecordingQueue, uuid: &str) -> Result<(), DeletionError> {
+pub async fn finalize_deletion(
+    queue: &RecordingQueue,
+    uuid: &str,
+) -> Result<(Option<String>, CancelledEnclosingAction), DeletionError> {
     crate::recording::recording_queue::mutate(queue, |candidate| {
         if let Some(location) = locate(candidate, uuid) {
-            let _ = remove_at(candidate, location);
-            return Ok(());
+            let removed = remove_at(candidate, location);
+            let worker_to_stop = if let Some(ref task) = removed {
+                if task.clip.is_some() && !task.media_identity.is_empty() {
+                    RecordingQueue::update_cancelled_enclosing_stop_time(candidate, &task.media_identity)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let actions = RecordingQueue::cleanup_settled_cancelled_enclosings(candidate);
+            return Ok((worker_to_stop, actions));
         }
         Err(QueueMutationError::UnknownRecording)
     })
     .await
-    .map_err(DeletionError::FinalizeFailed)?;
-    Ok(())
+    .map_err(DeletionError::FinalizeFailed)
 }
 
 /// Startup recovery decision for a task in `Deleting` state.
@@ -437,7 +674,7 @@ mod tests {
         let mut meta = RecordingMetadata::new_live(
             RecordingOwner::User(UserId::from("web:alice")),
             RecordingVisibility::Private,
-            RecordingSource::new("t1", "v1", "in1"),
+            RecordingSource::new("t1", "v1", "in1").with_provider_id(Some("p1".to_string())),
             1_700_000_000,
             1_700_000_060,
             0,
@@ -448,6 +685,7 @@ mod tests {
             media_identity: String::new(),
             partition: crate::recording::recording_queue::RecordingPartition::default(),
             uuid: uuid.to_string(),
+            vod_id: 0,
             file_dir: PathBuf::from("/tmp"),
             file_path: PathBuf::from(format!("/tmp/{uuid}.ts")),
             filename: format!("{uuid}.ts"),
@@ -464,6 +702,8 @@ mod tests {
             retry_attempts: 0,
             next_retry_at: None,
             recording: meta,
+            clip: None,
+            cancelled_by_owner: false,
         }
     }
 

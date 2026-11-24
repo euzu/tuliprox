@@ -117,6 +117,7 @@ pub(super) async fn playlist_webplayer_stream(
         None,
         Some(source),
         Some(resolved_target.clone()),
+        false,
     )
     .await;
 

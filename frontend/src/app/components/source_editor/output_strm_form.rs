@@ -3,7 +3,7 @@ use crate::{
         build_options, config::HasFormData, select::Select, selection_parse_first, BlockId, BlockInstance, Card,
         DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton,
     },
-    config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
+    config_field, config_field_bool, config_field_child, config_field_optional, edit_field_bool,
     edit_field_list_option, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
@@ -181,10 +181,11 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                 <Card class="tp__config-view__card">
                     { config_field!(output_form_state.form, translate.t(LABEL_DIRECTORY), directory) }
                     { config_field_optional!(output_form_state.form, translate.t(LABEL_USERNAME), username) }
-                    { config_field_custom!(translate.t(LABEL_EXPORT_STYLE), output_form_state.form.style.to_string()) }
-                    { config_field_custom!(
+                    { config_field_child!(translate.t(LABEL_EXPORT_STYLE), "OUTPUT_STRM_FORM.EXPORT_STYLE", { html! { <span class="tp__form-field__value">{output_form_state.form.style.to_string()}</span> } }) }
+                    { config_field_child!(
                         translate.t(LABEL_FILTER),
-                        output_form_state.form.filter.clone().unwrap_or_default()
+                        "OUTPUT_STRM_FORM.FILTER",
+                        { html! { <span class="tp__form-field__value">{output_form_state.form.filter.clone().unwrap_or_default()}</span> } }
                     ) }
                 </Card>
             }
@@ -211,9 +212,10 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                     { config_field_bool!(output_form_state.form, translate.t(LABEL_CLEANUP), cleanup) }
                     { config_field_bool!(output_form_state.form, translate.t(LABEL_ADD_QUALITY_TO_FILENAME), add_quality_to_filename) }
                     { config_field_bool!(output_form_state.form, translate.t(LABEL_USE_METADATA), use_metadata) }
-                    { config_field_custom!(
+                    { config_field_child!(
                         translate.t(LABEL_STRM_PROPS),
-                        output_form_state.form.strm_props.as_ref().map_or_else(String::new, |props| props.join(", "))
+                        "STRM_TARGET_OUTPUT.STRM_PROPS",
+                        { html! { <span class="tp__form-field__value">{output_form_state.form.strm_props.as_ref().map_or_else(String::new, |props| props.join(", "))}</span> } }
                     ) }
                 </Card>
             }

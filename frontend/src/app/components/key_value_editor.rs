@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{chip::Chip, IconButton},
+    app::components::{chip::Chip, FieldLabel, IconButton},
     i18n::use_translation,
 };
 use std::{collections::HashMap, rc::Rc};
@@ -16,6 +16,9 @@ pub struct KeyValue {
 pub struct KeyValueEditorProps {
     #[prop_or_default]
     pub label: Option<String>,
+    /// Help id for the label; without it the label has no help icon.
+    #[prop_or_default]
+    pub field_id: Option<String>,
     pub entries: HashMap<String, String>,
     #[prop_or_else(Callback::noop)]
     pub on_change: Callback<HashMap<String, String>>,
@@ -57,8 +60,16 @@ fn candidate_entry(
 
 #[component]
 pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
-    let KeyValueEditorProps { label, entries, on_change, readonly, key_placeholder, value_placeholder, validate_entry } =
-        props.clone();
+    let KeyValueEditorProps {
+        label,
+        field_id,
+        entries,
+        on_change,
+        readonly,
+        key_placeholder,
+        value_placeholder,
+        validate_entry,
+    } = props.clone();
     let translate = use_translation();
     // Empty placeholder props fall back to localized defaults
     let key_placeholder = if key_placeholder.is_empty() { translate.t("LABEL.ADD_KEY") } else { key_placeholder };
@@ -162,9 +173,11 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
 
     html! {
         <div class="tp__keyvalue-editor">
-            { if let Some(lbl) = &label {
-                html! { <label>{ lbl }</label> }
-            } else { html!{} } }
+            { match (&label, &field_id) {
+                (Some(lbl), Some(id)) => html! { <FieldLabel label={lbl.clone()} field_id={id.clone()} /> },
+                (Some(lbl), None) => html! { <label>{ lbl }</label> },
+                _ => html! {},
+            } }
             <div class="tp__keyvalue-editor__entries">
             { for (*entry_state).iter().map(|kv| {
                 let key_clone = kv.key.clone();

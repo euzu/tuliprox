@@ -51,6 +51,11 @@ pub enum RecordingPartition {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PersistedRecordingTask {
     pub uuid: String,
+    /// Stream id this recording answers to in the Xtream VOD namespace of its owner.
+    /// `0` means "not assigned yet"; the queue assigns it inside the mutation that
+    /// inserts the task, so no id is ever handed out twice.
+    #[serde(default)]
+    pub vod_id: u32,
     pub kind: RecordingKind,
     pub file_dir: PathBuf,
     pub file_path: PathBuf,
@@ -77,6 +82,24 @@ pub struct PersistedRecordingTask {
     /// same recording and share one physical file.
     #[serde(default)]
     pub media_identity: String,
+    /// When this task is a clip, its enclosing time window and byte offsets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<RecordingClip>,
+    #[serde(default)]
+    pub cancelled_by_owner: bool,
+}
+
+/// A virtual slice of an enclosing recording.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RecordingClip {
+    pub start_ts: i64,
+    pub end_ts: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_bytes: Option<Vec<u8>>,
 }
 
 /// Who a library entry belongs to.
@@ -144,6 +167,13 @@ pub struct PersistedLibraryEntry {
     pub quota_bytes: u64,
     #[serde(default)]
     pub priority: i8,
+    #[serde(default)]
+    pub cancelled_by_owner: bool,
+    /// Stream id this entry answers to in the Xtream VOD namespace of its principal.
+    /// Per entry, not per file: the same recording belongs to several principals, and
+    /// each recognizes it by its own id.
+    #[serde(default)]
+    pub vod_id: u32,
     /// Where this entry is in its own lifecycle.
     ///
     /// Execution state is per entry, not per file: one entry can be running a
@@ -172,6 +202,9 @@ pub struct PersistedLibraryEntry {
     /// link stores its metadata once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<RecordingMetadata>,
+    /// When this entry is a clip, its enclosing time window and byte offsets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<RecordingClip>,
 }
 
 /// Repository-level bookkeeping, stored under its own key.
@@ -180,6 +213,10 @@ pub struct RecordingDbMetadata {
     /// Mirrors the queue's own monotonic revision so a reopened queue resumes
     /// counting where it left off.
     pub queue_revision: u64,
+    /// Next recording VOD id to hand out. Kept here so a deleted recording does
+    /// not free its id for a different one after a restart.
+    #[serde(default)]
+    pub next_vod_id: u32,
 }
 
 /// How long an accepted idempotency key is honoured, from first acceptance.
@@ -312,6 +349,7 @@ impl RecoverySchema<RecordingDbKey, RecordingDbValue> for RecordingRecoverySchem
 #[derive(Clone, Debug, Default)]
 struct StoredRecords {
     queue_revision: u64,
+    next_vod_id: u32,
     materializations: BTreeMap<String, PersistedMaterialization>,
     entries: BTreeMap<String, PersistedLibraryEntry>,
     idempotency: BTreeMap<(String, String), PersistedIdempotency>,
@@ -461,6 +499,8 @@ fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedL
         materialization_id,
         quota_bytes: task.recording.reserved_bytes,
         priority: task.priority,
+        cancelled_by_owner: task.cancelled_by_owner,
+        vod_id: task.vod_id,
         state: task.state,
         partition: task.partition,
         finished: task.finished,
@@ -469,6 +509,7 @@ fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedL
         retry_attempts: task.retry_attempts,
         next_retry_at: task.next_retry_at,
         media: Some(task.recording.clone()),
+        clip: task.clip.clone(),
     };
     (materialization, entry)
 }
@@ -509,11 +550,14 @@ fn join(materialization: &PersistedMaterialization, entry: &PersistedLibraryEntr
         state: entry.state,
         input_name: materialization.input_name.clone(),
         priority: entry.priority,
+        vod_id: entry.vod_id,
         retry_attempts: entry.retry_attempts,
         next_retry_at: entry.next_retry_at,
         recording: media,
         partition: entry.partition,
         media_identity: materialization.media_identity.clone(),
+        clip: entry.clip.clone(),
+        cancelled_by_owner: entry.cancelled_by_owner,
     }
 }
 
@@ -523,6 +567,8 @@ type Journal = BPlusTreeRecoveryJournal<RecordingDbKey, RecordingDbValue, Record
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecordingRepositorySnapshot {
     pub queue_revision: u64,
+    /// Next recording VOD id to hand out, as stored with the last commit.
+    pub next_vod_id: u32,
     pub tasks: Vec<PersistedRecordingTask>,
 }
 
@@ -640,7 +686,11 @@ impl RecordingRepository {
     /// repository's job precisely so the reference count has one owner.
     pub fn load(&mut self) -> io::Result<RecordingRepositorySnapshot> {
         let stored = self.committed()?;
-        let mut snapshot = RecordingRepositorySnapshot { queue_revision: stored.queue_revision, tasks: Vec::new() };
+        let mut snapshot = RecordingRepositorySnapshot {
+            queue_revision: stored.queue_revision,
+            next_vod_id: stored.next_vod_id,
+            tasks: Vec::new(),
+        };
         for entry in stored.entries.values() {
             let materialization = stored
                 .materializations
@@ -652,13 +702,22 @@ impl RecordingRepository {
         Ok(snapshot)
     }
 
+    /// Every committed physical materialization.
+    pub fn materializations(&mut self) -> io::Result<Vec<PersistedMaterialization>> {
+        let stored = self.committed()?;
+        Ok(stored.materializations.values().cloned().collect())
+    }
+
     /// Every stored record, indexed for joining and for invariant checks.
     fn read_records(&mut self) -> io::Result<StoredRecords> {
         let mut stored = StoredRecords::default();
         for (key, value) in self.journal.entries()? {
             check_pairing(&key, &value)?;
             match (key, value) {
-                (_, RecordingDbValue::Metadata(metadata)) => stored.queue_revision = metadata.queue_revision,
+                (_, RecordingDbValue::Metadata(metadata)) => {
+                    stored.queue_revision = metadata.queue_revision;
+                    stored.next_vod_id = metadata.next_vod_id;
+                }
                 (RecordingDbKey::Materialization { id }, RecordingDbValue::Materialization(materialization)) => {
                     if id != materialization.id {
                         return Err(invalid("materialization is filed under a different id than it carries"));
@@ -784,15 +843,20 @@ impl RecordingRepository {
             ));
             let _ = incoming.idempotency.insert((record.principal.clone(), record.key.clone()), record);
         }
-        if existing.queue_revision != queue_revision || operations.is_empty() {
+        // The counter only ever grows: a deleted recording keeps its id retired so a
+        // client that cached it can never be served a different recording under it.
+        let highest_assigned = incoming.entries.values().map(|entry| entry.vod_id).max().unwrap_or(0);
+        let next_vod_id = existing.next_vod_id.max(highest_assigned.saturating_add(1));
+        if existing.queue_revision != queue_revision || existing.next_vod_id != next_vod_id || operations.is_empty() {
             operations.push(RecoveryOperation::Upsert(
                 RecordingDbKey::Metadata,
-                RecordingDbValue::Metadata(RecordingDbMetadata { queue_revision }),
+                RecordingDbValue::Metadata(RecordingDbMetadata { queue_revision, next_vod_id }),
             ));
         }
 
         let _ = self.journal.apply_batch(RecoveryBatch::new(operations))?;
         incoming.queue_revision = queue_revision;
+        incoming.next_vod_id = next_vod_id;
         self.committed = Some(incoming);
         // The batch is durable from here on. A failed checkpoint is
         // maintenance, not a failed write: reporting it as one would make the
@@ -852,6 +916,7 @@ mod tests {
         PersistedRecordingTask {
             media_identity: String::new(),
             uuid: uuid.to_owned(),
+            vod_id: 0,
             kind: RecordingKind::Vod,
             file_dir: PathBuf::from("/rec"),
             file_path: PathBuf::from("/rec/film.mp4"),
@@ -869,6 +934,8 @@ mod tests {
             next_retry_at: None,
             recording: metadata(),
             partition: RecordingPartition::Queued,
+            clip: None,
+            cancelled_by_owner: false,
         }
     }
 
@@ -1108,6 +1175,33 @@ mod tests {
         built.media_identity = identity.to_owned();
         built.recording.owner = RecordingOwner::User(UserId::from(owner));
         built
+    }
+
+    #[test]
+    fn recording_vod_ids_round_trip_and_the_counter_only_moves_forward() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut first = task("a");
+        first.vod_id = 1_000_000_000;
+        let mut second = task("b");
+        second.vod_id = 1_000_000_001;
+        {
+            let mut repository = fixture.open()?;
+            repository.commit(1, &[first.clone(), second.clone()])?;
+            // A later commit without them keeps the counter where it was, so a cached
+            // client id is never reissued to a different recording.
+            repository.commit(2, &[])?;
+        }
+
+        let mut repository = fixture.open()?;
+        let snapshot = repository.load()?;
+        assert_eq!(snapshot.next_vod_id, 1_000_000_002);
+        assert!(snapshot.tasks.is_empty(), "both entries were removed");
+
+        repository.commit(3, &[first])?;
+        let snapshot = repository.load()?;
+        assert_eq!(snapshot.tasks[0].vod_id, 1_000_000_000);
+        assert_eq!(snapshot.next_vod_id, 1_000_000_002);
+        Ok(())
     }
 
     #[test]
@@ -1633,6 +1727,26 @@ mod tests {
         for field in ["\"principal\"", "\"key\"", "\"request_fingerprint\"", "\"recording_id\"", "\"accepted_at\""] {
             assert!(encoded.contains(field), "{field} is missing from {encoded}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn task_cancelled_by_owner_survives_reopen() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        let mut t = task("task-cancelled");
+        t.cancelled_by_owner = true;
+        repository.commit(1, &[t])?;
+        drop(repository);
+
+        let mut reopened = fixture.open()?;
+        let snapshot = reopened.load()?;
+        let loaded = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.uuid == "task-cancelled")
+            .ok_or_else(|| io::Error::other("task not found"))?;
+        assert!(loaded.cancelled_by_owner);
         Ok(())
     }
 }

@@ -109,6 +109,8 @@ async fn shared_admission_rejection_does_not_leak_meter_registration() {
         crate::api::model::ConnectionKind::Normal,
         false,
         None,
+        false,
+        false,
     )
     .await
     .into_response();
@@ -449,4 +451,15 @@ fn grace_hold_defers_live_and_fresh_video_but_not_catchup_or_affine_reopens() {
     assert!(!should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::Catchup, true));
     assert!(!should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::Video, true));
     assert!(!should_defer_provider_open_for_grace_hold(true, false, PlaylistItemType::Video, true));
+}
+
+#[test]
+fn test_join_shared_503_response_has_no_store() {
+    let response = crate::api::model::fallback_status_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+    );
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let cc = response.headers().get(axum::http::header::CACHE_CONTROL).expect("cache-control header");
+    assert_eq!(cc.to_str().unwrap(), "no-store");
 }

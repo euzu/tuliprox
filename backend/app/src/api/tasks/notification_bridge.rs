@@ -296,7 +296,9 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         | EventMessage::FailoverGroupExhausted { .. }
         | EventMessage::FailoverGroupCircuitChanged { .. }
         | EventMessage::FailoverGroupMemberSwitched { .. }
-        | EventMessage::FailoverOverridesChanged { .. } => None,
+        | EventMessage::FailoverOverridesChanged { .. }
+        | EventMessage::StreamEnded { .. }
+        | EventMessage::RecordingFinished { .. } => None,
     }
 }
 
@@ -696,6 +698,12 @@ mod tests {
             plugin_update(shared::model::PluginUpdateOutcome::Available),
             plugin_update(shared::model::PluginUpdateOutcome::Applied),
             plugin_update(shared::model::PluginUpdateOutcome::Failed),
+            EventMessage::StreamEnded {
+                username: "u".into(),
+                uid: 1,
+                virtual_id: 1,
+                reason: shared::model::StreamEndedReason::Kicked,
+            },
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples

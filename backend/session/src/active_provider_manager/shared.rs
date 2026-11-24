@@ -69,6 +69,12 @@ impl ActiveProviderManager {
         let _ = self.shared_stream_manager.set(Arc::downgrade(manager));
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn shared_stream_priority(&self, key: &str) -> Option<i8> {
+        let connections = self.read_connections();
+        connections.shared.by_key.get(key).map(|shared| shared.priority)
+    }
+
     /// Finds every shared subscription carried by one transport socket.
     ///
     /// This is an explicit socket-wide transport action (connection close, kick), not

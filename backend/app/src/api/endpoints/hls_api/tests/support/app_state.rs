@@ -222,15 +222,49 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_inputs(
     test_app_state_with_hls_proxy_and_inputs(Arc::new(HlsProxyManager::new()), inputs)
 }
 
+/// Origin budgets that loopback test origins rely on.
+///
+/// The production default (`origin_manifest_timeout_ms` = 3 s) is a wall-clock budget for real provider links.
+/// A loaded or single-threaded test runtime can exceed it while the loopback origin answers in microseconds;
+/// the manifest attempt then fails, no cached manifest is published, and the entry request degrades to the
+/// failed-start fallback status instead of the manifest.
+pub(in crate::api::endpoints::hls_api::tests) const TEST_HLS_ORIGIN_MANIFEST_TIMEOUT_MS: u64 = 30_000;
+/// Initial manifest wait written into test configs. It equals today's production default; it is spelled out so a
+/// change of that default does not silently change how long HLS tests wait for the bootstrap decision.
+pub(in crate::api::endpoints::hls_api::tests) const TEST_HLS_INITIAL_MANIFEST_WAIT_SECS: u64 = 90;
+
+/// HLS cache config for tests: the manager's cache path plus loopback-safe origin budgets.
+pub(in crate::api::endpoints::hls_api::tests) fn test_hls_cache_dto(app_state: &Arc<AppState>) -> HlsCacheConfigDto {
+    app_state.hls.proxy.keep_cache_path(HlsCacheConfigDto {
+        origin_manifest_timeout_ms: shared::model::Millis::new(TEST_HLS_ORIGIN_MANIFEST_TIMEOUT_MS),
+        initial_manifest_wait_timeout_secs: shared::model::Secs::new(TEST_HLS_INITIAL_MANIFEST_WAIT_SECS),
+        ..HlsCacheConfigDto::default()
+    })
+}
+
+/// Enables the HLS cache for a test app state.
+///
+/// Stores the config and lifts the running manager's origin manifest budget, which is also the AES key and MAP
+/// fetch deadline, to the loopback test budget. Other manager settings stay untouched: tests build managers with
+/// settings of their own that `update_config` would replace. The lift applies only while the manager runs the
+/// production default; a test that sets 3000 ms on purpose must set it after this call.
 pub(in crate::api::endpoints::hls_api::tests) fn enable_hls_cache(app_state: &Arc<AppState>) {
     let config = Config {
         reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
-            hls_cache: Some(app_state.hls.proxy.keep_cache_path(HlsCacheConfigDto::default())),
+            hls_cache: Some(test_hls_cache_dto(app_state)),
             ..Default::default()
         })),
         ..Default::default()
     };
     app_state.app_config.config.store(Arc::new(config));
+    let proxy = &app_state.hls.proxy;
+    if proxy.origin_manifest_timeout_ms() == shared::defaults::default_hls_origin_manifest_timeout_ms().get() {
+        proxy.update_origin_preferences(
+            proxy.min_origin_target_duration_secs(),
+            proxy.segment_fetch_policy().timeouts.config().segment,
+            TEST_HLS_ORIGIN_MANIFEST_TIMEOUT_MS,
+        );
+    }
 }
 
 pub(in crate::api::endpoints::hls_api::tests) async fn configure_test_hls_strip(

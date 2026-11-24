@@ -119,10 +119,19 @@ pub(super) struct ActiveClientStreamState {
     pub(super) group_lease_owner: Option<Arc<str>>,
 }
 
+pub(crate) struct ActiveClientStreamOutcome {
+    pub(crate) stream: BoxedProviderStream,
+    pub(crate) stream_uid: u32,
+}
+
+impl ActiveClientStreamOutcome {
+    pub fn into_stream(self) -> BoxedProviderStream { self.stream }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn create_active_client_stream(
     request: ActiveClientStreamParams<'_>,
-) -> Result<BoxedProviderStream, StreamAdmissionError> {
+) -> Result<ActiveClientStreamOutcome, StreamAdmissionError> {
     let ActiveClientStreamParams {
         mut stream_details,
         app_state,
@@ -242,7 +251,7 @@ pub(crate) async fn create_active_client_stream(
             };
             // The shared source owns the claim from here; disarm the registration rollback.
             registered_request.commit();
-            return Ok(stream);
+            return Ok(ActiveClientStreamOutcome { stream, stream_uid: request_uid });
         }
     }
 
@@ -437,14 +446,16 @@ pub(crate) async fn create_active_client_stream(
 
     let timed_whole_response = state.group_switcher.is_some();
     let stream = ActiveClientStream { state }.boxed();
-    if timed_whole_response {
-        return Ok(wrap_timed_client_stream_if_needed(
+    let stream = if timed_whole_response {
+        wrap_timed_client_stream_if_needed(
             app_state,
             stream,
             fingerprint.addr,
             VirtualId::new(virtual_id),
             display_stream_uid,
-        ));
-    }
-    Ok(stream)
+        )
+    } else {
+        stream
+    };
+    Ok(ActiveClientStreamOutcome { stream, stream_uid: request_uid })
 }

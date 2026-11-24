@@ -42,3 +42,5 @@ pub use self::{
     event_manager::*, failover_group::*, meter::*, meter_registry::*, provider_leases::*, provider_lineup_manager::*,
     provider_session_headers::*, stream::*, streams::*,
 };
+
+pub const MANUAL_SWITCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);

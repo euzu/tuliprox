@@ -394,6 +394,8 @@ async fn create_shared_data(
     let hls_proxy = Arc::new(HlsProxyManager::from_config(&config, &app_config.encrypt_secret));
     active_provider.set_shared_stream_manager(&shared_stream_manager);
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
+    active_users.set_shared_stream_manager(&shared_stream_manager);
+    shared_stream_manager.set_user_manager(&active_users);
     active_users.start_adaptive_expiry_worker();
 
     let history_config = config.reverse_proxy.as_ref().and_then(|r| r.stream_history.as_ref());
@@ -442,28 +444,32 @@ async fn create_shared_data(
     populate_initial_member_health(std::path::Path::new(&config.storage_dir), &member_health);
     let plugins = crate::api::model::load_validated_plugins(app_config, Some(&cache)).await;
 
+    let playlists = Arc::new(PlaylistStorageState::new());
     let app_state = AppState {
         app_config: Arc::clone(app_config),
         http_clients,
         cache,
-        shared_stream_manager,
+        shared_stream_manager: Arc::clone(&shared_stream_manager),
         hls: HlsState::new(hls_proxy),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
         epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
         recording: crate::api::model::RecordingState::new(
             Arc::new(recordings),
-            crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+            crate::api::model::recording_runtime::ProviderCapacityAdapter::with_shared_stream_manager(
                 Arc::clone(&active_provider),
                 Arc::clone(&connection_manager),
                 Arc::clone(&maintenance),
+                Arc::clone(app_config),
+                Arc::clone(&playlists),
+                Arc::clone(&shared_stream_manager),
             ),
         ),
         active_provider,
         connection_manager,
         event_manager,
         cancel_tokens,
-        playlists: Arc::new(PlaylistStorageState::new()),
+        playlists,
         geoip,
         metadata_manager,
         auth: AuthState::new(token_revocations),
@@ -608,7 +614,7 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
     false
 }
 
-fn is_web_auth_enabled(cfg: &Arc<Config>, web_ui_enabled: bool) -> bool {
+pub(crate) fn is_web_auth_enabled(cfg: &Config, web_ui_enabled: bool) -> bool {
     if web_ui_enabled {
         if let Some(web_auth) = &cfg.web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
             return web_auth.enabled;
@@ -867,6 +873,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
             axum::http::Method::POST,
             axum::http::Method::OPTIONS,
             axum::http::Method::HEAD,
+            axum::http::Method::DELETE,
         ]))
         .layer(create_compression_layer());
 
@@ -1302,6 +1309,8 @@ mod tests {
             let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
             let config = app_cfg.config.load();
             let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
+            active_users.set_shared_stream_manager(&shared_stream_manager);
+            shared_stream_manager.set_user_manager(&active_users);
             let connection_manager = Arc::new(ConnectionManager::new(
                 &active_users,
                 &active_provider,

@@ -556,7 +556,7 @@ async fn bounded_flussonic_hls_404_is_unavailable_without_live_or_timeshift_fall
     assert_eq!(entry.status(), StatusCode::OK);
     let (_, uri) = single_variant_master_playlist(entry).await;
     let response = get_response(Arc::clone(&fixture.app_state), &uri, None).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert!(!response.headers().contains_key(header::LOCATION));
     {
         let paths = fixture.requests.lock().map_err(|_| "request log")?;

@@ -407,6 +407,7 @@ impl EventManager {
 
 impl EventSink for EventManager {
     fn emit(&self, event: EventMessage) { self.send_event(event); }
+    fn has_event_receivers(&self) -> bool { self.has_event_receivers() }
     fn observe_provider_account(
         &self,
         name: Arc<str>,

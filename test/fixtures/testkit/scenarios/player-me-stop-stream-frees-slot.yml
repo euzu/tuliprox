@@ -1,0 +1,69 @@
+schema_version: 1
+name: player-me-stop-stream-frees-slot
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: false
+    share_live_mpeg_ts: false
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: player-me-stop-stream-frees-slot
+actors:
+  - id: device-1
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/device-1
+    client_ip: { mode: forwarded, value: 10.40.0.10 }
+  - id: device-2
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/device-2
+    client_ip: { mode: forwarded, value: 10.40.0.11 }
+channels:
+  channel-x: { origin_marker: 17, protocol: m3u }
+steps:
+  - command_id: start-device-1
+    start:
+      actor: device-1
+      playback_id: playback-dev1
+      session_group: group-dev1
+      channel: channel-x
+    await: { valid_frames: 3 }
+    assert_runtime:
+      active_users: 1
+      active_user_connections: 1
+  - command_id: stop-via-api
+    api_request:
+      actor: device-1
+      method: DELETE
+      path: /api/v1/me/streams/{uid}
+      expect_status: 204
+    assert_runtime:
+      active_users: 0
+      active_user_connections: 0
+  - command_id: start-device-2
+    start:
+      actor: device-2
+      playback_id: playback-dev2
+      session_group: group-dev2
+      channel: channel-x
+    await: { valid_frames: 3 }
+    assert_runtime:
+      active_users: 1
+      active_user_connections: 1
+  - command_id: stop-device-2
+    stop: { playback_id: playback-dev2 }
+    assert_runtime:
+      active_users: 0
+      active_user_connections: 0
+policy_contract:
+  user_access_control: true
+  player_api: true
+  users:
+    viewer:
+      max_connections: 1
+  admission_strategies: []

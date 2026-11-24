@@ -37,8 +37,12 @@ impl RecordingService {
         let recording_cfg = config.recording();
         let bounds = padding_bounds(recording_cfg);
         let fallback_bytes_per_minute = recording_cfg.map_or(8 * 1024 * 1024, |cfg| cfg.fallback_bytes_per_minute);
-        let quota_limits = quota_limits_from_config(recording_cfg.and_then(|cfg| cfg.quota.as_ref()));
+        let quota_limits = quota_limits_from_config(
+            recording_cfg.and_then(|cfg| cfg.quota.as_ref()),
+            self.app_config.live_api_user_recording_quotas(),
+        );
         let mut out = None;
+        let mut stopped_worker: Option<String> = None;
         mutate(&self.recordings, |candidate| {
             // Single linear scan: locate the recording, snapshot the
             // primitives we need for the immutable analysis, drop the
@@ -178,12 +182,32 @@ impl RecordingService {
             // so it must not keep the shared file's path either: two
             // captures would write one file, and deleting either would
             // take the other's.
+            let old_identity = task.media_identity.clone();
             let identity = recording_identity_key(&task.recording, &task.url);
             let leaves_shared_media = identity != task.media_identity && snapshot.shares_media;
-            task.media_identity = identity;
+            task.media_identity.clone_from(&identity);
             if leaves_shared_media {
                 let mut detached = task.clone();
-                reserve_recording_relative_path(candidate, &mut detached)?;
+                detached.clip = None;
+                if let Some(matching) =
+                    super::create::matching_existing_materialization(candidate, &detached.uuid, &identity)
+                {
+                    if matching.state == crate::recording::recording_queue::RecordingTaskState::Completed {
+                        crate::recording::recording_queue::attach_to_completed(&mut detached, matching);
+                    } else {
+                        detached.file_dir.clone_from(&matching.file_dir);
+                        detached.file_path.clone_from(&matching.file_path);
+                        detached.filename.clone_from(&matching.filename);
+                        detached.recording.relative_path.clone_from(&matching.recording.relative_path);
+                    }
+                } else {
+                    reserve_recording_relative_path(candidate, &mut detached)?;
+                }
+                stopped_worker =
+                    crate::recording::recording_queue::RecordingQueue::update_cancelled_enclosing_stop_time(
+                        candidate,
+                        &old_identity,
+                    );
                 let Some(task) = recording_mut_at(candidate, location) else {
                     return Err(QueueMutationError::UnknownRecording);
                 };
@@ -206,6 +230,11 @@ impl RecordingService {
         })
         .await
         .map_err(|e| map_queue_error(&e))?;
+
+        if let Some(worker_uuid) = stopped_worker {
+            self.recordings.stop_worker_early(&worker_uuid).await;
+        }
+
         out.ok_or(ServiceError::UnknownRecording)
     }
 }

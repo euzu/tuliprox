@@ -57,9 +57,7 @@ pub(super) fn is_audio_stream_type(stream_type: u8) -> bool {
     matches!(stream_type, 0x03 | 0x04 | 0x0F | 0x11 | 0x81 | 0x87)
 }
 
-pub(super) fn is_video_stream_type(stream_type: u8) -> bool {
-    matches!(stream_type, 0x01 | 0x02 | 0x10 | 0x1B | 0x24 | 0x42)
-}
+pub(super) use crate::packet::is_video_stream_type;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HlsTsMalformedReason {

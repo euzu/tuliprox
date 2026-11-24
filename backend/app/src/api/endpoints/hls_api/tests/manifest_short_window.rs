@@ -88,7 +88,7 @@ async fn short_window_resource_fixture(count: usize, resources: ShortWindowResou
     let mut cache = HlsCacheConfigDto {
         cache_path: Some(temp_dir.path().to_string_lossy().to_string()),
         startup: HlsStartupConfigDto { mode: startup_mode, ..HlsStartupConfigDto::default() },
-        ..HlsCacheConfigDto::default()
+        ..super::test_hls_cache_dto(&app_state)
     };
     cache.manifest_recovery_burst.level = HlsManifestRecoveryBurstLevel::Friendly;
     let config = Config {

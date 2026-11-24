@@ -42,6 +42,7 @@ pub enum RecordingErrorCode {
     InvalidSource,
     DuplicateOccurrence,
     QuotaExceeded,
+    ConcurrencyExceeded,
     InsufficientDisk,
     UnsafePath,
     DeleteFailed,
@@ -65,6 +66,7 @@ impl RecordingErrorCode {
             Self::InvalidSource => "recording_invalid_source",
             Self::DuplicateOccurrence => "recording_duplicate_occurrence",
             Self::QuotaExceeded => "recording_quota_exceeded",
+            Self::ConcurrencyExceeded => "recording_concurrency_exceeded",
             Self::InsufficientDisk => "recording_insufficient_disk",
             Self::UnsafePath => "recording_unsafe_path",
             Self::DeleteFailed => "recording_delete_failed",
@@ -203,6 +205,7 @@ mod tests {
         assert_eq!(RecordingErrorCode::InvalidSource.wire(), "recording_invalid_source");
         assert_eq!(RecordingErrorCode::DuplicateOccurrence.wire(), "recording_duplicate_occurrence");
         assert_eq!(RecordingErrorCode::QuotaExceeded.wire(), "recording_quota_exceeded");
+        assert_eq!(RecordingErrorCode::ConcurrencyExceeded.wire(), "recording_concurrency_exceeded");
         assert_eq!(RecordingErrorCode::InsufficientDisk.wire(), "recording_insufficient_disk");
         assert_eq!(RecordingErrorCode::UnsafePath.wire(), "recording_unsafe_path");
         assert_eq!(RecordingErrorCode::DeleteFailed.wire(), "recording_delete_failed");

@@ -4,7 +4,7 @@ use super::{
     provider_admission::stats_provider_test_user_session, recording_test_response, recording_test_router,
     recording_test_url, response_body, single_hls_provider_input, spawn_recording_header_origin,
     store_test_sources_with_target, test_app_state, test_app_state_with_inputs, test_fingerprint,
-    test_hls_access_context, test_hls_share_target, test_m3u_hls_item, test_m3u_hls_share_target,
+    test_hls_access_context, test_hls_share_target, test_m3u_hls_item, test_m3u_hls_share_target, test_segment_entry,
     transient_manifest_body, try_test_hls_cached_manifest_response,
 };
 use crate::{
@@ -184,6 +184,62 @@ async fn delivered_media_ends_startup_protection_when_the_media_window_expires()
         current.origin_account_binding.as_mut().unwrap().startup_media_deadline_ms = Some(31_000);
     }
     super::super::detach_unprotected_hls_origin_account_bindings(&app, 13_001).await;
+    assert!(session.read().await.origin_account_binding.as_ref().unwrap().is_detached());
+}
+
+async fn bound_session_with_queued_startup_segment(
+    delivered_at_ms: Option<u64>,
+) -> (Arc<crate::api::model::AppState>, tuliprox_hls::api::HlsSessionHandle) {
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "12345", &input.name, 1_000).await;
+    {
+        let mut current = session.write().await;
+        current.target_duration = Some(1);
+        current.activity.last_delivered_media_at_ms = delivered_at_ms;
+        current.origin_account_binding.as_mut().unwrap().startup_protection =
+            Some(tuliprox_hls::api::HlsOriginStartProtection {
+                anchored_at_ms: 1_000,
+                timing: tuliprox_hls::api::HlsAccountOverlapTiming::from_target_duration_secs(Some(1)),
+            });
+        // A segment waiting for its retry backoff holds no active origin work.
+        let entry = test_segment_entry(
+            &current.proxy_session_id.clone(),
+            0,
+            SegmentCacheStatus::Queued {
+                priority: tuliprox_hls::api::SegmentFetchPriority::RenderWindow,
+                queued_at_ms: 5_950,
+            },
+        );
+        current.segments.insert(0, entry);
+        current.segment_prefetch_queue.enqueue(0, tuliprox_hls::api::SegmentFetchPriority::RenderWindow);
+        assert!(current.initial_manifest_commit_work_pending());
+        assert_eq!(current.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+    (app, session)
+}
+
+#[tokio::test]
+async fn startup_retains_origin_binding_while_initial_manifest_commit_work_is_pending() {
+    let (app, session) = bound_session_with_queued_startup_segment(None).await;
+
+    // The start window (5 s) and the 3T protection (3 s) have both elapsed.
+    super::super::detach_unprotected_hls_origin_account_bindings(&app, 6_001).await;
+    assert!(
+        session.read().await.origin_account_binding.as_ref().unwrap().is_active(),
+        "startup media preparation between retry attempts must retain its binding"
+    );
+
+    session.write().await.invalidate_queued_origin_work();
+    super::super::detach_unprotected_hls_origin_account_bindings(&app, 6_001).await;
+    assert!(session.read().await.origin_account_binding.as_ref().unwrap().is_detached());
+}
+
+#[tokio::test]
+async fn delivered_media_ignores_pending_commit_work_for_binding_expiry() {
+    let (app, session) = bound_session_with_queued_startup_segment(Some(2_000)).await;
+
+    super::super::detach_unprotected_hls_origin_account_bindings(&app, 6_001).await;
     assert!(session.read().await.origin_account_binding.as_ref().unwrap().is_detached());
 }
 

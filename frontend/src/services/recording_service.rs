@@ -318,6 +318,8 @@ impl RecordingError {
             Self::Other(code) => match code.as_str() {
                 "recording_io_error" => "MESSAGES.RECORDING.ERROR.IO_ERROR",
                 "recording_persistence_failed" => "MESSAGES.RECORDING.ERROR.PERSISTENCE_FAILED",
+                "recording_source_recording_failed" => "MESSAGES.RECORDING.ERROR.SOURCE_RECORDING_FAILED",
+                "recording_source_gap" => "MESSAGES.RECORDING.ERROR.SOURCE_GAP",
                 _ => "MESSAGES.RECORDING.ERROR.OTHER",
             },
         }

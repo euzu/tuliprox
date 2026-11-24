@@ -18,6 +18,17 @@ plans:
   max_connections: 0
   soft_connections: 0
   comment: Unlimited connections, all channels
+#   player_features:
+#     source_switch: true            # Allow manual failover source switching (MPEG-TS & HLS)
+#     joinable_streams: true         # Allow discovering running shared streams on target
+#     recording: private             # none | read | private | shared
+#     recording_quota: 20GB   # 20 GiB personal DVR quota (optional, > 0)
+#     max_concurrent_recordings: 1   # Max concurrent overlapping recordings (optional, > 0)
+#     max_recording_rules: 10        # Max active recording rules for private/shared DVR (optional, > 0)
+#     free_shared_joins: true        # Join running shared streams when user slots are full
+#     max_free_shared_joins: 1       # Max concurrent free shared connections (optional, > 0)
+#     watch_progress: false          # Track and report playback progress (optional, bool)
+#     event_stream: false            # Real-time user event stream WebSocket (optional, bool)
 - name: Sports
   proxy: reverse
   max_connections: 1

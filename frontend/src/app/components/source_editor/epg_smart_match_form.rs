@@ -1,7 +1,7 @@
 use crate::{
     app::components::{select::Select, selection_first_owned, Card, DropDownOption, DropDownSelection, TextButton},
-    config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
-    edit_field_list_option, edit_field_number_u16, edit_field_text_option, generate_form_reducer,
+    config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list_option,
+    edit_field_number_u16, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{EpgNamePrefix, EpgSmartMatchConfigDto};
@@ -160,16 +160,18 @@ pub fn EpgSmartMatchForm(props: &EpgSmartMatchFormProps) -> Html {
         if props.readonly {
             { config_field_bool!(form_state.form, translate.t(LABEL_ENABLED), enabled) }
             { config_field_bool!(form_state.form, translate.t(LABEL_FUZZY_MATCHING), fuzzy_matching) }
-            { config_field_custom!(translate.t(LABEL_MATCH_THRESHOLD), form_state.form.match_threshold.to_string()) }
-            { config_field_custom!(translate.t(LABEL_BEST_MATCH_THRESHOLD), form_state.form.best_match_threshold.to_string()) }
+            { config_field_child!(translate.t(LABEL_MATCH_THRESHOLD), "EPG_SMART_MATCH_FORM_DATA.MATCH_THRESHOLD", { html! { <span class="tp__form-field__value">{form_state.form.match_threshold.to_string()}</span> } }) }
+            { config_field_child!(translate.t(LABEL_BEST_MATCH_THRESHOLD), "EPG_SMART_MATCH_FORM_DATA.BEST_MATCH_THRESHOLD", { html! { <span class="tp__form-field__value">{form_state.form.best_match_threshold.to_string()}</span> } }) }
             { config_field_optional!(form_state.form, translate.t(LABEL_NORMALIZE_REGEX), normalize_regex) }
-            { config_field_custom!(
+            { config_field_child!(
                 translate.t(LABEL_STRIP),
-                form_state.form.strip.as_ref().map(|values| values.join(", ")).unwrap_or_default()
+                "EPG_SMART_MATCH_FORM_DATA.STRIP",
+                { html! { <span class="tp__form-field__value">{form_state.form.strip.as_ref().map(|values| values.join(", ")).unwrap_or_default()}</span> } }
             ) }
-            { config_field_custom!(
+            { config_field_child!(
                 translate.t(LABEL_NAME_PREFIX),
-                EpgSmartMatchConfigDto::from(&form_state.form).name_prefix.to_string()
+                "EPG_SMART_MATCH_FORM.NAME_PREFIX_MODE",
+                { html! { <span class="tp__form-field__value">{EpgSmartMatchConfigDto::from(&form_state.form).name_prefix.to_string()}</span> } }
             ) }
             { config_field_optional!(form_state.form, translate.t(LABEL_NAME_PREFIX_SEPARATOR), name_prefix_separator) }
         } else {

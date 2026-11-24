@@ -6,7 +6,7 @@ mod clock;
 mod compression;
 mod crypto_utils;
 mod epg_id;
-mod epg_parser;
+pub mod epg_parser;
 pub mod ffmpeg;
 mod file;
 mod hls_duration;

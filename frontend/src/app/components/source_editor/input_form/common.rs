@@ -15,10 +15,9 @@ use crate::{
         selection_parse_first, Card, DropDownOption, DropDownSelection, FilterInput, KeyValueEditor, RadioButtonGroup,
         RangeSlider, Select, TitledCard, ToolAction,
     },
-    config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional,
-    config_field_optional_hide, edit_field_bool, edit_field_exp_date, edit_field_number_i16,
-    edit_field_number_option_u32, edit_field_number_u16, edit_field_number_u32, edit_field_text,
-    edit_field_text_option, html_if,
+    config_field, config_field_bool, config_field_child, config_field_optional, config_field_optional_hide,
+    edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_option_u32, edit_field_number_u16,
+    edit_field_number_u32, edit_field_text, edit_field_text_option, html_if,
     i18n::{use_translation, YewI18n},
     utils::content_cluster_presentation,
 };
@@ -99,11 +98,11 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
                     { html_if!(connection, {
                         <>
                             <div class="tp__config-view__cols-2">
-                                { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), state.form.max_connections.to_string()) }
-                                { config_field_custom!(translate.t(LABEL_PRIORITY), state.form.priority.to_string()) }
+                                { config_field_child!(translate.t(LABEL_MAX_CONNECTIONS), "CONFIG_INPUT.MAX_CONNECTIONS", { html! { <span class="tp__form-field__value">{state.form.max_connections.to_string()}</span> } }) }
+                                { config_field_child!(translate.t(LABEL_PRIORITY), "CONFIG_INPUT.PRIORITY", { html! { <span class="tp__form-field__value">{state.form.priority.to_string()}</span> } }) }
                             </div>
                             <div class="tp__config-view__cols-2">
-                                { config_field_custom!(translate.t(LABEL_EXP_DATE), state.form.exp_date.map_or_else(String::new, |value| value.to_string())) }
+                                { config_field_child!(translate.t(LABEL_EXP_DATE), "CONFIG_INPUT.EXP_DATE", { html! { <span class="tp__form-field__value">{state.form.exp_date.map_or_else(String::new, |value| value.to_string())}</span> } }) }
                                 { html_if!(props.cache_duration, {
                                     { config_field_optional!(state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
                                 })}
@@ -114,7 +113,7 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
                         { config_field_optional!(state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
                     })}
                     <div class="tp__config-view__cols-2">
-                        { config_field_custom!(translate.t(LABEL_FETCH_METHOD), state.form.method.to_string()) }
+                        { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", { html! { <span class="tp__form-field__value">{state.form.method.to_string()}</span> } }) }
                         { config_field_optional!(state.form, translate.t(LABEL_PERSIST), persist, Some(input_persist_hint_key(props.staged_persist).to_string())) }
                     </div>
                     { config_field_optional!(state.form, translate.t(LABEL_PLAYBACK_PROVIDER), playback_provider, Some("INPUT_FORM.PLAYBACK_PROVIDER".to_string())) }
@@ -300,7 +299,9 @@ fn m3u_options(
             })} /> }
         })
     } else {
-        config_field_custom!(label, state.form.flussonic_hls_catchup.to_string())
+        config_field_child!(label, "CONFIG_INPUT_OPTIONS.FLUSSONIC_HLS_CATCHUP", {
+            html! { <span class="tp__form-field__value">{state.form.flussonic_hls_catchup.to_string()}</span> }
+        })
     };
     let window_label = translate.t("LABEL.FLUSSONIC_HLS_CATCHUP_MAX_DURATION_SECS");
     let window = if allow_write {
@@ -311,7 +312,9 @@ fn m3u_options(
             ConfigInputOptionsFormAction::FlussonicHlsCatchupMaxDurationSecs
         )
     } else {
-        config_field_custom!(window_label, state.form.flussonic_hls_catchup_max_duration_secs.to_string())
+        config_field_child!(window_label, "CONFIG_INPUT_OPTIONS.FLUSSONIC_HLS_CATCHUP_MAX_DURATION_SECS", {
+            html! { <span class="tp__form-field__value">{state.form.flussonic_hls_catchup_max_duration_secs.to_string()}</span> }
+        })
     };
     html! {
         <>
@@ -444,7 +447,7 @@ fn xtream_options_readonly(
                 { config_field_bool!(state.form, translate.t(LABEL_RESOLVE_VOD), resolve_vod) }
                 { config_field_bool!(state.form, translate.t(LABEL_RESOLVE_SERIES), resolve_series) }
             </div>
-            { config_field_custom!(translate.t(LABEL_RESOLVE_DELAY_SEC), state.form.resolve_delay.to_string()) }
+            { config_field_child!(translate.t(LABEL_RESOLVE_DELAY_SEC), "CONFIG_INPUT_OPTIONS.RESOLVE_DELAY", { html! { <span class="tp__form-field__value">{state.form.resolve_delay.to_string()}</span> } }) }
             { config_field_bool!(state.form, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background) }
             { config_field_optional!(state.form, translate.t(LABEL_RESOLVE_FILTER), resolve_filter) }
         </TitledCard>
@@ -457,8 +460,8 @@ fn xtream_options_readonly(
                 { config_field_bool!(state.form, translate.t(LABEL_PROBE_SERIES), probe_series) }
             </div>
             <div class="tp__config-view__cols-2">
-                { config_field_custom!(translate.t(LABEL_PROBE_DELAY_SEC), state.form.probe_delay.to_string()) }
-                { config_field_custom!(translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), state.form.probe_live_interval_hours.to_string()) }
+                { config_field_child!(translate.t(LABEL_PROBE_DELAY_SEC), "CONFIG_INPUT_OPTIONS.PROBE_DELAY", { html! { <span class="tp__form-field__value">{state.form.probe_delay.to_string()}</span> } }) }
+                { config_field_child!(translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), "CONFIG_INPUT_OPTIONS.PROBE_LIVE_INTERVAL_HOURS", { html! { <span class="tp__form-field__value">{state.form.probe_live_interval_hours.to_string()}</span> } }) }
             </div>
             { config_field_optional!(state.form, translate.t(LABEL_PROBE_FILTER), probe_filter) }
         </TitledCard>
@@ -489,7 +492,7 @@ fn xtream_options_editable(
             </div>
             { edit_field_number_u16!(state, translate.t(LABEL_RESOLVE_DELAY_SEC), resolve_delay, ConfigInputOptionsFormAction::ResolveDelay) }
             { edit_field_bool!(state, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background, ConfigInputOptionsFormAction::ResolveBackground) }
-            { config_field_child!(translate.t(LABEL_RESOLVE_FILTER), "INPUT_FORM.RESOLVE_FILTER", {
+            { config_field_child!(translate.t(LABEL_RESOLVE_FILTER), "CONFIG_INPUT_OPTIONS.RESOLVE_FILTER", {
                 let state = state.clone();
                 html! { <FilterInput filter={state.form.resolve_filter.clone().unwrap_or_default()} on_change={Callback::from(move |value| state.dispatch(ConfigInputOptionsFormAction::ResolveFilter(value)))} /> }
             })}
@@ -506,7 +509,7 @@ fn xtream_options_editable(
                 { edit_field_number_u16!(state, translate.t(LABEL_PROBE_DELAY_SEC), probe_delay, ConfigInputOptionsFormAction::ProbeDelay) }
                 { edit_field_number_u32!(state, translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), probe_live_interval_hours, ConfigInputOptionsFormAction::ProbeLiveIntervalHours) }
             </div>
-            { config_field_child!(translate.t(LABEL_PROBE_FILTER), "INPUT_FORM.PROBE_FILTER", {
+            { config_field_child!(translate.t(LABEL_PROBE_FILTER), "CONFIG_INPUT_OPTIONS.PROBE_FILTER", {
                 let state = state.clone();
                 html! { <FilterInput filter={state.form.probe_filter.clone().unwrap_or_default()} on_change={Callback::from(move |value| state.dispatch(ConfigInputOptionsFormAction::ProbeFilter(value)))} /> }
             })}

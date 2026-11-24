@@ -1,6 +1,6 @@
 use crate::model::{
     user_command::UserCommand, ActiveUserConnectionChange, ConfigType, LibraryScanProgressEvent, PermissionSet,
-    PlaylistUpdateProgressEvent, PlaylistUpdateRunStateEvent, QueueRevision, RecordingTaskDto, StatusCheck,
+    PlaylistUpdateProgressEvent, PlaylistUpdateRunStateEvent, QueueRevision, RecordingTaskDto, RoleSet, StatusCheck,
     StreamMeterEntry, SystemInfo,
 };
 use bytes::Bytes;
@@ -31,6 +31,8 @@ pub struct ProtocolHandlerMemory {
     pub role: UserRole,
     pub subject_id: Option<String>,
     pub stream_meter_subscribed: bool,
+    pub username: Option<String>,
+    pub roles: RoleSet,
 }
 
 pub enum ProtocolHandler {

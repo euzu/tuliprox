@@ -73,6 +73,8 @@ pub enum EventKind {
     PluginUpdateApplied,
     /// A marketplace update was rejected or rolled back (W10).
     PluginUpdateFailed,
+    /// An active stream was ended by the server (e.g. kicked or preempted).
+    StreamEnded,
 }
 
 impl EventKind {
@@ -80,7 +82,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 52] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -132,6 +134,7 @@ impl EventKind {
         Self::PluginUpdateAvailable,
         Self::PluginUpdateApplied,
         Self::PluginUpdateFailed,
+        Self::StreamEnded,
     ];
 
     /// This kind's bit position.
@@ -164,7 +167,7 @@ impl EventKind {
             Self::LibraryScanProgress | Self::LibraryScanFailed => Permission::LibraryWrite,
             // Who may hear that an account was created is the same question
             // as who may list accounts.
-            Self::UserCreated | Self::UserUpdated | Self::UserDeleted => Permission::UserRead,
+            Self::UserCreated | Self::UserUpdated | Self::UserDeleted | Self::StreamEnded => Permission::UserRead,
             // Who was turned away is the same question as who signed in, and
             // strictly narrower than the system-wide read.
             Self::ConnectionDenied => Permission::UserRead,
@@ -314,6 +317,7 @@ impl EventKind {
             Self::PluginUpdateAvailable => "plugin.update.available",
             Self::PluginUpdateApplied => "plugin.update.applied",
             Self::PluginUpdateFailed => "plugin.update.failed",
+            Self::StreamEnded => "stream.ended",
         }
     }
 
