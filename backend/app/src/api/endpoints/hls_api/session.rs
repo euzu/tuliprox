@@ -263,6 +263,22 @@ pub(super) async fn resolve_hls_origin_fetch_url(
     build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, provider_config)
 }
 
+/// Strips the profile base URL's path prefix from a stream path at a segment boundary.
+///
+/// Returns `None` if the base URL cannot be parsed or if `path` does not start with
+/// the trimmed base path at a segment boundary (remainder is empty or starts with `/`).
+/// Root bases without a path return `Some(path)` unchanged.
+pub(super) fn strip_profile_base_path<'a>(base: &str, path: &'a str) -> Option<&'a str> {
+    let base_url =
+        if base.contains("://") { Url::parse(base).ok()? } else { Url::parse(&format!("http://{base}")).ok()? };
+    let base_path = base_url.path().trim_end_matches('/');
+    if base_path.is_empty() {
+        return (path.is_empty() || path.starts_with('/')).then_some(path);
+    }
+    let remainder = path.strip_prefix(base_path)?;
+    (remainder.is_empty() || remainder.starts_with('/')).then_some(remainder)
+}
+
 /// Keep the CDN profile while taking the token from the selected real M3U account's
 /// raw URL index. Probe only explicitly configured mirror origins, never arbitrary hosts.
 async fn resolve_hls_m3u_profile_account_url(
@@ -272,7 +288,7 @@ async fn resolve_hls_m3u_profile_account_url(
     account: &Arc<RuntimeProviderConfig>,
 ) -> Option<String> {
     let profile = input.get_resolve_provider(entry)?;
-    for index in 0..profile.urls.len() {
+    for (index, base) in profile.urls.iter().enumerate() {
         let (_, candidate) =
             resolve_provider_scheme_url_with_provider_index(entry, Some(Arc::clone(&profile)), index).ok()?;
         let selected =
@@ -288,8 +304,9 @@ async fn resolve_hls_m3u_profile_account_url(
                 }
             };
         let selected = Url::parse(&selected).ok()?;
+        let Some(path) = strip_profile_base_path(base, selected.path()) else { continue };
         let mut result = Url::parse(entry).ok()?;
-        result.set_path(selected.path());
+        result.set_path(path);
         result.set_query(selected.query());
         // URL-failover authority and the selected account's exact encoded query are retained.
         return Some(result.to_string());
