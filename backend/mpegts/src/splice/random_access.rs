@@ -181,7 +181,12 @@ impl TsRandomAccessScanner {
             self.pmt_after_last_pat = false;
         }
 
+        let selected_video = self.programs.video();
         let was_pmt = self.programs.observe(view);
+        // An open PES belongs to the selected video stream; a new selection invalidates it.
+        if self.programs.video() != selected_video {
+            self.close_open_pes();
+        }
         if was_pmt && self.last_pat.is_some() {
             self.pmt_after_last_pat = true;
             if self.programs.video().is_none() {

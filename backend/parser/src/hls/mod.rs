@@ -257,6 +257,21 @@ pub fn media_playlist_media_sequence(content: &str) -> Option<u64> {
         .find_map(|line| line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:").and_then(|value| value.trim().parse().ok()))
 }
 
+/// `SKIPPED-SEGMENTS` of the `EXT-X-SKIP` tag of a delta playlist; 0 for a full playlist.
+fn media_playlist_skipped_segments(content: &str) -> u64 {
+    normalize_hls_playlist(content)
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("#EXT-X-SKIP:"))
+        .and_then(|attributes| {
+            attributes.split(',').find_map(|attribute| {
+                let (name, value) = attribute.split_once('=')?;
+                (name.trim() == "SKIPPED-SEGMENTS").then(|| value.trim().parse().ok()).flatten()
+            })
+        })
+        .unwrap_or(0)
+}
+
 /// `EXT-X-DISCONTINUITY-SEQUENCE` value of a media playlist; `None` when the tag is absent (RFC 8216
 /// section 4.3.3.3 then defines it as 0). It counts the upstream discontinuities that already left
 /// the window, so a rebase caller adds its advance to the upstream value instead of replacing it.
@@ -493,11 +508,12 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
     let has_discontinuity_sequence =
         rebase.is_some() && content.lines().any(|line| line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:"));
     // Without an explicit IV, the client derives the AES IV from the media sequence number. A rebased
-    // sequence would change it, so the upstream sequence is pinned as an explicit IV per segment.
+    // sequence would change it, so the upstream sequence is pinned as an explicit IV per segment. In a
+    // delta playlist the first listed segment follows the skipped ones.
     let pinned_iv_base = rebase
         .map(|rebase| (rebase, media_playlist_media_sequence(content).unwrap_or(0)))
         .filter(|(rebase, upstream_sequence)| rebase.media_sequence != *upstream_sequence)
-        .map(|(_, upstream_sequence)| upstream_sequence);
+        .map(|(_, upstream_sequence)| upstream_sequence.saturating_add(media_playlist_skipped_segments(content)));
     let mut implicit_iv_key: Option<String> = None;
     let mut segment_index = 0_u64;
     let mut keyed_segment_index: Option<u64> = None;
@@ -1351,6 +1367,20 @@ mod test {
 
     fn key_lines(rewritten: &str) -> Vec<&str> {
         rewritten.lines().filter(|line| line.starts_with("#EXT-X-KEY")).collect()
+    }
+
+    #[test]
+    fn rebase_pins_implicit_aes_iv_after_skipped_segments_of_a_delta_playlist() {
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n\
+            #EXT-X-SKIP:SKIPPED-SEGMENTS=3\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\n5003.ts\n#EXTINF:4.0,\n5004.ts\n";
+        let props = RewriteHlsProps { rebase: Some(rebase_with(7, false, 0)), ..rewrite_props(content, Some("s")) };
+        let rewritten = rewrite_hls(&test_user(), &props);
+        let keys = key_lines(&rewritten);
+        assert_eq!(keys.len(), 2, "{rewritten}");
+        assert!(keys[0].ends_with(&format!(",IV=0x{:032X}", 5003)), "{}", keys[0]);
+        assert!(keys[1].ends_with(&format!(",IV=0x{:032X}", 5004)), "{}", keys[1]);
+        assert!(rewritten.contains("#EXT-X-SKIP:SKIPPED-SEGMENTS=3"), "{rewritten}");
     }
 
     #[test]

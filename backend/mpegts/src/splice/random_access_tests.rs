@@ -173,3 +173,16 @@ fn radio_only_stream_still_opens_at_pat_and_pmt() {
     let stream = join(&[psi(0, &finish_section(section)), radio_pmt()]);
     assert_eq!(scanner.observe(&stream), Some(0));
 }
+
+#[test]
+fn video_selection_change_invalidates_the_open_pes() {
+    let mut scanner = TsRandomAccessScanner::new();
+    let sei = [vec![0x06], vec![0x05; 150]].concat();
+    let pes_start = pes(VIDEO_PID, false, false, &[&h264(9), &sei]);
+    let other_video = 0x102;
+    let new_pmt = pmt(1, &[(H264, other_video), (AAC, AUDIO_PID)]);
+    let idr_on_new_pid = ts(other_video, false, None, &[0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84]);
+    let stream = join(&[pat(0), video_pmt(0), pes_start, new_pmt, idr_on_new_pid]);
+
+    assert_eq!(scanner.observe(&stream), None);
+}
