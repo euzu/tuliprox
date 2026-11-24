@@ -258,16 +258,26 @@ pub fn media_playlist_media_sequence(content: &str) -> Option<u64> {
 }
 
 /// `SKIPPED-SEGMENTS` of the `EXT-X-SKIP` tag of a delta playlist; 0 for a full playlist.
+/// Commas inside quoted values (`RECENTLY-REMOVED-DATERANGES`) do not separate attributes. The list
+/// is split here instead of with `origin_manifest::parse_attribute_list`, which rejects the tab that
+/// separates the IDs in `RECENTLY-REMOVED-DATERANGES`.
 fn media_playlist_skipped_segments(content: &str) -> u64 {
-    normalize_hls_playlist(content)
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("#EXT-X-SKIP:"))
-        .and_then(|attributes| {
-            attributes.split(',').find_map(|attribute| {
-                let (name, value) = attribute.split_once('=')?;
-                (name.trim() == "SKIPPED-SEGMENTS").then(|| value.trim().parse().ok()).flatten()
-            })
+    let Some(attributes) =
+        normalize_hls_playlist(content).lines().map(str::trim).find_map(|line| line.strip_prefix("#EXT-X-SKIP:"))
+    else {
+        return 0;
+    };
+    let mut quoted = false;
+    attributes
+        .split(|ch| {
+            if ch == '"' {
+                quoted = !quoted;
+            }
+            ch == ',' && !quoted
+        })
+        .find_map(|attribute| {
+            let (name, value) = attribute.split_once('=')?;
+            (name.trim() == "SKIPPED-SEGMENTS").then(|| value.trim().parse().ok()).flatten()
         })
         .unwrap_or(0)
 }
@@ -1372,7 +1382,7 @@ mod test {
     #[test]
     fn rebase_pins_implicit_aes_iv_after_skipped_segments_of_a_delta_playlist() {
         let content = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5000\n\
-            #EXT-X-SKIP:SKIPPED-SEGMENTS=3\n\
+            #EXT-X-SKIP:RECENTLY-REMOVED-DATERANGES=\"ad-1\tad-2,SKIPPED-SEGMENTS=9,ad-3\",SKIPPED-SEGMENTS=3\n\
             #EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\n5003.ts\n#EXTINF:4.0,\n5004.ts\n";
         let props = RewriteHlsProps { rebase: Some(rebase_with(7, false, 0)), ..rewrite_props(content, Some("s")) };
         let rewritten = rewrite_hls(&test_user(), &props);
@@ -1380,7 +1390,14 @@ mod test {
         assert_eq!(keys.len(), 2, "{rewritten}");
         assert!(keys[0].ends_with(&format!(",IV=0x{:032X}", 5003)), "{}", keys[0]);
         assert!(keys[1].ends_with(&format!(",IV=0x{:032X}", 5004)), "{}", keys[1]);
-        assert!(rewritten.contains("#EXT-X-SKIP:SKIPPED-SEGMENTS=3"), "{rewritten}");
+        assert!(rewritten.contains(",SKIPPED-SEGMENTS=3"), "{rewritten}");
+    }
+
+    #[test]
+    fn skipped_segments_ignores_commas_and_tabs_in_quoted_dateranges() {
+        let content = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:5000\n\
+            #EXT-X-SKIP:RECENTLY-REMOVED-DATERANGES=\"ad-1\tad-2,SKIPPED-SEGMENTS=9,ad-3\",SKIPPED-SEGMENTS=3\n";
+        assert_eq!(super::media_playlist_skipped_segments(content), 3);
     }
 
     #[test]
