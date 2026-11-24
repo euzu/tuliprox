@@ -4,6 +4,12 @@
 
 ## ⚠️ Breaking Changes
 
+- **Recording quota keys renamed.** Under `video.recording.quota`, `default_private_bytes`, `per_user_bytes` and
+  `shared_bytes` are now `default_private`, `per_user` and `shared`. They accept plain byte counts and human-readable
+  sizes such as `50GB` or `500MB` (binary units, `50GB` = 53687091200 bytes). The old key names stay accepted as
+  aliases, so existing configs load unchanged; 3.3.206 rejected them and failed at startup with
+  ``unknown field `default_private_bytes` ``. Rename the keys when you next edit the config.
+
 - **Web UI sessions must sign in again once.** The new `recording.share` permission bumps the permission schema version to 6,
   so tokens issued before the update are rejected with `X-Token-Refresh: required` and the Web UI returns to the sign-in page.
 
