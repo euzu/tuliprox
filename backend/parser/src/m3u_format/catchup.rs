@@ -189,6 +189,24 @@ fn derive_xc_template(source_url: &str) -> Option<String> {
     Some(rebuilt.into())
 }
 
+/// Derives the bounded Flussonic archive template for a live stream URL.
+///
+/// Returns `{prefix}archive-{utc}-{duration}.m3u8{suffix}` when the live URL path
+/// ends with `/mono.m3u8` preceded by a non-empty channel segment, keeping any query
+/// string and fragment byte-exact without re-encoding.
+pub fn flussonic_bounded_archive_template(live_url: &str) -> Option<String> {
+    let url = Url::parse(live_url).ok()?;
+    let channel_path = url.path().strip_suffix("/mono.m3u8")?;
+    if channel_path.rsplit('/').next().is_none_or(str::is_empty) {
+        return None;
+    }
+
+    // Replace only the filename so signed queries and the original live URL remain byte-for-byte intact.
+    let suffix_start = live_url.find(['?', '#']).unwrap_or(live_url.len());
+    let prefix = live_url[..suffix_start].strip_suffix("mono.m3u8")?;
+    Some(format!("{prefix}archive-{{utc}}-{{duration}}.m3u8{}", &live_url[suffix_start..]))
+}
+
 fn derive_flussonic_template(source_url: &str) -> Option<String> {
     let mut parsed = Url::parse(source_url).ok()?;
     let mut segments = parsed.path_segments().map(|it| it.map(ToString::to_string).collect::<Vec<_>>())?;
@@ -699,8 +717,9 @@ pub fn resolve_m3u_catchup_url(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_m3u_catchup_rewrite, has_m3u_catchup_marker, is_xtream_m3u_catchup_supported, parse_template,
-        render_template, resolve_m3u_catchup_url, resolve_xtream_m3u_catchup_url, M3U_CATCHUP_MARKER,
+        build_m3u_catchup_rewrite, flussonic_bounded_archive_template, has_m3u_catchup_marker,
+        is_xtream_m3u_catchup_supported, parse_template, render_template, resolve_m3u_catchup_url,
+        resolve_xtream_m3u_catchup_url, M3U_CATCHUP_MARKER,
     };
     use shared::{error::TuliproxError, model::CatchupProperties, utils::Internable};
 
@@ -1431,5 +1450,62 @@ mod tests {
             resolve_xtream_m3u_catchup_url("http://provider.example/channel/index.m3u8", &catchup, "1704067200", "60")
                 .expect("unix seconds start");
         assert_eq!(resolved.url, "http://provider.example/channel/video-1704067200-3600.m3u8");
+    }
+
+    #[test]
+    fn flussonic_bounded_archive_template_derivation() {
+        // Query and percent encoding kept byte-exact (%2B%2F%3D)
+        assert_eq!(
+            flussonic_bounded_archive_template("https://b.example.com/media/Channel_A/mono.m3u8?sig=%2B%2F%3D"),
+            Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D".to_string())
+        );
+
+        // Fragment kept
+        assert_eq!(
+            flussonic_bounded_archive_template("https://b.example.com/media/Channel_A/mono.m3u8#frag"),
+            Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8#frag".to_string())
+        );
+
+        // Both query and fragment kept byte-exact
+        assert_eq!(
+            flussonic_bounded_archive_template("https://b.example.com/media/Channel_A/mono.m3u8?sig=%2B%2F%3D#frag"),
+            Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D#frag".to_string())
+        );
+
+        // No query
+        assert_eq!(
+            flussonic_bounded_archive_template("https://b.example.com/media/Channel_A/mono.m3u8"),
+            Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8".to_string())
+        );
+
+        // provider:// input
+        assert_eq!(
+            flussonic_bounded_archive_template("provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D"),
+            Some("provider://cdn/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D".to_string())
+        );
+
+        // Non-mono filename -> None
+        assert_eq!(
+            flussonic_bounded_archive_template("https://b.example.com/media/Channel_A/tracks-v1a1/mono.ts"),
+            None
+        );
+        assert_eq!(flussonic_bounded_archive_template("https://b.example.com/media/Channel_A/other.m3u8"), None);
+
+        // /index.m3u8 -> None
+        assert_eq!(flussonic_bounded_archive_template("https://b.example.com/media/Channel_A/index.m3u8"), None);
+
+        // Empty channel (https://h/mono.m3u8 -> None)
+        assert_eq!(flussonic_bounded_archive_template("https://h/mono.m3u8"), None);
+        assert_eq!(flussonic_bounded_archive_template("https://h//mono.m3u8"), None);
+        assert_eq!(flussonic_bounded_archive_template("https://h/Ch/../mono.m3u8"), None);
+        assert_eq!(
+            flussonic_bounded_archive_template("https://h\\Ch\\mono.m3u8"),
+            Some("https://h\\Ch\\archive-{utc}-{duration}.m3u8".to_string())
+        );
+        assert_eq!(flussonic_bounded_archive_template("provider://cdn/mono.m3u8"), None);
+        assert_eq!(
+            flussonic_bounded_archive_template("https://u@h:8443/Ch/mono.m3u8?t=1"),
+            Some("https://u@h:8443/Ch/archive-{utc}-{duration}.m3u8?t=1".to_string())
+        );
     }
 }

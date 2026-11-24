@@ -1767,6 +1767,10 @@
 
 ## 🐛 Fixes
 
+- **Generated bounded Flussonic archives follow playback providers.** Generated bounded Flussonic archive templates
+  of an M3U live entry mapped to a playback provider now use that provider (priority and failover) instead of the
+  mirror captured at import; explicit catch-up sources keep their destination.
+
 - **Proxied Low-Latency HLS playlists no longer promise blocking reloads.** A provider playlist with
   `#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES` was passed through unchanged, but the `_HLS_msn`/`_HLS_part`
   directives of the player never reached the provider, so a blocking reload returned at once without the requested
