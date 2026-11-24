@@ -714,6 +714,80 @@ pub async fn serve_short_epg(
     }
 }
 
+/// Entry cap of the catch-up table when the client sends no `limit` (Xtream panels cap at 1000).
+const DEFAULT_CATCHUP_TABLE_LIMIT: u32 = 1000;
+const SECONDS_PER_DAY: i64 = 86_400;
+
+/// Builds the `get_simple_data_table` listing of one channel from the local EPG.
+///
+/// With an archive of `archive_days` days the listing starts at the oldest programme that
+/// ends inside the archive window; without an archive it starts at the current programme.
+/// `now_playing` and `has_archive` always compare source timestamps with the real clock,
+/// so a user EPG timeshift changes only the displayed times. A programme is archived
+/// once it has ended inside the archive window.
+fn build_catchup_table(
+    channel: &EpgChannel,
+    stream_id: &Arc<str>,
+    epg_id: &Arc<str>,
+    epg_processing_options: &EpgProcessingOptions,
+    archive_days: Option<u32>,
+    limit: u32,
+    now: i64,
+) -> ShortEpgResultDto {
+    let limit = if limit > 0 { limit } else { DEFAULT_CATCHUP_TABLE_LIMIT };
+    let archive_from = archive_days.filter(|days| *days > 0).map(|days| now - i64::from(days) * SECONDS_PER_DAY);
+    // The archive window starts inclusive. Without an archive only programmes with
+    // `stop > now` are listed, so one that ends exactly now takes no result slot.
+    let listing_from = archive_from.unwrap_or(now + 1);
+    ShortEpgResultDto::new(
+        channel
+            .get_programme_with_limit_at(limit, listing_from)
+            .into_iter()
+            .map(|programme| {
+                let (start, stop) = get_source_epg_timestamps(programme);
+                let mut entry = from_programme(stream_id, epg_id, programme, epg_processing_options, false);
+                entry.now_playing = Some(u8::from(start <= now && now < stop));
+                entry.has_archive = Some(u8::from(archive_from.is_some() && stop <= now));
+                entry
+            })
+            .collect(),
+    )
+}
+
+/// Serves `get_simple_data_table` from the local EPG database of the target.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_catchup_table(
+    app_state: &Arc<AppState>,
+    epg_path: &Path,
+    user: &ProxyUserCredentials,
+    target: &Arc<ConfigTarget>,
+    channel_id: &Arc<str>,
+    stream_id: &Arc<str>,
+    limit: u32,
+    archive_days: Option<u32>,
+) -> axum::response::Response {
+    let storage_key = canonicalize_output_epg_id(channel_id, target.epg_id_case());
+    let table = match get_epg_channel_by_storage_key(app_state, &storage_key, epg_path).await {
+        Some(epg_channel) => build_catchup_table(
+            &epg_channel,
+            stream_id,
+            &storage_key,
+            &get_epg_processing_options(&app_state.app_config, user, target),
+            archive_days,
+            limit,
+            chrono::Utc::now().timestamp(),
+        ),
+        None => ShortEpgResultDto::default(),
+    };
+    match serde_json::to_string(&table) {
+        Ok(json) => {
+            (axum::http::StatusCode::OK, [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())], json)
+                .into_response()
+        }
+        Err(_) => internal_server_error!(),
+    }
+}
+
 /// Serves per-stream EPG data for the UI "now playing" / "up next" display.
 /// Queries epg.db by `epg_channel_id`, filters to 8h window, applies user timeshift.
 /// Returns empty entries for all error/missing cases (no errors surfaced to client).
@@ -1010,11 +1084,11 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_xmltv_resource_url, empty_stream_epg_entries, encode_xmltv_resource_url, from_programme,
-        get_epg_path_for_target, get_epg_path_for_target_by_type, group_stream_epg_items, prepare_stream_epg_request,
-        rewrite_epg_channel_resource_url, serve_epg, serve_epg_web_ui, serve_short_epg, serve_stream_epg,
-        stream_epg_api, stream_epg_programmes_for_channel, write_programme_metadata_tags, EpgIconOutput,
-        MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
+        build_catchup_table, decode_xmltv_resource_url, empty_stream_epg_entries, encode_xmltv_resource_url,
+        from_programme, get_epg_path_for_target, get_epg_path_for_target_by_type, group_stream_epg_items,
+        prepare_stream_epg_request, rewrite_epg_channel_resource_url, serve_epg, serve_epg_web_ui, serve_short_epg,
+        serve_stream_epg, stream_epg_api, stream_epg_programmes_for_channel, write_programme_metadata_tags,
+        EpgIconOutput, MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
     };
     use crate::{
         api::model::{create_test_app_state, AppState},
@@ -2200,5 +2274,117 @@ mod tests {
             vec!["a.channel", "Z.Channel"],
             "serve_epg_web_ui must stream channels in sorted index order"
         );
+    }
+
+    fn catchup_table_channel() -> EpgChannel {
+        EpgChannel {
+            id: "ch".intern(),
+            title: None,
+            icon: None,
+            programmes: vec![
+                EpgProgramme::new(1_000, 2_000, "ch".intern()),
+                EpgProgramme::new(90_000, 95_000, "ch".intern()),
+                EpgProgramme::new(95_000, 100_500, "ch".intern()),
+                EpgProgramme::new(100_500, 101_000, "ch".intern()),
+                EpgProgramme::new(101_000, 102_000, "ch".intern()),
+            ],
+        }
+    }
+
+    fn catchup_table_rows(archive_days: Option<u32>, limit: u32) -> Vec<(String, Option<u8>, Option<u8>)> {
+        let options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [0; 16] };
+        build_catchup_table(
+            &catchup_table_channel(),
+            &"7".intern(),
+            &"ch".intern(),
+            &options,
+            archive_days,
+            limit,
+            100_000,
+        )
+        .epg_listings
+        .into_iter()
+        .map(|entry| (entry.start_timestamp, entry.now_playing, entry.has_archive))
+        .collect()
+    }
+
+    #[test]
+    fn catchup_table_starts_at_archive_window_and_marks_ended_programmes() {
+        // now = 100_000, one day archive: window starts at 13_600, so the programme ending at 2_000 is gone.
+        let rows = catchup_table_rows(Some(1), 0);
+        assert_eq!(
+            rows,
+            vec![
+                ("90000".to_string(), Some(0), Some(1)),
+                ("95000".to_string(), Some(1), Some(0)),
+                ("100500".to_string(), Some(0), Some(0)),
+                ("101000".to_string(), Some(0), Some(0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn catchup_table_without_archive_starts_at_current_programme() {
+        let rows = catchup_table_rows(None, 0);
+        assert_eq!(
+            rows,
+            vec![
+                ("95000".to_string(), Some(1), Some(0)),
+                ("100500".to_string(), Some(0), Some(0)),
+                ("101000".to_string(), Some(0), Some(0)),
+            ]
+        );
+        assert_eq!(catchup_table_rows(Some(0), 0), rows);
+    }
+
+    #[test]
+    fn catchup_table_without_archive_skips_programme_ending_now() {
+        let channel = EpgChannel {
+            id: "ch".intern(),
+            title: None,
+            icon: None,
+            programmes: vec![
+                EpgProgramme::new(99_000, 100_000, "ch".intern()),
+                EpgProgramme::new(100_000, 101_000, "ch".intern()),
+            ],
+        };
+        let options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [0; 16] };
+        let rows: Vec<_> = build_catchup_table(&channel, &"7".intern(), &"ch".intern(), &options, None, 1, 100_000)
+            .epg_listings
+            .into_iter()
+            .map(|entry| (entry.start_timestamp, entry.now_playing))
+            .collect();
+        assert_eq!(rows, vec![("100000".to_string(), Some(1))]);
+
+        // The archive window keeps its inclusive start: a programme ending exactly there stays listed.
+        let rows: Vec<_> =
+            build_catchup_table(&channel, &"7".intern(), &"ch".intern(), &options, Some(1), 0, 100_000 + 86_400)
+                .epg_listings
+                .into_iter()
+                .map(|entry| entry.start_timestamp)
+                .collect();
+        assert_eq!(rows, vec!["99000".to_string(), "100000".to_string()]);
+    }
+
+    #[test]
+    fn catchup_table_limit_caps_entries_from_window_start() {
+        let rows = catchup_table_rows(Some(1), 2);
+        assert_eq!(rows, vec![("90000".to_string(), Some(0), Some(1)), ("95000".to_string(), Some(1), Some(0))]);
+    }
+
+    #[test]
+    fn catchup_table_entries_carry_stream_and_channel_ids() {
+        let options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [0; 16] };
+        let table =
+            build_catchup_table(&catchup_table_channel(), &"7".intern(), &"ch".intern(), &options, None, 1, 100_000);
+        let json = serde_json::to_value(&table).expect("serialize catch-up table");
+        assert_eq!(json["epg_listings"][0]["id"], "7");
+        assert_eq!(json["epg_listings"][0]["stream_id"], "7");
+        assert_eq!(json["epg_listings"][0]["epg_id"], "ch");
+        assert_eq!(json["epg_listings"][0]["now_playing"], 1);
+        assert_eq!(json["epg_listings"][0]["has_archive"], 0);
     }
 }

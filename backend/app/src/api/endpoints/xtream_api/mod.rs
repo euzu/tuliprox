@@ -27,7 +27,9 @@ use crate::{
                 HlsEntryOutputScope, HlsEntryStreamContext, HlsRequestStage,
             },
             recording_api::AppRecordingVisibility,
-            xmltv_api::{get_empty_epg_response, get_epg_path_for_target_by_type, serve_short_epg},
+            xmltv_api::{
+                get_empty_epg_response, get_epg_path_for_target_by_type, serve_catchup_table, serve_short_epg,
+            },
         },
         model::{
             create_custom_video_stream_response, AppState, CustomVideoStreamType, UserApiRequest,
@@ -67,7 +69,7 @@ use shared::{
     defaults::{HLS_EXT, TS_EXT},
     error::TuliproxError,
     model::{
-        create_stream_channel_with_type,
+        archive_info, create_stream_channel_with_type,
         xtream_const::{RECORDINGS_VOD_CATEGORY_ID, RECORDING_VOD_ID_BASE},
         ConnectFailureReason, PlaylistEntry, PlaylistItemType, ProxyType, ShortEpgResultDto, StreamProperties,
         TargetType, UserConnectionPermission, VirtualId, XtreamCluster, XtreamPlaylistItem,
@@ -1069,6 +1071,33 @@ fn member_supports_archive(app_state: &Arc<AppState>, member: &GroupMember) -> b
     }
 }
 
+/// Archive window, in days, of a channel whose archive has no known duration.
+/// The same default as the failover group member records.
+const DEFAULT_CATCHUP_ARCHIVE_DAYS: u32 = 1;
+
+/// Archive duration in days that the catch-up table advertises for a channel.
+///
+/// `None` when no member can play the archive. A failover group advertises the longest
+/// archive among its playable members, as recorded in the group member records.
+fn catchup_archive_days(
+    app_state: &Arc<AppState>,
+    classified: &ResolvedStreamTarget,
+    pli: &XtreamPlaylistItem,
+) -> Option<u32> {
+    if let Some(group) = classified.group() {
+        group
+            .members
+            .iter()
+            .filter(|member| member_supports_archive(app_state, member))
+            .filter_map(|member| member.archive.as_ref().map(|archive| archive.duration_days))
+            .max()
+    } else if single_item_supports_archive(app_state, pli) {
+        Some(archive_info(pli.additional_properties.as_ref(), "").1.unwrap_or(DEFAULT_CATCHUP_ARCHIVE_DAYS))
+    } else {
+        None
+    }
+}
+
 async fn pli_supports_archive(app_state: &Arc<AppState>, target: &ConfigTarget, pli: &XtreamPlaylistItem) -> bool {
     let classified = classify_virtual_id(&app_state.app_config, &app_state.playlists, target, pli.virtual_id).await;
     if let Some(group) = classified.group() {
@@ -1992,6 +2021,7 @@ async fn xtream_get_catchup_response(
     stream_id: &str,
     start_time: &str,
     end_time: &str,
+    limit: u32,
 ) -> impl IntoResponse + Send {
     if !user.allows_cluster(XtreamCluster::Live) {
         return axum::Json(json!(ShortEpgResultDto::default())).into_response();
@@ -2035,6 +2065,28 @@ async fn xtream_get_catchup_response(
 
     if !content_allowed {
         return axum::Json(json!(ShortEpgResultDto::default())).into_response();
+    }
+
+    // The local EPG answers whenever the target has one; the provider is asked only
+    // for channels without local EPG data, like `get_short_epg`.
+    if let Some(channel_id) = pli.epg_channel_id.as_ref() {
+        let config = app_state.app_config.config.load();
+        if let Some(epg_path) = get_epg_path_for_target_by_type(&config, target, TargetType::Xtream) {
+            if file_exists_async(&epg_path).await {
+                let archive_days = catchup_archive_days(app_state, &classified, &pli);
+                return serve_catchup_table(
+                    app_state,
+                    epg_path.as_path(),
+                    user,
+                    target,
+                    channel_id,
+                    &stream_id.intern(),
+                    limit,
+                    archive_days,
+                )
+                .await;
+            }
+        }
     }
 
     if let Some(group) = classified.group() {
@@ -2274,7 +2326,8 @@ async fn xtream_player_api(
                     &target,
                     api_req.stream_id.trim(),
                     api_req.start.trim(),
-                    api_req.end.trim()
+                    api_req.end.trim(),
+                    api_req.get_limit()
                 )
                 .await
             );

@@ -228,6 +228,14 @@
 
 ## 🌟 New Features
 
+- **Xtream catch-up table from the local EPG.** `player_api.php?action=get_simple_data_table&stream_id=<virtual id>`
+  now answers from the target's local EPG database instead of the provider, like `get_short_epg`. The listing starts
+  at the oldest programme that ends inside the channel's archive window (`tv_archive_duration`, the longest playable
+  member for a failover group), or at the current programme for a channel without archive. Every entry carries
+  `now_playing` and `has_archive` (`1` for programmes that have ended inside the window). `limit` caps the entries
+  (default 1000). Only a channel without `epg_channel_id` or a target without local EPG database still asks the provider; `start`/`end`
+  apply only to that request. A channel that is missing in the local EPG gets an empty table.
+
 - **Recording requests default to the player's own target.** A player-token client cannot learn its target name, so
   `source.target_id` in `POST /api/v1/recording/requests` and `source.target_name` in
   `POST /api/v1/recording/conflicts/preview` may now be empty or omitted; the server then uses the caller's own
