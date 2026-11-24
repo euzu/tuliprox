@@ -736,9 +736,12 @@ fn build_catchup_table(
 ) -> ShortEpgResultDto {
     let limit = if limit > 0 { limit } else { DEFAULT_CATCHUP_TABLE_LIMIT };
     let archive_from = archive_days.filter(|days| *days > 0).map(|days| now - i64::from(days) * SECONDS_PER_DAY);
+    // The archive window starts inclusive. Without an archive only programmes with
+    // `stop > now` are listed, so one that ends exactly now takes no result slot.
+    let listing_from = archive_from.unwrap_or(now + 1);
     ShortEpgResultDto::new(
         channel
-            .get_programme_with_limit_at(limit, archive_from.unwrap_or(now))
+            .get_programme_with_limit_at(limit, listing_from)
             .into_iter()
             .map(|programme| {
                 let (start, stop) = get_source_epg_timestamps(programme);
@@ -2333,6 +2336,36 @@ mod tests {
             ]
         );
         assert_eq!(catchup_table_rows(Some(0), 0), rows);
+    }
+
+    #[test]
+    fn catchup_table_without_archive_skips_programme_ending_now() {
+        let channel = EpgChannel {
+            id: "ch".intern(),
+            title: None,
+            icon: None,
+            programmes: vec![
+                EpgProgramme::new(99_000, 100_000, "ch".intern()),
+                EpgProgramme::new(100_000, 101_000, "ch".intern()),
+            ],
+        };
+        let options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [0; 16] };
+        let rows: Vec<_> = build_catchup_table(&channel, &"7".intern(), &"ch".intern(), &options, None, 1, 100_000)
+            .epg_listings
+            .into_iter()
+            .map(|entry| (entry.start_timestamp, entry.now_playing))
+            .collect();
+        assert_eq!(rows, vec![("100000".to_string(), Some(1))]);
+
+        // The archive window keeps its inclusive start: a programme ending exactly there stays listed.
+        let rows: Vec<_> =
+            build_catchup_table(&channel, &"7".intern(), &"ch".intern(), &options, Some(1), 0, 100_000 + 86_400)
+                .epg_listings
+                .into_iter()
+                .map(|entry| entry.start_timestamp)
+                .collect();
+        assert_eq!(rows, vec!["99000".to_string(), "100000".to_string()]);
     }
 
     #[test]
