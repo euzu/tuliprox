@@ -921,6 +921,7 @@ A create that does not fit on disk answers `507` with `recording_disk_full`.
 #### Create a recording
 
 The source is named by server-owned identifiers; a stream URL is never accepted.
+For a player token, `source.target_id` may be omitted and defaults to the caller's own target.
 
 ```bash
 curl -s -X POST "$BASE_URL/api/v1/recording/requests" \
@@ -1017,6 +1018,8 @@ user gets `403 recording_forbidden` from them and cannot address them from a sna
 (`/api/v1/recording/rules`) are the exception: playlist users reach them as documented in section 4.10.
 
 #### Conflict preview
+
+For a player token, `source.target_name` may be omitted and defaults to the caller's own target.
 
 ```bash
 curl -s -X POST "$BASE_URL/api/v1/recording/conflicts/preview" \

@@ -228,6 +228,11 @@
 
 ## 🌟 New Features
 
+- **Recording requests default to the player's own target.** A player-token client cannot learn its target name, so
+  `source.target_id` in `POST /api/v1/recording/requests` and `source.target_name` in
+  `POST /api/v1/recording/conflicts/preview` may now be empty or omitted; the server then uses the caller's own
+  target, as the recording rule route already does. Web UI and admin callers still must send the target.
+
 - **Live responses name their stream uid.** For users with Player API access, every direct live MPEG-TS response
   carries `X-Tuliprox-Stream-Uid`, the `uid` of this connection in `GET /api/v1/me/streams`. A player on a login shared
   by several devices stops or splits exactly its own stream with `DELETE /api/v1/me/streams/{uid}` or

@@ -101,6 +101,31 @@ fn idempotency_from_headers(headers: &HeaderMap, body: &CreateRecordingRequest) 
     })
 }
 
+/// Resolves an API user's target configuration if the claims represent an API caller.
+/// Returns `None` if the caller is not an API user or has no configured target.
+fn api_user_target(
+    app_state: &AppState,
+    claims: &shared::model::Claims,
+) -> Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)> {
+    let subject_id = claims.subject_id.as_ref()?;
+    if !subject_id.is_api() {
+        return None;
+    }
+    app_state.app_config.get_target_for_username(&claims.username)
+}
+
+/// Defaults an empty target identifier to the caller's own target for API users (player token).
+/// Non-API callers and unknown users leave the target unchanged, keeping downstream rejection.
+fn default_player_target(app_state: &AppState, claims: &shared::model::Claims, target: &mut String) {
+    if !target.trim().is_empty() {
+        return;
+    }
+    let Some((_user, target_cfg)) = api_user_target(app_state, claims) else {
+        return;
+    };
+    target.clone_from(&target_cfg.name);
+}
+
 /// POST /api/v1/recording/requests
 ///
 /// A command, not a query: it answers `204` and nothing else. The new
@@ -111,8 +136,9 @@ pub async fn create_recording_request(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
     headers: HeaderMap,
-    Json(body): Json<CreateRecordingRequest>,
+    Json(mut body): Json<CreateRecordingRequest>,
 ) -> impl IntoResponse {
+    default_player_target(&app_state, &claims, &mut body.source.target_id);
     let idempotency = idempotency_from_headers(&headers, &body);
     let mut source = body.source.clone();
     let Some(resolved_source) = resolve_recording_source(
@@ -434,8 +460,9 @@ pub async fn delete_recording_task(
 pub async fn preview_recording_conflicts(
     AuthClaims(claims): AuthClaims,
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Json(body): axum::extract::Json<PreviewConflictsBody>,
+    axum::extract::Json(mut body): axum::extract::Json<PreviewConflictsBody>,
 ) -> axum::response::Response {
+    default_player_target(&state, &claims, &mut body.source.target_name);
     let mut source = RecordingSourceInput::from(&body.source);
     // EPG rows do not know the input, so the preview resolves the same
     // playlist channel the create request will record.
@@ -497,6 +524,8 @@ pub struct PreviewConflictsBody {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PreviewSourceDto {
+    /// Empty means the caller's own target for a player token; required for other callers.
+    #[serde(default)]
     pub target_name: String,
     pub virtual_id: String,
     pub input_name: String,
@@ -867,7 +896,7 @@ pub async fn authorize_api_user_source(
         return Ok(None);
     }
 
-    let Some((user, target)) = app_state.app_config.get_target_for_username(&claims.username) else {
+    let Some((user, target)) = api_user_target(app_state, claims) else {
         return Err(ServiceError::InvalidSource);
     };
 
@@ -3111,6 +3140,18 @@ mod tests {
     }
 
     #[test]
+    fn create_recording_source_defaults_missing_target_to_empty() {
+        let parsed: RecordingSourceRequest = serde_json::from_value(json!({
+            "virtual_id": "42",
+            "cluster": "Live",
+            "input_name": "input-a"
+        }))
+        .expect("parse recording source without target_id");
+
+        assert_eq!(parsed.target_id, "");
+    }
+
+    #[test]
     fn edit_rule_body_round_trips_enabled_field() {
         let wire = r#"{"enabled":false,"visibility":"shared"}"#;
         let parsed: EditRecordingRuleBody = serde_json::from_str(wire).expect("parse");
@@ -3268,10 +3309,51 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn api_user_source_scoping_matrix() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        let state = live_request_state(dir.path(), shared::model::TargetType::Xtream).await?;
+    async fn live_api_request_state(dir: &std::path::Path) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
+        use tuliprox_repository::{ensure_xtream_storage_path, xtream_get_file_path, BPlusTree};
+
+        let mut state = live_request_state(dir, shared::model::TargetType::Xtream).await?;
+
+        let persistent_queue = Arc::new(
+            crate::api::model::recording::recording_queue::RecordingQueue::new_persistent(dir, dir)
+                .map_err(|err| format!("open persistent queue: {err}"))?,
+        );
+        Arc::get_mut(&mut state).ok_or("unique app state")?.recording.queue = persistent_queue;
+
+        let mut sources = (*state.app_config.sources.load_full()).clone();
+        let mut other_target = (*sources.sources[0].targets[0]).clone();
+        other_target.id = 12;
+        other_target.name = "other".to_string();
+        sources.sources[0].targets.push(Arc::new(other_target.clone()));
+        state.app_config.sources.store(Arc::new(sources));
+
+        let other_storage = ensure_xtream_storage_path(&state.app_config.config.load(), &other_target.name).await?;
+        let path = xtream_get_file_path(&other_storage, shared::model::XtreamCluster::Live);
+        std::fs::create_dir_all(path.parent().ok_or("database parent missing")?)?;
+        let mut tree = BPlusTree::new();
+        for (id, input_name, title, epg_id) in [
+            (42, "input-a", "Channel HD", "43"),
+            (43, "input-b", "Channel 4K", "43"),
+            (44, "foreign", "Foreign", "43"),
+            (45, "input-a", "Legacy", "shared.epg"),
+        ] {
+            let item = shared::model::PlaylistItem {
+                header: shared::model::PlaylistItemHeader {
+                    virtual_id: shared::model::VirtualId::new(id),
+                    input_name: input_name.into(),
+                    name: title.into(),
+                    title: title.into(),
+                    group: "News".into(),
+                    epg_channel_id: Some(epg_id.into()),
+                    url: "http://upstream.example/live.ts".into(),
+                    item_type: shared::model::PlaylistItemType::Live,
+                    xtream_cluster: shared::model::XtreamCluster::Live,
+                    ..Default::default()
+                },
+            };
+            tree.insert(item.header.virtual_id, shared::model::XtreamPlaylistItem::from(&item));
+        }
+        tree.store(&path)?;
 
         let api_proxy_dto = shared::model::ApiProxyConfigDto {
             user: vec![
@@ -3306,6 +3388,13 @@ mod tests {
             ..Default::default()
         };
         state.app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig::from(&api_proxy_dto))));
+        Ok(state)
+    }
+
+    #[tokio::test]
+    async fn api_user_source_scoping_matrix() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_api_request_state(dir.path()).await?;
 
         let alice_claims = test_api_claims("alice", Permission::RecordingCreate | Permission::RecordingRead);
         let bob_claims = test_api_claims("bob", Permission::RecordingCreate | Permission::RecordingRead);
@@ -3378,6 +3467,216 @@ mod tests {
         .await
         .into_response();
         assert_eq!(visible_res.status(), StatusCode::NO_CONTENT);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn player_token_recording_request_defaults_to_player_own_target() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_api_request_state(dir.path()).await?;
+
+        let alice_claims = test_api_claims("alice", Permission::RecordingCreate | Permission::RecordingRead);
+        let carol_claims = test_api_claims("carol", Permission::RecordingCreate | Permission::RecordingRead);
+        let web_claims = creator_claims("web_user", Permission::RecordingCreate.into());
+
+        let start = chrono::Utc::now().timestamp() + 3_600;
+
+        // a1) Alice (API user of target "1"), empty target_id -> 204, stored recording source.target_id == "1"
+        let alice_empty_target_body = serde_json::from_value(json!({
+            "source": {"target_id": "", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News Alice Target",
+            "program_start": start,
+            "program_end": start + 120,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        let res_alice = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims),
+            HeaderMap::new(),
+            Json(alice_empty_target_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(res_alice.status(), StatusCode::NO_CONTENT);
+        let (_, tasks) = state.recording.queue.committed_snapshot().await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].recording.source.target_id, "1");
+
+        // a2) Carol (API user of target "other"), empty target_id -> 204, stored recording source.target_id == "other"
+        let carol_empty_target_body = serde_json::from_value(json!({
+            "source": {"target_id": "", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News Carol Target",
+            "program_start": start + 200,
+            "program_end": start + 320,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        let res_carol = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(carol_claims.clone()),
+            HeaderMap::new(),
+            Json(carol_empty_target_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(res_carol.status(), StatusCode::NO_CONTENT);
+        let (_, tasks) = state.recording.queue.committed_snapshot().await;
+        assert_eq!(tasks.len(), 2);
+        let carol_targets: Vec<&str> = tasks
+            .iter()
+            .filter(|t| t.recording.program_title.as_deref() == Some("News Carol Target"))
+            .map(|t| t.recording.source.target_id.as_str())
+            .collect();
+        assert_eq!(carol_targets, vec!["other"]);
+
+        // b) Carol (API user of target "other"), target_id of another target ("1") -> 400 Bad Request
+        let foreign_body = serde_json::from_value(json!({
+            "source": {"target_id": "1", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News Foreign",
+            "program_start": start + 400,
+            "program_end": start + 520,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        let foreign_res = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(carol_claims),
+            HeaderMap::new(),
+            Json(foreign_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(foreign_res.status(), StatusCode::BAD_REQUEST);
+        let foreign_bytes = axum::body::to_bytes(foreign_res.into_body(), usize::MAX).await?;
+        let foreign_json: serde_json::Value = serde_json::from_slice(&foreign_bytes)?;
+        assert_eq!(foreign_json["error"], "recording_invalid_source");
+
+        // c) Web (non-API) user, empty target_id -> 400 Bad Request
+        let web_empty_body = serde_json::from_value(json!({
+            "source": {"target_id": "", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News Web Empty",
+            "program_start": start + 600,
+            "program_end": start + 720,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        let web_res = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(web_claims),
+            HeaderMap::new(),
+            Json(web_empty_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(web_res.status(), StatusCode::BAD_REQUEST);
+        let web_bytes = axum::body::to_bytes(web_res.into_body(), usize::MAX).await?;
+        let web_json: serde_json::Value = serde_json::from_slice(&web_bytes)?;
+        assert_eq!(web_json["error"], "recording_invalid_source");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn player_token_recording_request_idempotency_allows_explicit_target_retry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_api_request_state(dir.path()).await?;
+        let alice_claims = test_api_claims("alice", Permission::RecordingCreate | Permission::RecordingRead);
+        let start = chrono::Utc::now().timestamp() + 3_600;
+
+        let mut headers1 = HeaderMap::new();
+        headers1.insert("Idempotency-Key", axum::http::HeaderValue::from_static("retry-default-target-key"));
+        let body_empty = serde_json::from_value(json!({
+            "source": {"target_id": "", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News Idempotent Retry",
+            "program_start": start,
+            "program_end": start + 120,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        let res1 = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims.clone()),
+            headers1,
+            Json(body_empty),
+        )
+        .await
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::NO_CONTENT);
+
+        let mut headers2 = HeaderMap::new();
+        headers2.insert("Idempotency-Key", axum::http::HeaderValue::from_static("retry-default-target-key"));
+        let body_explicit = serde_json::from_value(json!({
+            "source": {"target_id": "1", "virtual_id": "42", "input_name": "input-a", "cluster": "Live"},
+            "program_title": "News Idempotent Retry",
+            "program_start": start,
+            "program_end": start + 120,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        let res2 = create_recording_request(
+            State(Arc::clone(&state)),
+            AuthClaims(alice_claims),
+            headers2,
+            Json(body_explicit),
+        )
+        .await
+        .into_response();
+        assert_eq!(res2.status(), StatusCode::NO_CONTENT);
+
+        let (_, tasks) = state.recording.queue.committed_snapshot().await;
+        let matching_targets: Vec<&str> = tasks
+            .iter()
+            .filter(|t| t.recording.program_title.as_deref() == Some("News Idempotent Retry"))
+            .map(|t| t.recording.source.target_id.as_str())
+            .collect();
+        assert_eq!(matching_targets, vec!["1"]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn player_token_recording_preview_defaults_to_player_own_target() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let state = live_api_request_state(dir.path()).await?;
+        let alice_claims = test_api_claims("alice", Permission::RecordingCreate | Permission::RecordingRead);
+        let start = chrono::Utc::now().timestamp() + 3_600;
+
+        let preview_explicit_body = serde_json::from_value(json!({
+            "source": {"target_name": "1", "virtual_id": "42", "input_name": "input-a",
+                       "channel_id": "43", "channel_name": "Channel HD"},
+            "candidate": {"padded_start": start, "padded_end": start + 120}
+        }))?;
+        let preview_explicit_res = preview_recording_conflicts(
+            AuthClaims(alice_claims.clone()),
+            State(Arc::clone(&state)),
+            Json(preview_explicit_body),
+        )
+        .await;
+        assert_eq!(preview_explicit_res.status(), StatusCode::OK);
+        let preview_explicit_bytes = axum::body::to_bytes(preview_explicit_res.into_body(), usize::MAX).await?;
+        let preview_explicit_json: serde_json::Value = serde_json::from_slice(&preview_explicit_bytes)?;
+
+        let preview_empty_body = serde_json::from_value(json!({
+            "source": {"virtual_id": "42", "input_name": "input-a",
+                       "channel_id": "43", "channel_name": "Channel HD"},
+            "candidate": {"padded_start": start, "padded_end": start + 120}
+        }))?;
+        let preview_empty_res =
+            preview_recording_conflicts(AuthClaims(alice_claims), State(Arc::clone(&state)), Json(preview_empty_body))
+                .await;
+        assert_eq!(preview_empty_res.status(), StatusCode::OK);
+        let preview_empty_bytes = axum::body::to_bytes(preview_empty_res.into_body(), usize::MAX).await?;
+        let preview_empty_json: serde_json::Value = serde_json::from_slice(&preview_empty_bytes)?;
+        assert_eq!(preview_empty_json, preview_explicit_json);
 
         Ok(())
     }

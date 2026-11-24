@@ -3574,14 +3574,13 @@ components:
       type: object
       description: Source channel identifiers for recording.
       required:
-        - target_id
         - virtual_id
         - cluster
         - input_name
       properties:
         target_id:
           type: string
-          description: Target playlist identifier.
+          description: Target playlist identifier. Player-token clients may omit this (the server uses the caller's own target); other callers still must send it.
           example: main
         virtual_id:
           type: string
@@ -3709,12 +3708,12 @@ components:
       type: object
       description: Source channel definition for conflict preview.
       required:
-        - target_name
         - virtual_id
         - input_name
       properties:
         target_name:
           type: string
+          description: Target name. Player-token clients may omit this (the server uses the caller's own target); other callers still must send it.
           example: main
         virtual_id:
           type: string
