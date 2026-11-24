@@ -1761,6 +1761,12 @@
 
 ## 🐛 Fixes
 
+- **New viewers of a shared live stream start close to live.** A viewer joining a shared MPEG-TS stream received the
+  whole burst buffer from its oldest byte and played 20-30 s behind live (12 MB at HD bitrate). The viewer now starts
+  at the newest keyframe that arrived at least `reverse_proxy.stream.shared_burst_secs` (default `3`) seconds ago,
+  so playback begins at once with a short prebuffer, typically 3-5 s behind live. Streams without detectable keyframes
+  use the arrival time alone. `shared_burst_buffer_mb` keeps the buffer size and the reserve for slow viewers.
+
 - **HLS start keeps its provider binding between segment retries.** When the first segment of a new HLS start failed
   and waited for its retry backoff, the start window and the 3T protection could both expire while no origin request
   was active. tuliprox then released the account binding, and the waiting player got an error instead of the
@@ -2768,6 +2774,10 @@
   same keys.
 
 - **config.yml (`reverse_proxy.stream`)**:
+  - `shared_burst_secs` (default `3`): minimum time in seconds a new viewer of a shared live MPEG-TS stream starts behind
+    live, aligned to the newest keyframe arriving at least this many seconds ago (typically 3-5 s behind live instead of
+    20-30 s). `0` sends the whole burst buffer from its oldest byte. `shared_burst_buffer_mb` remains the memory cap and
+    lag reserve. Editable in the Web UI under Reverse Proxy → Stream.
   - `hls_wrap_media_playlist` (default `true`): answers a proxied live HLS entry request whose provider returns a media
     playlist with a single-variant master playlist, so playlist refreshes keep their provider account across client
     IP changes. Applies only while the shared HLS cache is off for the target. Disable it for players that mishandle a

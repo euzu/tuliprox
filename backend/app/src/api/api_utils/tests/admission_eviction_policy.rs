@@ -31,6 +31,7 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
@@ -215,6 +216,7 @@ async fn resolve_admission_with_strategies_allows_other_channel_after_recent_evi
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
@@ -346,6 +348,7 @@ async fn resolve_admission_with_strategies_does_not_suppress_different_session_o
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
@@ -477,6 +480,7 @@ async fn resolve_admission_with_strategies_allows_recently_evicted_playback_when
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
@@ -582,6 +586,7 @@ async fn resolve_admission_with_strategies_evicts_preserved_hls_session_for_same
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
@@ -703,6 +708,7 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
                 throttle_str: None,
                 throttle_kbps: 0,
                 shared_burst_buffer_mb: 1,
+                shared_burst_secs: 3,
                 shared_subscriber_idle_timeout_secs: 300,
                 cleanup_queue_capacity: 4096,
                 recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
@@ -820,13 +826,9 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
     assert_eq!(ts_admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(ts_grace_mode, None);
     assert!(
-            app_state
-                .active_users
-                .get_and_update_user_session(&user.username, &hls_token)
-                .await
-                .is_none(),
-            "the competing TS activation must remove the old preserved HLS session even though there is no live socket left to kick"
-        );
+        app_state.active_users.get_and_update_user_session(&user.username, &hls_token).await.is_none(),
+        "the competing TS activation must remove the old preserved HLS session even though there is no live socket left to kick"
+    );
     assert_eq!(
         app_state.active_users.user_connections(&user.username).await,
         0,
@@ -873,13 +875,9 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
     assert_eq!(active_streams.len(), 1);
     assert_eq!(active_streams.first().and_then(|stream| stream.session_token.as_deref()), Some(ts_token.as_str()));
     assert!(
-            app_state
-                .active_users
-                .get_and_update_user_session(&user.username, &hls_token)
-                .await
-                .is_none(),
-            "after the competing TS request, the old Xtream HLS session must be gone so later /hls segment fetches cannot revive it"
-        );
+        app_state.active_users.get_and_update_user_session(&user.username, &hls_token).await.is_none(),
+        "after the competing TS request, the old Xtream HLS session must be gone so later /hls segment fetches cannot revive it"
+    );
     assert!(
         app_state.active_users.get_and_update_user_session(&user.username, &ts_token).await.is_some(),
         "the winning TS playback should remain tracked under its socket-bound Xtream token"
@@ -911,6 +909,7 @@ async fn test_eviction_strategy_falls_back_when_candidate_protected_by_reentry()
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
@@ -1114,6 +1113,7 @@ async fn test_mixed_suppressed_and_legitimate_eviction_reports_exhaustion() {
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
@@ -1275,6 +1275,7 @@ async fn test_reentry_suppression_does_not_emit_connection_denied() {
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
@@ -1400,6 +1401,7 @@ async fn test_real_exhaustion_emits_connection_denied() {
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
+        shared_burst_secs: 3,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),

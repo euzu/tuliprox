@@ -52,9 +52,9 @@ async fn old_origin_cannot_unregister_replacement() {
 #[test]
 fn test_burst_buffer_eviction_is_byte_bounded() {
     let mut buffer = BurstBuffer::new(10);
-    buffer.push(Bytes::from_static(b"12345"));
-    buffer.push(Bytes::from_static(b"67890"));
-    buffer.push(Bytes::from_static(b"abcde"));
+    buffer.push_now(Bytes::from_static(b"12345"));
+    buffer.push_now(Bytes::from_static(b"67890"));
+    buffer.push_now(Bytes::from_static(b"abcde"));
 
     let mut chunks = Vec::new();
     let read = buffer.read_from_into(0, &mut chunks, usize::MAX);
@@ -70,7 +70,7 @@ fn test_burst_buffer_reads_clone_bytes_without_copying_payload() {
     let mut buffer = BurstBuffer::new(1024);
     let chunk = Bytes::from(vec![1_u8, 2, 3, 4]);
     let ptr = chunk.as_ptr();
-    buffer.push(chunk);
+    buffer.push_now(chunk);
 
     let mut chunks = Vec::new();
     let _read = buffer.read_from_into(0, &mut chunks, usize::MAX);
@@ -85,7 +85,7 @@ fn test_burst_buffer_reads_clone_bytes_without_copying_payload() {
 fn test_burst_buffer_live_batch_is_chunk_bounded() {
     let mut buffer = BurstBuffer::new(4096);
     for _ in 0..10 {
-        buffer.push(Bytes::from_static(b"x"));
+        buffer.push_now(Bytes::from_static(b"x"));
     }
 
     let mut chunks = Vec::new();

@@ -118,7 +118,7 @@ fn test_burst_buffer_chunk_bound_preserves_ts_sized_byte_capacity() {
     let max_chunks = 4;
     let mut buffer = BurstBuffer::new(MIN_BURST_BUFFER_CHUNK_ACCOUNTING_BYTES * max_chunks);
     for _ in 0..max_chunks.saturating_add(1) {
-        buffer.push(Bytes::from(vec![0_u8; MIN_BURST_BUFFER_CHUNK_ACCOUNTING_BYTES]));
+        buffer.push_now(Bytes::from(vec![0_u8; MIN_BURST_BUFFER_CHUNK_ACCOUNTING_BYTES]));
     }
 
     let mut chunks = Vec::new();

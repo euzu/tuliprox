@@ -1,5 +1,5 @@
 use super::{
-    BudgetedChunk, BufferedChunk, BurstBuffer, BurstRead, MIN_BURST_BUFFER_CHUNKS,
+    BudgetedChunk, BufferedChunk, BurstBuffer, BurstRead, RandomAccessPoint, MAX_RAP_LOOKBACK, MIN_BURST_BUFFER_CHUNKS,
     MIN_BURST_BUFFER_CHUNK_ACCOUNTING_BYTES,
 };
 use bytes::Bytes;
@@ -37,11 +37,88 @@ impl BurstBuffer {
             max_chunks: Self::max_chunks_for_buffer_size(buf_size),
             current_bytes: 0,
             next_sequence: 0,
+            next_start: 0,
+            raps: VecDeque::new(),
         }
     }
 
-    pub fn snapshot(&self) -> (Vec<Bytes>, u64) {
-        (self.buffer.iter().map(|chunk| chunk.bytes.clone()).collect::<Vec<Bytes>>(), self.next_sequence)
+    /// Extracts the join burst from the ring.
+    ///
+    /// Selects a start point keyframe-aligned within the requested burst window:
+    /// (a) newest RAP with arrived <= target;
+    /// (b) else oldest RAP in the ring;
+    /// (c) else newest chunk with arrived <= target;
+    /// (d) else oldest chunk (whole ring).
+    /// Returns the sliced/cloned chunks and the ring head (`next_sequence`).
+    pub fn join_snapshot(&self, now: Instant, burst: Duration) -> (Vec<Bytes>, u64) {
+        if self.buffer.is_empty() {
+            return (Vec::new(), self.next_sequence);
+        }
+
+        if burst.is_zero() {
+            return (self.slice_from(0, None), self.next_sequence);
+        }
+
+        let Some(target) = now.checked_sub(burst) else {
+            return (self.slice_from(0, None), self.next_sequence);
+        };
+
+        if !self.raps.is_empty() {
+            let rap_idx = self.raps.partition_point(|rap| rap.arrived <= target);
+            let chosen_rap = if rap_idx > 0 {
+                let candidate = &self.raps[rap_idx - 1];
+                if target.saturating_duration_since(candidate.arrived) <= MAX_RAP_LOOKBACK {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            } else {
+                // (b) Oldest RAP in the ring when no RAP has arrived <= target.
+                self.raps.front()
+            };
+
+            if let Some(rap) = chosen_rap {
+                let chunk_idx = self.start_index_for_sequence(rap.sequence);
+                if let Some(chunk) = self.buffer.get(chunk_idx) {
+                    debug_assert_eq!(chunk.sequence, rap.sequence);
+                    return (self.slice_from(chunk_idx, Some(rap.offset)), self.next_sequence);
+                }
+            }
+        }
+
+        // Fallback when no RAPs exist in the ring, or RAP is stale, or chunk is missing
+        let chunk_idx = self.buffer.partition_point(|chunk| chunk.arrived <= target);
+        let start_idx = if chunk_idx > 0 {
+            // (c) Newest chunk with arrived <= target
+            chunk_idx - 1
+        } else {
+            // (d) Oldest chunk in the ring
+            0
+        };
+        (self.slice_from(start_idx, None), self.next_sequence)
+    }
+
+    fn slice_from(&self, start_idx: usize, rap_offset: Option<u32>) -> Vec<Bytes> {
+        if start_idx >= self.buffer.len() {
+            return Vec::new();
+        }
+        let mut chunks = Vec::with_capacity(self.buffer.len().saturating_sub(start_idx));
+        let first = &self.buffer[start_idx];
+        if let Some(offset) = rap_offset {
+            let offset = usize::try_from(offset).unwrap_or(0);
+            debug_assert!(offset < first.bytes.len());
+            if offset <= first.bytes.len() {
+                chunks.push(first.bytes.slice(offset..));
+            } else {
+                chunks.push(first.bytes.clone());
+            }
+        } else {
+            chunks.push(first.bytes.clone());
+        }
+        for chunk in self.buffer.range(start_idx.saturating_add(1)..) {
+            chunks.push(chunk.bytes.clone());
+        }
+        chunks
     }
 
     pub fn read_from_into(&self, next_sequence: u64, chunks: &mut Vec<Bytes>, max_chunks: usize) -> BurstRead {
@@ -59,7 +136,14 @@ impl BurstBuffer {
         BurstRead { next_sequence: read_next_sequence, skipped }
     }
 
-    pub fn push(&mut self, packet: Bytes) {
+    /// Appends one packet to the burst ring, pruning older entries when bounds are exceeded.
+    ///
+    /// Invariants:
+    /// - Only the broadcast task writes to `BurstBuffer` under the `burst_buffer` mutex.
+    /// - `raps` is pruned in the same call as eviction so every entry refers to a buffered chunk.
+    /// - At most one RAP entry is retained per chunk, holding the latest offset for that chunk.
+    /// - Stream positions (`next_start`) and scanner positions count the exact same bytes in order.
+    pub fn push(&mut self, packet: Bytes, arrived: Instant, rap: Option<u64>) {
         let packet_len = packet.len();
         while !self.buffer.is_empty()
             && (self.buffer.len() >= self.max_chunks
@@ -69,11 +153,61 @@ impl BurstBuffer {
                 self.current_bytes = self.current_bytes.saturating_sub(popped.bytes.len());
             }
         }
+
+        // Eviction invariant: remove any RAP whose referenced chunk was evicted in this call.
+        if let Some(front) = self.buffer.front() {
+            let min_seq = front.sequence;
+            while self.raps.front().is_some_and(|r| r.sequence < min_seq) {
+                self.raps.pop_front();
+            }
+        } else {
+            self.raps.clear();
+        }
+
+        let packet_len_u64 = u64::try_from(packet_len).unwrap_or(0);
+        let start = self.next_start;
+        self.next_start = self.next_start.saturating_add(packet_len_u64);
         self.current_bytes = self.current_bytes.saturating_add(packet_len);
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
-        self.buffer.push_back(BufferedChunk { sequence, bytes: packet });
+        self.buffer.push_back(BufferedChunk { sequence, start, arrived, bytes: packet });
+
+        if let Some(pos) = rap {
+            let idx = self.buffer.partition_point(|chunk| chunk.start <= pos);
+            if idx > 0 {
+                if let Some(candidate) = self.buffer.get(idx - 1) {
+                    let chunk_len = u64::try_from(candidate.bytes.len()).unwrap_or(0);
+                    if pos >= candidate.start && pos < candidate.start.saturating_add(chunk_len) {
+                        if let Ok(offset) = u32::try_from(pos.saturating_sub(candidate.start)) {
+                            let candidate_seq = candidate.sequence;
+                            let candidate_arrived = candidate.arrived;
+                            if let Some(last) = self.raps.back_mut() {
+                                if candidate_seq > last.sequence {
+                                    self.raps.push_back(RandomAccessPoint {
+                                        sequence: candidate_seq,
+                                        offset,
+                                        arrived: candidate_arrived,
+                                    });
+                                } else if candidate_seq == last.sequence && offset > last.offset {
+                                    last.offset = offset;
+                                    last.arrived = candidate_arrived;
+                                }
+                            } else {
+                                self.raps.push_back(RandomAccessPoint {
+                                    sequence: candidate_seq,
+                                    offset,
+                                    arrived: candidate_arrived,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    #[cfg(test)]
+    pub(super) fn push_now(&mut self, packet: Bytes) { self.push(packet, Instant::now(), None); }
 
     pub(super) fn start_index_for_sequence(&self, sequence: u64) -> usize {
         let mut left = 0_usize;

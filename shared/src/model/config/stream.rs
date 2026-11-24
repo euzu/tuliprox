@@ -2,11 +2,11 @@ use crate::{
     defaults::{
         default_as_true, default_catchup_session_ttl_secs, default_cleanup_queue_capacity, default_grace_period_millis,
         default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_provider_affinity_ttl_secs,
-        default_recent_eviction_reentry_ttl_ms, default_shared_burst_buffer_mb,
+        default_recent_eviction_reentry_ttl_ms, default_shared_burst_buffer_mb, default_shared_burst_secs,
         default_shared_subscriber_idle_timeout_secs, default_stream_buffer_max_bytes_mb,
         is_default_catchup_session_ttl_secs, is_default_cleanup_queue_capacity, is_default_grace_period_millis,
         is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs, is_default_provider_affinity_ttl_secs,
-        is_default_recent_eviction_reentry_ttl_ms, is_default_shared_burst_buffer_mb,
+        is_default_recent_eviction_reentry_ttl_ms, is_default_shared_burst_buffer_mb, is_default_shared_burst_secs,
         is_default_shared_subscriber_idle_timeout_secs, is_default_stream_buffer_max_bytes_mb, is_false, is_true,
         MAX_PROVIDER_AFFINITY_TTL_SECS,
     },
@@ -121,6 +121,10 @@ pub struct StreamConfigDto {
     pub throttle_kbps: u64,
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
     pub shared_burst_buffer_mb: u64,
+    /// Minimum seconds a new viewer of a shared live MPEG-TS stream starts behind live.
+    /// Playback aligns to a random access point at least this old; `0` sends the whole buffer.
+    #[serde(default = "default_shared_burst_secs", skip_serializing_if = "is_default_shared_burst_secs")]
+    pub shared_burst_secs: u64,
     /// Idle timeout in seconds after which a shared-stream subscriber that consumed no data is dropped.
     #[serde(
         default = "default_shared_subscriber_idle_timeout_secs",
@@ -152,6 +156,7 @@ impl Default for StreamConfigDto {
             grace_period_timeout_secs: default_grace_period_timeout_secs(),
             throttle_kbps: 0,
             shared_burst_buffer_mb: default_shared_burst_buffer_mb(),
+            shared_burst_secs: default_shared_burst_secs(),
             shared_subscriber_idle_timeout_secs: default_shared_subscriber_idle_timeout_secs(),
             cleanup_queue_capacity: default_cleanup_queue_capacity(),
             recent_eviction_reentry_ttl_ms: default_recent_eviction_reentry_ttl_ms(),
@@ -175,6 +180,7 @@ impl StreamConfigDto {
             && self.grace_period_timeout_secs == default_grace_period_timeout_secs()
             && self.throttle_kbps == 0
             && self.shared_burst_buffer_mb == default_shared_burst_buffer_mb()
+            && self.shared_burst_secs == default_shared_burst_secs()
             && self.shared_subscriber_idle_timeout_secs == default_shared_subscriber_idle_timeout_secs()
             && self.cleanup_queue_capacity == default_cleanup_queue_capacity()
             && self.recent_eviction_reentry_ttl_ms == default_recent_eviction_reentry_ttl_ms()
@@ -304,6 +310,20 @@ pub fn validate_admission_strategy_order(strategies: &[AdmissionStrategy]) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_burst_secs_defaults_and_round_trips() -> Result<(), serde_json::Error> {
+        let dto: StreamConfigDto = serde_json::from_str("{}")?;
+        assert_eq!(dto.shared_burst_secs, 3);
+        assert!(dto.is_empty());
+        assert!(!serde_json::to_string(&dto)?.contains("shared_burst_secs"));
+
+        let dto: StreamConfigDto = serde_json::from_str(r#"{"shared_burst_secs":0}"#)?;
+        assert_eq!(dto.shared_burst_secs, 0);
+        assert!(!dto.is_empty());
+        assert!(serde_json::to_string(&dto)?.contains("\"shared_burst_secs\":0"));
+        Ok(())
+    }
 
     #[test]
     fn test_empty_list_accepted() {

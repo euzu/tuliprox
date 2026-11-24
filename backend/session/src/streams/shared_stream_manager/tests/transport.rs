@@ -85,7 +85,7 @@ fn test_burst_buffer_eviction_is_chunk_bounded_for_small_packets() {
     let max_chunks = 3;
     let mut buffer = BurstBuffer::new(MIN_BURST_BUFFER_CHUNK_ACCOUNTING_BYTES * max_chunks);
     for _ in 0..max_chunks.saturating_add(1) {
-        buffer.push(Bytes::from_static(b"x"));
+        buffer.push_now(Bytes::from_static(b"x"));
     }
 
     let mut chunks = Vec::new();
@@ -100,7 +100,7 @@ fn test_burst_buffer_eviction_is_chunk_bounded_for_small_packets() {
 #[test]
 fn test_burst_buffer_keeps_oversized_packet_as_single_latest_chunk() {
     let mut buffer = BurstBuffer::new(4);
-    buffer.push(Bytes::from_static(b"12345678"));
+    buffer.push_now(Bytes::from_static(b"12345678"));
 
     let mut chunks = Vec::new();
     let read = buffer.read_from_into(0, &mut chunks, usize::MAX);

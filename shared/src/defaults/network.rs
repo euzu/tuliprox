@@ -15,6 +15,7 @@ default_eq_fns!(
     default_probe_delay_secs, is_default_probe_delay_secs, u16, 2;
     default_grace_period_millis, is_default_grace_period_millis, u64, 2000;
     default_shared_burst_buffer_mb, is_default_shared_burst_buffer_mb, u64, 12;
+    default_shared_burst_secs, is_default_shared_burst_secs, u64, 3;
     default_stream_buffer_max_bytes_mb, is_default_stream_buffer_max_bytes_mb, u64, 5;
     default_shared_subscriber_idle_timeout_secs, is_default_shared_subscriber_idle_timeout_secs, u64, 300;
     default_grace_period_timeout_secs, is_default_grace_period_timeout_secs, u64, 4;

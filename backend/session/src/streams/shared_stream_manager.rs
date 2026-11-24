@@ -36,6 +36,10 @@ const SHARED_CLEANUP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 // per-subscriber vector at once so a long backlog cannot balloon that vector.
 const MAX_SUBSCRIBER_LIVE_BATCH_CHUNKS: usize = 64;
 
+/// Maximum lookback duration for random access point selection relative to the join target.
+/// When the newest RAP before target is older than this limit, join snapshot falls back to time-based selection.
+const MAX_RAP_LOOKBACK: Duration = Duration::from_secs(10);
+
 pub struct PendingSharedSubscriberCleanup {
     permit: Option<tokio::sync::mpsc::OwnedPermit<CleanupEvent>>,
     subscriber_id: SharedSubscriberId,
@@ -97,7 +101,15 @@ impl SharedSubscriber {
 
 struct BufferedChunk {
     sequence: u64,
+    start: u64,
+    arrived: tokio::time::Instant,
     bytes: Bytes,
+}
+
+struct RandomAccessPoint {
+    sequence: u64,
+    offset: u32,
+    arrived: tokio::time::Instant,
 }
 
 struct BurstBuffer {
@@ -106,6 +118,8 @@ struct BurstBuffer {
     max_chunks: usize,
     current_bytes: usize,
     next_sequence: u64,
+    next_start: u64,
+    raps: VecDeque<RandomAccessPoint>,
 }
 
 struct BurstRead {
@@ -134,6 +148,7 @@ pub struct SharedStreamState {
     task_handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     subscriber_idle_timeout_secs: u64,
     subscriber_max_duration: Option<Duration>,
+    burst_duration: Duration,
     /// Number of joins that committed their registry entry but have not yet registered
     /// their subscriber in `subscribers`. Teardown must not remove an origin while this is
     /// non-zero, otherwise a join in flight would land on a stopped state.
@@ -204,6 +219,8 @@ pub struct SharedStreamManager {
     pub(crate) test_preflight_barrier: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
+#[cfg(test)]
+mod burst_tests;
 #[cfg(test)]
 mod tests;
 

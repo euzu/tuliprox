@@ -1,17 +1,13 @@
+use super::program_map::{ProgramMap, PAT_PID, PAT_TABLE_ID, PMT_TABLE_ID};
 use crate::packet::{
-    es_has_keyframe, is_idr_start, is_video_stream_type, pes_elementary_data, pid_from_bytes, rewrite_section_version,
-    section_version, single_packet_section, ts_sync_offset, TsPacket, KEYFRAME_SCAN_BYTES, TS_PACKET_SIZE,
-    TS_SYNC_BYTE,
+    es_has_keyframe, is_idr_start, pes_elementary_data, rewrite_section_version, section_version,
+    single_packet_section, ts_sync_offset, TsPacket, KEYFRAME_SCAN_BYTES, TS_PACKET_SIZE, TS_SYNC_BYTE,
 };
 use bytes::{Buf, Bytes, BytesMut};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
-
-const PAT_PID: u16 = 0;
-const PAT_TABLE_ID: u8 = 0x00;
-const PMT_TABLE_ID: u8 = 0x02;
 
 /// A change to an emitted packet, applied after the chunk was observed.
 enum PacketEdit {
@@ -56,17 +52,6 @@ impl PidSet {
     }
 }
 
-/// Program structure of the member currently read, learned from its PAT and PMT.
-#[derive(Default)]
-struct Programs {
-    /// PMT PID → program number.
-    pmt_pids: HashMap<u16, u16>,
-    /// First video elementary stream: PID and stream type.
-    video: Option<(u16, u8)>,
-    /// CRC of the PAT the program map was built from.
-    pat_crc: Option<u32>,
-}
-
 /// Version rewrite of one member: per table, the offset added to the source version.
 #[derive(Default)]
 struct VersionOffsets {
@@ -93,7 +78,7 @@ pub struct TsSpliceAligner {
     carry: BytesMut,
     budget_bytes: usize,
     budget: Duration,
-    programs: Programs,
+    programs: ProgramMap,
     aligning: Option<Aligning>,
     /// Number of members started; the first one is never rewritten.
     members: u32,
@@ -110,7 +95,7 @@ impl TsSpliceAligner {
             carry: BytesMut::new(),
             budget_bytes,
             budget,
-            programs: Programs::default(),
+            programs: ProgramMap::default(),
             aligning: None,
             members: 1,
             offsets: VersionOffsets::default(),
@@ -123,7 +108,7 @@ impl TsSpliceAligner {
     /// Starts the next member: its bytes are held until the splice point.
     pub fn begin_member(&mut self, now: Instant) {
         self.carry.clear();
-        self.programs = Programs::default();
+        self.programs.reset();
         self.offsets = VersionOffsets::default();
         self.discontinuity_seen.clear();
         self.members += 1;
@@ -212,9 +197,9 @@ impl TsSpliceAligner {
                 aligning.last_pat = Some(position);
                 aligning.pmt_after_last_pat = false;
             }
-            if self.observe(view) && aligning.last_pat.is_some() {
+            if self.programs.observe(view) && aligning.last_pat.is_some() {
                 aligning.pmt_after_last_pat = true;
-                if self.programs.video.is_none() {
+                if self.programs.video().is_none() {
                     start = aligning.last_pat;
                     continue;
                 }
@@ -244,14 +229,14 @@ impl TsSpliceAligner {
         buffer.advance(start);
         let output = buffer.freeze();
         // The emitted part is observed again from its PAT on for versions and discontinuity.
-        self.programs = Programs::default();
+        self.programs.reset();
         Some(self.process_emitted(output))
     }
 
     /// Follows the elementary data of a video PES across its packets; returns the PAT before the
     /// PES start once a keyframe shows up within its first bytes.
     fn continue_open_pes(&self, aligning: &mut Aligning, view: TsPacket<'_>) -> Option<usize> {
-        let (pid, stream_type) = self.programs.video?;
+        let (pid, stream_type) = self.programs.video()?;
         if view.pid() != pid {
             return None;
         }
@@ -276,70 +261,12 @@ impl TsSpliceAligner {
     }
 
     fn is_keyframe(&self, view: TsPacket<'_>) -> bool {
-        let Some((pid, stream_type)) = self.programs.video else {
+        let Some((pid, stream_type)) = self.programs.video() else {
             return false;
         };
         view.pid() == pid
             && view.payload_unit_start()
             && (view.random_access() || is_idr_start(stream_type, view.payload()))
-    }
-
-    /// Learns PAT/PMT structure from `view`; returns true when it was a PMT of a known program.
-    fn observe(&mut self, view: TsPacket<'_>) -> bool {
-        if !view.payload_unit_start() {
-            return false;
-        }
-        let pid = view.pid();
-        let is_pmt = self.programs.pmt_pids.contains_key(&pid);
-        if pid != PAT_PID && !is_pmt {
-            return false;
-        }
-        let payload = view.payload();
-        let Some(range) = single_packet_section(payload) else {
-            return false;
-        };
-        let section = &payload[range];
-        let entries = &section[8..section.len() - 4];
-        if pid == PAT_PID && section[0] == PAT_TABLE_ID {
-            // A repeated PAT (several per second) leaves the program map as it is.
-            let crc = u32::from_be_bytes([
-                section[section.len() - 4],
-                section[section.len() - 3],
-                section[section.len() - 2],
-                section[section.len() - 1],
-            ]);
-            if self.programs.pat_crc == Some(crc) {
-                return false;
-            }
-            self.programs.pat_crc = Some(crc);
-            self.programs.pmt_pids = entries
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .filter_map(|entry| {
-                    let program = u16::from_be_bytes([entry[0], entry[1]]);
-                    let pmt_pid = pid_from_bytes(entry[2], entry[3]);
-                    (program != 0).then_some((pmt_pid, program))
-                })
-                .collect();
-            return false;
-        }
-        if is_pmt && section[0] == PMT_TABLE_ID && entries.len() >= 4 {
-            let info_len = (usize::from(entries[2] & 0x0F) << 8) | usize::from(entries[3]);
-            let mut streams = entries.get(4 + info_len..).unwrap_or(&[]);
-            self.programs.video = None;
-            while streams.len() >= 5 {
-                let stream_type = streams[0];
-                let es_pid = pid_from_bytes(streams[1], streams[2]);
-                let es_info_len = (usize::from(streams[3] & 0x0F) << 8) | usize::from(streams[4]);
-                if self.programs.video.is_none() && is_video_stream_type(stream_type) {
-                    self.programs.video = Some((es_pid, stream_type));
-                }
-                streams = streams.get(5 + es_info_len..).unwrap_or(&[]);
-            }
-            return true;
-        }
-        false
     }
 
     /// Observes packets about to be emitted and applies the version rewrite and discontinuity
@@ -349,7 +276,7 @@ impl TsSpliceAligner {
         let mut edits: Vec<PacketEdit> = Vec::new();
         for (index, packet) in packets.as_chunks::<TS_PACKET_SIZE>().0.iter().enumerate() {
             let view = TsPacket(packet);
-            self.observe(view);
+            self.programs.observe(view);
             let offset = index * TS_PACKET_SIZE;
             let pid = view.pid();
             if rewrite && self.discontinuity_seen.insert(pid) && view.adaptation_len().is_some_and(|len| len >= 1) {
@@ -390,7 +317,7 @@ impl TsSpliceAligner {
             return None;
         }
         let pid = view.pid();
-        let program = if pid == PAT_PID { None } else { Some(*self.programs.pmt_pids.get(&pid)?) };
+        let program = if pid == PAT_PID { None } else { Some(self.programs.program_of_pmt(pid)?) };
         let payload = view.payload();
         let range = single_packet_section(payload)?;
         let section = &payload[range];

@@ -91,6 +91,7 @@ const LABEL_RATE_LIMIT: &str = "LABEL.RATE_LIMIT";
 const LABEL_PERIOD_MILLIS: &str = "LABEL.PERIOD_MILLIS";
 const LABEL_BURST_SIZE: &str = "LABEL.BURST_SIZE";
 const LABEL_SHARED_BURST_BUFFER_MB: &str = "LABEL.SHARED_BURST_BUFFER_BYTES";
+const LABEL_SHARED_BURST_SECS: &str = "LABEL.SHARED_BURST_SECS";
 
 const LABEL_ADMISSION_STRATEGIES: &str = "LABEL.ADMISSION_STRATEGIES";
 
@@ -201,6 +202,7 @@ generate_form_reducer!(
         GracePeriodTimeoutSecs => grace_period_timeout_secs: u64,
         ThrottleKbps => throttle_kbps: u64,
         SharedBurstBufferMb => shared_burst_buffer_mb: u64,
+        SharedBurstSecs => shared_burst_secs: u64,
         GracePeriodHoldStream => grace_period_hold_stream: bool,
         HlsSessionTtlSecs => hls_session_ttl_secs: u64,
         CatchupSessionTtlSecs => catchup_session_ttl_secs: u64,
@@ -1382,6 +1384,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { config_field_optional!(stream_state.form, translate.t(LABEL_THROTTLE), throttle) }
                 { config_field!(stream_state.form, translate.t(LABEL_THROTTLE_KBPS), throttle_kbps) }
                 { config_field!(stream_state.form, translate.t(LABEL_SHARED_BURST_BUFFER_MB), shared_burst_buffer_mb) }
+                { config_field!(stream_state.form, translate.t(LABEL_SHARED_BURST_SECS), shared_burst_secs) }
             </Card>
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_STREAM_GRACE)}</h1>
@@ -1608,6 +1611,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { edit_field_text_option!(stream_state, translate.t(LABEL_THROTTLE), throttle, StreamConfigFormAction::Throttle) }
                 { edit_field_number_u64!(stream_state, translate.t(LABEL_THROTTLE_KBPS), throttle_kbps, StreamConfigFormAction::ThrottleKbps) }
                 { edit_field_number_u64!(stream_state, translate.t(LABEL_SHARED_BURST_BUFFER_MB), shared_burst_buffer_mb, StreamConfigFormAction::SharedBurstBufferMb) }
+                { edit_field_number_u64!(stream_state, translate.t(LABEL_SHARED_BURST_SECS), shared_burst_secs, StreamConfigFormAction::SharedBurstSecs) }
             </Card>
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_STREAM_GRACE)}</h1>
