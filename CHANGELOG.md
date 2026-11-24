@@ -228,6 +228,11 @@
 
 ## 🌟 New Features
 
+- **Recording requests default to the player's own target.** A player-token client cannot learn its target name, so
+  `source.target_id` in `POST /api/v1/recording/requests` and `source.target_name` in
+  `POST /api/v1/recording/conflicts/preview` may now be empty or omitted; the server then uses the caller's own
+  target, as the recording rule route already does. Web UI and admin callers still must send the target.
+
 - **Live responses name their stream uid.** For users with Player API access, every direct live MPEG-TS response
   carries `X-Tuliprox-Stream-Uid`, the `uid` of this connection in `GET /api/v1/me/streams`. A player on a login shared
   by several devices stops or splits exactly its own stream with `DELETE /api/v1/me/streams/{uid}` or
@@ -1766,6 +1771,14 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Generated bounded Flussonic archives follow playback providers.** Generated bounded Flussonic archive templates
+  of an M3U live entry mapped to a playback provider now use that provider (priority and failover) instead of the
+  mirror captured at import; explicit catch-up sources keep their destination.
+
+- **Playback-provider HLS keeps a single base path for alias accounts.** When a playback provider URL has a path
+  (for example `http://cdn.example.com/media`), the HLS origin URL of an alias account repeated that path
+  (`/media/media/...`). The base path is now removed from the account URL before the provider expands it again.
 
 - **Proxied Low-Latency HLS playlists no longer promise blocking reloads.** A provider playlist with
   `#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES` was passed through unchanged, but the `_HLS_msn`/`_HLS_part`

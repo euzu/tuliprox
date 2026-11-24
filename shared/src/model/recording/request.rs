@@ -79,6 +79,8 @@ impl RecordingSource {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingSourceRequest {
+    /// Empty means the caller's own target for a player token; required for other callers.
+    #[serde(default)]
     pub target_id: String,
     pub virtual_id: String,
     pub cluster: super::super::XtreamCluster,

@@ -343,6 +343,8 @@ specific provider.
 For M3U inputs, `flussonic_hls_catchup: bounded_archive` generates a `catchup-source` for live entries with
 `catchup="fs"`, no existing source, and a `/CHANNEL/mono.m3u8` URL. The generated URL uses
 `/CHANNEL/archive-{utc}-{duration}.m3u8` and preserves the scheme, host, and query string, including tokens.
+When the live entry is mapped to a playback provider and the generated template matches one of its URLs, archive
+requests use that provider with its selection policy and failover; explicit sources keep their destination.
 The live URL, explicit sources, other URL forms, and native TS entries remain unchanged. Archive requests use
 a validated start and positive duration, capped to `flussonic_hls_catchup_max_duration_secs` (four hours by default).
 Shorter requests retain their duration. The seven-day safety limit and HLS session identity use the capped range,

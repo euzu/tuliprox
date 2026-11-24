@@ -25,9 +25,9 @@ use crate::{
     },
     auth::{ApiUserAuthError, Fingerprint},
     iptv::m3u::{
-        build_provider_flussonic_archive_url, decode_m3u_catchup_token, has_m3u_catchup_marker, is_flussonic_live_file,
-        parse_flat_flussonic_archive, parse_flussonic_archive_file, resolve_m3u_catchup_url, FlussonicArchiveKind,
-        M3uCatchupToken,
+        build_provider_flussonic_archive_url, decode_m3u_catchup_token, flussonic_bounded_archive_template,
+        has_m3u_catchup_marker, is_flussonic_live_file, parse_flat_flussonic_archive, parse_flussonic_archive_file,
+        resolve_m3u_catchup_url, FlussonicArchiveKind, M3uCatchupToken,
     },
     model::{AppConfig, ConfigTarget, ProxyUserCredentials},
     repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist, storage_const, PlaylistStorageState},
@@ -814,12 +814,42 @@ fn apply_native_flussonic_archive(
     Ok((catchup_item, archive.discriminator()))
 }
 
+/// Derives the provider archive template when a generated Flussonic bounded archive matches a provider mirror URL.
+fn generated_archive_provider_template(
+    input: &crate::model::ConfigInput,
+    source_url: &str,
+    catchup: &CatchupProperties,
+) -> Option<Arc<str>> {
+    catchup.flussonic_archive_max_duration_secs?;
+    let stored_source = catchup.source.as_deref()?;
+    let profile = input.get_resolve_provider(source_url)?;
+
+    // Only the playback provider may replace a stored archive destination.
+    if input.playback_provider.as_deref() != Some(profile.name.as_ref()) {
+        return None;
+    }
+
+    let template = flussonic_bounded_archive_template(source_url)?;
+
+    // An exact byte comparison verifies that the channel name, mirror base path, and signed query parameters match.
+    (0..profile.urls.len())
+        .any(|index| {
+            tuliprox_core::model::resolve_provider_scheme_url_with_provider_index(
+                &template,
+                Some(Arc::clone(&profile)),
+                index,
+            )
+            .is_ok_and(|(_, url)| url.as_ref() == stored_source)
+        })
+        .then(|| template.into())
+}
+
 fn resolve_loaded_m3u_catchup(
     pli: &shared::model::M3uPlaylistItem,
     input: &crate::model::ConfigInput,
     raw_query: Option<&str>,
 ) -> Result<(shared::model::M3uPlaylistItem, String), TuliproxError> {
-    let Some(catchup) =
+    let Some(mut catchup) =
         resolve_m3u_catchup_properties(pli.item_type, &pli.time_shift, pli.additional_properties.as_ref())
     else {
         if pli.item_type.is_live() {
@@ -828,6 +858,9 @@ fn resolve_loaded_m3u_catchup(
         return Err(TuliproxError::RepositoryM3u("M3U catchup requested for non-live stream".to_string()));
     };
     let source_url = resolve_effective_source_url(pli, input)?;
+    if let Some(template) = generated_archive_provider_template(input, source_url.as_ref(), catchup.as_ref()) {
+        catchup.to_mut().source = Some(template);
+    }
     let Some(resolved) = resolve_m3u_catchup_url(source_url.as_ref(), catchup.as_ref(), raw_query)? else {
         return Err(TuliproxError::RepositoryM3u("M3U catchup mode cannot be proxied".to_string()));
     };
@@ -1475,7 +1508,7 @@ mod tests {
     use super::{
         apply_native_flussonic_archive, effective_playback_extension, native_archive_matches_mode,
         native_live_file_matches_mode, playlist_item_allows_flussonic_archive, playlist_item_native_flussonic_mode,
-        resolve_m3u_catchup_properties, resolved_m3u_item_is_allowed,
+        resolve_loaded_m3u_catchup, resolve_m3u_catchup_properties, resolved_m3u_item_is_allowed,
     };
     use crate::{
         api::model::UserApiRequest,
@@ -1483,6 +1516,7 @@ mod tests {
         model::{ConfigInput, ProxyUserCredentials},
     };
     use shared::{
+        error::TuliproxError,
         model::{
             CatchupProperties, ClusterFlags, LiveStreamProperties, M3uPlaylistItem, PlaylistItemType, StreamProperties,
             VirtualId,
@@ -1744,6 +1778,164 @@ mod tests {
             legacy_archive.url.as_ref(),
             "http://pl.example.com/ChannelA/mono-1784898000-60.m3u8?token=fixture%2Btoken&keep=1"
         );
+    }
+
+    fn setup_flussonic_archive_fixture() -> (crate::model::ConfigInput, i64, String) {
+        let profile = std::sync::Arc::new(crate::model::ConfigProvider::from(&shared::model::ConfigProviderDto {
+            name: "cdn".into(),
+            urls: vec!["https://a.example.com/media".into(), "https://b.example.com/media".into()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::RestartFromFirst,
+            dns: None,
+        }));
+        let input = ConfigInput {
+            playback_provider: Some("cdn".into()),
+            provider_configs: Some(vec![profile]),
+            ..ConfigInput::default()
+        };
+        let start = chrono::Utc::now().timestamp() - 86400;
+        let query = format!("v0={start}&v1=7200");
+        (input, start, query)
+    }
+
+    fn bounded_flussonic_item(
+        live_url: &str,
+        stored_source: Option<&str>,
+        max_duration_secs: Option<u32>,
+    ) -> Result<shared::model::M3uPlaylistItem, TuliproxError> {
+        let mut item = native_flussonic_item("fs", live_url);
+        let Some(StreamProperties::Live(live)) = item.additional_properties.as_mut() else {
+            return Err(TuliproxError::RepositoryM3u("missing live properties".to_string()));
+        };
+        let Some(catchup) = live.catchup.as_mut() else {
+            return Err(TuliproxError::RepositoryM3u("missing catchup properties".to_string()));
+        };
+        catchup.source = stored_source.map(Internable::intern);
+        catchup.flussonic_archive_max_duration_secs = max_duration_secs;
+        Ok(item)
+    }
+
+    #[test]
+    fn generated_archive_follows_playback_provider() -> Result<(), TuliproxError> {
+        let (mut input, start, query) = setup_flussonic_archive_fixture();
+
+        let cases = [
+            (
+                "case a: stored mirror B template",
+                true,
+                "https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+                Some(1800),
+                format!("provider://cdn/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+                1800,
+            ),
+            (
+                "case b: stored mirror A template",
+                true,
+                "https://a.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+                Some(1800),
+                format!("provider://cdn/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+                1800,
+            ),
+            (
+                "case c: marker None (explicit source)",
+                true,
+                "https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+                None,
+                format!("https://b.example.com/media/Channel_A/archive-{start}-7200.m3u8?sig=%2B%2F%3D"),
+                7200,
+            ),
+            (
+                "case d: foreign host",
+                true,
+                "https://foreign.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+                Some(1800),
+                format!("https://foreign.example.com/media/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+                1800,
+            ),
+            (
+                "case e: other channel",
+                true,
+                "https://b.example.com/media/Channel_B/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+                Some(1800),
+                format!("https://b.example.com/media/Channel_B/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+                1800,
+            ),
+            (
+                "case f: other encoding",
+                true,
+                "https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2b%2F%3D",
+                Some(1800),
+                format!("https://b.example.com/media/Channel_A/archive-{start}-1800.m3u8?sig=%2b%2F%3D"),
+                1800,
+            ),
+            (
+                "case g: other base path",
+                true,
+                "https://b.example.com/prefix/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+                Some(1800),
+                format!("https://b.example.com/prefix/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+                1800,
+            ),
+            (
+                "case h: playback_provider disabled",
+                false,
+                "https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+                Some(1800),
+                format!("https://b.example.com/media/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+                1800,
+            ),
+        ];
+
+        for (label, provider_enabled, stored_source, marker, expected_url, expected_duration) in cases {
+            input.playback_provider = provider_enabled.then(|| "cdn".into());
+            let item = bounded_flussonic_item(
+                "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+                Some(stored_source),
+                marker,
+            )?;
+            let (catchup_item, discriminator) = resolve_loaded_m3u_catchup(&item, &input, Some(&query))?;
+            assert_eq!(catchup_item.url.as_ref(), expected_url, "{label}: url mismatch");
+            assert_eq!(
+                discriminator,
+                format!("archive|{start}|{expected_duration}"),
+                "{label}: discriminator mismatch"
+            );
+        }
+
+        // Case i: invalid range
+        input.playback_provider = Some("cdn".into());
+        let item = bounded_flussonic_item(
+            "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+            Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D"),
+            Some(1800),
+        )?;
+        assert!(
+            resolve_loaded_m3u_catchup(&item, &input, Some("v0=invalid&v1=1")).is_err(),
+            "case i: invalid range must fail"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn generated_archive_template_requires_playback_provider() -> Result<(), TuliproxError> {
+        let (mut input, _, _) = setup_flussonic_archive_fixture();
+        let live_url = "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D";
+        let item = bounded_flussonic_item(
+            live_url,
+            Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D"),
+            Some(1800),
+        )?;
+        let Some(StreamProperties::Live(live)) = item.additional_properties.as_ref() else {
+            return Err(TuliproxError::RepositoryM3u("missing live properties".to_string()));
+        };
+        let Some(catchup) = live.catchup.as_ref() else {
+            return Err(TuliproxError::RepositoryM3u("missing catchup properties".to_string()));
+        };
+        let expected = "provider://cdn/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D";
+        assert_eq!(super::generated_archive_provider_template(&input, live_url, catchup).as_deref(), Some(expected));
+        input.playback_provider = Some("other".into());
+        assert_eq!(super::generated_archive_provider_template(&input, live_url, catchup), None);
+        Ok(())
     }
 
     #[tokio::test]

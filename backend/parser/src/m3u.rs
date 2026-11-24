@@ -1,3 +1,4 @@
+use crate::m3u_format::flussonic_bounded_archive_template;
 use indexmap::IndexMap;
 use regex::Regex;
 use shared::{
@@ -541,14 +542,8 @@ fn apply_flussonic_hls_catchup(
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return;
     }
-    let Some(channel_path) = url.path().strip_suffix("/mono.m3u8") else { return };
-    if channel_path.rsplit('/').next().is_none_or(str::is_empty) {
-        return;
-    }
-    // Replace only the filename so signed queries and the original live URL remain byte-for-byte intact.
-    let suffix_start = header.url.find(['?', '#']).unwrap_or(header.url.len());
-    let Some(prefix) = header.url[..suffix_start].strip_suffix("mono.m3u8") else { return };
-    catchup.source = Some(format!("{prefix}archive-{{utc}}-{{duration}}.m3u8{}", &header.url[suffix_start..]).intern());
+    let Some(template) = flussonic_bounded_archive_template(&header.url) else { return };
+    catchup.source = Some(template.intern());
     catchup.flussonic_archive_max_duration_secs = Some(options.flussonic_hls_catchup_max_duration_secs);
 }
 
