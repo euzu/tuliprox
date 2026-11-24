@@ -7,17 +7,20 @@ use crate::{
     api::model::{hls_custom_video_manifest_response_for_access_lease, AppState, CustomVideoStreamType},
     auth::Fingerprint,
 };
-use axum::{http::StatusCode, response::IntoResponse};
+use axum::{
+    http::{header, HeaderValue, StatusCode},
+    response::IntoResponse,
+};
 use log::{debug, warn};
 use std::sync::Arc;
 use tuliprox_core::utils::current_time_millis;
 use tuliprox_hls::api::{
-    commit_hls_runtime_custom_tail, safe_hls_access_lease_id, safe_proxy_session_id, safe_user_session_token,
-    HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeasePendingDeadline,
-    HlsAccessLeaseState, HlsAccessLeaseTouch, HlsAccessLeaseValidationError, HlsLeasePlaybackMode,
-    HlsResourceServeFailure, HlsResourceServeOutcome, HlsRuntimeCustomTailOutcome, HlsRuntimeCustomTailReason,
-    HlsRuntimeCustomTailRequest, HlsSessionHandle, ProxySessionId, TransientObjectUnavailableState,
-    TransientPassthroughState, TransientResourceFile,
+    cold_start_retry_after_seconds, commit_hls_runtime_custom_tail, safe_hls_access_lease_id, safe_proxy_session_id,
+    safe_user_session_token, HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLease, HlsAccessLeaseId,
+    HlsAccessLeasePendingDeadline, HlsAccessLeaseState, HlsAccessLeaseTouch, HlsAccessLeaseValidationError,
+    HlsLeasePlaybackMode, HlsResourceServeFailure, HlsResourceServeOutcome, HlsRuntimeCustomTailOutcome,
+    HlsRuntimeCustomTailReason, HlsRuntimeCustomTailRequest, HlsSessionHandle, ProxySessionId,
+    TransientObjectUnavailableState, TransientPassthroughState, TransientResourceFile,
 };
 
 pub(in crate::api::endpoints::hls_api) async fn hls_custom_video_manifest_response_for_username(
@@ -187,13 +190,31 @@ pub(in crate::api::endpoints::hls_api) async fn hls_unpublished_lease_channel_un
         }
     }
     if let Some(lease) = lease.filter(|lease| lease.permits_unpublished_standalone_tail(reason)) {
-        return hls_custom_video_manifest_response_for_lease(
+        let attempt_failed = lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed());
+        let fallback_status = if attempt_failed {
+            crate::api::model::get_custom_stream_response_error_status(&app_state.app_config)
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        let mut response = hls_custom_video_manifest_response_for_lease(
             app_state,
             &lease,
             CustomVideoStreamType::ChannelUnavailable,
-            StatusCode::NOT_FOUND,
+            fallback_status,
         )
         .await;
+        // Only the cold-start status is a retry hint. A 503 produced while a custom video is configured
+        // comes from a configuration gap (no server info), which a retry cannot resolve.
+        if !attempt_failed
+            && response.status() == StatusCode::SERVICE_UNAVAILABLE
+            && !crate::api::model::hls_custom_video_type_configured(
+                app_state,
+                CustomVideoStreamType::ChannelUnavailable,
+            )
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(cold_start_retry_after_seconds()));
+        }
+        return response;
     }
     StatusCode::SERVICE_UNAVAILABLE.into_response()
 }

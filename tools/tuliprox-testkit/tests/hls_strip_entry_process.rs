@@ -282,7 +282,9 @@ async fn warm_window(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     loop {
         let response = player.get(url.clone()).send().await?;
-        if response.status() == StatusCode::NOT_FOUND && observations.is_empty() {
+        // A cold canonical start answers 503 with Retry-After until the first window is published.
+        if response.status() == StatusCode::SERVICE_UNAVAILABLE && observations.is_empty() {
+            assert!(response.headers().contains_key(reqwest::header::RETRY_AFTER), "cold start retry hint");
             assert!(tokio::time::Instant::now() < deadline, "cold manifest must become ready");
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;

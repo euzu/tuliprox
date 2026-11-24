@@ -1,7 +1,7 @@
 use super::{
     create_active_hls_user_session, manifest_media_sequence, path_has_extension, prepare_pending_test_hls_access_lease,
     response_body, spawn_test_binary_origin, test_app_state_with_inputs, test_fingerprint, test_hls_access_context,
-    TestBinaryOriginResponse, TestSegmentOrigin,
+    test_hls_cache_dto, TestBinaryOriginResponse, TestSegmentOrigin,
 };
 use crate::{
     api::model::{build_proxy_session_id, AppState, HlsAccessLeaseId, HlsAccessLeaseState, HlsSessionKey},
@@ -47,10 +47,10 @@ async fn spawn_moving_origin(head: Arc<AtomicU64>) -> TestSegmentOrigin {
 /// `default_hls_cache_path()`. Switching to it makes every test scan everything other runs left there when the first
 /// segment is written, which exceeds the segment body deadline on a loaded machine and fails the first fetch attempt.
 pub(super) async fn enable_hls_cache_with_startup_mode(app_state: &Arc<AppState>, mode: HlsStartupMode) {
-    let hls_cache = app_state.hls.proxy.keep_cache_path(HlsCacheConfigDto {
+    let hls_cache = HlsCacheConfigDto {
         startup: HlsStartupConfigDto { mode, ..HlsStartupConfigDto::default() },
-        ..HlsCacheConfigDto::default()
-    });
+        ..test_hls_cache_dto(app_state)
+    };
     let config = Config {
         reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
             hls_cache: Some(hls_cache),

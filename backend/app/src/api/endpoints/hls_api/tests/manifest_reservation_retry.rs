@@ -464,7 +464,7 @@ async fn failed_start_before_and_after_publication_have_identical_fallback() {
                 };
                 assert_eq!(
                     response.status(),
-                    if video { StatusCode::OK } else { StatusCode::NOT_FOUND },
+                    if video { StatusCode::OK } else { StatusCode::BAD_GATEWAY },
                     "{mode:?} video={video} fail_before={fail_before}"
                 );
             }

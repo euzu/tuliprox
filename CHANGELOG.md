@@ -1761,6 +1761,12 @@
 
 ## 🐛 Fixes
 
+- **HLS start fallback answers 503/502 instead of 404.** When a canonical HLS start fell back to channel-unavailable
+  without a usable custom video, tuliprox answered HTTP `404 Not Found`, so players treated a channel that was still
+  starting or had failed to start as missing. A start that is still open now answers `503 Service Unavailable` with
+  `Retry-After: 2`. A failed or exhausted start answers `custom_stream_response_error_status` (default `502`). A
+  configured `channel_unavailable` custom video still plays as before.
+
 - **Network rules of playlist users apply to the Player API.** `network_access` (allowed networks and countries) was
   checked on playlist, stream, HLS, and HDHomeRun routes, but not on token sign-in, refresh, or requests with the
   token. A client outside the allowed networks could sign in and use `/api/v1/me`, the event WebSocket, recordings,

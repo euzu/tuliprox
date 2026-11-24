@@ -145,12 +145,12 @@ async fn exhausted_startup_returns_configured_fallback_immediately_and_keeps_act
 }
 
 #[tokio::test]
-async fn exhausted_startup_with_enabled_custom_response_without_asset_keeps_hls_not_found_fallback() {
+async fn exhausted_startup_with_enabled_custom_response_without_asset_answers_configured_error_status() {
     let (_directory, app, session) = fixture(HlsStartupMode::Optimistic, &[0, 1, 2, 3, 4, 5]).await;
     let proxy = session.read().await.proxy_session_id.clone();
     let id = HlsAccessLeaseId("missing-custom-asset".into());
     super::super::prepare_pending_test_hls_access_lease(&app, &proxy, &id).await;
-    configure_custom_response(&app, true, StatusCode::SERVICE_UNAVAILABLE);
+    configure_custom_response(&app, true, StatusCode::GATEWAY_TIMEOUT);
     app.app_config.custom_stream_response.store(None);
     let mut lease = app.hls.proxy.access_lease_response_snapshot(&id, &proxy, current_time_millis()).await.unwrap();
     let attempt = Arc::new(tuliprox_hls::HlsManifestAttemptContext::new(
@@ -163,7 +163,7 @@ async fn exhausted_startup_with_enabled_custom_response_without_asset_keeps_hls_
     for state in [HlsAccessLeaseState::Pending, HlsAccessLeaseState::Idle] {
         lease.state = state;
         let response = super::super::super::hls_exhausted_startup_response(&app, &session, &lease).await.unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     }
 }
 

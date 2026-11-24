@@ -108,7 +108,11 @@ async fn live_window_timeout_preserves_unpublished_fallback_and_existing_lease_r
                         let fallback =
                             super::super::hls_unpublished_lease_channel_unavailable_response(&app, &proxy_id, &id)
                                 .await;
-                        assert_eq!(fallback.status(), StatusCode::NOT_FOUND);
+                        assert_eq!(fallback.status(), StatusCode::SERVICE_UNAVAILABLE);
+                        assert_eq!(
+                            fallback.headers().get(axum::http::header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
+                            Some(tuliprox_hls::api::cold_start_retry_after_seconds().to_string().as_str())
+                        );
                         super::enable_channel_unavailable_custom_response(&app);
                     } else {
                         let response = response.expect("existing leases keep the temporary failure response");

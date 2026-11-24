@@ -560,7 +560,7 @@ async fn pending_and_idle_provisioning_stay_retryable_until_the_job_finishes() {
         enable_hls_cache_with_startup_mode(&app, HlsStartupMode::Conservative).await;
         create_active_hls_user_session(&app).await;
         super::store_test_sources_with_target(&app, input.clone(), super::test_hls_share_target(true));
-        let mut cache = app.hls.proxy.keep_cache_path(shared::model::HlsCacheConfigDto::default());
+        let mut cache = super::test_hls_cache_dto(&app);
         cache.strip.value = 0;
         let config = app.app_config.config.load();
         app.app_config.config.store(Arc::new(crate::model::Config {

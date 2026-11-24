@@ -7,7 +7,7 @@ use super::{
     HlsMaterializedSharedManifest, HLS_MANIFEST_WAIT_POLL_INTERVAL, HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS,
 };
 use crate::{
-    api::model::{get_custom_stream_response_error_status, is_custom_video_stream_enabled, AppState},
+    api::model::{get_custom_stream_response_error_status, AppState},
     model::ConfigInput,
     processing::parser::hls::origin_manifest::HlsManifestWindowPolicy,
     repository::{persist_input_live_bitrate_bps, LiveBitratePersistenceOutcome},
@@ -103,11 +103,9 @@ pub(in crate::api::endpoints::hls_api) async fn hls_exhausted_startup_response(
     if !exhausted {
         return None;
     }
-    let fallback_status = if is_custom_video_stream_enabled(&app_state.app_config) {
-        axum::http::StatusCode::NOT_FOUND
-    } else {
-        get_custom_stream_response_error_status(&app_state.app_config)
-    };
+    // An exhausted start is a failed start: without a usable custom video it answers the
+    // configured error status like every other failed start.
+    let fallback_status = get_custom_stream_response_error_status(&app_state.app_config);
     Some(
         super::hls_custom_video_manifest_response_for_lease(app_state, lease, reason.video_type(), fallback_status)
             .await,

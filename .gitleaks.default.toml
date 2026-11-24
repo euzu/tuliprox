@@ -76,6 +76,10 @@ regexes = [
     '''^AABBCCDDEEFF00112233445566778899$''',
     # Published test fixture checksum
     '''^b481b7b85f79883b41f8a1436301257ee5cb5a45e30993233ec73a2a5824ff13$''',
+    # Synthetic web authentication test keys and a documented idempotency key in earlier history
+    '''^test_secret_at_least_32_characters_long_for_hs256$''',
+    '''^test_secret_01234567890123456789$''',
+    '''^7f4c1c2a-record-morning-match$''',
 ]
 
 [[allowlists]]
