@@ -1761,6 +1761,12 @@
 
 ## 🐛 Fixes
 
+- **HLS start keeps its provider binding between segment retries.** When the first segment of a new HLS start failed
+  and waited for its retry backoff, the start window and the 3T protection could both expire while no origin request
+  was active. tuliprox then released the account binding, and the waiting player got an error instead of the
+  manifest that the retry published. While the start has not delivered media and still has render-window work queued
+  or in flight, the binding now stays.
+
 - **HLS start fallback answers 503/502 instead of 404.** When a canonical HLS start fell back to channel-unavailable
   without a usable custom video, tuliprox answered HTTP `404 Not Found`, so players treated a channel that was still
   starting or had failed to start as missing. A start that is still open now answers `503 Service Unavailable` with

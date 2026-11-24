@@ -226,7 +226,14 @@ async fn provider_hls_diagnostics_follow_the_global_sanitization_setting() -> Re
                 ProviderCase::Status => assert!(logs.contains("exhausted all") && logs.contains("status 503")),
                 ProviderCase::Connection => assert!(logs.contains("connection error while trying")),
                 ProviderCase::Timeout => {
-                    assert!(logs.contains("idle timeout while trying") || logs.contains("Request timed out"));
+                    // The idle timer and the HTTP client timeout race; the client timeout reports
+                    // a send error. Both classify the manifest failure as a timeout.
+                    assert!(logs.contains("result=failed error=timeout"));
+                    assert!(
+                        logs.contains("idle timeout while trying")
+                            || logs.contains("Request timed out")
+                            || logs.contains("connection error while trying")
+                    );
                 }
                 ProviderCase::Redirect => assert!(
                     hls_requests.iter().any(|request| request.contains("opaque-target"))

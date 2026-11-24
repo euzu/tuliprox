@@ -966,6 +966,7 @@ pub(super) async fn detach_unprotected_hls_origin_account_bindings(app_state: &A
             if !starting_window_expired
                 || !media_window_expired
                 || session_guard.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) > 0
+                || (!delivered_on_binding && session_guard.initial_manifest_commit_work_pending())
             {
                 continue;
             }

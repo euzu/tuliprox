@@ -506,8 +506,22 @@ async fn verify_recovery(
         let deadline = Instant::now() + Duration::from_secs(5);
         let recovered = loop {
             let response = player.get(variant.clone()).send().await?;
-            assert_eq!(response.status(), StatusCode::OK, "the original lease must recover");
             assert_eq!(response.url(), variant, "recovery must preserve the session and access-lease URL");
+            // A refresh that commits while a poll publishes supersedes that poll's plan.
+            // The poll fails closed and retryable; the next poll plans from the new commit.
+            if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+                assert!(
+                    response.headers().contains_key(reqwest::header::RETRY_AFTER),
+                    "superseded poll must be retryable"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "new media must become reachable before the existing recovery deadline"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            assert_eq!(response.status(), StatusCode::OK, "the original lease must recover");
             let body = response.text().await?;
             if body.lines().any(|line| line.contains("000006.ts")) {
                 break body;
