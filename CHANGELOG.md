@@ -1767,6 +1767,12 @@
 
 ## 🐛 Fixes
 
+- **Proxied Low-Latency HLS playlists no longer promise blocking reloads.** A provider playlist with
+  `#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES` was passed through unchanged, but the `_HLS_msn`/`_HLS_part`
+  directives of the player never reached the provider, so a blocking reload returned at once without the requested
+  part. Proxied playlists (regular and shared HLS cache) are now served as regular HLS: part, preload-hint,
+  rendition-report, part-inf and skip tags are removed and `#EXT-X-SERVER-CONTROL` keeps only `HOLD-BACK`.
+
 - **New viewers of a shared live stream start close to live.** A viewer joining a shared MPEG-TS stream received the
   whole burst buffer from its oldest byte and played 20-30 s behind live (12 MB at HD bitrate). The viewer now starts
   at the newest keyframe that arrived at least `reverse_proxy.stream.shared_burst_secs` (default `3`) seconds ago,

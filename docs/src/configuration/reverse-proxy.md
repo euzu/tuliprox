@@ -705,6 +705,14 @@ and provider account regardless of the client IP:
 
 With the shared HLS cache on, the playback owner does not contain the client IP, and this setting has no effect.
 
+#### Low-Latency HLS
+
+Tuliprox serves proxied live HLS as regular HLS. It does not forward the blocking playlist reload directives
+(`_HLS_msn`, `_HLS_part`, `_HLS_skip`) to the provider, so it removes the Low-Latency HLS signalling from every
+proxied playlist: `#EXT-X-PART`, `#EXT-X-PART-INF`, `#EXT-X-PRELOAD-HINT`, `#EXT-X-RENDITION-REPORT` and
+`#EXT-X-SKIP` are dropped, and `#EXT-X-SERVER-CONTROL` keeps only `HOLD-BACK`. Players then poll the playlist and
+load full segments, with the latency of regular HLS.
+
 ---
 
 ### Archive Proxy Behavior & Live Playback Invariant

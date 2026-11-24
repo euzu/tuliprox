@@ -460,6 +460,30 @@ fn rewrite_resource_uri(
     build_hls_resource_uri(props.base_url, user, props.target_id, props.input_id, props.virtual_id, &token)
 }
 
+/// Removes Low-Latency HLS signalling from a playlist tag line. The proxy does not forward
+/// blocking playlist reload directives (`_HLS_msn`, `_HLS_part`, `_HLS_skip`) to the origin, and a
+/// server that offers partial segments must support blocking reload, so proxied playlists are
+/// served as regular HLS: part, preload-hint, rendition-report, part-inf and skip tags are dropped
+/// and `#EXT-X-SERVER-CONTROL` keeps only `HOLD-BACK`. Returns `None` when the line is dropped.
+pub fn strip_low_latency_hls_tag(line: &str) -> Option<Cow<'_, str>> {
+    const DROPPED_TAGS: [&str; 5] =
+        ["#EXT-X-PART:", "#EXT-X-PART-INF:", "#EXT-X-PRELOAD-HINT:", "#EXT-X-RENDITION-REPORT:", "#EXT-X-SKIP:"];
+    const SERVER_CONTROL: &str = "#EXT-X-SERVER-CONTROL:";
+    let trimmed = line.trim();
+    if DROPPED_TAGS.iter().any(|tag| trimmed.starts_with(tag)) {
+        return None;
+    }
+    let Some(attributes) = trimmed.strip_prefix(SERVER_CONTROL) else {
+        return Some(Cow::Borrowed(line));
+    };
+    let kept = attributes
+        .split(',')
+        .map(str::trim)
+        .filter(|attribute| attribute.split_once('=').is_some_and(|(name, _)| name.trim() == "HOLD-BACK"))
+        .collect::<Vec<_>>();
+    (!kept.is_empty()).then(|| Cow::Owned(concat_string!(SERVER_CONTROL, &kept.join(","))))
+}
+
 pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> String {
     let content = normalize_hls_playlist(props.content);
     let playlist_kind = props.playlist_kind.unwrap_or_else(|| classify_hls_playlist(content));
@@ -485,6 +509,10 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
 
         // skip comments
         if line.starts_with('#') {
+            let Some(line) = strip_low_latency_hls_tag(line) else {
+                continue;
+            };
+            let line = line.as_ref();
             if let Some(rebase) = rebase {
                 if line.starts_with("#EXT-X-MEDIA-SEQUENCE:") {
                     result.push(format!("#EXT-X-MEDIA-SEQUENCE:{}", rebase.media_sequence));
@@ -1105,16 +1133,39 @@ mod test {
         let content = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n\
             #EXT-X-MAP:URI=\"init-1.hls.mp4\"\n\
             #EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n\
-            #EXT-X-PART:DURATION=1,URI=\"part1.m4s\"\n\
-            #EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part2.m4s\"\n\
             #EXTINF:6,\nseg-1.m4s";
         let rewritten = rewrite_hls(&user, &rewrite_props(content, Some("s")));
-        for prefix in ["#EXT-X-MAP", "#EXT-X-KEY", "#EXT-X-PART", "#EXT-X-PRELOAD-HINT"] {
+        for prefix in ["#EXT-X-MAP", "#EXT-X-KEY"] {
             let line = rewritten.lines().find(|line| line.starts_with(prefix)).expect(prefix);
             assert_eq!(token_of_uri(uri_attribute(line)).kind, Some(HlsResourceKind::Media), "{prefix}");
         }
         let segment = rewritten.lines().find(|line| line.starts_with("http://proxy/hls/")).expect("segment");
         assert_eq!(token_of_uri(segment).kind, Some(HlsResourceKind::Media));
+    }
+
+    #[test]
+    fn rewrite_hls_serves_low_latency_playlist_as_regular_hls() {
+        let content = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n\
+            #EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=0.75,HOLD-BACK=6,CAN-SKIP-UNTIL=12\n\
+            #EXT-X-PART-INF:PART-TARGET=0.25\n\
+            #EXT-X-SKIP:SKIPPED-SEGMENTS=3\n\
+            #EXT-X-PART:DURATION=0.25,URI=\"part1.m4s\",INDEPENDENT=YES\n\
+            #EXTINF:2,\nseg-1.m4s\n\
+            #EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part2.m4s\"\n\
+            #EXT-X-RENDITION-REPORT:URI=\"other.m3u8\",LAST-MSN=1,LAST-PART=0";
+        let rewritten = rewrite_hls(&test_user(), &rewrite_props(content, Some("s")));
+        let tags = rewritten.lines().filter(|line| line.starts_with('#')).collect::<Vec<_>>();
+        assert_eq!(tags, ["#EXTM3U", "#EXT-X-TARGETDURATION:2", "#EXT-X-SERVER-CONTROL:HOLD-BACK=6", "#EXTINF:2,"]);
+        assert_eq!(rewritten.lines().filter(|line| line.starts_with("http://proxy/hls/")).count(), 1);
+    }
+
+    #[test]
+    fn strip_low_latency_hls_tag_drops_server_control_without_hold_back() {
+        assert_eq!(
+            super::strip_low_latency_hls_tag("#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1"),
+            None
+        );
+        assert_eq!(super::strip_low_latency_hls_tag("#EXTINF:2,").as_deref(), Some("#EXTINF:2,"));
     }
 
     #[test]
