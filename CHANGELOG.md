@@ -1780,6 +1780,13 @@
 
 ## 🐛 Fixes
 
+- **Recording database from earlier releases opens again.** The Xtream VOD ids for recordings added two fields in
+  the middle of the stored recording library entry. The recording database stores fields by position, so tuliprox
+  read the state of every existing entry as one of the new fields and refused to start with
+  `failed to open the recording repository: invalid type: string "Completed", expected a boolean`. The new fields
+  are now stored at the end, and optional fields are always written. Entries written by releases before 3.3.206 and
+  by 3.3.206 to 3.3.209 both load unchanged; every entry is written in the new layout on its next change.
+
 - **Generated bounded Flussonic archives follow playback providers.** Generated bounded Flussonic archive templates
   of an M3U live entry mapped to a playback provider now use that provider (priority and failover) instead of the
   mirror captured at import; explicit catch-up sources keep their destination.
