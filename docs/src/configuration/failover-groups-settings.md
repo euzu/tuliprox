@@ -258,6 +258,13 @@ does not notice more than a short freeze. This works for MPEG-TS streams (direct
 where the playlist continues with a discontinuity (see
 [HLS behavior](failover-groups.md#hls-behavior)). Changes apply to the next stream start.
 
+For MPEG-TS, Tuliprox holds the new member (and the first member at stream start) until the provider's start-up burst
+is over and splices it in so that the player is again about `reverse_proxy.stream.shared_burst_secs` (default `3`)
+seconds behind live, counting the media the player still has buffered from the previous member. The delay behind live
+therefore does not grow with each switch. The hold lasts at most 4 seconds, or half of `no_data_timeout_secs` when that
+is shorter. With `shared_burst_secs: 0` the new member starts at its first keyframe and passes its whole start-up burst on
+(see [Start-up burst of the provider](reverse-proxy.md#start-up-burst-of-the-provider)).
+
 ### `failover.enabled`
 
 Turns the switch while watching on or off. With `false` a group still starts on the best member, but the stream ends

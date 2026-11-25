@@ -1,8 +1,5 @@
-use super::program_map::{ProgramMap, PAT_PID};
-use crate::packet::{
-    es_has_keyframe, is_idr_start, pes_elementary_data, ts_sync_offset, TsPacket, KEYFRAME_SCAN_BYTES, TS_PACKET_SIZE,
-    TS_SYNC_BYTE,
-};
+use super::rap_detector::RapDetector;
+use crate::packet::{ts_sync_offset, TsPacket, TS_PACKET_SIZE, TS_SYNC_BYTE};
 
 /// Scans a live MPEG-TS byte stream chunk by chunk for random access points.
 ///
@@ -14,13 +11,7 @@ pub struct TsRandomAccessScanner {
     carry_len: usize,
     carry_start: u64,
     synced: bool,
-    programs: ProgramMap,
-    last_pat: Option<u64>,
-    pmt_after_last_pat: bool,
-    pes_open: bool,
-    /// PAT position that opened the random access point the open PES may complete.
-    pes_pat: Option<u64>,
-    pes_scratch: Vec<u8>,
+    detector: RapDetector,
 }
 
 impl Default for TsRandomAccessScanner {
@@ -36,12 +27,7 @@ impl TsRandomAccessScanner {
             carry_len: 0,
             carry_start: 0,
             synced: false,
-            programs: ProgramMap::new(),
-            last_pat: None,
-            pmt_after_last_pat: false,
-            pes_open: false,
-            pes_pat: None,
-            pes_scratch: Vec::with_capacity(KEYFRAME_SCAN_BYTES),
+            detector: RapDetector::new(),
         }
     }
 
@@ -107,7 +93,9 @@ impl TsRandomAccessScanner {
             let packet = self.carry;
             let packet_pos = self.carry_start;
             self.carry_len = 0;
-            self.inspect_packet(TsPacket(&packet), packet_pos, newest_rap);
+            if let Some(pos) = self.detector.observe_packet(TsPacket(&packet), packet_pos) {
+                *newest_rap = Some(pos);
+            }
             return;
         }
 
@@ -120,7 +108,9 @@ impl TsRandomAccessScanner {
             }
             let packet_pos = chunk_start.saturating_add(u64::try_from(*chunk_offset).unwrap_or(0));
             *chunk_offset += TS_PACKET_SIZE;
-            self.inspect_packet(TsPacket(packet_bytes), packet_pos, newest_rap);
+            if let Some(pos) = self.detector.observe_packet(TsPacket(packet_bytes), packet_pos) {
+                *newest_rap = Some(pos);
+            }
         } else {
             if chunk[*chunk_offset] != TS_SYNC_BYTE {
                 self.drop_sync();
@@ -164,87 +154,6 @@ impl TsRandomAccessScanner {
         // Lost sync invalidates any carried partial packet.
         self.carry_len = 0;
         self.carry_start = 0;
-        self.programs.reset();
-        self.last_pat = None;
-        self.pmt_after_last_pat = false;
-        self.close_open_pes();
-    }
-
-    fn inspect_packet(&mut self, view: TsPacket<'_>, packet_pos: u64, newest_rap: &mut Option<u64>) {
-        let pid = view.pid();
-        let pusi = view.payload_unit_start();
-
-        // A repeated PAT inside an open video PES leaves it open: its keyframe still belongs to
-        // the PAT captured when the PES started.
-        if pid == PAT_PID && pusi {
-            self.last_pat = Some(packet_pos);
-            self.pmt_after_last_pat = false;
-        }
-
-        let selected_video = self.programs.video();
-        let was_pmt = self.programs.observe(view);
-        // An open PES belongs to the selected video stream; a new selection invalidates it.
-        if self.programs.video() != selected_video {
-            self.close_open_pes();
-        }
-        if was_pmt && self.last_pat.is_some() {
-            self.pmt_after_last_pat = true;
-            if self.programs.video().is_none() {
-                *newest_rap = self.last_pat;
-                self.pmt_after_last_pat = false;
-                self.close_open_pes();
-                return;
-            }
-        }
-
-        let Some((video_pid, stream_type)) = self.programs.video() else {
-            return;
-        };
-
-        if pid != video_pid {
-            return;
-        }
-
-        if !pusi {
-            if self.pes_open {
-                self.continue_open_pes(view, stream_type, newest_rap);
-            }
-            return;
-        }
-
-        // A new video PES replaces any open one.
-        self.close_open_pes();
-        if !self.pmt_after_last_pat {
-            return;
-        }
-        if view.random_access() || is_idr_start(stream_type, view.payload()) {
-            *newest_rap = self.last_pat;
-            self.pmt_after_last_pat = false;
-        } else if let Some(data) = pes_elementary_data(view.payload()) {
-            self.pes_open = true;
-            self.pes_pat = self.last_pat;
-            self.pes_scratch.extend_from_slice(&data[..data.len().min(KEYFRAME_SCAN_BYTES)]);
-        }
-    }
-
-    fn continue_open_pes(&mut self, view: TsPacket<'_>, stream_type: u8, newest_rap: &mut Option<u64>) {
-        let room = KEYFRAME_SCAN_BYTES.saturating_sub(self.pes_scratch.len());
-        let payload = view.payload();
-        self.pes_scratch.extend_from_slice(&payload[..payload.len().min(room)]);
-        if es_has_keyframe(stream_type, &self.pes_scratch) {
-            *newest_rap = self.pes_pat;
-            if self.pes_pat == self.last_pat {
-                self.pmt_after_last_pat = false;
-            }
-            self.close_open_pes();
-        } else if self.pes_scratch.len() >= KEYFRAME_SCAN_BYTES {
-            self.close_open_pes();
-        }
-    }
-
-    fn close_open_pes(&mut self) {
-        self.pes_open = false;
-        self.pes_pat = None;
-        self.pes_scratch.clear();
+        self.detector.reset();
     }
 }

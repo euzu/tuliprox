@@ -1159,6 +1159,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         } else {
             false
         };
+        let has_group_runtime = group_runtime.is_some();
         let has_provider_stream = stream_details.stream.is_some() && stream_details.custom_reason.is_none();
         let group_driver = group_runtime.filter(|_| has_provider_stream).map(|(group, index, playback)| {
             GroupFailoverDriver::new(
@@ -1193,6 +1194,16 @@ pub(crate) async fn stream_response_with_provider_handle(
             }
             driver => driver,
         };
+        let has_custom_video = stream_details_has_custom_video(&stream_details);
+        let config = app_state.app_config.config.load();
+        let burst_secs = config.shared_burst_secs();
+
+        if should_apply_live_edge_trim(item_type, has_custom_video, has_group_runtime, burst_secs) {
+            if let Some(stream) = stream_details.stream.take() {
+                stream_details.stream =
+                    Some(crate::api::model::LiveEdgeTrimStream::new(stream, Duration::from_secs(burst_secs)).boxed());
+            }
+        }
         let open_failure = open_failure_class(&stream_details);
         let outcome = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
@@ -1465,5 +1476,53 @@ pub(crate) async fn release_reservation_and_exhausted_response(
             CustomVideoStreamType::UserConnectionsExhausted,
         )
         .into_response()
+    }
+}
+
+/// Determines whether stream details indicate a custom video substitution.
+pub(crate) fn stream_details_has_custom_video(details: &crate::api::model::StreamDetails) -> bool {
+    details.custom_reason.is_some() || details.stream_info.as_ref().is_some_and(|(_, _, _, cv)| cv.is_some())
+}
+
+/// Determines whether a stream qualifies for live edge startup trimming.
+///
+/// Trimming applies only to raw live streams (not adaptive HLS/DASH, VOD, series or catch-up),
+/// without custom video substitution, without a failover group runtime (group streams are trimmed
+/// by the splice aligner instead), and with a non-zero burst target.
+pub(crate) fn should_apply_live_edge_trim(
+    item_type: PlaylistItemType,
+    has_custom_video: bool,
+    has_group_runtime: bool,
+    shared_burst_secs: u64,
+) -> bool {
+    item_type == PlaylistItemType::Live && !has_custom_video && !has_group_runtime && shared_burst_secs > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::PlaylistItemType;
+
+    #[test]
+    fn test_should_apply_live_edge_trim_matrix() {
+        // Base accepting case: Live, no custom video, no group runtime, burst > 0
+        assert!(should_apply_live_edge_trim(PlaylistItemType::Live, false, false, 3));
+
+        // Isolate item_type: non-Live variants must reject
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::LiveHls, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::LiveDash, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::LiveUnknown, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Video, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Series, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Catchup, false, false, 3));
+
+        // Isolate custom video: must reject
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, true, false, 3));
+
+        // Isolate group runtime: must reject (group streams trimmed by splice aligner)
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, false, true, 3));
+
+        // Isolate burst_secs == 0: must reject
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, false, false, 0));
     }
 }

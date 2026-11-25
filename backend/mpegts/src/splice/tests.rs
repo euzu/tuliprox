@@ -22,7 +22,9 @@ fn section_version(packet: &[u8]) -> u8 {
 
 fn discontinuity(packet: &[u8]) -> bool { packet[3] & 0x20 != 0 && packet[4] >= 1 && packet[5] & 0x80 != 0 }
 
-fn aligner() -> TsSpliceAligner { TsSpliceAligner::new(1024 * 1024, Duration::from_secs(5)) }
+fn aligner() -> TsSpliceAligner {
+    TsSpliceAligner::new(1024 * 1024, Duration::from_secs(5), Duration::from_secs(5), Duration::ZERO)
+}
 
 /// An aligner that already streamed a first member with PAT/PMT `version` and is switching.
 fn switched_aligner(version: u8, now: Instant) -> TsSpliceAligner {
@@ -156,7 +158,8 @@ fn audio_only_member_starts_at_pmt() {
 #[test]
 fn falls_back_after_byte_budget_from_first_pat() {
     let now = Instant::now();
-    let mut aligner = TsSpliceAligner::new(5 * TS_PACKET_SIZE, Duration::from_secs(5));
+    let mut aligner =
+        TsSpliceAligner::new(5 * TS_PACKET_SIZE, Duration::from_secs(5), Duration::from_secs(5), Duration::ZERO);
     emitted(aligner.push(join(&[pat(0), video_pmt(0)]), now));
     aligner.begin_member(now);
     let input = [video_cont(false), pat(0), video_pmt(0), video_cont(false), video_cont(false), video_cont(false)];
@@ -288,4 +291,364 @@ fn psi_rewrite_of_unique_chunk_does_not_copy() {
     assert_eq!(out.as_ptr(), input_ptr, "the versions are rewritten in place");
     let out = packets(&out);
     assert_eq!((section_version(out[0]), section_version(out[1])), (1, 1));
+}
+
+const FRAME_TICKS: u64 = 1_080_000; // 40 ms at 27 MHz
+const FRAMES_PER_GOP: u64 = 25; // 1 second per GOP
+
+fn make_pcr_gop(gop_idx: u64, pat_version: u8, pcr_start_ticks: u64) -> Vec<Vec<u8>> {
+    let mut gop = Vec::with_capacity(27);
+    gop.push(pat(pat_version));
+    gop.push(video_pmt(0));
+    let gop_base_pcr = pcr_start_ticks.wrapping_add(gop_idx * FRAMES_PER_GOP * FRAME_TICKS);
+    gop.push(pes_with_pcr(VIDEO_PID, true, gop_base_pcr, &[&h264(5)]));
+    for frame in 1..FRAMES_PER_GOP {
+        let frame_pcr = gop_base_pcr.wrapping_add(frame * FRAME_TICKS);
+        gop.push(pes_with_pcr(VIDEO_PID, false, frame_pcr, &[&h264(1)]));
+    }
+    gop
+}
+
+#[test]
+fn switched_member_with_target_trims_burst_and_continues_psi_versions() {
+    let target = Duration::from_secs(3);
+    let mut aligner = TsSpliceAligner::new(10 * 1024 * 1024, Duration::from_secs(10), Duration::from_secs(10), target);
+
+    let base = Instant::now();
+    let m1_gop0 = make_pcr_gop(0, 0, 0);
+    assert!(matches!(aligner.push(join(&m1_gop0), base), SpliceOutput::Hold));
+    let m1_gop1 = make_pcr_gop(1, 0, 0);
+    let out1 = aligner.push(join(&m1_gop1), base + Duration::from_millis(1050));
+    assert!(!aligner.is_aligning());
+    let _ = emitted(out1);
+
+    let switch_time = base + Duration::from_millis(1050) + Duration::from_secs(5);
+    aligner.begin_member(switch_time);
+    assert!(aligner.is_aligning());
+
+    let gops: Vec<Vec<Vec<u8>>> = (0..20).map(|i| make_pcr_gop(i, 0, 0)).collect();
+    for (i, gop) in gops.iter().enumerate() {
+        let now = switch_time + Duration::from_millis(50 * i as u64);
+        let output = aligner.push(join(gop), now);
+        assert!(matches!(output, SpliceOutput::Hold), "member 2 held during burst at GOP {i}");
+    }
+
+    let gop20 = make_pcr_gop(20, 0, 0);
+    let now = switch_time + Duration::from_millis(2050);
+    let output = aligner.push(join(&gop20), now);
+    assert!(!aligner.is_aligning(), "settled and emitted");
+
+    let out = emitted(output);
+    let out_packets = packets(&out);
+
+    // Newest PCR is in GOP 20 (about 20.96 s); the start is the newest RAP at least 3 s behind: GOP 18.
+    assert_eq!(out_packets.len(), 3 * 27, "member 2 starts at GOP 18 and emits GOPs 18 to 20");
+    assert_eq!(pid_of(out_packets[0]), 0, "first emitted packet is PAT");
+    assert_eq!(pid_of(out_packets[1]), PMT_PID, "second packet is PMT");
+    assert_eq!(pid_of(out_packets[2]), VIDEO_PID, "third packet is keyframe");
+
+    assert_eq!(section_version(out_packets[0]), 1, "PAT version continues after member 1's version 0");
+    assert_eq!(section_version(out_packets[1]), 1, "PMT version continues after member 1's version 0");
+
+    assert!(discontinuity(out_packets[2]), "first video packet has discontinuity flag set");
+}
+
+#[test]
+fn first_member_with_target_trims_burst_without_rewriting_psi() {
+    let target = Duration::from_secs(3);
+    let mut aligner = TsSpliceAligner::new(10 * 1024 * 1024, Duration::from_secs(10), Duration::from_secs(10), target);
+    assert!(aligner.is_aligning(), "first member starts aligning when target > 0");
+
+    let base = Instant::now();
+    let gops: Vec<Vec<Vec<u8>>> = (0..20).map(|i| make_pcr_gop(i, 7, 0)).collect();
+    for (i, gop) in gops.iter().enumerate() {
+        let now = base + Duration::from_millis(50 * i as u64);
+        let output = aligner.push(join(gop), now);
+        assert!(matches!(output, SpliceOutput::Hold), "first member held during burst at GOP {i}");
+    }
+
+    let gop20 = make_pcr_gop(20, 7, 0);
+    let now = base + Duration::from_millis(2050);
+    let output = aligner.push(join(&gop20), now);
+    assert!(!aligner.is_aligning(), "settled and emitted");
+
+    let out = emitted(output);
+    let out_packets = packets(&out);
+
+    assert_eq!(out_packets.len(), 3 * 27, "first member starts at GOP 18 and emits GOPs 18 to 20");
+    assert_eq!(pid_of(out_packets[0]), 0);
+    assert_eq!(pid_of(out_packets[1]), PMT_PID);
+    assert_eq!(pid_of(out_packets[2]), VIDEO_PID);
+
+    assert_eq!(section_version(out_packets[0]), 7, "first member PAT version is not rewritten");
+    assert!(!discontinuity(out_packets[2]), "first member has no discontinuity flag");
+}
+
+#[test]
+fn target_zero_starts_first_member_immediately_in_passthrough() {
+    let mut aligner = TsSpliceAligner::new(1024 * 1024, Duration::from_secs(5), Duration::from_secs(5), Duration::ZERO);
+    assert!(!aligner.is_aligning());
+    let chunk = join(&[pat(0), video_pmt(0), video_cont(false)]);
+    let out = emitted(aligner.push(chunk.clone(), Instant::now()));
+    assert_eq!(out, chunk);
+}
+
+#[test]
+fn buffer_estimate_tracks_burst_realtime_and_drain() {
+    let mut aligner =
+        TsSpliceAligner::new(10 * 1024 * 1024, Duration::from_secs(10), Duration::from_secs(10), Duration::ZERO);
+    let t0 = Instant::now();
+
+    let frame_dur = Duration::from_nanos(FRAME_TICKS * 1_000 / 27);
+    assert_eq!(frame_dur, Duration::from_millis(40));
+
+    // Emit 10 s of media (10 GOPs) within 1 s wall time.
+    for i in 0..10 {
+        let t = t0 + Duration::from_millis(100 * i);
+        let gop = make_pcr_gop(i, 0, 0);
+        let out = aligner.push(join(&gop), t);
+        let _ = emitted(out);
+    }
+
+    let t_burst_end = t0 + Duration::from_secs(1);
+    // In GOP 0, packet 2 is the initial PCR baseline (0 delta). Across 10 GOPs there are
+    // 10 * FRAMES_PER_GOP - 1 frame advances of FRAME_TICKS.
+    let expected_media = Duration::from_nanos((10 * FRAMES_PER_GOP - 1) * FRAME_TICKS * 1_000 / 27);
+    let expected_buffer = expected_media.saturating_sub(Duration::from_secs(1));
+
+    let est = aligner.buffer_at(t_burst_end);
+    assert_eq!(est, expected_buffer);
+    assert!(expected_media.abs_diff(Duration::from_secs(10)) <= frame_dur);
+
+    // Real time: emit 1 GOP (1 s media) over 1 s wall time.
+    let t_real = t_burst_end + Duration::from_secs(1);
+    let gop10 = make_pcr_gop(10, 0, 0);
+    let out = aligner.push(join(&gop10), t_real);
+    let _ = emitted(out);
+
+    // 1 s media advance minus 1 s wall delta leaves the estimated buffer unchanged.
+    let est_real = aligner.buffer_at(t_real);
+    assert_eq!(est_real, expected_buffer);
+
+    // Wall time passes with nothing emitted: drains exactly with wall elapsed.
+    let t_pause = t_real + Duration::from_secs(3);
+    let est_pause = aligner.buffer_at(t_pause);
+    assert_eq!(est_pause, expected_buffer.saturating_sub(Duration::from_secs(3)));
+
+    // Drains to zero when nothing is emitted for longer than the buffer.
+    let t_drained = t_real + Duration::from_secs(20);
+    let est_drained = aligner.buffer_at(t_drained);
+    assert_eq!(est_drained, Duration::ZERO);
+
+    // Never negative.
+    let t_much_later = t_real + Duration::from_secs(100);
+    let est_later = aligner.buffer_at(t_much_later);
+    assert_eq!(est_later, Duration::ZERO);
+}
+
+#[test]
+fn switch_with_buffer_accounts_for_player_lead() {
+    let target = Duration::from_secs(3);
+    let mut aligner = TsSpliceAligner::new(10 * 1024 * 1024, Duration::from_secs(10), Duration::from_secs(10), target);
+
+    let base = Instant::now();
+    // First member bursts 20 GOPs and settles at GOP 20 (about 20.96 s PCR).
+    for i in 0..20 {
+        let now = base + Duration::from_millis(50 * i);
+        let output = aligner.push(join(&make_pcr_gop(i, 0, 0)), now);
+        assert!(matches!(output, SpliceOutput::Hold));
+    }
+
+    let emit_time = base + Duration::from_millis(2050);
+    let out = aligner.push(join(&make_pcr_gop(20, 0, 0)), emit_time);
+    assert!(!aligner.is_aligning());
+    let _ = emitted(out);
+
+    // First member was trimmed to target 3 s: emitted GOPs 18..20 (74 frames of PCR advances).
+    let initial_buffer = Duration::from_nanos((3 * FRAMES_PER_GOP - 1) * FRAME_TICKS * 1_000 / 27);
+    assert_eq!(aligner.buffer_at(emit_time), initial_buffer);
+
+    // Stream for 10 s in real time (GOPs 21..30 at 1 s intervals).
+    for k in 1..=10 {
+        let now = emit_time + Duration::from_secs(k);
+        let out = aligner.push(join(&make_pcr_gop(20 + k, 0, 0)), now);
+        let _ = emitted(out);
+    }
+
+    let last_stream_time = emit_time + Duration::from_secs(10);
+    assert_eq!(aligner.buffer_at(last_stream_time), initial_buffer);
+
+    // Switch with full 3 s buffer (no gap before switch).
+    let switch_time = last_stream_time;
+    assert_eq!(aligner.buffer_at(switch_time), initial_buffer);
+
+    aligner.begin_member(switch_time);
+    assert!(aligner.is_aligning());
+
+    // New member bursts 20 GOPs.
+    for i in 0..20 {
+        let now = switch_time + Duration::from_millis(50 * i);
+        let output = aligner.push(join(&make_pcr_gop(i, 0, 0)), now);
+        assert!(matches!(output, SpliceOutput::Hold));
+    }
+
+    // 1960 ms hold: player drains 1.96 s of its 2.96 s buffer, leaving 1.0 s.
+    let settle_time = switch_time + Duration::from_millis(1960);
+    let output = aligner.push(join(&make_pcr_gop(20, 0, 0)), settle_time);
+    assert!(!aligner.is_aligning());
+
+    let out = emitted(output);
+    let out_packets = packets(&out);
+
+    // The effective target evaluated at emit is 3 s - 1 s = 2 s.
+    // In GOP 20 (newest PCR ~20.96 s), newest RAP <= 18.96 s is GOP 19 (at 18.96 s).
+    // It emits GOPs 19 and 20 (2 GOPs = 54 packets), NOT GOP 18 (3 GOPs = 81 packets).
+    assert_eq!(out_packets.len(), 2 * 27, "member 2 starts at GOP 19, not GOP 18");
+    assert_eq!(pid_of(out_packets[0]), 0);
+    assert_eq!(pid_of(out_packets[1]), PMT_PID);
+    assert_eq!(pid_of(out_packets[2]), VIDEO_PID);
+}
+
+#[test]
+fn three_switches_in_a_row_keep_buffer_bounded() {
+    let target = Duration::from_secs(3);
+    let gop_duration = Duration::from_nanos(FRAMES_PER_GOP * FRAME_TICKS * 1_000 / 27);
+    let max_allowed_buffer = target + gop_duration;
+    let mut aligner = TsSpliceAligner::new(10 * 1024 * 1024, Duration::from_secs(10), Duration::from_secs(10), target);
+
+    let base = Instant::now();
+    // Member 1 bursts and settles.
+    for i in 0..20 {
+        let _ = aligner.push(join(&make_pcr_gop(i, 0, 0)), base + Duration::from_millis(50 * i));
+    }
+    let m1_emit_time = base + Duration::from_millis(2050);
+    let initial_out = emitted(aligner.push(join(&make_pcr_gop(20, 0, 0)), m1_emit_time));
+    let initial_packets = packets(&initial_out);
+    assert_eq!(initial_packets.len(), 3 * 27, "first member emits GOPs 18..20");
+
+    let mut current_time = m1_emit_time;
+    let initial_buffer = aligner.buffer_at(current_time);
+    assert!(initial_buffer <= max_allowed_buffer);
+
+    for switch_idx in 1..=3 {
+        // Stream in real time for 5 s.
+        for k in 1..=5 {
+            current_time += Duration::from_secs(1);
+            let out = aligner.push(join(&make_pcr_gop(20 + k, 0, 0)), current_time);
+            let _ = emitted(out);
+        }
+
+        // 1 s gap before switch.
+        current_time += Duration::from_secs(1);
+        aligner.begin_member(current_time);
+
+        // Next member bursts 20 GOPs.
+        for i in 0..20 {
+            let _ = aligner.push(join(&make_pcr_gop(i, 0, 0)), current_time + Duration::from_millis(50 * i));
+        }
+        current_time += Duration::from_millis(2050);
+        let out = emitted(aligner.push(join(&make_pcr_gop(20, 0, 0)), current_time));
+        assert!(!aligner.is_aligning());
+
+        let out_packets = packets(&out);
+        // Over the 1s gap + 2.05s hold, the buffer completely drains, so each switch emits the full 3s target.
+        let (expected_packets, expected_buf) = (3 * 27, Duration::from_millis(2960));
+        assert_eq!(out_packets.len(), expected_packets, "switch {switch_idx} emits exact expected GOP count");
+
+        let buf = aligner.buffer_at(current_time);
+        assert!(buf <= max_allowed_buffer, "switch {switch_idx} buffer {buf:?} exceeds limit {max_allowed_buffer:?}");
+        assert_eq!(
+            buf, expected_buf,
+            "switch {switch_idx} buffer matches exact expected value derived from emitted GOPs"
+        );
+    }
+}
+
+#[test]
+fn target_zero_switch_starts_at_first_rap() {
+    let now = Instant::now();
+    let mut aligner = TsSpliceAligner::new(1024 * 1024, Duration::from_secs(5), Duration::from_secs(5), Duration::ZERO);
+    emitted(aligner.push(join(&[pat(0), video_pmt(0), pes(VIDEO_PID, true, false, &[&h264(5)])]), now));
+    assert_eq!(aligner.buffer_at(now), Duration::ZERO);
+
+    aligner.begin_member(now);
+    // With trim_target == 0, switch uses FirstRap and starts at the very first RAP.
+    let input = [video_cont(false), pat(0), video_pmt(0), pes(VIDEO_PID, true, false, &[&h264(5)])];
+    let out = emitted(aligner.push(join(&input), now));
+    let out_packets = packets(&out);
+    assert_eq!(out_packets.len(), 3);
+    assert_eq!(pid_of(out_packets[0]), 0);
+    assert_eq!(pid_of(out_packets[1]), PMT_PID);
+    assert_eq!(pid_of(out_packets[2]), VIDEO_PID);
+}
+
+#[test]
+fn test_f3_4_switch_with_3s_buffer_and_2s_hold_evaluates_target_at_emit() {
+    let target = Duration::from_secs(3);
+    let mut aligner = TsSpliceAligner::new(10 * 1024 * 1024, Duration::from_secs(10), Duration::from_secs(10), target);
+
+    let base = Instant::now();
+    // First member bursts and settles to establish ~3 s buffer:
+    for i in 0..20 {
+        let _ = aligner.push(join(&make_pcr_gop(i, 0, 0)), base + Duration::from_millis(50 * i));
+    }
+    let m1_emit_time = base + Duration::from_millis(2050);
+    let initial_out = emitted(aligner.push(join(&make_pcr_gop(20, 0, 0)), m1_emit_time));
+    assert_eq!(packets(&initial_out).len(), 3 * 27, "member 1 emits 3 GOPs (GOPs 18..20)");
+
+    let expected_buf = Duration::from_nanos((3 * FRAMES_PER_GOP - 1) * FRAME_TICKS * 1_000 / 27);
+    assert_eq!(aligner.buffer_at(m1_emit_time), expected_buf);
+
+    // Switch at switch_time = m1_emit_time. Buffer at switch is ~2.96 s (~3 s).
+    let switch_time = m1_emit_time;
+    aligner.begin_member(switch_time);
+    assert!(aligner.is_aligning());
+
+    // New member bursts 20 GOPs over 50 ms intervals.
+    for i in 0..20 {
+        let now = switch_time + Duration::from_millis(50 * i);
+        let out = aligner.push(join(&make_pcr_gop(i, 0, 0)), now);
+        assert!(matches!(out, SpliceOutput::Hold));
+    }
+
+    // Settle at switch_time + 1.96 s (hold duration is ~2 s):
+    // Player drains 1.96 s from 2.96 s, leaving 1.0 s buffer remaining at emit.
+    // Effective target at emit is 3 - (3 - 2) = 2 s.
+    let settle_time = switch_time + Duration::from_millis(1960);
+    let out = aligner.push(join(&make_pcr_gop(20, 0, 0)), settle_time);
+    assert!(!aligner.is_aligning());
+
+    let out = emitted(out);
+    let out_packets = packets(&out);
+
+    // Target 2 s behind GOP 20 (newest PCR ~20.96 s) is 18.96 s -> starts at GOP 19 (at 18.96 s).
+    // It emits GOPs 19 and 20 (exact GOP: 2 GOPs = 54 packets).
+    assert_eq!(out_packets.len(), 2 * 27, "effective target at emit is 2s (3s - (3s - 2s)): starts at GOP 19 (2 GOPs)");
+    assert_eq!(pid_of(out_packets[0]), 0);
+    assert_eq!(pid_of(out_packets[1]), PMT_PID);
+    assert_eq!(pid_of(out_packets[2]), VIDEO_PID);
+}
+
+#[test]
+fn switch_buffer_drains_from_the_switch_not_from_the_first_packet() {
+    let target = Duration::from_secs(3);
+    let mut aligner = TsSpliceAligner::new(10 * 1024 * 1024, Duration::from_secs(10), Duration::from_secs(10), target);
+    let base = Instant::now();
+    for i in 0..20 {
+        let _ = aligner.push(join(&make_pcr_gop(i, 0, 0)), base + Duration::from_millis(50 * i));
+    }
+    let switch_time = base + Duration::from_millis(2050);
+    let _ = emitted(aligner.push(join(&make_pcr_gop(20, 0, 0)), switch_time));
+    aligner.begin_member(switch_time);
+
+    // The new member's first bytes arrive 1.5 s after the switch (member open time).
+    let first_packet = switch_time + Duration::from_millis(1500);
+    for i in 0..20 {
+        let out = aligner.push(join(&make_pcr_gop(i, 0, 0)), first_packet + Duration::from_millis(50 * i));
+        assert!(matches!(out, SpliceOutput::Hold));
+    }
+    // Emit 3.46 s after the switch: the 2.96 s player buffer is drained, so the full 3 s target applies
+    // and the member starts at GOP 18 (GOPs 18 to 20).
+    let out = emitted(aligner.push(join(&make_pcr_gop(20, 0, 0)), first_packet + Duration::from_millis(1960)));
+    assert_eq!(packets(&out).len(), 3 * 27, "buffer drained since the switch: start 3 s behind at GOP 18");
 }

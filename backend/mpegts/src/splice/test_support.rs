@@ -32,6 +32,23 @@ pub(crate) fn ts(pid: u16, pusi: bool, af_flags: Option<u8>, payload: &[u8]) -> 
     packet
 }
 
+/// One TS packet carrying only an adaptation field with a PCR.
+pub(crate) fn pcr_packet(pid: u16, pcr_27mhz: u64) -> Vec<u8> {
+    let base = pcr_27mhz / 300;
+    let ext = pcr_27mhz % 300;
+    let mut packet = vec![0x47, (pid >> 8) as u8 & 0x1F, pid as u8, 0x20, 183, 0x10];
+    packet.extend([
+        (base >> 25) as u8,
+        (base >> 17) as u8,
+        (base >> 9) as u8,
+        (base >> 1) as u8,
+        (((base & 1) << 7) as u8) | 0x7E | ((ext >> 8) as u8),
+        ext as u8,
+    ]);
+    packet.resize(TS_PACKET_SIZE, 0xFF);
+    packet
+}
+
 pub(crate) fn finish_section(mut section: Vec<u8>) -> Vec<u8> {
     let length = section.len() - 3 + 4;
     section[1] = 0xB0 | ((length >> 8) as u8 & 0x0F);
@@ -109,6 +126,36 @@ pub(crate) fn pes(pid: u16, rai: bool, af: bool, nal_headers: &[&[u8]]) -> Vec<u
         None
     };
     ts(pid, true, flags, &payload)
+}
+
+/// PES start on `pid` with an adaptation field containing PCR and optionally RAI flag.
+pub(crate) fn pes_with_pcr(pid: u16, rai: bool, pcr_27mhz: u64, nal_headers: &[&[u8]]) -> Vec<u8> {
+    let mut payload = vec![0x00, 0x00, 0x01, 0xE0, 0x00, 0x00, 0x80, 0x80, 0x05, 0x21, 0x00, 0x01, 0x00, 0x01];
+    for header in nal_headers {
+        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        payload.extend_from_slice(header);
+        payload.extend_from_slice(&[0x88, 0x84]);
+    }
+    let mut packet = vec![0x47, 0x40 | ((pid >> 8) as u8 & 0x1F), pid as u8, 0x30];
+    let af_len = 184 - 1 - payload.len();
+    assert!(af_len >= 7, "room for PCR in adaptation field");
+    packet.push(af_len as u8);
+    let flags = if rai { 0x50 } else { 0x10 };
+    packet.push(flags);
+    let base = pcr_27mhz / 300;
+    let ext = pcr_27mhz % 300;
+    packet.extend([
+        (base >> 25) as u8,
+        (base >> 17) as u8,
+        (base >> 9) as u8,
+        (base >> 1) as u8,
+        (((base & 1) << 7) as u8) | 0x7E | ((ext >> 8) as u8),
+        ext as u8,
+    ]);
+    packet.extend(std::iter::repeat_n(0xFF, af_len - 7));
+    packet.extend_from_slice(&payload);
+    assert_eq!(packet.len(), TS_PACKET_SIZE);
+    packet
 }
 
 pub(crate) fn h264(nal_type: u8) -> Vec<u8> { vec![0x60 | nal_type] }

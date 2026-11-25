@@ -19,7 +19,9 @@ mod switcher {
         RuntimeMember, SwitchError,
     };
     use crate::api::{
-        api_utils::tests::group_playback_support::{member_ts, FakeOriginMode, GroupPlaybackEnv},
+        api_utils::tests::group_playback_support::{
+            disable_burst, first_keyframe_pcr, member_pcr_gop, member_ts, FakeOriginMode, GroupPlaybackEnv,
+        },
         model::{BoxedProviderStream, StreamError},
     };
     use bytes::Bytes;
@@ -62,6 +64,7 @@ mod switcher {
 
     async fn switcher(failover: FailoverGroupRuntimeConfig) -> (GroupPlaybackEnv, GroupSwitcher) {
         let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        disable_burst(&env);
         let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
         let ctx = GroupFailoverContext {
             app_state: Arc::clone(&env.app_state),
@@ -94,7 +97,7 @@ mod switcher {
         FailoverGroupRuntimeConfig { max_outage_secs: 0, ..FailoverGroupRuntimeConfig::default() }
     }
 
-    async fn poll(switcher: &mut GroupSwitcher, host: &mut FakeHost) -> GroupPoll {
+    async fn poll(switcher: &mut GroupSwitcher, host: &mut impl MemberHost) -> GroupPoll {
         std::future::poll_fn(|cx: &mut Context<'_>| match switcher.poll_member(host, cx) {
             GroupPoll::Pending => Poll::Pending,
             ready => Poll::Ready(ready),
@@ -212,6 +215,7 @@ mod switcher {
             .origin_mode("korath", FakeOriginMode::TsThenStall(member_ts(0x100, 20)))
             .build()
             .await;
+        disable_burst(&env);
         let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
         let ctx = GroupFailoverContext {
             app_state: Arc::clone(&env.app_state),
@@ -386,6 +390,7 @@ mod switcher {
             .origin_mode("maris", FakeOriginMode::TsThenStall(member_ts(0x100, 50)))
             .build()
             .await;
+        disable_burst(&env);
         let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
         let ctx = GroupFailoverContext {
             app_state: Arc::clone(&env.app_state),
@@ -512,5 +517,354 @@ mod switcher {
 
         // Registry entry must be cleaned up:
         assert!(!env.app_state.failover_switch_registry.contains_shared(target_id, group_vid));
+    }
+
+    #[tokio::test]
+    async fn driver_reads_trim_target_from_stream_config() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let make_ctx = || GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover: FailoverGroupRuntimeConfig::default(),
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "test-session".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let driver_default = GroupFailoverDriver::new(Arc::new(make_ctx()), 0);
+        assert!(driver_default.is_aligning());
+
+        disable_burst(&env);
+        let driver_zero = GroupFailoverDriver::new(Arc::new(make_ctx()), 0);
+        assert!(!driver_zero.is_aligning());
+    }
+
+    struct SwitchBurstHost {
+        body: Option<BoxedProviderStream>,
+        replacement: Option<BoxedProviderStream>,
+        installed: u32,
+    }
+
+    impl MemberHost for SwitchBurstHost {
+        fn member_body(&mut self) -> Option<&mut BoxedProviderStream> { self.body.as_mut() }
+        fn member_preempted(&self) -> bool { false }
+        fn release_member(&mut self) { self.body = None; }
+        fn install_member(&mut self, _member: RuntimeMember) {
+            self.installed += 1;
+            self.body = self.replacement.take();
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_with_shared_burst_starts_at_expected_gop() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let mut config = (**env.app_state.app_config.config.load()).clone();
+        if let Some(ref mut reverse_proxy) = config.reverse_proxy {
+            if let Some(ref mut stream) = reverse_proxy.stream {
+                stream.shared_burst_secs = 2;
+            }
+        }
+        env.app_state.app_config.config.store(Arc::new(config));
+
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover: FailoverGroupRuntimeConfig::default(),
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "test-burst-switch".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let mut switcher = GroupSwitcher::new(GroupFailoverDriver::new(Arc::new(ctx), 0));
+
+        let gop0 = member_pcr_gop(0x200, 0, 2);
+        let gop1 = member_pcr_gop(0x200, 1, 2);
+        let gop2 = member_pcr_gop(0x200, 2, 2);
+        let gop3 = member_pcr_gop(0x200, 3, 2);
+        let gop4 = member_pcr_gop(0x200, 4, 2);
+
+        let mut burst = Vec::new();
+        burst.extend_from_slice(&gop0);
+        burst.extend_from_slice(&gop1);
+        burst.extend_from_slice(&gop2);
+        burst.extend_from_slice(&gop3);
+
+        let replacement = futures::stream::unfold(0_u32, move |step| {
+            let burst = burst.clone();
+            let gop4 = gop4.clone();
+            async move {
+                match step {
+                    0 => Some((Ok(Bytes::from(burst)), 1)),
+                    1 => {
+                        tokio::time::sleep(Duration::from_millis(1100)).await;
+                        Some((Ok(Bytes::from(gop4)), 2))
+                    }
+                    _ => None,
+                }
+            }
+        })
+        .boxed();
+
+        let mut host = SwitchBurstHost {
+            body: Some(futures::stream::empty().boxed()),
+            replacement: Some(replacement),
+            installed: 0,
+        };
+
+        let mut received = Vec::new();
+        let loop_result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match poll(&mut switcher, &mut host).await {
+                    GroupPoll::Data(bytes) => {
+                        received.extend_from_slice(&bytes);
+                        break;
+                    }
+                    GroupPoll::Keepalive(_) | GroupPoll::Pending => {}
+                    GroupPoll::Ended(end) => panic!("stream ended unexpectedly: {end:?}"),
+                }
+            }
+        })
+        .await;
+
+        assert!(loop_result.is_ok(), "received settled output within timeout");
+        assert_eq!(host.installed, 1, "member was installed on switch");
+
+        // First keyframe packet of member 1 (PID 0x200) must start at GOP 2 (PCR 2s = 180,000 ticks)
+        // because burst target was 2s and newest GOP was 4s (threshold = 4s - 2s = 2s).
+        let first_pcr = first_keyframe_pcr(&received, 0x200);
+        assert_eq!(first_pcr, Some(180_000), "switched stream trimmed GOP 0 and 1, starting at GOP 2");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_f3_2_group_hold_deadline_flushes_before_stall_timeout() {
+        let failover = FailoverGroupRuntimeConfig {
+            no_data_timeout_secs: 4,
+            max_outage_secs: 20,
+            ..FailoverGroupRuntimeConfig::default()
+        };
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let mut config = (**env.app_state.app_config.config.load()).clone();
+        if let Some(ref mut reverse_proxy) = config.reverse_proxy {
+            if let Some(ref mut stream) = reverse_proxy.stream {
+                stream.shared_burst_secs = 3;
+            }
+        }
+        env.app_state.app_config.config.store(Arc::new(config));
+
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover,
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "test-hold-deadline".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let mut switcher = GroupSwitcher::new(GroupFailoverDriver::new(Arc::new(ctx), 0));
+
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let mut host = FakeHost::new(rx.boxed(), false);
+
+        // Send a burst chunk: GOP 0. With shared_burst_secs = 3, aligner holds it.
+        let gop0 = member_pcr_gop(0x100, 0, 2);
+        tx.unbounded_send(Ok(Bytes::from(gop0.clone()))).unwrap();
+
+        // Poll once to ingest the chunk; returns Pending because data is held.
+        let handle = tokio::spawn(async move {
+            let res = poll(&mut switcher, &mut host).await;
+            (switcher, host, res)
+        });
+
+        // Advance 2 seconds (the hold deadline = min(4s, 4s/2) = 2s):
+        tokio::time::advance(Duration::from_millis(2100)).await;
+
+        let (switcher, host, res) = handle.await.unwrap();
+        // At the hold deadline (before the stall timeout of 4s), data arrives!
+        match res {
+            GroupPoll::Data(bytes) => {
+                assert_eq!(&bytes[..188], &gop0[188..376], "held burst emitted at deadline (starts at PAT)");
+            }
+            other => panic!("expected GroupPoll::Data at hold deadline, got {other:?}"),
+        }
+        // Member stays installed, no switch happened!
+        assert_eq!(host.released, 0, "no switch occurred");
+        assert_eq!(switcher.driver.current, 0, "still on member 0");
+    }
+
+    #[tokio::test]
+    async fn test_f3_5_held_member_then_eof_emits_data_then_ended_eof() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let mut config = (**env.app_state.app_config.config.load()).clone();
+        if let Some(ref mut reverse_proxy) = config.reverse_proxy {
+            if let Some(ref mut stream) = reverse_proxy.stream {
+                stream.shared_burst_secs = 3;
+            }
+        }
+        env.app_state.app_config.config.store(Arc::new(config));
+
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover: no_budget(),
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "test-f3-5-eof".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let mut switcher = GroupSwitcher::new(GroupFailoverDriver::new(Arc::new(ctx), 0));
+
+        let gop0 = member_pcr_gop(0x100, 0, 2);
+        let stream = futures::stream::iter(vec![Ok(Bytes::from(gop0.clone()))]).boxed();
+        let mut host = FakeHost::new(stream, false);
+
+        // First poll: returns the exact held bytes as Data!
+        let poll1 = poll(&mut switcher, &mut host).await;
+        match poll1 {
+            GroupPoll::Data(bytes) => assert_eq!(&bytes[..188], &gop0[188..376], "starts at PAT"),
+            other => panic!("expected GroupPoll::Data on EOF with held bytes, got {other:?}"),
+        }
+
+        // Second poll: returns Ended(Eof)
+        let poll2 = poll(&mut switcher, &mut host).await;
+        assert!(matches!(poll2, GroupPoll::Ended(GroupEnd::Eof)));
+    }
+
+    #[tokio::test]
+    async fn test_f3_5_held_member_then_error_emits_data_then_ended_error() {
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let mut config = (**env.app_state.app_config.config.load()).clone();
+        if let Some(ref mut reverse_proxy) = config.reverse_proxy {
+            if let Some(ref mut stream) = reverse_proxy.stream {
+                stream.shared_burst_secs = 3;
+            }
+        }
+        env.app_state.app_config.config.store(Arc::new(config));
+
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover: no_budget(),
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "test-f3-5-err".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let mut switcher = GroupSwitcher::new(GroupFailoverDriver::new(Arc::new(ctx), 0));
+
+        let gop0 = member_pcr_gop(0x100, 0, 2);
+        let stream = futures::stream::iter(vec![
+            Ok(Bytes::from(gop0.clone())),
+            Err(StreamError::Stream("upstream boom".into())),
+        ])
+        .boxed();
+        let mut host = FakeHost::new(stream, false);
+
+        // First poll: returns the exact held bytes as Data!
+        let poll1 = poll(&mut switcher, &mut host).await;
+        match poll1 {
+            GroupPoll::Data(bytes) => assert_eq!(&bytes[..188], &gop0[188..376], "starts at PAT"),
+            other => panic!("expected GroupPoll::Data on error with held bytes, got {other:?}"),
+        }
+
+        // Second poll: returns Ended(Error)
+        let poll2 = poll(&mut switcher, &mut host).await;
+        assert!(matches!(poll2, GroupPoll::Ended(GroupEnd::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn test_f3_5_first_rap_without_pat_then_eof_ends_without_data() {
+        let (_env, mut switcher) = switcher(no_budget()).await;
+        // Member 0 has no burst (target 0), so begin_member on member 1 starts Aligning::FirstRap
+        switcher.driver.on_switched(1);
+        assert!(switcher.driver.is_aligning());
+
+        // Member 1 body delivers non-PAT packets (e.g. video continuation without PAT), then EOF:
+        let non_pat_pkt = vec![0x47, 0x01, 0x00, 0x10, 0xFF];
+        let mut non_pat_chunk = non_pat_pkt;
+        non_pat_chunk.resize(188, 0xFF);
+        let stream = futures::stream::iter(vec![Ok(Bytes::from(non_pat_chunk))]).boxed();
+        let mut host = FakeHost::new(stream, false);
+
+        // Poll must end WITHOUT emitting data (no mid-GOP garbage prefix):
+        let poll_res = poll(&mut switcher, &mut host).await;
+        assert!(
+            matches!(poll_res, GroupPoll::Ended(GroupEnd::Eof)),
+            "FirstRap without PAT must end directly without emitting data, got {poll_res:?}"
+        );
     }
 }

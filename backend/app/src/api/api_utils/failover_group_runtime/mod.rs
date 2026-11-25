@@ -111,6 +111,8 @@ pub(crate) struct GroupFailoverDriver {
     stall_timeout: Option<Duration>,
     stall: Pin<Box<Sleep>>,
     stall_armed: bool,
+    hold_sleep: Pin<Box<Sleep>>,
+    hold_deadline: Option<Instant>,
     keepalive: Pin<Box<Sleep>>,
     pending_since: Option<Instant>,
     underrun: bool,
@@ -123,14 +125,24 @@ pub(crate) struct GroupFailoverDriver {
 impl GroupFailoverDriver {
     pub(crate) fn new(ctx: Arc<GroupFailoverContext>, current: usize) -> Self {
         let failover = ctx.playback.failover;
+        let config = ctx.app_state.app_config.config.load();
+        let burst_secs = config.shared_burst_secs();
+        let trim_target = Duration::from_secs(burst_secs);
+        let hold_limit = if failover.no_data_timeout_secs > 0 {
+            SPLICE_BUDGET.min(Duration::from_secs(failover.no_data_timeout_secs) / 2)
+        } else {
+            SPLICE_BUDGET
+        };
         Self {
             budget: FailoverBudget::new(&failover),
-            aligner: TsSpliceAligner::new(SPLICE_BUDGET_BYTES, SPLICE_BUDGET),
+            aligner: TsSpliceAligner::new(SPLICE_BUDGET_BYTES, SPLICE_BUDGET, hold_limit, trim_target),
             meter: RealtimeMeter::new(failover.slow_source_pct, Duration::from_secs(failover.slow_source_secs)),
             stall_timeout: (failover.no_data_timeout_secs > 0)
                 .then(|| Duration::from_secs(failover.no_data_timeout_secs)),
             stall: Box::pin(tokio::time::sleep(Duration::ZERO)),
             stall_armed: false,
+            hold_sleep: Box::pin(tokio::time::sleep(Duration::ZERO)),
+            hold_deadline: None,
             keepalive: Box::pin(tokio::time::sleep(Duration::ZERO)),
             pending_since: None,
             underrun: false,
@@ -164,12 +176,41 @@ impl GroupFailoverDriver {
             self.underrun = true;
             self.meter.reset(now);
         }
+        if !self.aligner.is_aligning() {
+            self.hold_deadline = None;
+        }
         self.pending_output = second;
         Some(first)
     }
 
     /// The second piece of the last split chunk, to send before polling the provider again.
     pub(crate) fn take_pending_output(&mut self) -> Option<Bytes> { self.pending_output.take() }
+
+    pub(crate) fn flush_held(&mut self) -> Option<Bytes> {
+        self.hold_deadline = None;
+        self.aligner.finish()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_aligning(&self) -> bool { self.aligner.is_aligning() }
+
+    /// Flushes held bytes when the hold deadline expires while the member body is pending.
+    pub(crate) fn poll_hold_flushed(&mut self, cx: &mut Context<'_>) -> Option<Bytes> {
+        let deadline = self.aligner.hold_deadline()?;
+        if self.hold_deadline != Some(deadline) {
+            self.hold_sleep.as_mut().reset(tokio::time::Instant::from_std(deadline));
+            self.hold_deadline = Some(deadline);
+        }
+        if self.hold_sleep.as_mut().poll(cx).is_pending() {
+            return None;
+        }
+        let now = Instant::now();
+        self.hold_deadline = None;
+        let bytes = self.aligner.finish_at(now)?;
+        self.stall_armed = false;
+        self.budget.on_data(now);
+        Some(bytes)
+    }
 
     /// Called while the provider body is pending; true once it stayed silent for the stall timeout.
     pub(crate) fn poll_stalled(&mut self, cx: &mut Context<'_>) -> bool {
@@ -238,6 +279,7 @@ impl GroupFailoverDriver {
         self.budget.on_switched(index, self.current, now);
         self.current = index;
         self.aligner.begin_member(now);
+        self.hold_deadline = None;
         self.meter.begin_member(now);
         self.stall_armed = false;
         self.pending_since = None;
@@ -571,6 +613,7 @@ pub(crate) struct GroupSwitcher {
     driver: GroupFailoverDriver,
     /// The switch in flight and the failure that started it.
     switch: Option<(SwitchFuture, SwitchReason)>,
+    deferred_end: Option<GroupEnd>,
     manual_switch_rx: SwitchReceiver,
     manual_switch_tx: SwitchSender,
     manual_respondent: Option<tokio::sync::oneshot::Sender<Result<(), SwitchError>>>,
@@ -584,6 +627,7 @@ impl GroupSwitcher {
         Self {
             driver,
             switch: None,
+            deferred_end: None,
             manual_switch_rx,
             manual_switch_tx,
             manual_respondent: None,
@@ -631,6 +675,9 @@ impl GroupSwitcher {
         loop {
             if let Some(packets) = self.driver.take_pending_output() {
                 return GroupPoll::Data(packets);
+            }
+            if let Some(end) = self.deferred_end.take() {
+                return GroupPoll::Ended(end);
             }
             if let Some((switch, reason)) = self.switch.as_mut() {
                 let reason = *reason;
@@ -689,23 +736,35 @@ impl GroupSwitcher {
                 }
                 Poll::Ready(Some(Err(err))) => {
                     if !self.start_switch(host, SwitchReason::UpstreamError, err.provider_http_status()) {
-                        return GroupPoll::Ended(GroupEnd::Error(err));
+                        return self.end_with_flush(GroupEnd::Error(err));
                     }
                 }
                 Poll::Ready(None) => {
                     if !self.start_switch(host, SwitchReason::UpstreamEof, None) {
-                        return GroupPoll::Ended(GroupEnd::Eof);
+                        return self.end_with_flush(GroupEnd::Eof);
                     }
                 }
                 Poll::Pending => {
+                    if let Some(packets) = self.driver.poll_hold_flushed(cx) {
+                        return GroupPoll::Data(packets);
+                    }
                     if !self.driver.poll_stalled(cx) {
                         return GroupPoll::Pending;
                     }
                     if !self.start_switch(host, SwitchReason::Stall, None) {
-                        return GroupPoll::Ended(GroupEnd::Stalled);
+                        return self.end_with_flush(GroupEnd::Stalled);
                     }
                 }
             }
+        }
+    }
+
+    fn end_with_flush(&mut self, end: GroupEnd) -> GroupPoll {
+        if let Some(bytes) = self.driver.flush_held() {
+            self.deferred_end = Some(end);
+            GroupPoll::Data(bytes)
+        } else {
+            GroupPoll::Ended(end)
         }
     }
 

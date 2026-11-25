@@ -1807,6 +1807,15 @@
   so playback begins at once with a short prebuffer, typically 3-5 s behind live. Streams without detectable keyframes
   use the arrival time alone. `shared_burst_buffer_mb` keeps the buffer size and the reserve for slow viewers.
 
+- **Live streams start near live despite the provider's start-up burst.** Many providers send 15-25 s of media within
+  the first one or two seconds of a connection. The first viewer of a live MPEG-TS channel (shared or direct) played
+  that whole burst and stayed 18-21 s behind live, and each failover switch passed the new member's burst on as
+  well, so the delay grew with every switch (66 s after three switches). tuliprox now holds the start of a live
+  stream and of every member spliced in on a switch until the burst is over, measured on the stream's PCR clock, and
+  starts at the newest keyframe at most `reverse_proxy.stream.shared_burst_secs` behind the newest media. The delay
+  stays at about `shared_burst_secs` plus one keyframe interval, also after switches. A provider without burst
+  starts up to about 1 s later. `shared_burst_secs: 0` keeps the previous behavior.
+
 - **HLS start keeps its provider binding between segment retries.** When the first segment of a new HLS start failed
   and waited for its retry backoff, the start window and the 3T protection could both expire while no origin request
   was active. tuliprox then released the account binding, and the waiting player got an error instead of the
@@ -2819,7 +2828,9 @@
     20-30 s). When the buffer holds no keyframe that old, the viewer starts at the oldest buffered keyframe and can be
     less than this time behind live. `0` sends the whole burst buffer from its oldest byte. `shared_burst_buffer_mb`
     remains the minimum ring size and lag reserve; a larger channel buffer can raise the ring size, and a single chunk
-    larger than the ring is kept whole. Editable in the Web UI under Reverse Proxy → Stream.
+    larger than the ring is kept whole. The same value also sets the start point of a live MPEG-TS stream (shared or
+    direct) and of a failover member spliced in on a switch: tuliprox holds the provider's start-up burst and starts at
+    most this many seconds of media behind the newest PCR. Editable in the Web UI under Reverse Proxy → Stream.
   - `hls_wrap_media_playlist` (default `true`): answers a proxied live HLS entry request whose provider returns a media
     playlist with a single-variant master playlist, so playlist refreshes keep their provider account across client
     IP changes. Applies only while the shared HLS cache is off for the target. Disable it for players that mishandle a
