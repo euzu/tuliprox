@@ -155,21 +155,12 @@ impl GroupFailoverDriver {
 
     pub(crate) fn group_vid(&self) -> u32 { self.ctx.group.group_vid.get() }
 
-    /// Hot path: aligns the chunk and does the per-chunk bookkeeping. `None` while the aligner
-    /// holds packets back.
-    pub(crate) fn process_chunk(&mut self, chunk: Bytes) -> Option<Bytes> {
-        let now = Instant::now();
+    fn record_emit(&mut self, first: &[u8], second: Option<&[u8]>, now: Instant) {
         let waited = self.pending_since.take().map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
-        let (first, second) = match self.aligner.push(chunk, now) {
-            SpliceOutput::Hold => return None,
-            SpliceOutput::Emit(packets) => (packets, None),
-            SpliceOutput::EmitTwo(first, second) => (first, Some(second)),
-        };
-        // Only packets that reach the client count as playback and hold off the stall check.
         self.stall_armed = false;
         self.budget.on_data(now);
-        let mut slow = self.meter.observe(&first, waited, now);
-        if let Some(second) = &second {
+        let mut slow = self.meter.observe(first, waited, now);
+        if let Some(second) = second {
             slow |= self.meter.observe(second, Duration::ZERO, now);
         }
         if slow {
@@ -179,6 +170,18 @@ impl GroupFailoverDriver {
         if !self.aligner.is_aligning() {
             self.hold_deadline = None;
         }
+    }
+
+    /// Hot path: aligns the chunk and does the per-chunk bookkeeping. `None` while the aligner
+    /// holds packets back.
+    pub(crate) fn process_chunk(&mut self, chunk: Bytes) -> Option<Bytes> {
+        let now = clock_now();
+        let (first, second) = match self.aligner.push(chunk, now) {
+            SpliceOutput::Hold => return None,
+            SpliceOutput::Emit(packets) => (packets, None),
+            SpliceOutput::EmitTwo(first, second) => (first, Some(second)),
+        };
+        self.record_emit(&first, second.as_deref(), now);
         self.pending_output = second;
         Some(first)
     }
@@ -196,25 +199,38 @@ impl GroupFailoverDriver {
 
     /// Flushes held bytes when the hold deadline expires while the member body is pending.
     pub(crate) fn poll_hold_flushed(&mut self, cx: &mut Context<'_>) -> Option<Bytes> {
-        let deadline = self.aligner.hold_deadline()?;
-        if self.hold_deadline != Some(deadline) {
-            self.hold_sleep.as_mut().reset(tokio::time::Instant::from_std(deadline));
-            self.hold_deadline = Some(deadline);
+        loop {
+            let now = clock_now();
+            // A wake instant that has come is evaluated before the next one is computed: the trimmer no longer
+            // reports a passed wake instant, so recomputing first would skip it.
+            let deadline = match self.hold_deadline {
+                Some(deadline) if deadline <= now => deadline,
+                _ => self.aligner.hold_deadline(now)?,
+            };
+            if self.hold_deadline != Some(deadline) {
+                self.hold_sleep.as_mut().reset(tokio::time::Instant::from_std(deadline));
+                self.hold_deadline = Some(deadline);
+            }
+            if self.hold_sleep.as_mut().poll(cx).is_pending() {
+                return None;
+            }
+            let now = clock_now();
+            if let Some(bytes) = self.aligner.poll_hold(now) {
+                self.record_emit(&bytes, None, now);
+                self.pending_since = Some(now);
+                return Some(bytes);
+            }
+            if !self.aligner.is_aligning() {
+                self.hold_deadline = None;
+                return None;
+            }
+            self.hold_deadline = None;
         }
-        if self.hold_sleep.as_mut().poll(cx).is_pending() {
-            return None;
-        }
-        let now = Instant::now();
-        self.hold_deadline = None;
-        let bytes = self.aligner.finish_at(now)?;
-        self.stall_armed = false;
-        self.budget.on_data(now);
-        Some(bytes)
     }
 
     /// Called while the provider body is pending; true once it stayed silent for the stall timeout.
     pub(crate) fn poll_stalled(&mut self, cx: &mut Context<'_>) -> bool {
-        let now = Instant::now();
+        let now = clock_now();
         // The wait also feeds the underrun meter, with or without a stall timeout.
         self.pending_since.get_or_insert(now);
         let Some(timeout) = self.stall_timeout else {
@@ -234,7 +250,7 @@ impl GroupFailoverDriver {
     /// or `None` when the budget is spent. The caller releases the current provider slot before
     /// it polls the future, so a retry on the same account finds its slot free.
     pub(crate) fn begin_switch(&mut self, reason: SwitchReason, status: Option<u16>) -> Option<SwitchFuture> {
-        let now = Instant::now();
+        let now = clock_now();
         // A slow member still plays: when no switch is allowed it keeps playing, and the check
         // leaves the incident untouched.
         if reason == SwitchReason::Underrun && self.budget.would_give_up(now) {
@@ -275,7 +291,7 @@ impl GroupFailoverDriver {
 
     /// Continues on the member a switch opened.
     pub(crate) fn on_switched(&mut self, index: usize) {
-        let now = Instant::now();
+        let now = clock_now();
         self.budget.on_switched(index, self.current, now);
         self.current = index;
         self.aligner.begin_member(now);
@@ -295,6 +311,10 @@ impl GroupFailoverDriver {
         Poll::Ready(ts_null_packet_bytes())
     }
 }
+
+/// Driver instants follow the Tokio clock, so the hold, stall and meter instants agree with the sleeps that
+/// wake the driver (also under paused test time).
+fn clock_now() -> Instant { tokio::time::Instant::now().into_std() }
 
 /// How a member failure counts in the health index: an upstream error by its HTTP status, a
 /// transport error without one; an ended, stalled or slow body as a stream failure.
@@ -791,7 +811,7 @@ impl GroupSwitcher {
             let _ = respondent.send(Err(SwitchError::Preempted));
             return false;
         }
-        let now = Instant::now();
+        let now = clock_now();
         let deadline = now + RUNTIME_OPEN_TIMEOUT;
         let previous = self.driver.current;
         let exclude: Vec<usize> = (0..self.driver.ctx.group.members.len()).filter(|&i| i != target_index).collect();

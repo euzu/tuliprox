@@ -521,21 +521,21 @@ fn test_burst_pause_longer_than_window_settles_by_design() {
 
     let base = Instant::now();
 
-    // 1. Initial burst: 5 s media in 80 ms (GOPs 0..4, 20 ms apart)
+    // 1. Initial burst: 5 s media in 200 ms (GOPs 0..4, 50 ms apart)
     for i in 0..5 {
         let gop = make_gop(i, 0);
-        let now = base + Duration::from_millis(20 * i);
+        let now = base + Duration::from_millis(50 * i);
         let out = trim.push(join(&gop), now);
         assert_eq!(out, TrimOutput::Hold, "holding GOP {i} in initial burst");
     }
 
     // 2. 1.1 s pause: longer than SETTLE_WINDOW (400 ms).
-    // When the next chunk with >= 300 ms media arrives at 80 + 1100 = 1180 ms,
+    // When the next chunk with >= 300 ms media arrives at 200 + 1100 = 1300 ms,
     // the settle tracker sees wall span >= 400 ms, media advance >= 300 ms, and lead growth <= 100 ms.
     // By design, a pause longer than the settle window is indistinguishable from the end of the burst,
     // so it settles and emits on that chunk.
     let gop5 = make_gop(5, 0);
-    let out = trim.push(join(&gop5), base + Duration::from_millis(1180));
+    let out = trim.push(join(&gop5), base + Duration::from_millis(1300));
 
     let emitted = match out {
         TrimOutput::Emit(bytes) => bytes,
@@ -972,4 +972,256 @@ fn test_switch_with_player_buffer_emits_when_buffer_drains_below_slack() {
     assert_eq!(&emitted[..TS_PACKET_SIZE], &gop3[0][..], "starts at GOP 3 PAT");
     assert_eq!(&emitted[TS_PACKET_SIZE..2 * TS_PACKET_SIZE], &gop3[1][..], "second packet is PMT");
     assert_eq!(&emitted[2 * TS_PACKET_SIZE..3 * TS_PACKET_SIZE], &gop3[2][..], "third packet is keyframe");
+}
+
+#[test]
+fn burst_then_20ms_realtime_chunks_settles_before_max_hold() {
+    let target = Duration::from_secs(3);
+    let max_hold = Duration::from_secs(10);
+    let max_bytes = 10_000_000;
+    let mut trim = TsLiveEdgeTrim::new(target, max_hold, max_bytes);
+    let base = Instant::now();
+
+    let gops: Vec<Vec<Vec<u8>>> = (0..20).map(|i| make_gop(i, 0)).collect();
+
+    for (i, gop) in gops.iter().enumerate() {
+        let now = base + Duration::from_millis(50 * i as u64);
+        let output = trim.push(join(gop), now);
+        assert_eq!(output, TrimOutput::Hold, "holding during burst at GOP {i}");
+    }
+
+    let mut emitted_bytes = None;
+    for step in 1..=30 {
+        let wall_ms = 950 + step * 20;
+        let pcr = (20 * 1000 + step * 20) * (PCR_HZ / 1000);
+        let packet = pes_with_pcr(VIDEO_PID, false, pcr, &[&h264(1)]);
+        let out = trim.push(Bytes::from(packet), base + Duration::from_millis(wall_ms));
+        if wall_ms < 1350 {
+            assert_eq!(out, TrimOutput::Hold, "holding in real time at {wall_ms} ms");
+        } else if let TrimOutput::Emit(bytes) = out {
+            emitted_bytes = Some(bytes);
+            break;
+        }
+    }
+
+    let emitted = emitted_bytes.expect("expected emit after settle in real time with 20ms chunks before max_hold");
+    assert!(!trim.is_holding());
+    let gop17 = make_gop(17, 0);
+    assert_eq!(&emitted[..TS_PACKET_SIZE], &gop17[0][..]);
+    assert_eq!(&emitted[TS_PACKET_SIZE..2 * TS_PACKET_SIZE], &gop17[1][..]);
+    assert_eq!(&emitted[2 * TS_PACKET_SIZE..3 * TS_PACKET_SIZE], &gop17[2][..]);
+}
+
+#[test]
+fn burst_before_discontinuity_in_same_chunk_disqualifies_no_burst() {
+    let target = Duration::from_secs(3);
+    let max_hold = Duration::from_secs(10);
+    let max_bytes = 1_000_000;
+    let mut trim = TsLiveEdgeTrim::new(target, max_hold, max_bytes);
+    let base = Instant::now();
+
+    let pcr_300ms = 300 * (PCR_HZ / 1000);
+    let pcr_jump = (5 * 1000 + 300) * (PCR_HZ / 1000);
+    let chunk0 = join(&[
+        pat(0),
+        video_pmt(0),
+        pes_with_pcr(VIDEO_PID, true, 0, &[&h264(5)]),
+        pes_with_pcr(VIDEO_PID, false, pcr_300ms, &[&h264(1)]),
+        pes_with_pcr(VIDEO_PID, false, pcr_jump, &[&h264(1)]),
+    ]);
+    let out0 = trim.push(chunk0, base);
+    assert_eq!(out0, TrimOutput::Hold);
+
+    let gop1 = make_short_gop(1, pcr_jump, 3);
+    let out1 = trim.push(join(&gop1), base + Duration::from_millis(120));
+    assert_eq!(out1, TrimOutput::Hold);
+
+    let gop2 = make_short_gop(2, pcr_jump, 3);
+    let out2 = trim.push(join(&gop2), base + Duration::from_millis(240));
+    assert_eq!(out2, TrimOutput::Hold);
+
+    let gop3 = make_short_gop(3, pcr_jump, 3);
+    let out3 = trim.push(join(&gop3), base + Duration::from_millis(360));
+    assert_eq!(out3, TrimOutput::Hold, "no-burst early release must NOT happen after burst in initial chunk");
+
+    let gop4 = make_short_gop(4, pcr_jump, 3);
+    let out4 = trim.push(join(&gop4), base + Duration::from_millis(480));
+    assert!(matches!(out4, TrimOutput::Emit(_)), "settles through regular settle window");
+    assert!(!trim.is_holding());
+}
+
+#[test]
+fn skip_candidate_whose_pat_was_dropped() {
+    let target = Duration::from_secs(1);
+    let max_hold = Duration::from_secs(10);
+    // 6 packets = 1128 bytes cap
+    let max_bytes = 6 * TS_PACKET_SIZE;
+    let mut trim = TsLiveEdgeTrim::new(target, max_hold, max_bytes);
+    let base = Instant::now();
+
+    // Chunk 0: 4 packets (0..752 bytes). Opens PES at PAT 0 (pos 0).
+    let sei = [vec![0x06], vec![0x05; 150]].concat();
+    let pes_open = pes(VIDEO_PID, false, false, &[&h264(9), &sei]);
+    let chunk0 = join(&[pat(0), video_pmt(0), pcr_packet(VIDEO_PID, 0), pes_open]);
+    assert_eq!(trim.push(chunk0, base), TrimOutput::Hold);
+
+    // Chunk 1: 3 packets (752..1316 bytes). Exceeds 1128 byte cap; force_drop_on_cap drops
+    // to offset 752 (pcr_sample at packet 4), dropping PAT 0.
+    let chunk1 = join(&[
+        pcr_packet(VIDEO_PID, 50 * (PCR_HZ / 1000)),
+        ts(AUDIO_PID, false, None, &[1; 20]),
+        ts(AUDIO_PID, false, None, &[1; 20]),
+    ]);
+    assert_eq!(trim.push(chunk1, base + Duration::from_millis(10)), TrimOutput::Hold);
+
+    // Chunk 2: 1 packet (1316..1504 bytes). Completes the open PES whose PAT was at pos 0 (< dropped_bytes 752).
+    let idr_cont = ts(VIDEO_PID, false, None, &[0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84]);
+    assert_eq!(trim.push(Bytes::from(idr_cont), base + Duration::from_millis(20)), TrimOutput::Hold);
+
+    // Chunk 3: 3 packets with a valid second keyframe at PAT 1 (pos 1504 >= dropped_bytes).
+    let chunk3 = join(&[pat(1), video_pmt(1), pes_with_pcr(VIDEO_PID, true, 100 * (PCR_HZ / 1000), &[&h264(5)])]);
+    assert_eq!(trim.push(chunk3, base + Duration::from_millis(30)), TrimOutput::Hold);
+
+    let emitted = trim.finish().expect("held bytes");
+    assert_eq!(pid_of(&emitted[..TS_PACKET_SIZE]), 0, "must start at PAT packet, not dropped non-PAT at offset 0");
+    assert_eq!(&emitted[..TS_PACKET_SIZE], &pat(1)[..], "must start at PAT 1");
+}
+
+#[test]
+fn candidate_media_time_retained_across_many_pats() {
+    let target = Duration::from_secs(5);
+    let max_hold = Duration::from_secs(10);
+    let max_bytes = 10_000_000;
+    let mut trim = TsLiveEdgeTrim::new(target, max_hold, max_bytes);
+    let base = Instant::now();
+
+    let sei = [vec![0x06], vec![0x05; 150]].concat();
+    let pes_open = pes(VIDEO_PID, false, false, &[&h264(9), &sei]);
+    let chunk0 = join(&[pat(0), video_pmt(0), pcr_packet(VIDEO_PID, 0), pes_open]);
+    assert_eq!(trim.push(chunk0, base), TrimOutput::Hold);
+
+    // Send 10 PATs, evicting PAT 0 from pat_history (capacity 8).
+    for i in 1..=10 {
+        let pcr = (i * 100) * (PCR_HZ / 1000);
+        let chunk = join(&[pat(i as u8), pcr_packet(VIDEO_PID, pcr)]);
+        assert_eq!(trim.push(chunk, base + Duration::from_millis(i * 10)), TrimOutput::Hold);
+    }
+
+    // Complete the open PES which started at PAT 0.
+    let idr_cont = ts(VIDEO_PID, false, None, &[0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84]);
+    assert_eq!(trim.push(Bytes::from(idr_cont), base + Duration::from_millis(110)), TrimOutput::Hold);
+
+    // Verify candidate media time was retained from PAT 0 (0s), not substituted with current clock (1s).
+    let candidates = trim.candidate_media_times();
+    assert_eq!(candidates.len(), 1, "exactly one candidate from completed open PES");
+    assert_eq!(candidates[0].0, 0, "candidate offset points to PAT 0");
+    assert_eq!(
+        candidates[0].1,
+        Duration::ZERO,
+        "candidate media time must be retained opening PAT media time (0s), not clock time at completion (1s)"
+    );
+
+    let emitted = trim.finish().expect("held bytes");
+    assert_eq!(&emitted[..TS_PACKET_SIZE], &pat(0)[..], "must retain GOP 0 PAT");
+}
+
+#[test]
+fn switch_hold_wakes_and_releases_at_player_buffer_floor() {
+    let target = Duration::from_secs(3);
+    let max_hold = Duration::from_secs(10);
+    let max_bytes = 10_000_000;
+    let mut trim = TsLiveEdgeTrim::new(target, max_hold, max_bytes);
+
+    let base = Instant::now();
+    trim.set_player_buffer(Duration::from_secs(4), base);
+
+    // Burst: push GOP 0..2 (3 full GOPs = 6 s media) and GOP 3's first 35 frames (media 7.4 s) over 150 ms.
+    for i in 0..3 {
+        let gop = make_gop_with_frames(i, 0, 50);
+        let out = trim.push(join(&gop), base + Duration::from_millis(50 * i));
+        assert_eq!(out, TrimOutput::Hold, "holding during burst at GOP {i}");
+    }
+
+    let gop3 = make_gop_with_frames(3, 0, 50);
+    let gop3_burst_packets = &gop3[..38];
+    let out_burst = trim.push(join(gop3_burst_packets), base + Duration::from_millis(150));
+    assert_eq!(out_burst, TrimOutput::Hold, "holding at GOP 3 partial burst");
+
+    // Real-time delivery every 100 ms after the burst ended at 150 ms. The hold settles, but the only RAP old
+    // enough (GOP 3 at 6 s) is not fresh, so it holds until the player buffer drains to the floor.
+    for wall_ms in (250..=2900).step_by(100) {
+        let pcr_ms = 7400 + (wall_ms - 150);
+        let pkt = pes_with_pcr(VIDEO_PID, false, pcr_ms * (PCR_HZ / 1000), &[&h264(1)]);
+        let out = trim.push(Bytes::from(pkt), base + Duration::from_millis(wall_ms));
+        assert_eq!(out, TrimOutput::Hold, "holding in real time at {wall_ms} ms");
+    }
+
+    // The upstream pauses. Floor instant: sampled_at (base) + buffer (4 s) - PLAYER_BUFFER_FLOOR (1 s).
+    let floor_instant = base + Duration::from_millis(3000);
+    let hold_deadline = base + max_hold;
+
+    let before_floor = base + Duration::from_millis(2950);
+    assert_eq!(trim.next_wake(before_floor), Some(floor_instant));
+    assert_eq!(trim.push(Bytes::new(), before_floor), TrimOutput::Hold);
+    assert_eq!(trim.next_wake(base + Duration::from_millis(3500)), Some(hold_deadline));
+
+    // At the floor instant, empty push emits!
+    let out_floor = trim.push(Bytes::new(), floor_instant);
+    let emitted = match out_floor {
+        TrimOutput::Emit(bytes) => bytes,
+        TrimOutput::Hold => panic!("expected emit at floor instant on empty push"),
+    };
+    assert!(!trim.is_holding());
+    assert_eq!(&emitted[..TS_PACKET_SIZE], &gop3[0][..], "starts at GOP 3 PAT");
+    assert_eq!(trim.next_wake(floor_instant), None, "no wake when not holding");
+}
+
+#[test]
+fn first_rap_wait_wake_releases_settled_hold_without_keyframe() {
+    let mut trim = TsLiveEdgeTrim::new(Duration::from_secs(2), Duration::from_secs(5), 1_000_000);
+    let base = Instant::now();
+    // PAT, PMT and PCR in real time, but no detectable keyframe (scrambled payload).
+    let chunk = |media_ms: u64, version: u8| {
+        join(&[
+            pcr_packet(VIDEO_PID, media_ms * (PCR_HZ / 1000)),
+            pat(version),
+            video_pmt(0),
+            ts(VIDEO_PID, false, None, &[0x55; 100]),
+        ])
+    };
+    let at = |ms: u64| base + Duration::from_millis(ms);
+
+    // Burst of 2 s media within 100 ms, then real time; PCR steps stay below 1 s (no discontinuity).
+    for (wall_ms, media_ms, version) in [(0, 0, 0), (50, 1000, 1), (100, 2000, 2), (1400, 2900, 3), (1700, 3200, 4)] {
+        assert_eq!(trim.push(chunk(media_ms, version), at(wall_ms)), TrimOutput::Hold, "holding at {wall_ms} ms");
+    }
+    let expected_wake = at(2000);
+    assert_eq!(trim.next_wake(at(1700)), Some(expected_wake));
+
+    // The upstream pauses; at the wait instant the settled hold without keyframe releases at a PAT.
+    let t2 = expected_wake;
+    let TrimOutput::Emit(emitted) = trim.push(Bytes::new(), t2) else {
+        panic!("expected emit at FIRST_RAP_WAIT instant");
+    };
+    assert_eq!(&emitted[..TS_PACKET_SIZE], &pat(1)[..], "starts at the PAT at least the target behind");
+    assert!(!trim.is_holding());
+    assert_eq!(trim.next_wake(t2), None);
+}
+
+#[test]
+fn no_pcr_hold_wakes_and_releases_at_settle_window() {
+    let mut trim = TsLiveEdgeTrim::new(Duration::from_secs(3), Duration::from_secs(5), 1_000_000);
+    let base = Instant::now();
+    let packet = ts(0x200, false, None, &[0xAA; 100]);
+
+    assert_eq!(trim.push(join(std::slice::from_ref(&packet)), base), TrimOutput::Hold);
+    let settle = base + Duration::from_millis(400);
+    assert_eq!(trim.next_wake(base + Duration::from_millis(100)), Some(settle));
+
+    // The upstream stays silent; the wake at the settle window releases everything held.
+    let TrimOutput::Emit(emitted) = trim.push(Bytes::new(), settle) else {
+        panic!("expected emit at the settle window without PCR");
+    };
+    assert_eq!(emitted.as_ref(), packet.as_slice());
+    assert_eq!(trim.next_wake(settle), None);
 }

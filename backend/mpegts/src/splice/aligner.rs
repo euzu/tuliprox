@@ -153,12 +153,24 @@ impl TsSpliceAligner {
 
     /// Wall-clock deadline for the running hold, or `None` if not aligning or hold has not started.
     #[must_use]
-    pub fn hold_deadline(&self) -> Option<Instant> {
+    pub fn hold_deadline(&self, now: Instant) -> Option<Instant> {
         match &self.aligning {
             Some(Aligning::FirstRap(state)) => Some(state.started + self.first_rap_budget),
-            Some(Aligning::Trim(trim)) => {
-                let hold_start = trim.hold_start()?;
-                Some(hold_start + self.trim_budget)
+            Some(Aligning::Trim(trim)) => trim.next_wake(now),
+            None => None,
+        }
+    }
+
+    /// Re-evaluates a running hold: returns held bytes if ready to emit, or `None`.
+    pub fn poll_hold(&mut self, now: Instant) -> Option<Bytes> {
+        match &self.aligning {
+            Some(Aligning::Trim(_)) => self.push_aligning(Bytes::new(), now).filter(|b| !b.is_empty()),
+            Some(Aligning::FirstRap(state)) => {
+                if now.saturating_duration_since(state.started) >= self.first_rap_budget {
+                    self.finish_at(now)
+                } else {
+                    None
+                }
             }
             None => None,
         }
@@ -286,10 +298,13 @@ impl TsSpliceAligner {
                         state.pmt_after_last_pat = false;
                     }
                     if self.programs.observe(view) && state.last_pat.is_some() {
-                        state.pmt_after_last_pat = true;
                         if self.programs.video().is_none() {
+                            state.pmt_after_last_pat = true;
                             start = state.last_pat;
                             continue;
+                        }
+                        if self.programs.video_pmt() == Some(view.pid()) {
+                            state.pmt_after_last_pat = true;
                         }
                     }
                     if !state.pmt_after_last_pat {

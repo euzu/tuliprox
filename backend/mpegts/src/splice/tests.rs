@@ -772,3 +772,153 @@ fn five_switches_with_4s_gop_keep_buffer_bounded_and_non_growing() {
         }
     }
 }
+
+#[test]
+fn pcr_clock_rejects_extension_above_299() {
+    let mut clock = super::pcr_clock::PcrClock::new();
+    let pid = 0x100;
+    let pkt1 = pcr_packet_raw(pid, 1000, 299, false);
+    let pcr1 = 1000 * 300 + 299;
+    assert_eq!(clock.observe(crate::packet::TsPacket(&pkt1)), super::pcr_clock::PcrProgress::First { pcr: pcr1 });
+    assert_eq!(clock.media_time(), Duration::ZERO);
+
+    let pkt_invalid1 = pcr_packet_raw(pid, 1000, 300, false);
+    assert_eq!(clock.observe(crate::packet::TsPacket(&pkt_invalid1)), super::pcr_clock::PcrProgress::None);
+    assert_eq!(clock.media_time(), Duration::ZERO);
+
+    let pkt_invalid2 = pcr_packet_raw(pid, 1000, 511, false);
+    assert_eq!(clock.observe(crate::packet::TsPacket(&pkt_invalid2)), super::pcr_clock::PcrProgress::None);
+    assert_eq!(clock.media_time(), Duration::ZERO);
+
+    let pkt2 = pcr_packet_raw(pid, 1090, 299, false);
+    assert_eq!(
+        clock.observe(crate::packet::TsPacket(&pkt2)),
+        super::pcr_clock::PcrProgress::Advance {
+            delta: Duration::from_millis(1),
+            media_time: Duration::from_millis(1),
+        }
+    );
+    assert_eq!(clock.media_time(), Duration::from_millis(1));
+}
+
+#[test]
+fn pcr_clock_discontinuity_flag_resets_timeline_on_small_delta() {
+    let mut clock = super::pcr_clock::PcrClock::new();
+    let pid = 0x100;
+    let pkt1 = pcr_packet_raw(pid, 1000, 0, true);
+    assert!(crate::packet::TsPacket(&pkt1).discontinuity());
+    assert_eq!(clock.observe(crate::packet::TsPacket(&pkt1)), super::pcr_clock::PcrProgress::First { pcr: 300_000 });
+    assert_eq!(clock.media_time(), Duration::ZERO);
+
+    let pkt2 = pcr_packet_raw(pid, 1090, 0, false);
+    assert!(!crate::packet::TsPacket(&pkt2).discontinuity());
+    assert_eq!(
+        clock.observe(crate::packet::TsPacket(&pkt2)),
+        super::pcr_clock::PcrProgress::Advance {
+            delta: Duration::from_millis(1),
+            media_time: Duration::from_millis(1),
+        }
+    );
+    assert_eq!(clock.media_time(), Duration::from_millis(1));
+
+    let pkt3 = pcr_packet_raw(pid, 1180, 0, true);
+    assert!(crate::packet::TsPacket(&pkt3).discontinuity());
+    let pcr3 = 1180 * 300;
+    assert_eq!(
+        clock.observe(crate::packet::TsPacket(&pkt3)),
+        super::pcr_clock::PcrProgress::Discontinuity { pcr: pcr3 }
+    );
+    assert_eq!(clock.media_time(), Duration::ZERO);
+
+    let pkt4 = pcr_packet_raw(pid, 1270, 0, false);
+    assert_eq!(
+        clock.observe(crate::packet::TsPacket(&pkt4)),
+        super::pcr_clock::PcrProgress::Advance {
+            delta: Duration::from_millis(1),
+            media_time: Duration::from_millis(1),
+        }
+    );
+    assert_eq!(clock.media_time(), Duration::from_millis(1));
+}
+
+#[test]
+fn aligner_two_program_non_video_pmt_does_not_qualify_video_keyframe() {
+    let now = Instant::now();
+    let mut aligner = switched_aligner(0, now);
+
+    // Prime member with video PMT so video stream is selected
+    let prime = join(&[two_program_pat(), video_pmt(0)]);
+    assert!(matches!(aligner.push(prime, now), SpliceOutput::Hold));
+
+    // Next chunk in member: PAT + non-video PMT + video keyframe must NOT qualify as RAP
+    let non_video_chunk = join(&[two_program_pat(), radio_pmt(), pes(VIDEO_PID, true, false, &[&h264(5)])]);
+    let out = aligner.push(non_video_chunk, now);
+    assert!(matches!(out, SpliceOutput::Hold), "keyframe after non-video PMT must NOT produce a RAP");
+
+    // Chunk with video PMT + video keyframe MUST qualify as RAP
+    let video_chunk = join(&[two_program_pat(), video_pmt(0), pes(VIDEO_PID, true, false, &[&h264(5)])]);
+    let out2 = emitted(aligner.push(video_chunk, now));
+    let pkts = packets(&out2);
+    assert_eq!(pid_of(pkts[0]), 0);
+    assert_eq!(pid_of(pkts[1]), PMT_PID);
+    assert_eq!(pid_of(pkts[2]), VIDEO_PID);
+}
+
+#[test]
+fn poll_hold_at_floor_instant_emits_with_psi_rewrite() {
+    let target = Duration::from_secs(3);
+    let mut aligner = TsSpliceAligner::new(10 * 1024 * 1024, Duration::from_secs(10), Duration::from_secs(10), target);
+    let base = Instant::now();
+
+    // Member 1 (first member, no player buffer) bursts 4 GOPs (0..3, each 4s) over 150 ms:
+    for i in 0..4 {
+        let _ = aligner.push(join(&make_pcr_gop_4s(i, 0, 0)), base + Duration::from_millis(50 * i));
+    }
+    // Member 1 settles at 600 ms and emits:
+    let m1_gop4 = make_pcr_gop_4s(4, 0, 0);
+    let m1_emit_time = base + Duration::from_millis(600);
+    let m1_out = emitted(aligner.push(join(&m1_gop4[..10]), m1_emit_time));
+    assert!(!aligner.is_aligning());
+    let _ = m1_out;
+
+    let initial_buf = aligner.buffer_at(m1_emit_time);
+    assert_eq!(initial_buf, Duration::from_millis(4280));
+
+    // Switch to member 2 at m1_emit_time with 4280ms player buffer:
+    let switch_time = m1_emit_time;
+    aligner.begin_member(switch_time);
+    assert!(aligner.is_aligning());
+
+    // Floor instant: switch_time + (4280ms - 1000ms) = switch_time + 3280ms:
+    let floor_instant = switch_time + Duration::from_millis(3280);
+
+    // Member 2 bursts 3 GOPs (each 4s) over 150 ms (media reaches 12.0s):
+    for i in 0..3 {
+        let _ = aligner.push(join(&make_pcr_gop_4s(i, 0, 0)), switch_time + Duration::from_millis(50 * i));
+    }
+
+    // Real-time delivery every 100 ms after the burst ended at 150 ms, up to shortly before the floor instant.
+    // The hold settles, but the chosen RAP (GOP 2 at 8 s) is not fresh, so it holds.
+    for wall_ms in (250..=3250).step_by(100) {
+        let pcr_ms = 12000 + (wall_ms - 150);
+        let pkt = pes_with_pcr(VIDEO_PID, false, pcr_ms * (PCR_HZ / 1000), &[&h264(1)]);
+        let out = aligner.push(Bytes::from(pkt), switch_time + Duration::from_millis(wall_ms));
+        assert!(matches!(out, SpliceOutput::Hold), "holding at {wall_ms} ms");
+    }
+
+    // The upstream pauses. Before the floor instant the hold stays; the wake instant is the floor instant.
+    let before_floor = switch_time + Duration::from_millis(3260);
+    assert_eq!(aligner.hold_deadline(before_floor), Some(floor_instant));
+    assert!(aligner.poll_hold(before_floor).is_none());
+    assert!(aligner.is_aligning());
+
+    // Poll at floor instant emits:
+    let out = aligner.poll_hold(floor_instant);
+    let emitted = out.expect("poll_hold at floor instant emits");
+    assert!(!aligner.is_aligning(), "aligning ended");
+
+    let out_packets = packets(&emitted);
+    assert_eq!(section_version(out_packets[0]), 1, "PAT version continues after member 1's version 0");
+    assert_eq!(section_version(out_packets[1]), 1, "PMT version continues after member 1's version 0");
+    assert!(discontinuity(out_packets[2]), "first video packet has discontinuity flag set");
+}

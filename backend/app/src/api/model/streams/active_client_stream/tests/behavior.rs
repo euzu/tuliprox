@@ -11,7 +11,7 @@ use crate::{
         StreamError,
     },
     auth::Fingerprint,
-    model::GracePeriodOptions,
+    model::{GracePeriodOptions, StreamConfig},
 };
 use axum::http::HeaderMap;
 use bytes::Bytes;
@@ -131,6 +131,7 @@ async fn deferred_provider_open_forces_identity_when_original_mode_preserves_ori
         &stream_channel,
         &HeaderMap::new(),
         None,
+        false,
     )
     .expect("deferred provider open context");
 
@@ -267,4 +268,207 @@ async fn test_active_client_stream_immediate_provider_stream_emits_meter_batches
     assert_eq!(entries[0].uids, vec![1]);
     assert_eq!(entries[0].rate_kbps, 1);
     assert_eq!(entries[0].total_kb, 3);
+}
+
+#[tokio::test]
+async fn test_deferred_provider_open_applies_live_edge_trim() {
+    let app_state = create_test_app_state();
+    let provider_name = "provider_1".intern();
+    let addr = "127.0.0.1:55016".parse().unwrap();
+    let provider_handle = app_state
+        .active_provider
+        .acquire_exact_connection_with_grace(&provider_name, &addr, true, 0, crate::api::model::ConnectionKind::Normal)
+        .expect("deferred provider allocation");
+    let stream_details = create_deferred_provider_grace_details(
+        &provider_name,
+        tuliprox_session::ManagedProviderHandle::new(
+            Arc::clone(&app_state.connection_manager.provider_manager),
+            provider_handle.clone(),
+        ),
+    );
+    let fingerprint = create_test_fingerprint(addr);
+    let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
+    stream_channel.item_type = PlaylistItemType::Live;
+
+    let deferred = create_deferred_provider_open_future(
+        &app_state,
+        &stream_details,
+        &fingerprint,
+        &stream_channel,
+        &HeaderMap::new(),
+        None,
+        false,
+    )
+    .expect("deferred provider open context");
+
+    let DeferredProviderOpenState::Pending(context) = deferred else { panic!("new deferred open must start pending") };
+    assert_eq!(context.live_edge_trim, Some(Duration::from_secs(3)));
+    drop(context);
+    app_state.connection_manager.release_provider_handle(Some(provider_handle));
+}
+
+#[tokio::test]
+async fn test_deferred_provider_open_live_edge_trim_rejects_zero_burst() {
+    let provider_name = "provider_1".intern();
+    let addr = "127.0.0.1:55017".parse().unwrap();
+    let fingerprint = create_test_fingerprint(addr);
+
+    let app_state = super::admission::create_test_app_state_with_stream_config(StreamConfig {
+        shared_burst_secs: 0,
+        ..StreamConfig::default()
+    });
+    let provider_handle = app_state
+        .active_provider
+        .acquire_exact_connection_with_grace(&provider_name, &addr, true, 0, crate::api::model::ConnectionKind::Normal)
+        .expect("deferred provider allocation");
+    let stream_details = create_deferred_provider_grace_details(
+        &provider_name,
+        tuliprox_session::ManagedProviderHandle::new(
+            Arc::clone(&app_state.connection_manager.provider_manager),
+            provider_handle.clone(),
+        ),
+    );
+    let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
+    stream_channel.item_type = PlaylistItemType::Live;
+
+    let deferred = create_deferred_provider_open_future(
+        &app_state,
+        &stream_details,
+        &fingerprint,
+        &stream_channel,
+        &HeaderMap::new(),
+        None,
+        false,
+    )
+    .expect("deferred provider open context");
+
+    let DeferredProviderOpenState::Pending(context) = deferred else { panic!("new deferred open must start pending") };
+    assert_eq!(context.live_edge_trim, None);
+    drop(context);
+    app_state.connection_manager.release_provider_handle(Some(provider_handle));
+}
+
+#[tokio::test]
+async fn test_deferred_provider_open_live_edge_trim_rejects_non_live_item_types() {
+    let provider_name = "provider_1".intern();
+    let addr = "127.0.0.1:55018".parse().unwrap();
+    let fingerprint = create_test_fingerprint(addr);
+    let app_state = create_test_app_state();
+
+    for non_live in [PlaylistItemType::Video, PlaylistItemType::Catchup, PlaylistItemType::LiveHls] {
+        let provider_handle = app_state
+            .active_provider
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &addr,
+                true,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
+            .expect("deferred provider allocation");
+        let stream_details = create_deferred_provider_grace_details(
+            &provider_name,
+            tuliprox_session::ManagedProviderHandle::new(
+                Arc::clone(&app_state.connection_manager.provider_manager),
+                provider_handle.clone(),
+            ),
+        );
+        let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
+        stream_channel.item_type = non_live;
+
+        let deferred = create_deferred_provider_open_future(
+            &app_state,
+            &stream_details,
+            &fingerprint,
+            &stream_channel,
+            &HeaderMap::new(),
+            None,
+            false,
+        )
+        .expect("deferred provider open context");
+
+        let DeferredProviderOpenState::Pending(context) = deferred else {
+            panic!("new deferred open must start pending")
+        };
+        assert_eq!(context.live_edge_trim, None);
+        drop(context);
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+    }
+}
+
+#[tokio::test]
+async fn test_deferred_provider_open_live_edge_trim_rejects_group_runtime() {
+    let provider_name = "provider_1".intern();
+    let addr = "127.0.0.1:55019".parse().unwrap();
+    let fingerprint = create_test_fingerprint(addr);
+    let app_state = create_test_app_state();
+
+    let provider_handle = app_state
+        .active_provider
+        .acquire_exact_connection_with_grace(&provider_name, &addr, true, 0, crate::api::model::ConnectionKind::Normal)
+        .expect("deferred provider allocation");
+    let stream_details = create_deferred_provider_grace_details(
+        &provider_name,
+        tuliprox_session::ManagedProviderHandle::new(
+            Arc::clone(&app_state.connection_manager.provider_manager),
+            provider_handle.clone(),
+        ),
+    );
+    let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
+    stream_channel.item_type = PlaylistItemType::Live;
+
+    let deferred = create_deferred_provider_open_future(
+        &app_state,
+        &stream_details,
+        &fingerprint,
+        &stream_channel,
+        &HeaderMap::new(),
+        None,
+        true,
+    )
+    .expect("deferred provider open context");
+
+    let DeferredProviderOpenState::Pending(context) = deferred else { panic!("new deferred open must start pending") };
+    assert_eq!(context.live_edge_trim, None);
+    drop(context);
+    app_state.connection_manager.release_provider_handle(Some(provider_handle));
+}
+
+#[tokio::test]
+async fn test_deferred_provider_open_live_edge_trim_rejects_custom_video() {
+    let provider_name = "provider_1".intern();
+    let addr = "127.0.0.1:55020".parse().unwrap();
+    let fingerprint = create_test_fingerprint(addr);
+    let app_state = create_test_app_state();
+
+    let provider_handle = app_state
+        .active_provider
+        .acquire_exact_connection_with_grace(&provider_name, &addr, true, 0, crate::api::model::ConnectionKind::Normal)
+        .expect("deferred provider allocation");
+    let mut stream_details = create_deferred_provider_grace_details(
+        &provider_name,
+        tuliprox_session::ManagedProviderHandle::new(
+            Arc::clone(&app_state.connection_manager.provider_manager),
+            provider_handle.clone(),
+        ),
+    );
+    stream_details.custom_reason = Some(tuliprox_session::ProviderStreamCustomReason::ProviderExhausted);
+    let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
+    stream_channel.item_type = PlaylistItemType::Live;
+
+    let deferred = create_deferred_provider_open_future(
+        &app_state,
+        &stream_details,
+        &fingerprint,
+        &stream_channel,
+        &HeaderMap::new(),
+        None,
+        false,
+    )
+    .expect("deferred provider open context");
+
+    let DeferredProviderOpenState::Pending(context) = deferred else { panic!("new deferred open must start pending") };
+    assert_eq!(context.live_edge_trim, None);
+    drop(context);
+    app_state.connection_manager.release_provider_handle(Some(provider_handle));
 }

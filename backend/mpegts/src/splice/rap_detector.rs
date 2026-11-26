@@ -40,6 +40,15 @@ impl RapDetector {
         self.close_open_pes();
     }
 
+    #[must_use]
+    pub(crate) fn pending_pat(&self) -> Option<u64> {
+        if self.pes_open {
+            self.pes_pat
+        } else {
+            None
+        }
+    }
+
     /// Observes one whole 188-byte packet at `packet_pos`. Returns the PAT position
     /// if this packet completes a random access point.
     pub(crate) fn observe_packet(&mut self, view: TsPacket<'_>, packet_pos: u64) -> Option<u64> {
@@ -66,12 +75,14 @@ impl RapDetector {
             self.close_open_pes();
         }
         if was_pmt && self.last_pat.is_some() {
-            self.pmt_after_last_pat = true;
             if self.programs.video().is_none() {
                 *newest_rap = self.last_pat;
                 self.pmt_after_last_pat = false;
                 self.close_open_pes();
                 return;
+            }
+            if self.programs.video_pmt() == Some(pid) {
+                self.pmt_after_last_pat = true;
             }
         }
 

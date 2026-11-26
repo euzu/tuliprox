@@ -343,7 +343,10 @@ pub(crate) use self::{
         activate_local_file_stream, admit_local_file_connection, apply_stream_throttle, local_stream_response,
     },
     maintenance::{blocks_new_playback, is_running_playback, maintenance_rejection_response},
-    provider_acquire::{resolve_target_shared_lookup_key, stream_response_with_provider_handle, StreamPlaybackOutcome},
+    provider_acquire::{
+        resolve_target_shared_lookup_key, should_apply_live_edge_trim, stream_details_has_custom_video,
+        stream_response_with_provider_handle, StreamPlaybackOutcome,
+    },
     provider_urls::{lookup_account_m3u_stream_url, select_provider_stream_url},
     recording_vod::{
         recording_vod_applies, recording_vod_documents, recording_vod_info, serve_recording_vod,

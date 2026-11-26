@@ -48,6 +48,7 @@ struct HoldingState {
     trim: TsLiveEdgeTrim,
     carry: BytesMut,
     hold_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    wake_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
     max_hold: Duration,
     synced: bool,
 }
@@ -58,14 +59,30 @@ impl HoldingState {
             trim: TsLiveEdgeTrim::new(target, max_hold, max_bytes),
             carry: BytesMut::with_capacity(SYNC_PROBE_BYTES),
             hold_sleep: None,
+            wake_sleep: None,
             max_hold,
             synced: false,
+        }
+    }
+
+    /// Arms the wake sleep to the next instant at which the trimmer's release decision can change without data.
+    fn arm_wake_sleep(&mut self, now: std::time::Instant) {
+        let Some(wake) = self.trim.next_wake(now).filter(|wake| *wake > now) else {
+            self.wake_sleep = None;
+            return;
+        };
+        let wake = tokio::time::Instant::from_std(wake);
+        match &mut self.wake_sleep {
+            Some(sleep) => sleep.as_mut().reset(wake),
+            None => self.wake_sleep = Some(Box::pin(tokio::time::sleep_until(wake))),
         }
     }
 }
 
 fn confirmed_ts_sync_offset(buf: &[u8]) -> Option<usize> {
-    (0..TS_PACKET_SIZE).find(|&offset| {
+    let limit = buf.len().min(SYNC_PROBE_BYTES);
+    let max_offset = limit.saturating_sub(TS_PACKET_SIZE);
+    (0..max_offset).find(|&offset| {
         buf.get(offset) == Some(&TS_SYNC_BYTE) && buf.get(offset + TS_PACKET_SIZE) == Some(&TS_SYNC_BYTE)
     })
 }
@@ -166,6 +183,20 @@ where
                         }
                     }
 
+                    // A release condition that changes with wall time alone (player-buffer floor, keyframe
+                    // wait) is evaluated when its instant comes, also while the upstream stays silent.
+                    if let Some(sleep) = &mut holding.wake_sleep {
+                        if sleep.as_mut().poll(cx).is_ready() {
+                            holding.wake_sleep = None;
+                            if let TrimOutput::Emit(bytes) = holding.trim.push(Bytes::new(), now) {
+                                this.finish_hold(Some(bytes), After::PassThrough);
+                            } else {
+                                holding.arm_wake_sleep(now);
+                            }
+                            continue;
+                        }
+                    }
+
                     match Pin::new(&mut this.inner).poll_next(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(None) => {
@@ -194,9 +225,7 @@ where
                                     }
                                     None if holding.carry.len() >= SYNC_PROBE_BYTES => {
                                         let non_ts = holding.carry.split().freeze();
-                                        if let TrimOutput::Emit(emitted) = holding.trim.push(non_ts, now) {
-                                            this.finish_hold(Some(emitted), After::PassThrough);
-                                        }
+                                        this.finish_hold(Some(non_ts), After::PassThrough);
                                         continue;
                                     }
                                     None => continue,
@@ -211,6 +240,8 @@ where
 
                             if let TrimOutput::Emit(emitted) = holding.trim.push(packets, now) {
                                 this.finish_hold(Some(emitted), After::PassThrough);
+                            } else {
+                                holding.arm_wake_sleep(now);
                             }
                         }
                     }
@@ -359,17 +390,28 @@ mod tests {
         let target = Duration::from_secs(3);
         let mut trim_stream = LiveEdgeTrimStream::new(rx, target);
 
+        let start_time = tokio::time::Instant::now();
+
         for i in 0..20 {
             let gop = make_gop(i, 0);
             tx.unbounded_send(Ok(Bytes::from(gop))).unwrap();
+            assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
             tokio::time::advance(Duration::from_millis(50)).await;
         }
 
         tokio::time::advance(Duration::from_millis(1050)).await;
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
         let gop20 = make_gop(20, 0);
         tx.unbounded_send(Ok(Bytes::from(gop20))).unwrap();
 
-        let emitted = trim_stream.next().await.unwrap().unwrap();
+        let Poll::Ready(Some(Ok(emitted))) = futures::poll!(trim_stream.next()) else {
+            panic!("expected emit on realtime GOP 20");
+        };
+
+        let elapsed = start_time.elapsed();
+        assert_eq!(elapsed, Duration::from_millis(2050));
+        assert!(elapsed < DEFAULT_MAX_HOLD);
         assert!(!trim_stream.is_holding());
         assert_eq!(emitted.len(), 3 * 27 * TS_PACKET_SIZE, "exact emitted length matches GOPs 18..20");
 
@@ -385,6 +427,8 @@ mod tests {
         let target = Duration::from_secs(3);
         let mut trim_stream = LiveEdgeTrimStream::new(rx, target);
 
+        let start_time = tokio::time::Instant::now();
+
         let mut all_bytes = Vec::new();
         for i in 0..21 {
             all_bytes.extend_from_slice(&make_gop(i, 0));
@@ -392,22 +436,38 @@ mod tests {
 
         let burst_len = 20 * 27 * TS_PACKET_SIZE;
         let burst_bytes = &all_bytes[..burst_len];
+        let mut burst_chunks = 0;
         for chunk in burst_bytes.chunks(200) {
             tx.unbounded_send(Ok(Bytes::copy_from_slice(chunk))).unwrap();
+            assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
             tokio::time::advance(Duration::from_millis(2)).await;
+            burst_chunks += 1;
         }
 
         tokio::time::advance(Duration::from_millis(1050)).await;
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
         let realtime_bytes = &all_bytes[burst_len..];
         for chunk in realtime_bytes.chunks(200) {
             tx.unbounded_send(Ok(Bytes::copy_from_slice(chunk))).unwrap();
         }
 
-        let emitted = trim_stream.next().await.unwrap().unwrap();
-        assert_eq!(emitted.len(), 3 * 27 * TS_PACKET_SIZE, "exact emitted length matches GOPs 18..20");
-        let gop18 = make_gop(18, 0);
-        assert_eq!(&emitted[..TS_PACKET_SIZE], &gop18[..TS_PACKET_SIZE]);
-        assert_eq!(&emitted[TS_PACKET_SIZE..2 * TS_PACKET_SIZE], &gop18[TS_PACKET_SIZE..2 * TS_PACKET_SIZE]);
+        let Poll::Ready(Some(Ok(emitted))) = futures::poll!(trim_stream.next()) else {
+            panic!("expected emit on realtime GOP 20");
+        };
+
+        let elapsed = start_time.elapsed();
+        let expected_burst_time = Duration::from_millis(burst_chunks * 2);
+        assert_eq!(elapsed, expected_burst_time + Duration::from_millis(1050));
+        assert!(elapsed < DEFAULT_MAX_HOLD);
+        assert!(!trim_stream.is_holding());
+        assert_eq!(
+            emitted.len(),
+            16228,
+            "exact emitted length matches GOPs 17..19 plus initial GOP 20 packets and carry"
+        );
+        let gop17 = make_gop(17, 0);
+        assert_eq!(&emitted[..TS_PACKET_SIZE], &gop17[..TS_PACKET_SIZE]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -416,20 +476,33 @@ mod tests {
         let target = Duration::from_secs(3);
         let mut trim_stream = LiveEdgeTrimStream::new(rx, target);
 
+        let start_time = tokio::time::Instant::now();
+
         let mut first_chunk = vec![0xAA; 13];
         first_chunk.extend_from_slice(&make_gop(0, 0));
         tx.unbounded_send(Ok(Bytes::from(first_chunk))).unwrap();
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
         tokio::time::advance(Duration::from_millis(50)).await;
 
         for i in 1..20 {
             tx.unbounded_send(Ok(Bytes::from(make_gop(i, 0)))).unwrap();
+            assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
             tokio::time::advance(Duration::from_millis(50)).await;
         }
 
         tokio::time::advance(Duration::from_millis(1050)).await;
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
         tx.unbounded_send(Ok(Bytes::from(make_gop(20, 0)))).unwrap();
 
-        let emitted = trim_stream.next().await.unwrap().unwrap();
+        let Poll::Ready(Some(Ok(emitted))) = futures::poll!(trim_stream.next()) else {
+            panic!("expected emit on realtime GOP 20");
+        };
+
+        let elapsed = start_time.elapsed();
+        assert_eq!(elapsed, Duration::from_millis(2050));
+        assert!(elapsed < DEFAULT_MAX_HOLD);
+        assert!(!trim_stream.is_holding());
         assert_eq!(emitted.len(), 3 * 27 * TS_PACKET_SIZE, "exact emitted length matches GOPs 18..20");
         let gop18 = make_gop(18, 0);
         // Garbage prefix was dropped: output starts cleanly at GOP 18 PAT!
@@ -549,19 +622,36 @@ mod tests {
         let target = Duration::from_secs(3);
         let mut trim_stream = LiveEdgeTrimStream::new(rx, target);
 
+        let start_time = tokio::time::Instant::now();
+
         // First chunk is 100 bytes of junk before the first sync
         tx.unbounded_send(Ok(Bytes::from(vec![0xAA; 100]))).unwrap();
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
         let gop0 = make_gop(0, 0);
         tx.unbounded_send(Ok(Bytes::copy_from_slice(&gop0))).unwrap();
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+        tokio::time::advance(Duration::from_millis(50)).await;
 
         for i in 1..20 {
-            tokio::time::advance(Duration::from_millis(50)).await;
             tx.unbounded_send(Ok(Bytes::from(make_gop(i, 0)))).unwrap();
+            assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+            tokio::time::advance(Duration::from_millis(50)).await;
         }
+
         tokio::time::advance(Duration::from_millis(1050)).await;
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
         tx.unbounded_send(Ok(Bytes::from(make_gop(20, 0)))).unwrap();
 
-        let first = trim_stream.next().await.unwrap().unwrap();
+        let Poll::Ready(Some(Ok(first))) = futures::poll!(trim_stream.next()) else {
+            panic!("expected emit on realtime GOP 20");
+        };
+
+        let elapsed = start_time.elapsed();
+        assert_eq!(elapsed, Duration::from_millis(2050));
+        assert!(elapsed < DEFAULT_MAX_HOLD);
+        assert!(!trim_stream.is_holding());
         assert_eq!(first.len(), 3 * 27 * TS_PACKET_SIZE, "exact emitted length matches GOPs 18..20");
         let gop18 = make_gop(18, 0);
         assert_eq!(
@@ -623,5 +713,153 @@ mod tests {
         assert_eq!(received.len(), 2500, "must emit all 2500 bytes without waiting for 5s hold");
         assert_eq!(&received[..], &raw[..]);
         assert!(!trim_stream.is_holding());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_junk_prefix_300_bytes_then_ts_trim_applies_at_exact_start_offset() {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let target = Duration::from_secs(3);
+        let mut trim_stream = LiveEdgeTrimStream::new(rx, target);
+
+        let start_time = tokio::time::Instant::now();
+
+        // 300 bytes of non-TS garbage prefix
+        let mut first_chunk = vec![0xAA; 300];
+        first_chunk.extend_from_slice(&make_gop(0, 0));
+        tx.unbounded_send(Ok(Bytes::from(first_chunk))).unwrap();
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+        tokio::time::advance(Duration::from_millis(50)).await;
+
+        for i in 1..20 {
+            tx.unbounded_send(Ok(Bytes::from(make_gop(i, 0)))).unwrap();
+            assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+            tokio::time::advance(Duration::from_millis(50)).await;
+        }
+
+        tokio::time::advance(Duration::from_millis(1050)).await;
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
+        tx.unbounded_send(Ok(Bytes::from(make_gop(20, 0)))).unwrap();
+        let Poll::Ready(Some(Ok(emitted))) = futures::poll!(trim_stream.next()) else {
+            panic!("expected emit on realtime GOP 20");
+        };
+
+        let elapsed = start_time.elapsed();
+        assert_eq!(elapsed, Duration::from_millis(2050));
+        assert!(elapsed < DEFAULT_MAX_HOLD);
+        assert!(!trim_stream.is_holding());
+        assert_eq!(emitted.len(), 3 * 27 * TS_PACKET_SIZE, "exact emitted length matches GOPs 18..20");
+
+        let gop18 = make_gop(18, 0);
+        // Garbage prefix was dropped: output starts cleanly at GOP 18 PAT!
+        assert_eq!(&emitted[..TS_PACKET_SIZE], &gop18[..TS_PACKET_SIZE]);
+        assert_eq!(&emitted[TS_PACKET_SIZE..2 * TS_PACKET_SIZE], &gop18[TS_PACKET_SIZE..2 * TS_PACKET_SIZE]);
+        assert_eq!(&emitted[2 * TS_PACKET_SIZE..3 * TS_PACKET_SIZE], &gop18[2 * TS_PACKET_SIZE..3 * TS_PACKET_SIZE]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_probe_1504_bytes_starting_with_0x47_without_sync_pair_released_at_once() {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let target = Duration::from_secs(3);
+        let mut trim_stream = LiveEdgeTrimStream::new(rx, target);
+
+        // Exactly SYNC_PROBE_BYTES (1504 bytes) starting with 0x47, but byte 188 is not 0x47,
+        // and no valid sync pair exists anywhere in the probe.
+        let mut probe = vec![0x55; SYNC_PROBE_BYTES];
+        probe[0] = 0x47;
+        probe[188] = 0xAA;
+
+        let start_time = tokio::time::Instant::now();
+        tx.unbounded_send(Ok(Bytes::copy_from_slice(&probe))).unwrap();
+
+        // Must be released immediately unchanged without advancing time or waiting for 5s hold:
+        let Poll::Ready(Some(Ok(emitted))) = futures::poll!(trim_stream.next()) else {
+            panic!("expected unconfirmed probe to be released at once");
+        };
+
+        assert_eq!(start_time.elapsed(), Duration::ZERO, "must be released at once without delay");
+        assert!(!trim_stream.is_holding());
+        assert_eq!(emitted.as_ref(), &probe[..]);
+    }
+
+    fn pcr_packet(pid: u16, pcr_27mhz: u64) -> Vec<u8> {
+        let base = pcr_27mhz / 300;
+        let ext = pcr_27mhz % 300;
+        let mut packet = vec![0x47, (pid >> 8) as u8 & 0x1F, pid as u8, 0x20, 183, 0x10];
+        packet.extend([
+            (base >> 25) as u8,
+            (base >> 17) as u8,
+            (base >> 9) as u8,
+            (base >> 1) as u8,
+            (((base & 1) << 7) as u8) | 0x7E | ((ext >> 8) as u8),
+            ext as u8,
+        ]);
+        packet.resize(TS_PACKET_SIZE, 0xFF);
+        packet
+    }
+
+    fn make_no_keyframe_chunk_ms(media_ms: u64, pat_cc: u8) -> Vec<u8> {
+        let pcr_ticks = media_ms.wrapping_mul(27_000);
+        let mut chunk = Vec::with_capacity(4 * TS_PACKET_SIZE);
+        chunk.extend_from_slice(&pcr_packet(0x100, pcr_ticks));
+        chunk.extend_from_slice(&pat_packet(pat_cc));
+        chunk.extend_from_slice(&pmt_packet(0));
+        chunk.extend_from_slice(&ts_packet(0x100, false, None, &[0x55; 100]));
+        chunk
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_settled_burst_without_keyframe_releases_at_first_rap_wait() {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let target = Duration::from_secs(4);
+        let mut trim_stream = LiveEdgeTrimStream::new(rx, target);
+
+        let start_time = tokio::time::Instant::now();
+
+        // 1. Initial burst at 0 ms, 50 ms, 100 ms:
+        let c0 = make_no_keyframe_chunk_ms(0, 0);
+        tx.unbounded_send(Ok(Bytes::from(c0))).unwrap();
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let c1 = make_no_keyframe_chunk_ms(1000, 1);
+        tx.unbounded_send(Ok(Bytes::from(c1))).unwrap();
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let c2 = make_no_keyframe_chunk_ms(2000, 2);
+        tx.unbounded_send(Ok(Bytes::from(c2))).unwrap();
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
+        // 2. Real-time delivery settling the stream before 2 s (PCR steps stay below 1 s, no discontinuity):
+        tokio::time::advance(Duration::from_millis(1300)).await; // wall = 1400 ms
+        let c3 = make_no_keyframe_chunk_ms(2900, 3);
+        tx.unbounded_send(Ok(Bytes::from(c3))).unwrap();
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
+        tokio::time::advance(Duration::from_millis(300)).await; // wall = 1700 ms
+        let c4 = make_no_keyframe_chunk_ms(3200, 4);
+        tx.unbounded_send(Ok(Bytes::from(c4))).unwrap();
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
+        // 3. Inner stream pauses / stays pending indefinitely.
+        // Advance to 1 ms before FIRST_RAP_WAIT (2 s from first PCR wall):
+        tokio::time::advance(Duration::from_millis(299)).await; // wall = 1999 ms
+        assert!(matches!(futures::poll!(trim_stream.next()), Poll::Pending));
+
+        // Advance 1 ms to reach exactly 2000 ms (FIRST_RAP_WAIT):
+        tokio::time::advance(Duration::from_millis(1)).await; // wall = 2000 ms
+        let poll_res = futures::poll!(trim_stream.next());
+        let Poll::Ready(Some(Ok(emitted))) = poll_res else {
+            panic!("expected release at FIRST_RAP_WAIT instant without keyframe, got {poll_res:?}");
+        };
+
+        let elapsed = start_time.elapsed();
+        assert_eq!(elapsed, Duration::from_secs(2));
+        assert!(elapsed < DEFAULT_MAX_HOLD);
+        assert!(!trim_stream.is_holding());
+
+        let expected_pat = pat_packet(0);
+        assert_eq!(&emitted[..TS_PACKET_SIZE], &expected_pat[..TS_PACKET_SIZE], "starts at chunk 0 PAT");
     }
 }

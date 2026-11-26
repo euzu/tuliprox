@@ -41,20 +41,24 @@ impl PcrClock {
         if !packet.has_pcr() {
             return PcrProgress::None;
         }
+        let Some(pcr_bytes) = packet.0.get(6..12) else {
+            return PcrProgress::None;
+        };
+        let pcr_ext = (u16::from(pcr_bytes[4] & 1) << 8) | u16::from(pcr_bytes[5]);
+        if pcr_ext > 299 {
+            return PcrProgress::None;
+        }
         let pid = packet.pid();
         if *self.pcr_pid.get_or_insert(pid) != pid {
             return PcrProgress::None;
         }
-        let Some(pcr_bytes) = packet.0.get(6..12) else {
-            return PcrProgress::None;
-        };
         let pcr = decode_pcr(pcr_bytes);
         let Some(last) = self.last_pcr.replace(pcr) else {
             return PcrProgress::First { pcr };
         };
         let delta = (pcr + PCR_MODULUS - last) % PCR_MODULUS;
-        if delta > PCR_HZ {
-            // A jump forward or backward is a new timeline.
+        if packet.discontinuity() || delta > PCR_HZ {
+            // A jump forward or backward, or an explicit discontinuity flag, resets the timeline.
             self.media_time = Duration::ZERO;
             self.last_pcr = Some(pcr);
             return PcrProgress::Discontinuity { pcr };

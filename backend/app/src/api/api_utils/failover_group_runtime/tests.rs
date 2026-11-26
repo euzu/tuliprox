@@ -15,8 +15,8 @@ fn upstream_error_class_follows_http_status() {
 
 mod switcher {
     use super::super::{
-        GroupEnd, GroupFailoverContext, GroupFailoverDriver, GroupPoll, GroupSwitcher, ManualSwitchCommand, MemberHost,
-        RuntimeMember, SwitchError,
+        clock_now, GroupEnd, GroupFailoverContext, GroupFailoverDriver, GroupPoll, GroupSwitcher, ManualSwitchCommand,
+        MemberHost, RuntimeMember, SwitchError,
     };
     use crate::api::{
         api_utils::tests::group_playback_support::{
@@ -103,6 +103,12 @@ mod switcher {
             ready => Poll::Ready(ready),
         })
         .await
+    }
+
+    fn poll_once(switcher: &mut GroupSwitcher, host: &mut impl MemberHost) -> GroupPoll {
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        switcher.poll_member(host, &mut cx)
     }
 
     #[tokio::test]
@@ -734,6 +740,129 @@ mod switcher {
         // Member stays installed, no switch happened!
         assert_eq!(host.released, 0, "no switch occurred");
         assert_eq!(switcher.driver.current, 0, "still on member 0");
+        assert_eq!(
+            switcher.driver.pending_since,
+            Some(tokio::time::Instant::now().into_std()),
+            "pending_since is reset to the flush instant"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::too_many_lines)]
+    async fn switch_hold_releases_at_player_buffer_floor_while_body_pending() {
+        let failover = FailoverGroupRuntimeConfig {
+            no_data_timeout_secs: 10,
+            max_outage_secs: 20,
+            ..FailoverGroupRuntimeConfig::default()
+        };
+        let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+        let mut config = (**env.app_state.app_config.config.load()).clone();
+        if let Some(ref mut reverse_proxy) = config.reverse_proxy {
+            if let Some(ref mut stream) = reverse_proxy.stream {
+                stream.shared_burst_secs = 3;
+            }
+        }
+        env.app_state.app_config.config.store(Arc::new(config));
+
+        let user = env.app_state.app_config.get_user_credentials("viewer").expect("viewer");
+        let ctx = GroupFailoverContext {
+            app_state: Arc::clone(&env.app_state),
+            target: Arc::clone(&env.target),
+            target_name: env.target.name.as_str().into(),
+            group: Arc::clone(&env.group_record),
+            playback: shared::model::FailoverGroupPlayback {
+                failover,
+                ..shared::model::FailoverGroupsConfig::default().playback(None)
+            },
+            user: (*user).clone(),
+            fingerprint: crate::auth::Fingerprint::new(
+                "fp".to_string(),
+                "127.0.0.1".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            ),
+            req_headers: axum::http::HeaderMap::new(),
+            session_token: "test-switch-floor-hold".into(),
+            connection_kind: tuliprox_session::active_provider_manager::ConnectionKind::Normal,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            share_stream: false,
+            base_channel: shared::model::StreamChannel::default(),
+            shared_key: None,
+        };
+        let mut switcher = GroupSwitcher::new(GroupFailoverDriver::new(Arc::new(ctx), 0));
+
+        // Member 0 plays media seconds 0..=4 at once (PCR only, so no PSI versions are emitted): the player buffer
+        // grows by the media delta (4 s) minus the wall time (0 s), all at the same paused instant.
+        let _ = switcher.driver.process_chunk(Bytes::from(pcr_packet(0)));
+        let _ = switcher.driver.aligner.finish_at(clock_now());
+        for sec in 1..=4_u64 {
+            let _ = switcher.driver.process_chunk(Bytes::from(pcr_packet(sec * 27_000_000)));
+        }
+        let _ = switcher.driver.take_pending_output();
+
+        // One wall second drains the buffer: 4 s - 1 s = 3 s at the switch.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let switch_instant = tokio::time::Instant::now();
+        switcher.driver.on_switched(1);
+        assert_eq!(switcher.driver.aligner.buffer_at(clock_now()), Duration::from_secs(3), "buffer at the switch");
+
+        // Burst target 3 s, remaining buffer 3 s: the floor (remaining <= 1 s) is reached 2 s after the switch.
+        // The hold deadline is min(SPLICE_BUDGET, no_data_timeout / 2) = 4 s, the stall timeout 10 s.
+        let floor_instant = switch_instant + Duration::from_secs(2);
+        let hold_deadline = switch_instant + Duration::from_secs(4);
+        let stall_deadline = switch_instant + Duration::from_secs(10);
+
+        // Member 1: a burst of 2 s media with one RAP (PCR 0) at once, then realtime chunks every 100 ms.
+        // Until the floor, the effective target equals the elapsed time, so the only RAP (span 2 s + elapsed)
+        // is older than effective target + FRESH_RAP_SLACK: the settled hold stays held.
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let mut host = FakeHost::new(rx.boxed(), false);
+        let gop0 = member_pcr_gop(0x100, 0, 2);
+        let mut burst = gop0.clone();
+        for pcr_ms in [500_u64, 1000, 1500, 2000] {
+            burst.extend(pcr_packet(pcr_ms * 27_000));
+        }
+        tx.unbounded_send(Ok(Bytes::from(burst))).unwrap();
+        let res = poll_once(&mut switcher, &mut host);
+        assert!(matches!(res, GroupPoll::Pending), "holding the burst got: {res:?}");
+        assert_eq!(
+            switcher.driver.aligner.hold_deadline(clock_now()),
+            Some(floor_instant.into_std()),
+            "the next wake is the floor instant, not the hold deadline"
+        );
+
+        for step in 1..=19_u64 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            tx.unbounded_send(Ok(Bytes::from(pcr_packet((2000 + step * 100) * 27_000)))).unwrap();
+            let res = poll_once(&mut switcher, &mut host);
+            assert!(
+                matches!(res, GroupPoll::Pending),
+                "settled hold with a stale RAP stays held at step {step}: {res:?}"
+            );
+        }
+        assert_eq!(tokio::time::Instant::now(), switch_instant + Duration::from_millis(1900));
+
+        // The provider body now stays pending: the hold must wake by itself at the floor instant.
+        let handle = tokio::spawn(async move {
+            let res = poll(&mut switcher, &mut host).await;
+            (switcher, host, res)
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let (switcher, host, res) = handle.await.expect("poll task");
+        let emit_instant = tokio::time::Instant::now();
+
+        assert_eq!(emit_instant, floor_instant, "released at the floor instant");
+        assert!(emit_instant < hold_deadline, "earlier than the hold deadline");
+        assert!(emit_instant < stall_deadline, "earlier than the stall timeout");
+        let bytes = match res {
+            GroupPoll::Data(bytes) => bytes,
+            other => panic!("expected GroupPoll::Data at the floor instant, got {other:?}"),
+        };
+        assert_eq!(&bytes[..188], &gop0[188..376], "emitted bytes start at the PAT of the RAP");
+        assert_eq!(bytes.len(), gop0.len() - 188 + (4 + 19) * 188, "the held bytes from the PAT on");
+        assert_eq!(switcher.driver.pending_since, Some(emit_instant.into_std()), "pending_since is the flush instant");
+        assert_eq!(host.released, 0, "no switch occurred");
+        assert_eq!(switcher.driver.current, 1, "still on the switched-to member");
     }
 
     #[tokio::test]

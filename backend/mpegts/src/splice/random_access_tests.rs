@@ -144,16 +144,6 @@ fn repeated_pat_inside_open_pes_keeps_its_keyframe_scan() {
     assert_eq!(scanner.observe(&stream), Some(0));
 }
 
-/// PAT announcing a video program on `PMT_PID` and a radio program on `RADIO_PMT_PID`.
-fn two_program_pat() -> Vec<u8> {
-    let section = vec![0x00, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00, 0x00, 0x02, 0xF0, 0x01];
-    psi(0, &finish_section(section))
-}
-
-const RADIO_PMT_PID: u16 = 0x1001;
-
-fn radio_pmt() -> Vec<u8> { psi(RADIO_PMT_PID, &pmt_section(0, 2, &[(AAC, 0x201)])) }
-
 #[test]
 fn radio_program_pmt_does_not_hide_the_video_program() {
     let mut scanner = TsRandomAccessScanner::new();
@@ -185,4 +175,17 @@ fn video_selection_change_invalidates_the_open_pes() {
     let stream = join(&[pat(0), video_pmt(0), pes_start, new_pmt, idr_on_new_pid]);
 
     assert_eq!(scanner.observe(&stream), None);
+}
+
+#[test]
+fn two_program_non_video_pmt_does_not_qualify_video_keyframe_as_rap() {
+    let mut scanner = TsRandomAccessScanner::new();
+    let prime = join(&[two_program_pat(), video_pmt(0)]);
+    assert_eq!(scanner.observe(&prime), None);
+
+    let non_video_stream = join(&[two_program_pat(), radio_pmt(), pes(VIDEO_PID, true, false, &[&h264(5)])]);
+    assert_eq!(scanner.observe(&non_video_stream), None, "keyframe after non-video PMT must NOT produce a RAP");
+
+    let video_stream = join(&[two_program_pat(), video_pmt(0), pes(VIDEO_PID, true, false, &[&h264(5)])]);
+    assert_eq!(scanner.observe(&video_stream), Some(940));
 }

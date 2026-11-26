@@ -93,6 +93,7 @@ struct HoldingState {
     pcr_samples: Vec<PcrSample>,
     settle_tracker: SettleTracker,
     pat_history: PatHistory,
+    retained_pending_pat: Option<(u64, Duration)>,
     lead_exceeded_no_burst: bool,
 }
 
@@ -110,6 +111,7 @@ impl HoldingState {
             pcr_samples: Vec::new(),
             settle_tracker: SettleTracker::new(),
             pat_history: PatHistory::new(),
+            retained_pending_pat: None,
             lead_exceeded_no_burst: false,
         }
     }
@@ -131,16 +133,16 @@ impl HoldingState {
                     self.pcr_samples.push(PcrSample { offset: packet_offset, media_time: Duration::ZERO });
                 }
                 PcrProgress::Advance { media_time, .. } => {
-                    self.pcr_samples.push(PcrSample { offset: packet_offset, media_time });
-                }
-                PcrProgress::Discontinuity { .. } => {
                     if let Some(first_wall) = self.first_pcr_wall {
                         let wall_elapsed = now.saturating_duration_since(first_wall);
-                        let lead_micros = compute_lead_micros(self.clock.media_time(), wall_elapsed);
+                        let lead_micros = compute_lead_micros(media_time, wall_elapsed);
                         if lead_micros > NO_BURST_MAX_LEAD_MICROS {
                             self.lead_exceeded_no_burst = true;
                         }
                     }
+                    self.pcr_samples.push(PcrSample { offset: packet_offset, media_time });
+                }
+                PcrProgress::Discontinuity { .. } => {
                     self.candidates.clear();
                     self.pcr_samples.clear();
                     self.pcr_samples.push(PcrSample { offset: packet_offset, media_time: Duration::ZERO });
@@ -148,6 +150,7 @@ impl HoldingState {
                     self.first_pcr_wall = Some(now);
                     self.pat_history.reset();
                     self.detector.reset();
+                    self.retained_pending_pat = None;
                 }
                 PcrProgress::None => {}
             }
@@ -156,12 +159,31 @@ impl HoldingState {
                 self.pat_history.record(packet_stream_pos, self.clock.media_time());
             }
 
-            if let Some(pat_stream_pos) = self.detector.observe_packet(packet, packet_stream_pos) {
-                let media_time = self.pat_history.find(pat_stream_pos).unwrap_or_else(|| self.clock.media_time());
-                let offset = usize::try_from(pat_stream_pos.saturating_sub(self.dropped_bytes))
-                    .unwrap_or(self.buffer.len())
-                    .min(self.buffer.len());
-                self.candidates.push(RapCandidate { offset, media_time });
+            let rap_pat = self.detector.observe_packet(packet, packet_stream_pos);
+            if let Some(pat_stream_pos) = rap_pat {
+                if pat_stream_pos >= self.dropped_bytes {
+                    let media_time = self
+                        .retained_pending_pat
+                        .and_then(|(pos, mt)| (pos == pat_stream_pos).then_some(mt))
+                        .or_else(|| self.pat_history.find(pat_stream_pos));
+                    if let Some(media_time) = media_time {
+                        let offset = usize::try_from(pat_stream_pos.saturating_sub(self.dropped_bytes))
+                            .unwrap_or(self.buffer.len())
+                            .min(self.buffer.len());
+                        self.candidates.push(RapCandidate { offset, media_time });
+                    }
+                }
+            }
+
+            match self.detector.pending_pat() {
+                Some(p) => {
+                    if self.retained_pending_pat.as_ref().is_none_or(|(pos, _)| *pos != p) {
+                        self.retained_pending_pat = self.pat_history.find(p).map(|mt| (p, mt));
+                    }
+                }
+                None => {
+                    self.retained_pending_pat = None;
+                }
             }
         }
 
@@ -408,8 +430,6 @@ impl SettleTracker {
                     *slot = Some(LeadSample { wall: now, lead_micros, media_time });
                 }
             }
-        } else if let Some(slot) = self.samples.get_mut(last_idx) {
-            *slot = Some(LeadSample { wall: now, lead_micros, media_time });
         }
     }
 
@@ -540,6 +560,41 @@ impl TsLiveEdgeTrim {
             return None;
         };
         holding.hold_start
+    }
+
+    /// Earliest future instant at which the release predicate can change without new data.
+    #[must_use]
+    pub fn next_wake(&self, now: Instant) -> Option<Instant> {
+        let TrimState::Holding(holding) = &self.state else {
+            return None;
+        };
+        let hold_start = holding.hold_start?;
+        let mut wake = hold_start + self.max_hold;
+
+        if let Some((buffer, sampled_at)) = self.player_buffer {
+            let floor_instant = sampled_at + buffer.saturating_sub(PLAYER_BUFFER_FLOOR);
+            if floor_instant > now {
+                wake = wake.min(floor_instant);
+            }
+        }
+
+        if !holding.clock.has_pcr_pid() {
+            let no_pcr_settle = hold_start + SETTLE_WINDOW;
+            if no_pcr_settle > now {
+                wake = wake.min(no_pcr_settle);
+            }
+        }
+
+        if holding.candidates.is_empty() {
+            if let Some(first_wall) = holding.first_pcr_wall {
+                let rap_wait = first_wall + FIRST_RAP_WAIT;
+                if rap_wait > now {
+                    wake = wake.min(rap_wait);
+                }
+            }
+        }
+
+        Some(wake)
     }
 
     /// Remaining player buffer at `now`, drained by wall elapsed since it was sampled.
