@@ -295,6 +295,7 @@ fn psi_rewrite_of_unique_chunk_does_not_copy() {
 
 const FRAME_TICKS: u64 = 1_080_000; // 40 ms at 27 MHz
 const FRAMES_PER_GOP: u64 = 25; // 1 second per GOP
+const PCR_HZ: u64 = 27_000_000;
 
 fn make_pcr_gop(gop_idx: u64, pat_version: u8, pcr_start_ticks: u64) -> Vec<Vec<u8>> {
     let mut gop = Vec::with_capacity(27);
@@ -651,4 +652,123 @@ fn switch_buffer_drains_from_the_switch_not_from_the_first_packet() {
     // and the member starts at GOP 18 (GOPs 18 to 20).
     let out = emitted(aligner.push(join(&make_pcr_gop(20, 0, 0)), first_packet + Duration::from_millis(1960)));
     assert_eq!(packets(&out).len(), 3 * 27, "buffer drained since the switch: start 3 s behind at GOP 18");
+}
+
+fn make_pcr_gop_4s(gop_idx: u64, pat_version: u8, pcr_start_ticks: u64) -> Vec<Vec<u8>> {
+    let frames_per_gop = 100;
+    let mut gop = Vec::with_capacity(102);
+    gop.push(pat(pat_version));
+    gop.push(video_pmt(0));
+    let gop_base_pcr = pcr_start_ticks.wrapping_add(gop_idx * frames_per_gop * FRAME_TICKS);
+    gop.push(pes_with_pcr(VIDEO_PID, true, gop_base_pcr, &[&h264(5)]));
+    for frame in 1..frames_per_gop {
+        let frame_pcr = gop_base_pcr.wrapping_add(frame * FRAME_TICKS);
+        gop.push(pes_with_pcr(VIDEO_PID, false, frame_pcr, &[&h264(1)]));
+    }
+    gop
+}
+
+#[test]
+fn five_switches_with_4s_gop_keep_buffer_bounded_and_non_growing() {
+    let target = Duration::from_secs(3);
+    let mut aligner = TsSpliceAligner::new(10 * 1024 * 1024, Duration::from_secs(10), Duration::from_secs(10), target);
+    let base = Instant::now();
+    let one_frame = Duration::from_millis(40);
+    let max_allowed_buffer = target + super::live_edge::FRESH_RAP_SLACK + one_frame;
+
+    // Member 1 (first member, no player buffer) bursts 4 GOPs (0..3, each 4s) over 150 ms.
+    for i in 0..4 {
+        let _ = aligner.push(join(&make_pcr_gop_4s(i, 0, 0)), base + Duration::from_millis(50 * i));
+    }
+    // Member 1 settles at 600 ms (media reaches 16.0s + 7 frames = 16.28s).
+    // Target 3s behind 16.28s is 13.28s -> newest RAP <= 13.28s is GOP 3 at 12.0s.
+    // Emits GOP 3 (100 frames) + 7 frames = 107 frames = 4280 ms media delta.
+    let m1_gop4 = make_pcr_gop_4s(4, 0, 0);
+    let m1_emit_time = base + Duration::from_millis(600);
+    let m1_out = emitted(aligner.push(join(&m1_gop4[..10]), m1_emit_time));
+    assert!(!aligner.is_aligning());
+    let _ = m1_out;
+
+    let mut current_time = m1_emit_time;
+    let initial_buf = aligner.buffer_at(current_time);
+    assert_eq!(initial_buf, Duration::from_millis(4280));
+
+    let mut prev_switch_buf = initial_buf;
+
+    // Five switches in a row:
+    for switch_idx in 1..=5 {
+        // Switch to next member:
+        let buf_at_switch = aligner.buffer_at(current_time);
+        assert_eq!(buf_at_switch, Duration::from_millis(4280));
+
+        aligner.begin_member(current_time);
+        assert!(aligner.is_aligning());
+
+        // Next member bursts 3 GOPs (each 4s) over 150 ms (media reaches 12.0s):
+        for i in 0..3 {
+            let _ = aligner.push(join(&make_pcr_gop_4s(i, 0, 0)), current_time + Duration::from_millis(50 * i));
+        }
+        // At 150 ms, burst ends with GOP 3's keyframe at 12.0s plus 85 frames (media 15.4s):
+        let gop3 = make_pcr_gop_4s(3, 0, 0);
+        let _ = aligner.push(join(&gop3[..88]), current_time + Duration::from_millis(150));
+
+        // Real-time frames arrive from 150 ms to 550 ms (400 ms window) in 100 ms steps:
+        for step in 1..=3 {
+            let wall_ms = 150 + step * 100;
+            let pcr_ms = 15_400 + step * 100;
+            let pkt = pes_with_pcr(VIDEO_PID, false, pcr_ms * (PCR_HZ / 1000), &[&h264(1)]);
+            let out = aligner.push(Bytes::from(pkt), current_time + Duration::from_millis(wall_ms));
+            assert!(matches!(out, SpliceOutput::Hold));
+        }
+
+        // At 550 ms (400 ms since burst end), stream settles into real time.
+        // But GOP 3 is at 12.0 s (span = 15.8 s - 12.0 s = 3.8 s > 500 ms). Aligner must hold!
+        let pcr550 = 15_800 * (PCR_HZ / 1000);
+        let pkt550 = pes_with_pcr(VIDEO_PID, false, pcr550, &[&h264(1)]);
+        let out_settle = aligner.push(Bytes::from(pkt550), current_time + Duration::from_millis(550));
+        assert!(matches!(out_settle, SpliceOutput::Hold), "switch {switch_idx} must hold after settle");
+
+        // Real time continues: push at 650 ms (media 15.9 s):
+        let pcr650 = 15_900 * (PCR_HZ / 1000);
+        let pkt650 = pes_with_pcr(VIDEO_PID, false, pcr650, &[&h264(1)]);
+        let out650 = aligner.push(Bytes::from(pkt650), current_time + Duration::from_millis(650));
+        assert!(matches!(out650, SpliceOutput::Hold));
+
+        // At 750 ms, GOP 4 arrives with keyframe at 16.0 s!
+        let gop4 = make_pcr_gop_4s(4, 0, 0);
+        let out_emit = emitted(aligner.push(join(&gop4[..3]), current_time + Duration::from_millis(750)));
+        current_time += Duration::from_millis(750);
+        assert!(!aligner.is_aligning(), "switch {switch_idx} emits when fresh GOP 4 arrives");
+
+        let out_pkts = packets(&out_emit);
+        assert_eq!(pid_of(out_pkts[0]), 0, "first emitted packet is PAT");
+        assert_eq!(pid_of(out_pkts[1]), PMT_PID, "second packet is PMT");
+        assert_eq!(pid_of(out_pkts[2]), VIDEO_PID, "third packet is keyframe");
+
+        let buf_after_switch = aligner.buffer_at(current_time);
+        assert!(
+            buf_after_switch <= max_allowed_buffer,
+            "switch {switch_idx} buffer {buf_after_switch:?} exceeds max allowed {max_allowed_buffer:?}"
+        );
+        assert!(
+            buf_after_switch <= prev_switch_buf,
+            "switch {switch_idx} buffer {buf_after_switch:?} grew from previous {prev_switch_buf:?}"
+        );
+        assert_eq!(
+            buf_after_switch,
+            Duration::from_millis(3530),
+            "switch {switch_idx} buffer matches exact derived value"
+        );
+        prev_switch_buf = buf_after_switch;
+
+        // Player streams 50 frames (2000 ms media) over 1250 ms wall time (25 ms per frame),
+        // recovering 750 ms to restore the buffer to 4280 ms for the next switch.
+        let mut stream_pcr_ticks = 16_000 * (PCR_HZ / 1000);
+        for _ in 0..50 {
+            current_time += Duration::from_millis(25);
+            stream_pcr_ticks += 40 * (PCR_HZ / 1000);
+            let pkt = pes_with_pcr(VIDEO_PID, false, stream_pcr_ticks, &[&h264(1)]);
+            let _ = emitted(aligner.push(Bytes::from(pkt), current_time));
+        }
+    }
 }

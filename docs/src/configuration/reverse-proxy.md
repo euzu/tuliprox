@@ -757,13 +757,14 @@ Tuliprox therefore holds the start of every live MPEG-TS stream (shared or direc
 burst is over and then starts at the newest keyframe that is at least `shared_burst_secs` of media behind the newest
 data. The media time comes from the stream's PCR clock, so the arrival time of the burst does not matter.
 
-* The burst is over when, during the last second, the received media ran ahead of the clock by less than 250 ms.
+* The burst is over when, during the last 400 ms, the received media ran ahead of the clock by less than 100 ms.
 * The hold lasts at most 5 seconds and 32 MB; then playback starts at the best start point found so far.
-* A provider without burst starts about 1 second later than without the trim.
+* With a bursting provider the first picture comes about 0.5 seconds later. A provider without burst is released at
+  its first keyframe, so the first picture comes as fast as without the trim.
 * No data reaches the viewer during the hold, so keep `shared_subscriber_idle_timeout_secs` above 5 seconds.
-* Streams that are not MPEG-TS pass through at once. Streams without PCR start after about 1 second with all held data.
-* A provider that pauses inside its burst does not end the hold early; a very large burst (high bitrate) keeps only the
-  newest part in memory and is still trimmed.
+* Streams that are not MPEG-TS pass through at once. Streams without PCR start after about 0.4 seconds with all held data.
+* A pause inside the burst shorter than 400 ms does not end the hold; after a longer pause the rest of the burst
+  passes on. A very large burst (high bitrate) keeps only the newest part in memory and is still trimmed.
 * Failover group streams use the same trim for their first member and for every member spliced in on a switch, see
   [Failover while watching](failover-groups-settings.md#failover-while-watching).
 * `shared_burst_secs: 0` turns the trim off.

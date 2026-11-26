@@ -1813,8 +1813,9 @@
   well, so the delay grew with every switch (66 s after three switches). tuliprox now holds the start of a live
   stream and of every member spliced in on a switch until the burst is over, measured on the stream's PCR clock, and
   starts at the newest keyframe at most `reverse_proxy.stream.shared_burst_secs` behind the newest media. The delay
-  stays at about `shared_burst_secs` plus one keyframe interval, also after switches. A provider without burst
-  starts up to about 1 s later. `shared_burst_secs: 0` keeps the previous behavior.
+  stays at about `shared_burst_secs` plus one keyframe interval, also after switches. With a bursting provider the
+  first picture comes about 0.5 s later; without burst the stream starts at its first keyframe, as fast as before.
+  `shared_burst_secs: 0` keeps the previous behavior.
 
 - **HLS start keeps its provider binding between segment retries.** When the first segment of a new HLS start failed
   and waited for its retry backoff, the start window and the 3T protection could both expire while no origin request

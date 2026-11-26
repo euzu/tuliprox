@@ -7,12 +7,48 @@ use crate::packet::{TsPacket, TS_PACKET_SIZE, TS_SYNC_BYTE};
 use bytes::{Bytes, BytesMut};
 use std::time::{Duration, Instant};
 
-const SETTLE_WINDOW: Duration = Duration::from_secs(1);
-const SETTLE_GROWTH_MICROS: i64 = 250_000;
-const SETTLE_MIN_MEDIA_ADVANCE: Duration = Duration::from_millis(750);
+/// Observation window over which lead growth and media advance are checked to confirm the burst has settled.
+const SETTLE_WINDOW: Duration = Duration::from_millis(400);
+
+/// Maximum lead growth allowed within `SETTLE_WINDOW` for the stream to be considered settled into real time.
+const SETTLE_GROWTH_MICROS: i64 = 100_000;
+
+/// Minimum media progress required within `SETTLE_WINDOW` to confirm stream progress and prevent settling on a stall.
+const SETTLE_MIN_MEDIA_ADVANCE: Duration = Duration::from_millis(300);
+
+/// Interval between samples recorded in the settle ring buffer.
 const SETTLE_SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Capacity of the settle lead sample ring buffer.
 const RING_CAP: usize = 32;
+
+/// Capacity of the PAT stream position history ring buffer.
 const PAT_RING_CAP: usize = 8;
+
+/// Longest wall time since the first PCR the hold waits for a first keyframe after the burst is over. A stream
+/// whose keyframes are not detectable (scrambled) starts at a PAT or PCR boundary after it.
+const FIRST_RAP_WAIT: Duration = Duration::from_secs(2);
+
+/// Wall-clock observation time since the first PCR required before releasing a non-bursting stream early.
+const NO_BURST_PROBE: Duration = Duration::from_millis(300);
+
+/// Maximum lead (media received minus wall time since the first PCR) allowed for early release.
+/// If lead exceeds this at any time during the hold, early release is disqualified.
+const NO_BURST_MAX_LEAD: Duration = Duration::from_millis(150);
+const NO_BURST_MAX_LEAD_MICROS: i64 = 150_000;
+const _: () = assert!(NO_BURST_MAX_LEAD.as_micros() == NO_BURST_MAX_LEAD_MICROS as u128);
+
+/// Slack allowance for RAP freshness during switch holds. A candidate RAP whose media time is within
+/// `effective_target + FRESH_RAP_SLACK` of the newest media time is considered fresh enough to emit.
+pub const FRESH_RAP_SLACK: Duration = Duration::from_millis(500);
+
+/// Waiting for a fresher RAP stops once the remaining player buffer drains to this floor, so the player keeps a
+/// reserve against network jitter right after the splice.
+pub const PLAYER_BUFFER_FLOOR: Duration = Duration::from_secs(1);
+
+// Invariant: the sample ring buffer must cover the settle window plus margin.
+// At 32 samples with a 50 ms interval, the ring spans 1600 ms, which exceeds the 400 ms settle window.
+const _: () = assert!(RING_CAP as u128 * SETTLE_SAMPLE_INTERVAL.as_millis() >= SETTLE_WINDOW.as_millis());
 
 fn compute_lead_micros(media_time: Duration, wall_elapsed: Duration) -> i64 {
     let media_micros = i64::try_from(media_time.as_micros()).unwrap_or(i64::MAX);
@@ -57,6 +93,7 @@ struct HoldingState {
     pcr_samples: Vec<PcrSample>,
     settle_tracker: SettleTracker,
     pat_history: PatHistory,
+    lead_exceeded_no_burst: bool,
 }
 
 impl HoldingState {
@@ -73,6 +110,7 @@ impl HoldingState {
             pcr_samples: Vec::new(),
             settle_tracker: SettleTracker::new(),
             pat_history: PatHistory::new(),
+            lead_exceeded_no_burst: false,
         }
     }
 
@@ -96,6 +134,13 @@ impl HoldingState {
                     self.pcr_samples.push(PcrSample { offset: packet_offset, media_time });
                 }
                 PcrProgress::Discontinuity { .. } => {
+                    if let Some(first_wall) = self.first_pcr_wall {
+                        let wall_elapsed = now.saturating_duration_since(first_wall);
+                        let lead_micros = compute_lead_micros(self.clock.media_time(), wall_elapsed);
+                        if lead_micros > NO_BURST_MAX_LEAD_MICROS {
+                            self.lead_exceeded_no_burst = true;
+                        }
+                    }
                     self.candidates.clear();
                     self.pcr_samples.clear();
                     self.pcr_samples.push(PcrSample { offset: packet_offset, media_time: Duration::ZERO });
@@ -126,6 +171,9 @@ impl HoldingState {
             let wall_elapsed = now.saturating_duration_since(first_wall);
             let media_time = self.clock.media_time();
             let lead_micros = compute_lead_micros(media_time, wall_elapsed);
+            if lead_micros > NO_BURST_MAX_LEAD_MICROS {
+                self.lead_exceeded_no_burst = true;
+            }
             self.settle_tracker.record_lead(now, lead_micros, media_time);
         }
     }
@@ -206,9 +254,33 @@ impl HoldingState {
             return false;
         };
         let wall_elapsed = now.saturating_duration_since(first_wall);
+        // Without a keyframe the start would land inside a GOP; wait for one a little longer.
+        // Streams whose keyframes cannot be detected (scrambled) fall back after this wait.
+        if self.candidates.is_empty() && wall_elapsed < FIRST_RAP_WAIT {
+            return false;
+        }
         let media_time = self.clock.media_time();
         let lead_micros = compute_lead_micros(media_time, wall_elapsed);
         self.settle_tracker.is_settled(now, lead_micros, media_time)
+    }
+
+    fn check_no_burst_settled(&self, now: Instant) -> bool {
+        if !self.clock.has_pcr_pid() {
+            return false;
+        }
+        let Some(first_wall) = self.first_pcr_wall else {
+            return false;
+        };
+        let wall_elapsed = now.saturating_duration_since(first_wall);
+        if wall_elapsed < NO_BURST_PROBE || self.lead_exceeded_no_burst {
+            return false;
+        }
+        let media_time = self.clock.media_time();
+        let lead_micros = compute_lead_micros(media_time, wall_elapsed);
+        if lead_micros > NO_BURST_MAX_LEAD_MICROS {
+            return false;
+        }
+        !self.candidates.is_empty()
     }
 
     fn pick_start_offset(&self, target: Duration) -> usize {
@@ -237,6 +309,43 @@ impl HoldingState {
             return s.offset;
         }
         0
+    }
+
+    fn chosen_rap_media_time(&self, target: Duration) -> Option<Duration> {
+        if !self.clock.has_pcr_pid() {
+            return None;
+        }
+        let newest_media_time = self.clock.media_time();
+        let threshold = newest_media_time.saturating_sub(target);
+
+        if let Some(c) = self.candidates.iter().rfind(|c| c.media_time <= threshold) {
+            return Some(c.media_time);
+        }
+        self.candidates.first().map(|c| c.media_time)
+    }
+
+    /// Evaluates whether the chosen RAP is fresh enough or waiting is no longer free.
+    /// When no player buffer is set (stream start, first member), this returns true immediately.
+    fn rap_fresh_or_drain_limit(
+        &self,
+        player_buffer: Option<(Duration, Instant)>,
+        target: Duration,
+        now: Instant,
+    ) -> bool {
+        let Some((buffer, sampled_at)) = player_buffer else {
+            return true;
+        };
+        let remaining_buffer = buffer.saturating_sub(now.saturating_duration_since(sampled_at));
+        if remaining_buffer <= PLAYER_BUFFER_FLOOR {
+            return true;
+        }
+        let eff = target.saturating_sub(remaining_buffer);
+        let Some(rap_media_time) = self.chosen_rap_media_time(eff) else {
+            return true;
+        };
+        let newest_media_time = self.clock.media_time();
+        let span = newest_media_time.saturating_sub(rap_media_time);
+        span <= eff.saturating_add(FRESH_RAP_SLACK)
     }
 }
 
@@ -433,11 +542,16 @@ impl TsLiveEdgeTrim {
         holding.hold_start
     }
 
-    fn effective_target(&self, now: Instant) -> Duration {
-        let buffer_remaining = self.player_buffer.map_or(Duration::ZERO, |(buffer, sampled_at)| {
+    /// Remaining player buffer at `now`, drained by wall elapsed since it was sampled.
+    #[must_use]
+    pub fn remaining_player_buffer(&self, now: Instant) -> Duration {
+        self.player_buffer.map_or(Duration::ZERO, |(buffer, sampled_at)| {
             buffer.saturating_sub(now.saturating_duration_since(sampled_at))
-        });
-        self.target.saturating_sub(buffer_remaining)
+        })
+    }
+
+    fn effective_target(&self, now: Instant) -> Duration {
+        self.target.saturating_sub(self.remaining_player_buffer(now))
     }
 
     /// `packets`: whole TS packets (length multiple of 188, starting at a sync byte; the caller aligns).
@@ -453,8 +567,15 @@ impl TsLiveEdgeTrim {
         if packets.is_empty() {
             let no_pcr_settled =
                 !holding.clock.has_pcr_pid() && now.saturating_duration_since(hold_start) >= SETTLE_WINDOW;
-            if now.saturating_duration_since(hold_start) >= self.max_hold || no_pcr_settled {
-                return self.emit_held(now);
+            let timed_out = now.saturating_duration_since(hold_start) >= self.max_hold;
+            let settled = holding.check_settled(now);
+            let no_burst_settled = holding.check_no_burst_settled(now);
+            let normal_settled = settled || no_burst_settled;
+            let unconditional_end = timed_out || no_pcr_settled;
+            if unconditional_end
+                || (normal_settled && holding.rap_fresh_or_drain_limit(self.player_buffer, self.target, now))
+            {
+                return self.emit_held(now, no_burst_settled);
             }
             return TrimOutput::Hold;
         }
@@ -482,9 +603,13 @@ impl TsLiveEdgeTrim {
         let timed_out = now.saturating_duration_since(hold_start) >= self.max_hold;
         let still_memory_capped = holding.buffer.len() > self.max_bytes;
         let settled = holding.check_settled(now);
+        let no_burst_settled = holding.check_no_burst_settled(now);
+        let normal_settled = settled || no_burst_settled;
+        let unconditional_end = timed_out || still_memory_capped || no_pcr_settled;
+        let rap_fresh = holding.rap_fresh_or_drain_limit(self.player_buffer, self.target, now);
 
-        if settled || timed_out || still_memory_capped || no_pcr_settled {
-            return self.emit_held(now);
+        if unconditional_end || (normal_settled && rap_fresh) {
+            return self.emit_held(now, no_burst_settled);
         }
 
         TrimOutput::Hold
@@ -523,12 +648,16 @@ impl TsLiveEdgeTrim {
         holding.candidates.iter().map(|c| (c.offset, c.media_time)).collect()
     }
 
-    fn emit_held(&mut self, now: Instant) -> TrimOutput {
+    fn emit_held(&mut self, now: Instant, no_burst_settled: bool) -> TrimOutput {
         let TrimState::Holding(mut holding) = std::mem::replace(&mut self.state, TrimState::PassThrough) else {
             return TrimOutput::Hold;
         };
         let effective_target = self.effective_target(now);
-        let start_offset = holding.pick_start_offset(effective_target);
+        let start_offset = if no_burst_settled && self.player_buffer.is_none() {
+            holding.candidates.first().map_or_else(|| holding.pick_start_offset(effective_target), |c| c.offset)
+        } else {
+            holding.pick_start_offset(effective_target)
+        };
         let start_offset = start_offset.min(holding.buffer.len());
         let _ = holding.buffer.split_to(start_offset);
         let out = holding.buffer.freeze();
