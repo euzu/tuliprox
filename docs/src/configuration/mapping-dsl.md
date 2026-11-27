@@ -176,10 +176,32 @@ the `@` prefix.
 **Readable & Writable `@Fields`:**
 `@name`, `@title`, `@caption`, `@group`, `@id`, `@chno`, `@logo`, `@logo_small`, `@parent_code`, `@audio_track`,
 `@time_shift`,  
-`@rec`, `@url`, `@epg_channel_id`, `@epg_id`, `@genre`.
+`@rec`, `@url`, `@epg_channel_id`, `@epg_id`, `@genre`, `@failover_group`.
 
-**Read-only `@Fields`:** `@input`, `@type`. They can be used as values, regex sources, and map keys, but assignments
-such as `@Input = "provider"` or `@Type = "vod"` are rejected.
+**Read-only `@Fields`:** `@input`, `@type`, `@year`, `@rating`, `@votes`. They can be used as values, regex sources, and
+map keys, but assignments such as `@Input = "provider"`, `@Type = "vod"`, `@year = "2024"`, `@rating = "8"`, or
+`@votes = "100"` are rejected.
+
+* `@year`: 4-digit release year (`1870` to `2100`) extracted from the stream's release date (VOD details, series, or
+  episodes; empty for live channels or items without a valid date).
+* `@rating`: effective rating from `0` to `10` with one fraction digit (same formatting as the `Rating` filter field;
+  empty when unrated).
+* `@votes`: IMDb vote count (same formatting as the `Votes` filter field; empty when unknown).
+
+> **Metadata timing:** With `resolve_background: true` (the default), provider or TMDB release dates are resolved in the
+> background and arrive on the next playlist update. When resolution runs inline (`resolve_background: false`), mapping
+> blocks with `stage: after_epg` run after the resolve step and see the newly resolved data immediately.
+
+Example: append `" (YYYY)"` to `@Title` only when `@year` is present and the title does not already end with a year:
+
+```dsl
+has_year = @Title ~ "(\(\d{4}\)|\b\d{4})$"
+year = @year
+match {
+  has_year => null,
+  year => @Title = concat(@Title, " (", year, ")"),
+}
+```
 
 *(Special note on `@Caption`: Acts as an alias for Title/Name. If you write to `@Caption`,
 Tuliprox updates both the `Title` AND the `Name` to the same value).*
@@ -471,8 +493,9 @@ let number = item.chno;           // read as an integer
 ```
 
 The writable fields are the same as the DSL: `name`, `title`, `caption`, `group`, `id`, `chno`, `logo`, `logo_small`,
-`parent_code`, `audio_track`, `time_shift`, `rec`, `url`, `epg_channel_id`/`epg_id` and `genre`. `input` and `type` are
-read-only. Both the property and the index form go through the same field lookup, so `item.NAME`, `item.name` and
+`parent_code`, `audio_track`, `time_shift`, `rec`, `url`, `epg_channel_id`/`epg_id`, `genre` and `failover_group`. `input`, `type`,
+`year`, `rating` and `votes` are read-only (`year` is an integer when present; `rating` and `votes` are strings).
+Both the property and the index form go through the same field lookup, so `item.NAME`, `item.name` and
 `item["NAME"]` address the same field. Reading a field the item does not carry yields `()`, so a missing EPG id is
 testable; writing an unknown or read-only field is a runtime error that is logged as a mapping diagnostic and skips
 the rest of the script; assignments that ran before the error stay applied.

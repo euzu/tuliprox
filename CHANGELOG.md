@@ -228,6 +228,18 @@
 
 ## 🌟 New Features
 
+- **Release year, rating and votes in mappings and filters.** The mapper DSL has the read-only fields `@year`,
+  `@rating` and `@votes`, and Rhai mapping scripts read `item.year`, `item.rating` and `item.votes`. The filter DSL
+  has the numeric field `Year` (`Year >= 2020`, `Year IS EMPTY`). The year is the first four-digit year
+  (`1870`-`2100`) in the release date of a movie, series or episode; live channels and items without a usable date
+  have no year. With `resolve_background: true` (the default), dates found by the background resolution arrive with
+  the next update. Example in [Mapper DSL](docs/src/configuration/mapping-dsl.md): append the year in parentheses to titles
+  without a year.
+
+- **Documentation: fallback outgoing proxies with GOST.** The outgoing proxy section explains how to put a local
+  GOST instance with several upstream SOCKS5 proxies in front of `proxy.url`, so a dead proxy is replaced by the
+  next one. A proxy IP that the provider bans is not detected by this setup.
+
 - **Xtream catch-up table from the local EPG.** `player_api.php?action=get_simple_data_table&stream_id=<virtual id>`
   now answers from the target's local EPG database instead of the provider, like `get_short_epg`. The listing starts
   at the oldest programme that ends inside the channel's archive window (`tv_archive_duration`, the longest playable
@@ -1779,6 +1791,27 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Xtream timeshift for M3U inputs follows the playback provider.** The Xtream timeshift bridge built the archive
+  URL from the first provider URL and the stored generated Flussonic archive template, so it ignored provider
+  priority and failover. It now resolves the archive through the playback provider like the M3U catch-up route:
+  the preferred mirror serves the archive, and a failing mirror fails over to the next one. Explicit catch-up
+  sources keep their destination.
+  HLS archives requested through Xtream timeshift now also use the HLS session handler; the playback extension
+  was computed as `..m3u8`, so such archives fell back to a plain playlist rewrite.
+
+- **User category selection no longer loses groups after a target bouquet change.** A user's Xtream category
+  selection matched categories by id. A group that a target bouquet removed for one update received a new id when
+  it came back, so it disappeared for the user until the selection was saved again. The selection now matches by
+  category name; stored selections work unchanged. A client request with a `category_id` outside the user's
+  selection now returns no entries instead of bypassing the selection.
+
+- **Provider ratings outside 0 to 10 no longer become the effective rating.** Negative ratings or ratings above 10
+  from the provider are ignored for the effective rating (filters `Rating`, `@rating`, sorting, `replace_rating`
+  output and the Web UI explorer rating badge); IMDb can still supply one. The raw provider `rating` field is
+  passed through unchanged. A rating override outside 0 to 10 is ignored. The rating source documentation no longer claims a TMDB rating fallback for
+  Xtream and M3U items. The Xtream series info `year` now uses the same year rule as `@year` (for example
+  `01.05.2024` gives `2024` instead of `105`).
 
 - **Recording database from earlier releases opens again.** The Xtream VOD ids for recordings added two fields in
   the middle of the stored recording library entry. The recording database stores fields by position, so tuliprox

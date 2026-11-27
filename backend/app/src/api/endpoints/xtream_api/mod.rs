@@ -1,5 +1,6 @@
 // https://github.com/tellytv/go.xtream-codes/blob/master/structs.go
 // Xtream api -> https://9tzx6f0ozj.apidog.io/
+use super::m3u_api::{apply_generated_archive_provider_template, resolve_effective_source_url};
 use crate::{
     api::{
         api_utils,
@@ -46,7 +47,7 @@ use crate::{
         ProxyUserCredentials,
     },
     repository::{
-        get_target_id_mapping, get_target_id_mapping_file, get_target_storage_path, user_get_bouquet_filter,
+        get_target_id_mapping, get_target_id_mapping_file, get_target_storage_path, user_get_xtream_bouquet_names,
         xtream_get_item_for_stream_id, xtream_load_rewrite_playlist, xtream_read_playlist_categories, BPlusTreeQuery,
         GroupMember, VirtualIdRecord,
     },
@@ -80,6 +81,7 @@ use shared::{
     },
 };
 use std::{
+    borrow::Cow,
     fmt::{Display, Formatter, Write},
     str::FromStr,
     sync::Arc,
@@ -616,7 +618,7 @@ async fn xtream_player_api_stream_with_query(
         }
 
         let requested_extension = if m3u_timeshift.is_some() {
-            extract_extension_from_url(&pli.url).map(|ext| concat_string!(".", ext))
+            extract_extension_from_url(&pli.url).map(ToString::to_string)
         } else {
             resolve_xtream_playback_extension(stream_ext, &pli)
         }
@@ -734,7 +736,11 @@ async fn xtream_player_api_stream_with_query(
                 .into_response();
             }
 
-            session.stream_url.clone()
+            if m3u_timeshift.is_some() {
+                pli.url.clone()
+            } else {
+                session.stream_url.clone()
+            }
         } else {
             pli.url.clone()
         };
@@ -1019,8 +1025,11 @@ fn resolve_m3u_xtream_timeshift(
         .catchup
         .as_ref()
         .ok_or_else(|| TuliproxError::ApiXtream("M3U Xtream timeshift item has no catch-up metadata".to_string()))?;
-    let resolved_source = input.resolve_url(&item.url)?;
-    let resolved = resolve_xtream_m3u_catchup_url(resolved_source.as_ref(), catchup, start, duration)?;
+    let resolved_source = resolve_effective_source_url(&item.url, input)?;
+    let mut effective_catchup = Cow::Borrowed(catchup);
+    apply_generated_archive_provider_template(input, resolved_source.as_ref(), &mut effective_catchup);
+    let resolved =
+        resolve_xtream_m3u_catchup_url(resolved_source.as_ref(), effective_catchup.as_ref(), start, duration)?;
     Ok(Some(resolved))
 }
 
@@ -1935,13 +1944,18 @@ async fn xtream_player_api_handle_content_action(
     let (mut categories, provider_owns_recording_category) =
         match xtream_read_playlist_categories(&app_state.app_config, target_name, cluster).await {
             Ok(content) => {
-                let filter =
-                    user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
+                let bouquet_names = user_get_xtream_bouquet_names(&config, &user.username, cluster).await;
+                let requested_category_id = category_id.filter(|&cid| cid > 0);
                 match serde_json::from_str::<Vec<XtreamCategoryEntry>>(&content) {
                     Ok(mut categories) => {
                         let provider_owns_recording_category = provider_publishes_reserved_vod_category(&categories);
-                        if let Some(fltr) = filter {
-                            categories.retain(|category| fltr.contains(&category.category_id));
+                        if requested_category_id.is_some() || bouquet_names.is_some() {
+                            categories.retain(|category| {
+                                requested_category_id.is_none_or(|cid| category.category_id.parse::<u32>() == Ok(cid))
+                                    && bouquet_names
+                                        .as_ref()
+                                        .is_none_or(|names| names.contains(category.category_name.as_str()))
+                            });
                         }
                         // Hide categories fully filtered out by the user's content filter.
                         if let Some(visible) = crate::api::endpoints::user_visibility::collect_visible_category_ids(

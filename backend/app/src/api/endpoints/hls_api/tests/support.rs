@@ -18,7 +18,7 @@ pub(in crate::api::endpoints::hls_api::tests) use self::{
         test_app_state_with_hls_proxy, test_app_state_with_hls_proxy_and_inputs, test_app_state_with_inputs,
         test_custom_video_buffer, test_hls_access_context, test_hls_access_context_with, test_hls_cache_dto,
         test_hls_entry_stream_context, test_hls_input, test_hls_share_target, test_m3u_hls_item,
-        test_m3u_hls_share_target, test_segment_entry,
+        test_m3u_hls_share_target, test_segment_entry, test_stalker_app_state,
     },
     crypto::{
         encrypt_test_aes128_cbc_pkcs7, spawn_test_encrypted_hls_origin, test_hls_sequence_iv, AES_TEST_KEY_BYTES,

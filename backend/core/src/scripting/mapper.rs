@@ -4,7 +4,8 @@
 //!
 //! * `item` — the playlist item under mapping. Fields are read and written with the same
 //!   `HeaderField` semantics as the mapper DSL, so `item.caption = ..` updates both `name` and
-//!   `title`, `item.chno` is a number, and `item.input`/`item.type` are read-only.
+//!   `title`, `item.chno` and `item.year` are numbers, and
+//!   `item.input`/`item.type`/`item.year`/`item.rating`/`item.votes` are read-only.
 //! * `ctx` — the mapping environment. Templates, regex evaluation and favourite aliases belong to
 //!   the mapping, not to the item, so they are explicit context methods:
 //!   `ctx.template(name)`, `ctx.regex(text, pattern)` and `ctx.favourite(item, group)`.
@@ -29,11 +30,18 @@ use tuliprox_scripting::{CompiledScript, Dynamic, Engine, EvalAltResult, Immutab
 /// Header fields a script may address.
 ///
 /// `MAPPER_FIELDS` is the allow-list of the legacy `MapperOperation` config type, not the mapper
-/// DSL's vocabulary: the DSL grammar accepts `@genre` while `MAPPER_FIELDS` omits it. The two
-/// read-only fields and `genre` are therefore added here, so a script sees exactly what the DSL
-/// sees.
+/// DSL's vocabulary: the DSL grammar accepts `@genre` and the read-only fields while
+/// `MAPPER_FIELDS` omits them. Those fields are therefore added here, so a script sees exactly
+/// what the DSL sees.
 fn script_fields() -> impl Iterator<Item = HeaderField> {
-    MAPPER_FIELDS.iter().copied().chain([HeaderField::Input, HeaderField::Type, HeaderField::Genre])
+    MAPPER_FIELDS.iter().copied().chain([
+        HeaderField::Input,
+        HeaderField::Type,
+        HeaderField::Genre,
+        HeaderField::Year,
+        HeaderField::Rating,
+        HeaderField::Votes,
+    ])
 }
 
 /// Resolve a field name a script used, accepting only the fields in [`script_fields`].
@@ -45,7 +53,15 @@ fn script_field(name: &str) -> Option<HeaderField> {
 }
 
 const fn is_writable(field: HeaderField) -> bool {
-    !matches!(field, HeaderField::Input | HeaderField::Type | HeaderField::ProviderId)
+    !matches!(
+        field,
+        HeaderField::Input
+            | HeaderField::Type
+            | HeaderField::ProviderId
+            | HeaderField::Year
+            | HeaderField::Rating
+            | HeaderField::Votes
+    )
 }
 
 /// The item as a script sees it: the playlist item plus the fields it assigned.
@@ -74,9 +90,11 @@ impl MapperItem {
 
     fn read(&self, field: HeaderField) -> Dynamic {
         match self.pli.header.get(field) {
-            // `chno` stays numeric so scripts can compare and add without parsing a string.
+            // `chno` and `year` stay numeric so scripts can compare and add without parsing a string.
             Some(FieldRef::Num(value)) => Dynamic::from(i64::from(value)),
-            Some(value) => Dynamic::from(value.as_cow().into_owned()),
+            Some(FieldRef::Shared(value)) => Dynamic::from(ImmutableString::from(value.as_ref())),
+            Some(FieldRef::Owned(value)) => Dynamic::from(ImmutableString::from(value.as_ref())),
+            Some(FieldRef::Str(value)) => Dynamic::from(ImmutableString::from(value)),
             None => Dynamic::UNIT,
         }
     }

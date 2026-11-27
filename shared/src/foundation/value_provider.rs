@@ -120,6 +120,7 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
                 ItemField::Quality => header_quality_rank(header).to_string().intern(),
                 ItemField::Rating => header.rating_arc().unwrap_or_else(|| "".intern()),
                 ItemField::Votes => header.votes_arc().unwrap_or_else(|| "".intern()),
+                ItemField::Year => header.get_release_year().map_or_else(|| "".intern(), |y| y.to_string().intern()),
                 ItemField::Caption => {
                     if header.title.is_empty() {
                         Arc::clone(&header.name)
@@ -153,7 +154,11 @@ pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: &str) ->
                     Ok(chno) => header.chno = chno,
                     Err(_) => return false,
                 },
-                ItemField::Type | ItemField::Quality | ItemField::Rating | ItemField::Votes => {}
+                ItemField::Type
+                | ItemField::Quality
+                | ItemField::Rating
+                | ItemField::Votes
+                | ItemField::Year => return false,
             }
         };
     }
@@ -189,6 +194,9 @@ impl ValueProvider<'_> {
         if field == ItemField::Votes {
             return header.format_votes().map(Cow::Owned);
         }
+        if field == ItemField::Year {
+            return header.get_release_year().map(|y| Cow::Owned(y.to_string()));
+        }
         let value = match field {
             ItemField::Group => header.group.as_ref(),
             ItemField::Name => header.name.as_ref(),
@@ -200,7 +208,9 @@ impl ValueProvider<'_> {
             ItemField::EpgId => header.epg_channel_id.as_deref()?,
             // These are returned above; if that ever changes, reporting "no value" is better
             // than aborting the process on a filter evaluation.
-            ItemField::Chno | ItemField::Quality | ItemField::Rating | ItemField::Votes => return None,
+            ItemField::Chno | ItemField::Quality | ItemField::Rating | ItemField::Votes | ItemField::Year => {
+                return None
+            }
             ItemField::Caption => {
                 if header.title.is_empty() {
                     header.name.as_ref()
@@ -223,15 +233,11 @@ impl ValueProvider<'_> {
         if field == ItemField::Quality {
             return Some(header_quality_rank(&self.pli.header).to_string().intern());
         }
-        if field == ItemField::Rating {
-            return self.pli.header.rating_arc();
-        }
-        if field == ItemField::Votes {
-            return self.pli.header.votes_arc();
-        }
         let value = self.pli.header.get(field.header_field()?)?;
         if self.match_as_ascii {
-            return Some(deunicode_string(value.as_cow().as_ref()).into_owned().into());
+            if let Cow::Owned(ascii) = deunicode_string(value.as_cow().as_ref()) {
+                return Some(ascii.into());
+            }
         }
         Some(value.to_arc())
     }
@@ -241,15 +247,11 @@ impl ValueProvider<'_> {
         if field.eq_ignore_ascii_case("quality") {
             return Some(header_quality_rank(&self.pli.header).to_string().intern());
         }
-        if field.eq_ignore_ascii_case("rating") {
-            return self.get_typed(ItemField::Rating);
-        }
-        if field.eq_ignore_ascii_case("votes") {
-            return self.get_typed(ItemField::Votes);
-        }
         let val = self.pli.header.get_field(field)?;
         if self.match_as_ascii {
-            return Some(deunicode_string(&val).into_owned().into());
+            if let Cow::Owned(ascii) = deunicode_string(&val) {
+                return Some(ascii.into());
+            }
         }
         Some(val)
     }

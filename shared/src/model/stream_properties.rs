@@ -227,6 +227,11 @@ impl StreamProperties {
         }
     }
 
+    #[must_use]
+    pub fn get_release_year(&self) -> Option<u32> {
+        self.get_release_date().as_deref().and_then(crate::utils::extract_year)
+    }
+
     pub fn get_added(&self) -> Option<Arc<str>> {
         match self {
             StreamProperties::Live(_) => None,

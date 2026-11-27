@@ -185,6 +185,11 @@ impl PlaylistItemHeader {
     }
 
     #[inline]
+    pub fn get_release_year(&self) -> Option<u32> {
+        self.additional_properties.as_ref().and_then(StreamProperties::get_release_year)
+    }
+
+    #[inline]
     pub(crate) fn format_rating(&self) -> Option<String> {
         self.effective_rating_tenths().map(crate::utils::format_decimal_tenths)
     }
@@ -224,6 +229,9 @@ impl crate::model::FieldGet for crate::model::PlaylistItemHeader {
                 self.additional_properties.as_ref().and_then(StreamProperties::genre).map(FieldRef::Shared)
             }
             HeaderField::FailoverGroup => self.failover_group.as_ref().map(FieldRef::Shared),
+            HeaderField::Year => self.get_release_year().map(FieldRef::Num),
+            HeaderField::Rating => self.rating_arc().map(FieldRef::Owned),
+            HeaderField::Votes => self.votes_arc().map(FieldRef::Owned),
             // Not carried by the header.
             HeaderField::ProviderId => None,
         }
@@ -257,7 +265,12 @@ impl crate::model::FieldSet for crate::model::PlaylistItemHeader {
             },
             HeaderField::Genre => return crate::set_genre!(self, value),
             // Read-only, or not carried by the header.
-            HeaderField::Input | HeaderField::Type | HeaderField::ProviderId => return false,
+            HeaderField::Input
+            | HeaderField::Type
+            | HeaderField::ProviderId
+            | HeaderField::Year
+            | HeaderField::Rating
+            | HeaderField::Votes => return false,
         }
         true
     }

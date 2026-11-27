@@ -2,8 +2,8 @@ use super::{Filter, FilterBuilder, Leaf, Node, StringOperator};
 use crate::{
     foundation::{filter::get_filter, prepare_templates, value_provider::ValueProvider},
     model::{
-        ItemField, PatternTemplate, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties,
-        TemplateValue, VideoStreamProperties,
+        EpisodeStreamProperties, ItemField, PatternTemplate, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+        SeriesStreamProperties, StreamProperties, TemplateValue, VideoStreamDetailProperties, VideoStreamProperties,
     },
     utils::{Internable, CONSTANTS},
 };
@@ -677,6 +677,7 @@ fn test_filter_drops_deep_chain_on_small_stack() {
 fn test_filter_decimal_numeric_round_trip() {
     assert_filter_round_trip("Rating >= 6.5");
     assert_filter_round_trip("Votes >= 5000");
+    assert_filter_round_trip("Year >= 2020");
     assert_filter_round_trip("Chno > 5");
     assert_filter_round_trip("Quality >= 2");
     assert_filter_round_trip("Rating < 7");
@@ -811,4 +812,100 @@ fn test_filter_rating_strict_greater_and_less_or_equal() {
         assert_eq!(greater.filter(&provider), expect_greater, "Rating > 6 with {rating}");
         assert_eq!(less_or_equal.filter(&provider), !expect_greater, "Rating <= 6 with {rating}");
     }
+}
+
+#[test]
+fn test_filter_year_eval_and_value_provider() {
+    let video_with_date = |release_date: Option<&str>| PlaylistItem {
+        header: PlaylistItemHeader {
+            name: "Movie".into(),
+            group: "Movies".intern(),
+            item_type: PlaylistItemType::Video,
+            additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                details: Some(VideoStreamDetailProperties {
+                    release_date: release_date.map(Internable::intern),
+                    ..VideoStreamDetailProperties::default()
+                }),
+                ..VideoStreamProperties::default()
+            }))),
+            ..Default::default()
+        },
+    };
+    let series_with_date = |release_date: Option<&str>| PlaylistItem {
+        header: PlaylistItemHeader {
+            name: "Series".into(),
+            group: "Series".intern(),
+            item_type: PlaylistItemType::SeriesInfo,
+            additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                release_date: release_date.map(Internable::intern),
+                ..SeriesStreamProperties::default()
+            }))),
+            ..Default::default()
+        },
+    };
+    let episode: EpisodeStreamProperties =
+        serde_json::from_value(serde_json::json!({ "release_date": "May 1999" })).expect("episode deserializes");
+    let episode_item = PlaylistItem {
+        header: PlaylistItemHeader {
+            name: "Episode".into(),
+            item_type: PlaylistItemType::Series,
+            additional_properties: Some(StreamProperties::Episode(Box::new(episode))),
+            ..Default::default()
+        },
+    };
+    let live_item = PlaylistItem {
+        header: PlaylistItemHeader {
+            name: "Live".into(),
+            item_type: PlaylistItemType::Live,
+            additional_properties: Some(StreamProperties::Live(Box::default())),
+            ..Default::default()
+        },
+    };
+
+    let f_ge_2020 = get_filter("Year >= 2020", None).expect("filter parses");
+    let f_lt_2020 = get_filter("Year < 2020", None).expect("filter parses");
+    let f_ne_2020 = get_filter("Year != 2020", None).expect("filter parses");
+    let f_eq_2024 = get_filter("Year = 2024", None).expect("filter parses");
+    let f_empty = get_filter("Year IS EMPTY", None).expect("filter parses");
+    let f_not_empty = get_filter("Year IS NOT EMPTY", None).expect("filter parses");
+
+    let p_2024 = video_with_date(Some("2024-05-01"));
+    let p_2020 = series_with_date(Some("01.05.2020"));
+    let p_1999 = episode_item;
+    let p_missing = video_with_date(None);
+    let p_malformed = video_with_date(Some("1600-01-01"));
+
+    assert!(f_ge_2020.filter(&ValueProvider { pli: &p_2024, match_as_ascii: false }));
+    assert!(f_eq_2024.filter(&ValueProvider { pli: &p_2024, match_as_ascii: false }));
+    assert!(f_ge_2020.filter(&ValueProvider { pli: &p_2020, match_as_ascii: false }));
+    assert!(!f_lt_2020.filter(&ValueProvider { pli: &p_2020, match_as_ascii: false }));
+    assert!(f_lt_2020.filter(&ValueProvider { pli: &p_1999, match_as_ascii: false }));
+    assert!(!f_ge_2020.filter(&ValueProvider { pli: &p_1999, match_as_ascii: false }));
+
+    for empty_item in [&p_missing, &p_malformed, &live_item] {
+        let vp = ValueProvider { pli: empty_item, match_as_ascii: false };
+        assert!(!f_ge_2020.filter(&vp));
+        assert!(!f_lt_2020.filter(&vp));
+        assert!(!f_ne_2020.filter(&vp));
+        assert!(f_empty.filter(&vp));
+        assert!(!f_not_empty.filter(&vp));
+        assert_eq!(vp.get_filter_value(ItemField::Year), None);
+        assert_eq!(vp.get_typed(ItemField::Year), None);
+        assert_eq!(vp.get("year"), None);
+        assert_eq!(crate::foundation::value_provider::get_field_value(empty_item, ItemField::Year).as_ref(), "");
+    }
+
+    let vp_2024 = ValueProvider { pli: &p_2024, match_as_ascii: false };
+    assert!(f_not_empty.filter(&vp_2024));
+    assert!(!f_empty.filter(&vp_2024));
+    assert_eq!(vp_2024.get_filter_value(ItemField::Year), Some(Cow::Owned("2024".into())));
+    assert_eq!(vp_2024.get_typed(ItemField::Year).as_deref(), Some("2024"));
+    assert_eq!(vp_2024.get("Year").as_deref(), Some("2024"));
+    assert_eq!(crate::foundation::value_provider::get_field_value(&p_2024, ItemField::Year).as_ref(), "2024");
+
+    let mut p_mut = video_with_date(Some("2024-05-01"));
+    for readonly in [ItemField::Type, ItemField::Quality, ItemField::Rating, ItemField::Votes, ItemField::Year] {
+        assert!(!crate::foundation::value_provider::set_field_value(&mut p_mut, readonly, "9999"));
+    }
+    assert_eq!(crate::foundation::value_provider::get_field_value(&p_mut, ItemField::Year).as_ref(), "2024");
 }

@@ -863,6 +863,386 @@ fn m3u_timeshift_stream_url_uses_resolved_archive_for_credential_bearing_input()
     assert!(!url.contains("secret"));
 }
 
+fn setup_flussonic_archive_timeshift_fixture() -> (ConfigInput, i64, String) {
+    let profile = Arc::new(crate::model::ConfigProvider::from(&shared::model::ConfigProviderDto {
+        name: "cdn".into(),
+        urls: vec!["https://a.example.com/media".into(), "https://b.example.com/media".into()],
+        provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::RestartFromFirst,
+        dns: None,
+    }));
+    let input = ConfigInput {
+        id: 1,
+        name: "m3u-flussonic".intern(),
+        input_type: InputType::M3u,
+        url: "http://playlist.example.com/list.m3u".to_string(),
+        playback_provider: Some("cdn".into()),
+        provider_configs: Some(vec![profile]),
+        ..ConfigInput::default()
+    };
+    let start = chrono::Utc::now().timestamp() - 86400;
+    let action_path = format!("120/{start}");
+    (input, start, action_path)
+}
+
+fn bounded_flussonic_timeshift_item(
+    live_url: &str,
+    stored_source: Option<&str>,
+    max_duration_secs: Option<u32>,
+) -> XtreamPlaylistItem {
+    let mut item = m3u_timeshift_item();
+    item.url = live_url.intern();
+    if let Some(StreamProperties::Live(live)) = item.additional_properties.as_mut() {
+        live.catchup = Some(shared::model::CatchupProperties {
+            mode: Some("fs".intern()),
+            source: stored_source.map(Internable::intern),
+            flussonic_archive_max_duration_secs: max_duration_secs,
+            ..shared::model::CatchupProperties::default()
+        });
+    }
+    item
+}
+
+#[test]
+fn m3u_timeshift_resolver_follows_playback_provider_for_generated_archive() {
+    let (mut input, start, action_path) = setup_flussonic_archive_timeshift_fixture();
+
+    let cases = [
+        (
+            "case a: stored mirror B template",
+            true,
+            "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+            "https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+            Some(1800),
+            format!("provider://cdn/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+            Some(format!("archive|{start}|1800")),
+        ),
+        (
+            "case b: stored mirror A template",
+            true,
+            "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+            "https://a.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+            Some(1800),
+            format!("provider://cdn/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+            Some(format!("archive|{start}|1800")),
+        ),
+        (
+            "case c: explicit source without marker",
+            true,
+            "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+            "https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+            None,
+            format!("https://b.example.com/media/Channel_A/archive-{start}-7200.m3u8?sig=%2B%2F%3D"),
+            None,
+        ),
+        (
+            "case d: foreign host",
+            true,
+            "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+            "https://foreign.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+            Some(1800),
+            format!("https://foreign.example.com/media/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+            Some(format!("archive|{start}|1800")),
+        ),
+        (
+            "case e: other channel",
+            true,
+            "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+            "https://b.example.com/media/Channel_B/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+            Some(1800),
+            format!("https://b.example.com/media/Channel_B/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+            Some(format!("archive|{start}|1800")),
+        ),
+        (
+            "case f: other query encoding",
+            true,
+            "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+            "https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2b%2F%3D",
+            Some(1800),
+            format!("https://b.example.com/media/Channel_A/archive-{start}-1800.m3u8?sig=%2b%2F%3D"),
+            Some(format!("archive|{start}|1800")),
+        ),
+        (
+            "case g: unmapped live item",
+            true,
+            "https://b.example.com/media/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+            "https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+            Some(1800),
+            format!("https://b.example.com/media/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+            Some(format!("archive|{start}|1800")),
+        ),
+        (
+            "case h: playback_provider disabled",
+            false,
+            "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+            "https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D",
+            Some(1800),
+            format!("https://b.example.com/media/Channel_A/archive-{start}-1800.m3u8?sig=%2B%2F%3D"),
+            Some(format!("archive|{start}|1800")),
+        ),
+    ];
+
+    for (label, provider_enabled, live_url, stored_source, marker, expected_url, expected_discriminator) in cases {
+        input.playback_provider = provider_enabled.then(|| "cdn".into());
+        let item = bounded_flussonic_timeshift_item(live_url, Some(stored_source), marker);
+        let resolved = resolve_m3u_xtream_timeshift(&input, &item, &action_path)
+            .expect("resolver ok")
+            .expect("M3U input handled by bridge");
+        assert_eq!(resolved.url, expected_url, "{label}: url mismatch");
+        if let Some(expected_disc) = expected_discriminator {
+            assert_eq!(resolved.discriminator, expected_disc, "{label}: discriminator mismatch");
+        } else {
+            assert_eq!(resolved.discriminator, shared::utils::short_hash(&expected_url), "{label}: hash mismatch");
+        }
+    }
+
+    input.playback_provider = Some("cdn".into());
+    let item = bounded_flussonic_timeshift_item(
+        "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+        Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D"),
+        Some(1800),
+    );
+    assert!(resolve_m3u_xtream_timeshift(&input, &item, "0/2024-01-01:00-00").is_err(), "zero duration must fail");
+    assert!(resolve_m3u_xtream_timeshift(&input, &item, "60/9999999999").is_err(), "future timestamp must fail");
+}
+
+#[tokio::test]
+async fn m3u_timeshift_supports_archive_accepts_mapped_explicit_and_unmapped_items() {
+    let dir = tempdir().expect("temp dir");
+    let config = Config { storage_dir: dir.path().to_string_lossy().into_owned(), ..Config::default() };
+    let app_state = create_test_app_state(config);
+    let (input, _, _) = setup_flussonic_archive_timeshift_fixture();
+    let target = Arc::new(short_epg_target());
+    let sources = SourcesConfig {
+        inputs: vec![Arc::new(input)],
+        sources: vec![crate::model::ConfigSource { inputs: vec!["m3u-flussonic".intern()], targets: vec![target] }],
+        ..SourcesConfig::default()
+    };
+    app_state.app_config.sources.store(Arc::new(sources));
+
+    let mapped = bounded_flussonic_timeshift_item(
+        "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+        Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D"),
+        Some(1800),
+    );
+    let explicit = bounded_flussonic_timeshift_item(
+        "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+        Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D"),
+        None,
+    );
+    let unmapped = bounded_flussonic_timeshift_item(
+        "https://b.example.com/media/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+        Some("https://b.example.com/media/Channel_A/archive-{utc}-{duration}.m3u8?sig=%2B%2F%3D"),
+        Some(1800),
+    );
+
+    for (label, item) in [("mapped", mapped), ("explicit", explicit), ("unmapped", unmapped)] {
+        assert!(super::single_item_supports_archive(&app_state, &item), "{label}: single_item_supports_archive");
+        let member = crate::repository::GroupMember {
+            member_vid: item.virtual_id,
+            provider_id: item.provider_id,
+            input_name: item.input_name.clone(),
+            url: item.url.clone(),
+            cluster: item.xtream_cluster,
+            item_type: item.item_type,
+            title: item.name.clone(),
+            input_stream_id: item.input_stream_id.clone(),
+            additional_properties: item.additional_properties.clone(),
+            archive: None,
+            epg_channel_id: item.epg_channel_id.clone(),
+            input_url: item.input_url.clone(),
+            upstream_user_agent: None,
+        };
+        assert!(super::member_supports_archive(&app_state, &member), "{label}: member_supports_archive");
+    }
+}
+
+async fn run_m3u_timeshift_consumer_mirror_test(
+    primary_status: &'static str,
+    primary_body: &'static str,
+    fallback_status: &'static str,
+    fallback_body: &'static str,
+) -> (axum::http::StatusCode, String, usize, usize) {
+    run_m3u_timeshift_consumer_mirror_test_with_hls_cache(
+        primary_status,
+        primary_body,
+        fallback_status,
+        fallback_body,
+        false,
+    )
+    .await
+}
+
+async fn spawn_m3u_timeshift_test_origin(
+    status_line: &'static str,
+    body: &'static str,
+) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
+    let addr = listener.local_addr().expect("local addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_task = Arc::clone(&hits);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            hits_task.fetch_add(1, Ordering::SeqCst);
+            let mut buf = [0_u8; 2048];
+            let _ = socket.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+        }
+    });
+    (format!("http://{addr}/media"), hits)
+}
+
+async fn run_m3u_timeshift_consumer_mirror_test_with_hls_cache(
+    primary_status: &'static str,
+    primary_body: &'static str,
+    fallback_status: &'static str,
+    fallback_body: &'static str,
+    with_hls_cache: bool,
+) -> (axum::http::StatusCode, String, usize, usize) {
+    use std::sync::atomic::Ordering;
+
+    let (primary_base, primary_hits) = spawn_m3u_timeshift_test_origin(primary_status, primary_body).await;
+    let (fallback_base, fallback_hits) = spawn_m3u_timeshift_test_origin(fallback_status, fallback_body).await;
+
+    let dir = tempdir().expect("temp dir");
+    let config = Config { storage_dir: dir.path().to_string_lossy().into_owned(), ..Config::default() };
+    let app_state = create_test_app_state(config);
+    if with_hls_cache {
+        let mut hls_config = (**app_state.app_config.config.load()).clone();
+        hls_config.reverse_proxy =
+            Some(crate::model::ReverseProxyConfig::from(&shared::model::ReverseProxyConfigDto {
+                hls_cache: Some(app_state.hls.proxy.keep_cache_path(shared::model::HlsCacheConfigDto::default())),
+                ..Default::default()
+            }));
+        app_state.app_config.config.store(Arc::new(hls_config));
+    }
+    let api_proxy_dto = shared::model::ApiProxyConfigDto {
+        server: vec![shared::model::ApiProxyServerInfoDto {
+            name: "default".to_string(),
+            protocol: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: Some("8901".to_string()),
+            timezone: "UTC".to_string(),
+            message: "test".to_string(),
+            path: None,
+        }],
+        ..Default::default()
+    };
+    app_state.app_config.set_api_proxy(crate::model::ApiProxyConfig::from(&api_proxy_dto)).expect("set api proxy");
+
+    let profile = Arc::new(crate::model::ConfigProvider::from(&shared::model::ConfigProviderDto {
+        name: "cdn".into(),
+        urls: vec![primary_base.into(), fallback_base.clone().into()],
+        provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::RestartFromFirst,
+        dns: None,
+    }));
+    let input = ConfigInput {
+        id: 1,
+        name: "m3u-flussonic".intern(),
+        input_type: InputType::M3u,
+        url: "http://playlist.example.com/list.m3u".to_string(),
+        enabled: true,
+        max_connections: 5,
+        playback_provider: Some("cdn".into()),
+        provider_configs: Some(vec![profile]),
+        ..ConfigInput::default()
+    };
+    let stored_mirror_b = format!("{fallback_base}/Channel_A/archive-{{utc}}-{{duration}}.m3u8?sig=%2B%2F%3D");
+    let item = bounded_flussonic_timeshift_item(
+        "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
+        Some(&stored_mirror_b),
+        Some(1800),
+    );
+    let mut target = short_epg_target();
+    if with_hls_cache {
+        target.options = Some(shared::model::ConfigTargetOptions {
+            share_live_streams: shared::model::ConfigTargetShareLiveStreams { hls: true, mpeg_ts: false },
+            ..Default::default()
+        });
+    }
+    let target = Arc::new(target);
+    cache_xtream_test_item(&app_state, &target, item, Some(input)).await;
+    app_state.active_provider.update_config(&app_state.app_config);
+
+    let mut user = ProxyUserCredentials::default();
+    user.username = "alice".to_string();
+    user.password = "secret".to_string();
+    user.max_connections = 5;
+    user.output_clusters = ClusterFlags::all();
+    user.proxy = shared::model::ProxyType::Reverse(None);
+    let user = Arc::new(user);
+    let fingerprint = Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:0".parse().unwrap());
+    let start = chrono::Utc::now().timestamp() - 86400;
+    let action_path = format!("120/{start}");
+
+    let response = xtream_player_api_stream(
+        &fingerprint,
+        &HeaderMap::new(),
+        &app_state,
+        &UserApiRequest::default(),
+        ApiStreamRequest::from(ApiStreamContext::Timeshift, "alice", "secret", "100.ts", &action_path),
+        Some((user, target)),
+    )
+    .await
+    .into_response();
+
+    let status = response.status();
+    let body = response_body_text(response).await.expect("response body");
+    (status, body, primary_hits.load(Ordering::SeqCst), fallback_hits.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn m3u_timeshift_consumer_uses_preferred_provider_mirror_over_stored_mirror_b() {
+    let playlist = "#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
+    let (status, _body, hits_a, hits_b) =
+        run_m3u_timeshift_consumer_mirror_test("200 OK", playlist, "200 OK", playlist).await;
+
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(hits_a, 1, "preferred mirror A must serve the request");
+    assert_eq!(hits_b, 0, "stored mirror B must not be hit when A succeeds");
+}
+
+#[tokio::test]
+async fn m3u_timeshift_consumer_fails_over_from_mirror_a_to_mirror_b() {
+    let playlist = "#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
+    let (status, _body, hits_a, hits_b) =
+        run_m3u_timeshift_consumer_mirror_test("502 Bad Gateway", "", "200 OK", playlist).await;
+
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(hits_a >= 1, "mirror A must be tried first");
+    assert_eq!(hits_b, 1, "mirror B must serve the failover request");
+}
+
+#[tokio::test]
+async fn m3u_timeshift_consumer_serves_hls_archive_through_hls_proxy() {
+    let playlist = "#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
+    let (status, body, _hits_a, hits_b) =
+        run_m3u_timeshift_consumer_mirror_test_with_hls_cache("200 OK", playlist, "200 OK", playlist, true).await;
+
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(hits_b, 0, "stored mirror B must not be hit when A succeeds");
+    assert!(
+        body.contains("/hls/shared/live/") && body.contains("/manifest.m3u8"),
+        "HLS archive must be served through the HLS session handler (/hls/shared/live/.../manifest.m3u8), got: {body}"
+    );
+    assert!(
+        !body.lines().any(|line| line.trim() == "seg0.ts"),
+        "raw relative segment URI must not pass through unrewritten: {body}"
+    );
+}
+
 #[tokio::test]
 async fn expired_user_is_rejected_before_m3u_timeshift_is_resolved() -> Result<(), String> {
     let dir = tempdir().map_err(|err| err.to_string())?;
@@ -2761,4 +3141,100 @@ mod player_api_account_info {
         let body: serde_json::Value = serde_json::from_str(&text).expect("json body");
         assert_eq!(body["server_info"]["player_api_path"], "/ui");
     }
+}
+
+async fn fetch_live_categories(
+    state: &Arc<AppState>,
+    target: &ConfigTarget,
+    category_id: Option<u32>,
+    user: &ProxyUserCredentials,
+) -> Vec<serde_json::Value> {
+    let response = super::xtream_player_api_handle_content_action(
+        state,
+        target,
+        crate::model::XC_ACTION_GET_LIVE_CATEGORIES,
+        category_id,
+        user,
+    )
+    .await
+    .expect("categories action response")
+    .into_response();
+    let json: serde_json::Value =
+        serde_json::from_str(&response_body_text(response).await.expect("body text")).expect("json");
+    json.as_array().expect("categories array").clone()
+}
+
+#[tokio::test]
+async fn xtream_categories_bouquet_survives_category_absence_and_rejects_foreign_category_id() {
+    use crate::repository::{
+        persist_playlist, save_user_bouquet, xtream_get_playlist_categories, TargetPlaylistPersistOptions,
+    };
+    use shared::model::{
+        PlaylistBouquetDto, PlaylistClusterBouquetDto, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
+    };
+
+    let directory = tempdir().expect("tempdir");
+    let state = create_test_app_state(Config {
+        storage_dir: directory.path().join("storage").to_string_lossy().into_owned(),
+        user_config_dir: Some(directory.path().join("users").to_string_lossy().into_owned()),
+        ..Default::default()
+    });
+    let target = ConfigTarget { use_memory_cache: false, ..short_epg_target() };
+    let group = |name: &str, id: u32| {
+        let name = name.intern();
+        let mut header = PlaylistItemHeader {
+            id: id.to_string().intern(),
+            name: format!("Channel {name}").intern(),
+            title: format!("Channel {name}").intern(),
+            group: name.clone(),
+            item_type: PlaylistItemType::Live,
+            xtream_cluster: XtreamCluster::Live,
+            url: format!("http://fixture.invalid/live/{id}").intern(),
+            ..Default::default()
+        };
+        header.gen_uuid();
+        PlaylistGroup { id, title: name, channels: vec![PlaylistItem { header }], xtream_cluster: XtreamCluster::Live }
+    };
+
+    let opts = TargetPlaylistPersistOptions::default();
+    persist_playlist(&state.app_config, &mut [group("A", 1), group("B", 2)], None, &target, None, opts.clone())
+        .await
+        .expect("initial publish");
+
+    let initial_cats = xtream_get_playlist_categories(&state.app_config, &target.name, XtreamCluster::Live)
+        .await
+        .expect("initial categories");
+    let initial_a_id = initial_cats.iter().find(|c| c.name == "A").expect("category A").id;
+
+    let bouquet = PlaylistBouquetDto {
+        xtream: Some(PlaylistClusterBouquetDto { live: Some(vec!["A".to_string()]), ..Default::default() }),
+        m3u: None,
+    };
+    save_user_bouquet(&state.app_config, &target.name, "alice", &bouquet).await.expect("save bouquet");
+
+    persist_playlist(&state.app_config, &mut [group("B", 2)], None, &target, None, opts.clone())
+        .await
+        .expect("publish without A");
+    persist_playlist(&state.app_config, &mut [group("A", 1), group("B", 2)], None, &target, None, opts)
+        .await
+        .expect("republish with A");
+
+    let republished_cats = xtream_get_playlist_categories(&state.app_config, &target.name, XtreamCluster::Live)
+        .await
+        .expect("republished categories");
+    let new_a_id = republished_cats.iter().find(|c| c.name == "A").expect("category A").id;
+    let b_id = republished_cats.iter().find(|c| c.name == "B").expect("category B").id;
+    assert_ne!(new_a_id, initial_a_id, "category A must receive a new id after temporary absence");
+
+    let mut user = ProxyUserCredentials::default();
+    user.username = "alice".to_string();
+    user.output_clusters = ClusterFlags::all();
+
+    let categories = fetch_live_categories(&state, &target, None, &user).await;
+    let category_names: Vec<&str> =
+        categories.iter().map(|c| c["category_name"].as_str().expect("category_name")).collect();
+    assert_eq!(category_names, vec!["A"]);
+    assert_eq!(categories[0]["category_id"].as_str(), Some(new_a_id.to_string().as_str()));
+
+    assert_eq!(fetch_live_categories(&state, &target, Some(b_id), &user).await, Vec::<serde_json::Value>::new());
 }

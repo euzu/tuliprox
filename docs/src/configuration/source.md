@@ -1716,6 +1716,10 @@ Tuliprox supports the following filter expression types:
 * Numeric comparison on the detected quality tier: `Quality >= 3` <br>
   The tier is derived from quality tokens in the caption: `5` = 4K/UHD/2160p, `4` = QHD/1440p, `3` = FHD/1080p,
   `2` = HD/720p, `1` = SD/480p/576p, `0` = no recognized quality token.
+* Numeric comparison on the release year: `Year >= 2020`, `Year = 2024`, `Year < 2000` <br>
+  `Year` extracts the 4-digit release year (`1870` to `2100`) from the stream's release date (VOD details, series, or
+  episodes). Live channels and items without a valid release date never match a numeric comparison, so select them with
+  `Year IS EMPTY`; `Year IS NOT EMPTY` matches items with a known year.
 * Numeric comparison on the IMDb rating: `Rating = 8`, `Rating != 8`, `Rating > 6`, `Rating >= 6.5`, `Rating < 5`,
   `Rating <= 5.5` <br>
   `Rating` is the effective rating from `0` to `10` with one fraction digit. An unrated item never matches a numeric

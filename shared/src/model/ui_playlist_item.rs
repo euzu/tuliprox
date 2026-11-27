@@ -3,7 +3,7 @@ use crate::{
         CommonPlaylistItem, ImdbRatingSource, M3uPlaylistItem, PlaylistItem, PlaylistItemType, StreamProperties,
         XtreamCluster, XtreamPlaylistItem,
     },
-    utils::Internable,
+    utils::{is_valid_provider_rating, Internable},
 };
 use serde::{de::Visitor, ser::SerializeTupleStruct, Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
@@ -288,7 +288,10 @@ impl UiPlaylistItem {
     /// - `ImdbThenProvider`: keep an `Imdb` origin, otherwise provider value is effective with origin `Provider`;
     /// - `Imdb`: store `rating` only.
     pub fn set_provider_rating(&mut self, rating: Option<f64>, source: ImdbRatingSource) {
-        let rating = rating.filter(|value| value.is_finite() && *value > 0.0);
+        // A value outside the 0-10 scale is ignored and keeps the stored rating; `None` clears it.
+        if rating.is_some_and(|value| !is_valid_provider_rating(value)) {
+            return;
+        }
         self.rating = rating.unwrap_or(0.0);
         let keeps_effective = match source {
             ImdbRatingSource::Imdb => true,
@@ -1044,5 +1047,17 @@ mod tests {
             compute_policy_rating_origin(Some(7.0), None, None, Some(ImdbRatingSource::ImdbThenProvider), 100),
             Some(UiRatingOrigin::Provider)
         );
+    }
+
+    #[test]
+    fn set_provider_rating_outside_zero_to_ten_is_ignored() {
+        let mut item = base_item();
+        item.set_provider_rating(Some(7.0), ImdbRatingSource::Provider);
+        item.set_provider_rating(Some(10.5), ImdbRatingSource::Provider);
+        assert_eq!(item.rating, 7.0);
+        assert_eq!(item.effective_rating, Some(7.0));
+
+        item.set_provider_rating(Some(10.0), ImdbRatingSource::Provider);
+        assert_eq!(item.effective_rating, Some(10.0));
     }
 }

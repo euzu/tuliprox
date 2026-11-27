@@ -523,10 +523,150 @@ fn read_only_fields_work_in_direct_regex_and_map_expressions() -> Result<(), Box
 
 #[test]
 fn read_only_field_assignments_are_rejected() {
-    for script in [r#"@Input = "changed""#, r#"@Type = "movie""#] {
-        assert!(MapperScript::parse(script, None).is_err());
+    for script in [
+        r#"@Input = "changed""#,
+        r#"@Type = "movie""#,
+        r#"@year = "1""#,
+        r#"@Year = "2024""#,
+        r#"@rating = "8.5""#,
+        r#"@Rating = "8.5""#,
+        r#"@votes = "100""#,
+        r#"@Votes = "100""#,
+    ] {
+        assert!(MapperScript::parse(script, None).is_err(), "expected error for {script}");
     }
     assert!(MapperScript::parse(r#"@Group = "changed""#, None).is_ok());
+}
+
+#[test]
+fn read_only_metadata_fields_year_rating_votes_eval_and_reject_set() {
+    use crate::model::{FieldGet, FieldSet, HeaderField};
+
+    let dsl = r#"
+        @Title = concat(@Title, " [", coalesce(@year, "n/a"), "|", coalesce(@rating, "n/a"), "|", coalesce(@votes, "n/a"), "]")
+    "#;
+    let mapper = MapperScript::parse(dsl, None).expect("mapper should parse");
+
+    let mut video = PlaylistItem {
+        header: PlaylistItemHeader {
+            title: "Inception".intern(),
+            item_type: PlaylistItemType::Video,
+            additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                effective_rating: Some(8.8),
+                imdb_votes: Some(2_500_000),
+                details: Some(VideoStreamDetailProperties {
+                    release_date: Some("2010-07-16".intern()),
+                    ..VideoStreamDetailProperties::default()
+                }),
+                ..VideoStreamProperties::default()
+            }))),
+            ..Default::default()
+        },
+    };
+    assert_eq!(video.header.get(HeaderField::Year).map(|v| v.to_arc()).as_deref(), Some("2010"));
+    assert_eq!(video.header.get(HeaderField::Rating).map(|v| v.to_arc()).as_deref(), Some("8.8"));
+    assert_eq!(video.header.get(HeaderField::Votes).map(|v| v.to_arc()).as_deref(), Some("2500000"));
+    assert!(!video.header.set(HeaderField::Year, "2020"));
+    assert!(!video.header.set(HeaderField::Rating, "9.0"));
+    assert!(!video.header.set(HeaderField::Votes, "10"));
+
+    let mut accessor =
+        ValueAccessor { pli: &mut video, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+    mapper.eval(&mut accessor, None);
+    assert_eq!(accessor.pli.header.title.as_ref(), "Inception [2010|8.8|2500000]");
+
+    let mut series = PlaylistItem {
+        header: PlaylistItemHeader {
+            title: "Dark".intern(),
+            item_type: PlaylistItemType::SeriesInfo,
+            additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                effective_rating: Some(9.0),
+                imdb_votes: Some(450_000),
+                release_date: Some("01.12.2017".intern()),
+                ..SeriesStreamProperties::default()
+            }))),
+            ..Default::default()
+        },
+    };
+    let mut series_accessor =
+        ValueAccessor { pli: &mut series, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+    mapper.eval(&mut series_accessor, None);
+    assert_eq!(series_accessor.pli.header.title.as_ref(), "Dark [2017|9|450000]");
+
+    let mut live = PlaylistItem {
+        header: PlaylistItemHeader {
+            title: "News Live".intern(),
+            item_type: PlaylistItemType::Live,
+            additional_properties: Some(StreamProperties::Live(Box::default())),
+            ..Default::default()
+        },
+    };
+    let mut live_accessor =
+        ValueAccessor { pli: &mut live, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+    mapper.eval(&mut live_accessor, None);
+    assert_eq!(live_accessor.pli.header.title.as_ref(), "News Live [n/a|n/a|n/a]");
+
+    let mut malformed = PlaylistItem {
+        header: PlaylistItemHeader {
+            title: "Broken Date".intern(),
+            item_type: PlaylistItemType::Video,
+            additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                details: Some(VideoStreamDetailProperties {
+                    release_date: Some("1600-01-01".intern()),
+                    ..VideoStreamDetailProperties::default()
+                }),
+                ..VideoStreamProperties::default()
+            }))),
+            ..Default::default()
+        },
+    };
+    let mut malformed_accessor =
+        ValueAccessor { pli: &mut malformed, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+    mapper.eval(&mut malformed_accessor, None);
+    assert_eq!(malformed_accessor.pli.header.title.as_ref(), "Broken Date [n/a|n/a|n/a]");
+}
+
+#[test]
+fn append_release_year_to_title_only_when_present_and_missing_at_end() {
+    let dsl = r#"
+        has_year = @Title ~ "(\(\d{4}\)|\b\d{4})$"
+        year = @year
+        match {
+            has_year => null,
+            year => @Title = concat(@Title, " (", year, ")"),
+        }
+    "#;
+    let mapper = MapperScript::parse(dsl, None).expect("mapper should parse");
+
+    let run = |title: &str, release_date: Option<&str>| {
+        let mut item = PlaylistItem {
+            header: PlaylistItemHeader {
+                title: title.intern(),
+                item_type: PlaylistItemType::Video,
+                additional_properties: release_date.map(|date| {
+                    StreamProperties::Video(Box::new(VideoStreamProperties {
+                        details: Some(VideoStreamDetailProperties {
+                            release_date: Some(date.intern()),
+                            ..VideoStreamDetailProperties::default()
+                        }),
+                        ..VideoStreamProperties::default()
+                    }))
+                }),
+                ..Default::default()
+            },
+        };
+        let mut accessor =
+            ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+        let outcome = mapper.eval(&mut accessor, None);
+        assert_eq!(outcome.diagnostics.len(), 0, "unexpected diagnostics: {:?}", outcome.diagnostics);
+        item.header.title
+    };
+
+    assert_eq!(run("Dune", Some("2024-05-01")).as_ref(), "Dune (2024)");
+    assert_eq!(run("Dune (2024)", Some("2024-05-01")).as_ref(), "Dune (2024)");
+    assert_eq!(run("Dune 2024", Some("2024-05-01")).as_ref(), "Dune 2024");
+    assert_eq!(run("Dune", None).as_ref(), "Dune");
+    assert_eq!(run("Dune", Some("12345")).as_ref(), "Dune");
 }
 
 #[test]

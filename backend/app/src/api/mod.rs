@@ -19,3 +19,5 @@ pub(crate) mod internal_csv;
 
 #[cfg(test)]
 mod epg_root_refresh_tests;
+#[cfg(test)]
+pub(in crate::api) mod test_support;

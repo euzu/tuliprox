@@ -84,6 +84,16 @@ pub fn format_decimal_tenths(tenths: u64) -> String {
     }
 }
 
+/// Returns true only for a usable provider rating on the 0-10 scale: finite and `0 < v <= 10`.
+///
+/// `f32` widens to `f64` exactly, so one `f64` check serves both stored types.
+#[inline]
+#[must_use]
+pub fn is_valid_provider_rating(value: impl Into<f64>) -> bool {
+    let value = value.into();
+    value.is_finite() && value > 0.0 && value <= 10.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +180,32 @@ mod tests {
         assert_eq!(format_decimal_tenths(70), "7");
         assert_eq!(format_decimal_tenths(100), "10");
         assert_eq!(format_decimal_tenths(105), "10.5");
+    }
+
+    #[test]
+    fn test_is_valid_provider_rating_f32_and_f64() {
+        assert!(is_valid_provider_rating(0.0001_f32));
+        assert!(is_valid_provider_rating(0.1_f32));
+        assert!(is_valid_provider_rating(5.0_f32));
+        assert!(is_valid_provider_rating(10.0_f32));
+        assert!(!is_valid_provider_rating(0.0_f32));
+        assert!(!is_valid_provider_rating(-0.1_f32));
+        assert!(!is_valid_provider_rating(10.0001_f32));
+        assert!(!is_valid_provider_rating(10.5_f32));
+        assert!(!is_valid_provider_rating(f32::NAN));
+        assert!(!is_valid_provider_rating(f32::INFINITY));
+        assert!(!is_valid_provider_rating(f32::NEG_INFINITY));
+
+        assert!(is_valid_provider_rating(0.0001_f64));
+        assert!(is_valid_provider_rating(0.1_f64));
+        assert!(is_valid_provider_rating(5.0_f64));
+        assert!(is_valid_provider_rating(10.0_f64));
+        assert!(!is_valid_provider_rating(0.0_f64));
+        assert!(!is_valid_provider_rating(-0.1_f64));
+        assert!(!is_valid_provider_rating(10.0001_f64));
+        assert!(!is_valid_provider_rating(10.5_f64));
+        assert!(!is_valid_provider_rating(f64::NAN));
+        assert!(!is_valid_provider_rating(f64::INFINITY));
+        assert!(!is_valid_provider_rating(f64::NEG_INFINITY));
     }
 }

@@ -723,23 +723,23 @@ pub(in crate::api) async fn m3u_api_stream_loaded_dedicated(
 }
 
 /// Source URL for archive construction; a playback-profile URL stays unresolved so failover still picks the host.
-fn resolve_effective_source_url<'a>(
-    item: &'a shared::model::M3uPlaylistItem,
+pub(crate) fn resolve_effective_source_url<'a>(
+    source_url: &'a str,
     input: &'a crate::model::ConfigInput,
 ) -> Result<Cow<'a, str>, TuliproxError> {
-    if !item.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-        return Ok(Cow::Borrowed(item.url.as_ref()));
+    if !source_url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return Ok(Cow::Borrowed(source_url));
     }
     if input
         .playback_provider
         .as_deref()
-        .is_some_and(|name| input.get_resolve_provider(&item.url).is_some_and(|profile| profile.name.as_ref() == name))
+        .is_some_and(|name| input.get_resolve_provider(source_url).is_some_and(|profile| profile.name.as_ref() == name))
     {
         // Archive construction must keep the explicit media profile until fetch
         // time, otherwise the URL is pinned to the first CDN before failover.
-        return Ok(Cow::Borrowed(item.url.as_ref()));
+        return Ok(Cow::Borrowed(source_url));
     }
-    input.resolve_url(&item.url)
+    input.resolve_url(source_url)
 }
 
 fn resolve_m3u_catchup_properties<'a>(
@@ -805,7 +805,7 @@ fn apply_native_flussonic_archive(
     input: &crate::model::ConfigInput,
     archive: &FlussonicArchiveKind,
 ) -> Result<(shared::model::M3uPlaylistItem, String), TuliproxError> {
-    let source_url = resolve_effective_source_url(item, input)?;
+    let source_url = resolve_effective_source_url(&item.url, input)?;
     let archive_url = build_provider_flussonic_archive_url(source_url.as_ref(), archive)
         .ok_or_else(|| TuliproxError::RepositoryM3u("Failed to build native Flussonic archive URL".to_string()))?;
     let mut catchup_item = item.clone();
@@ -815,7 +815,7 @@ fn apply_native_flussonic_archive(
 }
 
 /// Derives the provider archive template when a generated Flussonic bounded archive matches a provider mirror URL.
-fn generated_archive_provider_template(
+pub(crate) fn generated_archive_provider_template(
     input: &crate::model::ConfigInput,
     source_url: &str,
     catchup: &CatchupProperties,
@@ -844,6 +844,17 @@ fn generated_archive_provider_template(
         .then(|| template.into())
 }
 
+/// Applies any playback-provider archive template override to `catchup` in place.
+pub(crate) fn apply_generated_archive_provider_template(
+    input: &crate::model::ConfigInput,
+    source_url: &str,
+    catchup: &mut Cow<'_, CatchupProperties>,
+) {
+    if let Some(template) = generated_archive_provider_template(input, source_url, catchup.as_ref()) {
+        catchup.to_mut().source = Some(template);
+    }
+}
+
 fn resolve_loaded_m3u_catchup(
     pli: &shared::model::M3uPlaylistItem,
     input: &crate::model::ConfigInput,
@@ -857,10 +868,8 @@ fn resolve_loaded_m3u_catchup(
         }
         return Err(TuliproxError::RepositoryM3u("M3U catchup requested for non-live stream".to_string()));
     };
-    let source_url = resolve_effective_source_url(pli, input)?;
-    if let Some(template) = generated_archive_provider_template(input, source_url.as_ref(), catchup.as_ref()) {
-        catchup.to_mut().source = Some(template);
-    }
+    let source_url = resolve_effective_source_url(&pli.url, input)?;
+    apply_generated_archive_provider_template(input, source_url.as_ref(), &mut catchup);
     let Some(resolved) = resolve_m3u_catchup_url(source_url.as_ref(), catchup.as_ref(), raw_query)? else {
         return Err(TuliproxError::RepositoryM3u("M3U catchup mode cannot be proxied".to_string()));
     };
