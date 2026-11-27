@@ -1,7 +1,7 @@
 use super::{store_stream_mode, ActiveClientStreamState, StreamMode};
 use crate::{
     api::{
-        api_utils::plugin_upstream_headers,
+        api_utils::{plugin_upstream_headers, should_apply_live_edge_trim, stream_details_has_custom_video},
         model::{
             connection_manager::PROVIDER_END_PREEMPTED, AppState, BoxedProviderStream, CleanupEvent,
             CustomVideoStreamType, MeteringStream, ProviderStreamFactoryOptions, StreamDetails, TimedClientStream,
@@ -23,12 +23,14 @@ use std::{
         atomic::{AtomicU8, Ordering},
         Arc,
     },
+    time::Duration,
 };
 use tuliprox_session::stream_options::{get_stream_options, StreamResponseMode};
 
 pub(super) struct DeferredProviderOpenContext {
     pub(super) app_state: Arc<AppState>,
     pub(super) provider_stream_factory_options: ProviderStreamFactoryOptions,
+    pub(super) live_edge_trim: Option<Duration>,
 }
 
 pub(super) enum DeferredProviderOpenOutcome {
@@ -239,6 +241,7 @@ pub(super) fn create_deferred_provider_open_future(
     stream_channel: &StreamChannel,
     req_headers: &HeaderMap,
     plugin_headers: Option<&[(String, String)]>,
+    has_group_runtime: bool,
 ) -> Option<DeferredProviderOpenState> {
     if !stream_details.has_deferred_provider_open() {
         return None;
@@ -249,7 +252,9 @@ pub(super) fn create_deferred_provider_open_future(
     let input = find_input_by_provider_name(app_state.as_ref(), provider_name)?;
     let stream_url = url::Url::parse(request_url).ok()?;
     let stream_options = get_stream_options(&app_state.app_config, stream_details.response_mode);
-    let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
+    let config = app_state.app_config.config.load();
+    let default_user_agent = config.default_user_agent.clone();
+    let burst_secs = config.shared_burst_secs();
     let disabled_headers = app_state.get_disabled_headers();
     let mut provider_stream_factory_options =
         ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
@@ -279,8 +284,17 @@ pub(super) fn create_deferred_provider_open_future(
     provider_stream_factory_options.set_provider(input.get_resolve_provider(stream_url.as_ref()));
     provider_stream_factory_options.apply_input_options(&input);
 
+    let has_custom_video = stream_details_has_custom_video(stream_details);
+    let live_edge_trim =
+        if should_apply_live_edge_trim(stream_channel.item_type, has_custom_video, has_group_runtime, burst_secs) {
+            Some(Duration::from_secs(burst_secs))
+        } else {
+            None
+        };
+
     Some(DeferredProviderOpenState::Pending(Box::new(DeferredProviderOpenContext {
         app_state: Arc::clone(app_state),
         provider_stream_factory_options,
+        live_edge_trim,
     })))
 }

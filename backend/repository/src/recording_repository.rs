@@ -90,15 +90,17 @@ pub struct PersistedRecordingTask {
 }
 
 /// A virtual slice of an enclosing recording.
+///
+/// Stored positionally inside [`PersistedLibraryEntry`]: fields are never skipped on write.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RecordingClip {
     pub start_ts: i64,
     pub end_ts: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub start_offset: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub end_offset: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub header_bytes: Option<Vec<u8>>,
 }
 
@@ -156,7 +158,10 @@ pub struct PersistedMaterialization {
 }
 
 /// One user's link to a physical recording.
+///
+/// Decoding accepts every layout a release wrote, see [`StoredLibraryEntry`].
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(from = "StoredLibraryEntry")]
 pub struct PersistedLibraryEntry {
     pub id: String,
     pub principal: LibraryPrincipal,
@@ -167,13 +172,6 @@ pub struct PersistedLibraryEntry {
     pub quota_bytes: u64,
     #[serde(default)]
     pub priority: i8,
-    #[serde(default)]
-    pub cancelled_by_owner: bool,
-    /// Stream id this entry answers to in the Xtream VOD namespace of its principal.
-    /// Per entry, not per file: the same recording belongs to several principals, and
-    /// each recognizes it by its own id.
-    #[serde(default)]
-    pub vod_id: u32,
     /// Where this entry is in its own lifecycle.
     ///
     /// Execution state is per entry, not per file: one entry can be running a
@@ -200,11 +198,152 @@ pub struct PersistedLibraryEntry {
     /// `None` when it is identical to the materialization's copy, which is the
     /// case for the entry that produces the file, so a file with a single
     /// link stores its metadata once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // The value codec is positional (`rmp_serde` compact): a field is identified by its
+    // index, not its name. New fields go to the end with `#[serde(default)]`, so records
+    // written before they existed still decode; no field may be skipped on write, or the
+    // fields after it shift into its slot.
+    #[serde(default)]
     pub media: Option<RecordingMetadata>,
     /// When this entry is a clip, its enclosing time window and byte offsets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub clip: Option<RecordingClip>,
+    #[serde(default)]
+    pub cancelled_by_owner: bool,
+    /// Stream id this entry answers to in the Xtream VOD namespace of its principal.
+    /// Per entry, not per file: the same recording belongs to several principals, and
+    /// each recognizes it by its own id.
+    #[serde(default)]
+    pub vod_id: u32,
+}
+
+/// Every layout of [`PersistedLibraryEntry`] a release wrote. The value codec is positional,
+/// so the layouts are told apart by the type at each index: the current one has the entry
+/// state at index 5, the v3.3.206 to v3.3.209 one a bool (`cancelled_by_owner`).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredLibraryEntry {
+    Current(Box<LibraryEntryLayout>),
+    V206(Box<LibraryEntryLayoutV206>),
+}
+
+/// The current layout; also reads releases before v3.3.206 (missing trailing fields default).
+#[derive(Deserialize)]
+struct LibraryEntryLayout {
+    id: String,
+    principal: LibraryPrincipal,
+    materialization_id: String,
+    #[serde(default)]
+    quota_bytes: u64,
+    #[serde(default)]
+    priority: i8,
+    #[serde(default)]
+    state: RecordingTaskState,
+    #[serde(default)]
+    partition: RecordingPartition,
+    #[serde(default)]
+    finished: bool,
+    #[serde(default)]
+    paused: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    retry_attempts: u8,
+    #[serde(default)]
+    next_retry_at: Option<i64>,
+    #[serde(default)]
+    media: Option<RecordingMetadata>,
+    #[serde(default)]
+    clip: Option<RecordingClip>,
+    #[serde(default)]
+    cancelled_by_owner: bool,
+    #[serde(default)]
+    vod_id: u32,
+}
+
+/// Layout written by v3.3.206 to v3.3.209: `cancelled_by_owner` and `vod_id` after `priority`,
+/// and `media` and `clip` skipped when `None`, so the two trailing slots hold whichever of them
+/// was present, in this order.
+#[derive(Deserialize)]
+struct LibraryEntryLayoutV206 {
+    id: String,
+    principal: LibraryPrincipal,
+    materialization_id: String,
+    quota_bytes: u64,
+    priority: i8,
+    cancelled_by_owner: bool,
+    vod_id: u32,
+    state: RecordingTaskState,
+    partition: RecordingPartition,
+    finished: bool,
+    paused: bool,
+    error: Option<String>,
+    retry_attempts: u8,
+    next_retry_at: Option<i64>,
+    #[serde(default)]
+    tail: Option<MediaOrClip>,
+    #[serde(default)]
+    tail_clip: Option<RecordingClip>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MediaOrClip {
+    Clip(RecordingClip),
+    Media(Box<RecordingMetadata>),
+}
+
+impl From<StoredLibraryEntry> for PersistedLibraryEntry {
+    fn from(stored: StoredLibraryEntry) -> Self {
+        match stored {
+            StoredLibraryEntry::Current(entry) => {
+                let entry = *entry;
+                Self {
+                    id: entry.id,
+                    principal: entry.principal,
+                    materialization_id: entry.materialization_id,
+                    quota_bytes: entry.quota_bytes,
+                    priority: entry.priority,
+                    state: entry.state,
+                    partition: entry.partition,
+                    finished: entry.finished,
+                    paused: entry.paused,
+                    error: entry.error,
+                    retry_attempts: entry.retry_attempts,
+                    next_retry_at: entry.next_retry_at,
+                    media: entry.media,
+                    clip: entry.clip,
+                    cancelled_by_owner: entry.cancelled_by_owner,
+                    vod_id: entry.vod_id,
+                }
+            }
+            StoredLibraryEntry::V206(entry) => {
+                let entry = *entry;
+                let (media, clip) = match entry.tail {
+                    Some(MediaOrClip::Media(media)) => (Some(*media), entry.tail_clip),
+                    Some(MediaOrClip::Clip(clip)) => (None, Some(clip)),
+                    None => (None, None),
+                };
+                Self {
+                    id: entry.id,
+                    principal: entry.principal,
+                    materialization_id: entry.materialization_id,
+                    quota_bytes: entry.quota_bytes,
+                    priority: entry.priority,
+                    state: entry.state,
+                    partition: entry.partition,
+                    finished: entry.finished,
+                    paused: entry.paused,
+                    error: entry.error,
+                    retry_attempts: entry.retry_attempts,
+                    next_retry_at: entry.next_retry_at,
+                    media,
+                    clip,
+                    cancelled_by_owner: entry.cancelled_by_owner,
+                    vod_id: entry.vod_id,
+                }
+            }
+        }
+    }
 }
 
 /// Repository-level bookkeeping, stored under its own key.
@@ -1747,6 +1886,229 @@ mod tests {
             .find(|task| task.uuid == "task-cancelled")
             .ok_or_else(|| io::Error::other("task not found"))?;
         assert!(loaded.cancelled_by_owner);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{LibraryPrincipal, PersistedLibraryEntry, RecordingClip, RecordingPartition};
+    use serde::Serialize;
+    use shared::model::{
+        recording::{RecordingOwner, RecordingSource, RecordingVisibility},
+        RecordingMetadata, RecordingTaskState, UserId,
+    };
+
+    /// `PersistedLibraryEntry` as releases before the Xtream VOD ids wrote it.
+    #[derive(Serialize)]
+    struct LegacyLibraryEntry {
+        id: String,
+        principal: LibraryPrincipal,
+        materialization_id: String,
+        quota_bytes: u64,
+        priority: i8,
+        state: RecordingTaskState,
+        partition: RecordingPartition,
+        finished: bool,
+        paused: bool,
+        error: Option<String>,
+        retry_attempts: u8,
+        next_retry_at: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        media: Option<RecordingMetadata>,
+    }
+
+    fn metadata() -> RecordingMetadata {
+        RecordingMetadata::new_media(
+            RecordingOwner::User(UserId::from("web:alice")),
+            RecordingVisibility::Private,
+            RecordingSource::new("target", "42", "input"),
+            "Film".to_owned(),
+        )
+    }
+
+    fn legacy(media: Option<RecordingMetadata>) -> LegacyLibraryEntry {
+        LegacyLibraryEntry {
+            id: "entry".to_owned(),
+            principal: LibraryPrincipal::User { id: "web:alice".to_owned() },
+            materialization_id: "mat".to_owned(),
+            quota_bytes: 7,
+            priority: 2,
+            state: RecordingTaskState::Completed,
+            partition: RecordingPartition::Finished,
+            finished: true,
+            paused: false,
+            error: None,
+            retry_attempts: 1,
+            next_retry_at: Some(9),
+            media,
+        }
+    }
+
+    fn assert_legacy_fields(entry: &PersistedLibraryEntry) {
+        assert_eq!(entry.id, "entry");
+        assert_eq!(entry.principal, LibraryPrincipal::User { id: "web:alice".to_owned() });
+        assert_eq!(entry.materialization_id, "mat");
+        assert_eq!((entry.quota_bytes, entry.priority), (7, 2));
+        assert_eq!(entry.state, RecordingTaskState::Completed);
+        assert_eq!(entry.partition, RecordingPartition::Finished);
+        assert_eq!((entry.finished, entry.paused, entry.retry_attempts), (true, false, 1));
+        assert_eq!(entry.next_retry_at, Some(9));
+        assert_eq!(entry.clip, None);
+        assert!(!entry.cancelled_by_owner);
+        assert_eq!(entry.vod_id, 0);
+    }
+
+    #[test]
+    fn legacy_entry_without_media_decodes() -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = rmp_serde::to_vec(&legacy(None))?;
+        let entry: PersistedLibraryEntry = rmp_serde::from_slice(&bytes)?;
+        assert_legacy_fields(&entry);
+        assert_eq!(entry.media, None);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_entry_with_media_decodes() -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = rmp_serde::to_vec(&legacy(Some(metadata())))?;
+        let entry: PersistedLibraryEntry = rmp_serde::from_slice(&bytes)?;
+        assert_legacy_fields(&entry);
+        assert_eq!(entry.media, Some(metadata()));
+        Ok(())
+    }
+
+    /// `PersistedLibraryEntry` as v3.3.206 to v3.3.209 wrote it.
+    #[derive(Serialize)]
+    struct LibraryEntryV206 {
+        id: String,
+        principal: LibraryPrincipal,
+        materialization_id: String,
+        quota_bytes: u64,
+        priority: i8,
+        cancelled_by_owner: bool,
+        vod_id: u32,
+        state: RecordingTaskState,
+        partition: RecordingPartition,
+        finished: bool,
+        paused: bool,
+        error: Option<String>,
+        retry_attempts: u8,
+        next_retry_at: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        media: Option<RecordingMetadata>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        clip: Option<ClipV206>,
+    }
+
+    #[derive(Serialize)]
+    struct ClipV206 {
+        start_ts: i64,
+        end_ts: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        start_offset: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        end_offset: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        header_bytes: Option<Vec<u8>>,
+    }
+
+    fn v206(media: Option<RecordingMetadata>, clip: Option<ClipV206>) -> LibraryEntryV206 {
+        LibraryEntryV206 {
+            id: "entry".to_owned(),
+            principal: LibraryPrincipal::User { id: "web:alice".to_owned() },
+            materialization_id: "mat".to_owned(),
+            quota_bytes: 7,
+            priority: 2,
+            cancelled_by_owner: true,
+            vod_id: 1_000_042,
+            state: RecordingTaskState::Completed,
+            partition: RecordingPartition::Finished,
+            finished: true,
+            paused: false,
+            error: None,
+            retry_attempts: 1,
+            next_retry_at: Some(9),
+            media,
+            clip,
+        }
+    }
+
+    fn completed_clip_v206() -> ClipV206 {
+        ClipV206 { start_ts: 10, end_ts: 20, start_offset: Some(100), end_offset: Some(900), header_bytes: None }
+    }
+
+    fn completed_clip() -> RecordingClip {
+        RecordingClip { start_ts: 10, end_ts: 20, start_offset: Some(100), end_offset: Some(900), header_bytes: None }
+    }
+
+    #[test]
+    fn v206_entries_decode_in_every_media_and_clip_combination() -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            (None, None, None, None),
+            (Some(metadata()), None, Some(metadata()), None),
+            (None, Some(completed_clip_v206()), None, Some(completed_clip())),
+            (Some(metadata()), Some(completed_clip_v206()), Some(metadata()), Some(completed_clip())),
+        ];
+        for (media, clip, expected_media, expected_clip) in cases {
+            let bytes = rmp_serde::to_vec(&v206(media, clip))?;
+            let entry: PersistedLibraryEntry = rmp_serde::from_slice(&bytes)?;
+            assert_eq!(entry.state, RecordingTaskState::Completed);
+            assert_eq!(entry.partition, RecordingPartition::Finished);
+            assert_eq!((entry.quota_bytes, entry.priority, entry.retry_attempts), (7, 2, 1));
+            assert!(entry.cancelled_by_owner);
+            assert_eq!(entry.vod_id, 1_000_042);
+            assert_eq!(entry.next_retry_at, Some(9));
+            assert_eq!(entry.media, expected_media);
+            assert_eq!(entry.clip, expected_clip);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v206_entry_decodes_inside_the_stored_value() -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Serialize)]
+        #[serde(tag = "value", rename_all = "snake_case")]
+        enum StoredValueV206 {
+            LibraryEntry(Box<LibraryEntryV206>),
+        }
+        let bytes = rmp_serde::to_vec(&StoredValueV206::LibraryEntry(Box::new(v206(None, None))))?;
+        let value: super::RecordingDbValue = rmp_serde::from_slice(&bytes)?;
+        let super::RecordingDbValue::LibraryEntry(entry) = value else {
+            return Err("expected a library entry".into());
+        };
+        assert_eq!(entry.vod_id, 1_000_042);
+        assert_eq!(entry.state, RecordingTaskState::Completed);
+        Ok(())
+    }
+
+    #[test]
+    fn entry_without_media_but_with_clip_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let entry = PersistedLibraryEntry {
+            id: "clip".to_owned(),
+            principal: LibraryPrincipal::Shared,
+            materialization_id: "mat".to_owned(),
+            quota_bytes: 0,
+            priority: 0,
+            state: RecordingTaskState::Completed,
+            partition: RecordingPartition::Finished,
+            finished: true,
+            paused: false,
+            error: None,
+            retry_attempts: 0,
+            next_retry_at: None,
+            media: None,
+            clip: Some(RecordingClip {
+                start_ts: 1,
+                end_ts: 2,
+                start_offset: None,
+                end_offset: Some(5),
+                header_bytes: None,
+            }),
+            cancelled_by_owner: true,
+            vod_id: 1_000_123,
+        };
+        let decoded: PersistedLibraryEntry = rmp_serde::from_slice(&rmp_serde::to_vec(&entry)?)?;
+        assert_eq!(decoded, entry);
         Ok(())
     }
 }

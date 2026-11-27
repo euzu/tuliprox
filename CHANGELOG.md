@@ -1780,6 +1780,13 @@
 
 ## 🐛 Fixes
 
+- **Recording database from earlier releases opens again.** The Xtream VOD ids for recordings added two fields in
+  the middle of the stored recording library entry. The recording database stores fields by position, so tuliprox
+  read the state of every existing entry as one of the new fields and refused to start with
+  `failed to open the recording repository: invalid type: string "Completed", expected a boolean`. The new fields
+  are now stored at the end, and optional fields are always written. Entries written by releases before 3.3.206 and
+  by 3.3.206 to 3.3.209 both load unchanged; every entry is written in the new layout on its next change.
+
 - **Generated bounded Flussonic archives follow playback providers.** Generated bounded Flussonic archive templates
   of an M3U live entry mapped to a playback provider now use that provider (priority and failover) instead of the
   mirror captured at import; explicit catch-up sources keep their destination.
@@ -1799,6 +1806,18 @@
   at the newest keyframe that arrived at least `reverse_proxy.stream.shared_burst_secs` (default `3`) seconds ago,
   so playback begins at once with a short prebuffer, typically 3-5 s behind live. Streams without detectable keyframes
   use the arrival time alone. `shared_burst_buffer_mb` keeps the buffer size and the reserve for slow viewers.
+
+- **Live streams start near live despite the provider's start-up burst.** Many providers send 15-25 s of media within
+  the first one or two seconds of a connection. The first viewer of a live MPEG-TS channel (shared or direct) played
+  that whole burst and stayed 18-21 s behind live, and each failover switch passed the new member's burst on as
+  well, so the delay grew with every switch (66 s after three switches). tuliprox now holds the start of a live
+  stream and of every member spliced in on a switch until the burst is over, measured on the stream's PCR clock, and
+  starts at the newest keyframe at least `reverse_proxy.stream.shared_burst_secs` behind the newest media. The value is
+  a target, not a maximum: the delay stays at about `shared_burst_secs` plus one keyframe interval, also after
+  switches, and a stream without detectable keyframes or a hold that reaches its limit can start farther behind. With
+  a bursting provider the first picture comes about 0.5 s later; without burst the stream starts at its first
+  keyframe, as fast as before.
+  `shared_burst_secs: 0` keeps the previous behavior.
 
 - **HLS start keeps its provider binding between segment retries.** When the first segment of a new HLS start failed
   and waited for its retry backoff, the start window and the 3T protection could both expire while no origin request
@@ -2812,7 +2831,9 @@
     20-30 s). When the buffer holds no keyframe that old, the viewer starts at the oldest buffered keyframe and can be
     less than this time behind live. `0` sends the whole burst buffer from its oldest byte. `shared_burst_buffer_mb`
     remains the minimum ring size and lag reserve; a larger channel buffer can raise the ring size, and a single chunk
-    larger than the ring is kept whole. Editable in the Web UI under Reverse Proxy → Stream.
+    larger than the ring is kept whole. The same value also sets the start point of a live MPEG-TS stream (shared or
+    direct) and of a failover member spliced in on a switch: tuliprox holds the provider's start-up burst and starts at
+    most this many seconds of media behind the newest PCR. Editable in the Web UI under Reverse Proxy → Stream.
   - `hls_wrap_media_playlist` (default `true`): answers a proxied live HLS entry request whose provider returns a media
     playlist with a single-variant master playlist, so playlist refreshes keep their provider account across client
     IP changes. Applies only while the shared HLS cache is off for the target. Disable it for players that mishandle a

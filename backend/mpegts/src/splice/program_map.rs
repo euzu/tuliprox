@@ -34,6 +34,9 @@ impl ProgramMap {
     pub(crate) fn video(&self) -> Option<(u16, u8)> { self.video }
 
     #[must_use]
+    pub(crate) fn video_pmt(&self) -> Option<u16> { self.video_pmt }
+
+    #[must_use]
     pub(crate) fn program_of_pmt(&self, pmt_pid: u16) -> Option<u16> { self.pmt_pids.get(&pmt_pid).copied() }
 
     /// Learns PAT/PMT structure from `view`; returns true when it was a PMT of a known program.

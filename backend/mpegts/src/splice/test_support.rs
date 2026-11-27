@@ -4,6 +4,7 @@ use crate::packet::{mpeg2_crc32, TS_PACKET_SIZE};
 use bytes::Bytes;
 
 pub(crate) const PMT_PID: u16 = 0x1000;
+pub(crate) const RADIO_PMT_PID: u16 = 0x1001;
 pub(crate) const VIDEO_PID: u16 = 0x100;
 pub(crate) const AUDIO_PID: u16 = 0x101;
 pub(crate) const H264: u8 = 0x1B;
@@ -29,6 +30,40 @@ pub(crate) fn ts(pid: u16, pusi: bool, af_flags: Option<u8>, payload: &[u8]) -> 
         packet.resize(TS_PACKET_SIZE, 0xFF);
     }
     assert_eq!(packet.len(), TS_PACKET_SIZE);
+    packet
+}
+
+/// One TS packet carrying only an adaptation field with a PCR.
+pub(crate) fn pcr_packet(pid: u16, pcr_27mhz: u64) -> Vec<u8> {
+    let base = pcr_27mhz / 300;
+    let ext = pcr_27mhz % 300;
+    let mut packet = vec![0x47, (pid >> 8) as u8 & 0x1F, pid as u8, 0x20, 183, 0x10];
+    packet.extend([
+        (base >> 25) as u8,
+        (base >> 17) as u8,
+        (base >> 9) as u8,
+        (base >> 1) as u8,
+        (((base & 1) << 7) as u8) | 0x7E | ((ext >> 8) as u8),
+        ext as u8,
+    ]);
+    packet.resize(TS_PACKET_SIZE, 0xFF);
+    packet
+}
+
+/// One TS packet carrying an adaptation field with raw PCR base, extension, and discontinuity flag.
+pub(crate) fn pcr_packet_raw(pid: u16, base: u64, ext: u16, discontinuity: bool) -> Vec<u8> {
+    let mut packet = vec![0x47, (pid >> 8) as u8 & 0x1F, pid as u8, 0x20, 183];
+    let flags = if discontinuity { 0x90 } else { 0x10 };
+    packet.push(flags);
+    packet.extend([
+        (base >> 25) as u8,
+        (base >> 17) as u8,
+        (base >> 9) as u8,
+        (base >> 1) as u8,
+        (((base & 1) << 7) as u8) | 0x7E | ((ext >> 8) as u8 & 1),
+        ext as u8,
+    ]);
+    packet.resize(TS_PACKET_SIZE, 0xFF);
     packet
 }
 
@@ -89,6 +124,14 @@ pub(crate) fn psi(pid: u16, section: &[u8]) -> Vec<u8> {
 
 pub(crate) fn pat(version: u8) -> Vec<u8> { psi(0, &pat_section(version, 1, PMT_PID)) }
 
+/// PAT announcing a video program on `PMT_PID` and a radio program on `RADIO_PMT_PID`.
+pub(crate) fn two_program_pat() -> Vec<u8> {
+    let section = vec![0x00, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00, 0x00, 0x02, 0xF0, 0x01];
+    psi(0, &finish_section(section))
+}
+
+pub(crate) fn radio_pmt() -> Vec<u8> { psi(RADIO_PMT_PID, &pmt_section(0, 2, &[(AAC, 0x201)])) }
+
 pub(crate) fn pmt(version: u8, streams: &[(u8, u16)]) -> Vec<u8> { psi(PMT_PID, &pmt_section(version, 1, streams)) }
 
 pub(crate) fn video_pmt(version: u8) -> Vec<u8> { pmt(version, &[(H264, VIDEO_PID), (AAC, AUDIO_PID)]) }
@@ -109,6 +152,36 @@ pub(crate) fn pes(pid: u16, rai: bool, af: bool, nal_headers: &[&[u8]]) -> Vec<u
         None
     };
     ts(pid, true, flags, &payload)
+}
+
+/// PES start on `pid` with an adaptation field containing PCR and optionally RAI flag.
+pub(crate) fn pes_with_pcr(pid: u16, rai: bool, pcr_27mhz: u64, nal_headers: &[&[u8]]) -> Vec<u8> {
+    let mut payload = vec![0x00, 0x00, 0x01, 0xE0, 0x00, 0x00, 0x80, 0x80, 0x05, 0x21, 0x00, 0x01, 0x00, 0x01];
+    for header in nal_headers {
+        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        payload.extend_from_slice(header);
+        payload.extend_from_slice(&[0x88, 0x84]);
+    }
+    let mut packet = vec![0x47, 0x40 | ((pid >> 8) as u8 & 0x1F), pid as u8, 0x30];
+    let af_len = 184 - 1 - payload.len();
+    assert!(af_len >= 7, "room for PCR in adaptation field");
+    packet.push(af_len as u8);
+    let flags = if rai { 0x50 } else { 0x10 };
+    packet.push(flags);
+    let base = pcr_27mhz / 300;
+    let ext = pcr_27mhz % 300;
+    packet.extend([
+        (base >> 25) as u8,
+        (base >> 17) as u8,
+        (base >> 9) as u8,
+        (base >> 1) as u8,
+        (((base & 1) << 7) as u8) | 0x7E | ((ext >> 8) as u8),
+        ext as u8,
+    ]);
+    packet.extend(std::iter::repeat_n(0xFF, af_len - 7));
+    packet.extend_from_slice(&payload);
+    assert_eq!(packet.len(), TS_PACKET_SIZE);
+    packet
 }
 
 pub(crate) fn h264(nal_type: u8) -> Vec<u8> { vec![0x60 | nal_type] }

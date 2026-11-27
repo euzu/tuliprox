@@ -1,4 +1,8 @@
-use super::program_map::{ProgramMap, PAT_PID, PAT_TABLE_ID, PMT_TABLE_ID};
+use super::{
+    live_edge::{TrimOutput, TsLiveEdgeTrim},
+    pcr_clock::{PcrClock, PcrProgress},
+    program_map::{ProgramMap, PAT_PID, PAT_TABLE_ID, PMT_TABLE_ID},
+};
 use crate::packet::{
     es_has_keyframe, is_idr_start, pes_elementary_data, rewrite_section_version, section_version,
     single_packet_section, ts_sync_offset, TsPacket, KEYFRAME_SCAN_BYTES, TS_PACKET_SIZE, TS_SYNC_BYTE,
@@ -59,7 +63,7 @@ struct VersionOffsets {
     pmt: HashMap<u16, u8>,
 }
 
-struct Aligning {
+struct FirstRapState {
     started: Instant,
     buffer: BytesMut,
     first_pat: Option<usize>,
@@ -70,6 +74,24 @@ struct Aligning {
     open_pes: Option<(usize, Vec<u8>)>,
 }
 
+impl FirstRapState {
+    fn new(now: Instant) -> Self {
+        Self {
+            started: now,
+            buffer: BytesMut::new(),
+            first_pat: None,
+            last_pat: None,
+            pmt_after_last_pat: false,
+            open_pes: None,
+        }
+    }
+}
+
+enum Aligning {
+    FirstRap(FirstRapState),
+    Trim(TsLiveEdgeTrim),
+}
+
 /// Aligns provider bytes to whole TS packets and splices a new member into the output: after
 /// `begin_member` the new member is held back until it can start at a PAT/PMT followed by a
 /// keyframe, its PSI versions continue the ones already emitted, and the first packet per PID
@@ -77,7 +99,9 @@ struct Aligning {
 pub struct TsSpliceAligner {
     carry: BytesMut,
     budget_bytes: usize,
-    budget: Duration,
+    first_rap_budget: Duration,
+    trim_budget: Duration,
+    trim_target: Duration,
     programs: ProgramMap,
     aligning: Option<Aligning>,
     /// Number of members started; the first one is never rewritten.
@@ -86,23 +110,62 @@ pub struct TsSpliceAligner {
     emitted_pat_version: Option<u8>,
     emitted_pmt_versions: HashMap<u16, u8>,
     discontinuity_seen: PidSet,
+    buffer: Duration,
+    last_update: Option<Instant>,
+    emitted_clock: PcrClock,
+    new_member_pending: bool,
 }
 
 impl TsSpliceAligner {
     #[must_use]
-    pub fn new(budget_bytes: usize, budget: Duration) -> Self {
+    pub fn new(budget_bytes: usize, first_rap_budget: Duration, trim_budget: Duration, trim_target: Duration) -> Self {
+        let aligning = (!trim_target.is_zero())
+            .then(|| Aligning::Trim(TsLiveEdgeTrim::new(trim_target, trim_budget, budget_bytes)));
         Self {
             carry: BytesMut::new(),
             budget_bytes,
-            budget,
+            first_rap_budget,
+            trim_budget,
+            trim_target,
             programs: ProgramMap::default(),
-            aligning: None,
+            aligning,
             members: 1,
             offsets: VersionOffsets::default(),
             emitted_pat_version: None,
             emitted_pmt_versions: HashMap::new(),
             discontinuity_seen: PidSet::new(),
+            buffer: Duration::ZERO,
+            last_update: None,
+            emitted_clock: PcrClock::new(),
+            new_member_pending: false,
         }
+    }
+
+    /// Drains the estimated player buffer to `now` and returns the remaining duration.
+    pub fn buffer_at(&mut self, now: Instant) -> Duration {
+        if let Some(last) = self.last_update {
+            let wall_delta = now.saturating_duration_since(last);
+            self.buffer = self.buffer.saturating_sub(wall_delta);
+        }
+        self.last_update = Some(now);
+        self.buffer
+    }
+
+    /// Wall-clock deadline for the running hold, or `None` if not aligning or hold has not started.
+    #[must_use]
+    pub fn hold_deadline(&self, now: Instant) -> Option<Instant> {
+        match &self.aligning {
+            Some(Aligning::FirstRap(state)) => Some(state.started + self.first_rap_budget),
+            Some(Aligning::Trim(trim)) => trim.next_wake(now),
+            None => None,
+        }
+    }
+
+    /// Re-evaluates a running hold: returns held bytes if ready to emit, or `None`.
+    pub fn poll_hold(&mut self, now: Instant) -> Option<Bytes> {
+        // The same path as a packet push, so a first-RAP hold over its budget starts at the first PAT or, without
+        // one, at the first packet. `finish_at` (member end) keeps dropping a member that never sent a PAT.
+        self.push_aligning(Bytes::new(), now).filter(|bytes| !bytes.is_empty())
     }
 
     /// Starts the next member: its bytes are held until the splice point.
@@ -112,18 +175,45 @@ impl TsSpliceAligner {
         self.offsets = VersionOffsets::default();
         self.discontinuity_seen.clear();
         self.members += 1;
-        self.aligning = Some(Aligning {
-            started: now,
-            buffer: BytesMut::new(),
-            first_pat: None,
-            last_pat: None,
-            pmt_after_last_pat: false,
-            open_pes: None,
+        self.new_member_pending = true;
+        let buffered = self.buffer_at(now);
+        self.aligning = Some(if self.trim_target.is_zero() {
+            Aligning::FirstRap(FirstRapState::new(now))
+        } else {
+            let mut trim = TsLiveEdgeTrim::new(self.trim_target, self.trim_budget, self.budget_bytes);
+            trim.set_player_buffer(buffered, now);
+            Aligning::Trim(trim)
         });
     }
 
     #[must_use]
     pub fn is_aligning(&self) -> bool { self.aligning.is_some() }
+
+    /// Ends a running hold: returns the held bytes from the best start point, or `None` if nothing is held.
+    /// After this call aligning is finished and future packets pass through.
+    pub fn finish(&mut self) -> Option<Bytes> { self.finish_at(Instant::now()) }
+
+    /// Ends a running hold at `now`: returns the held bytes from the best start point, or `None` if nothing is held.
+    /// After this call aligning is finished and future packets pass through.
+    pub fn finish_at(&mut self, now: Instant) -> Option<Bytes> {
+        let aligning = self.aligning.take()?;
+        let output = match aligning {
+            Aligning::Trim(mut trim) => trim.finish_at(now)?,
+            Aligning::FirstRap(mut state) => {
+                let start = state.first_pat?.min(state.buffer.len());
+                let mut buffer = std::mem::take(&mut state.buffer);
+                if buffer.is_empty() {
+                    return None;
+                }
+                buffer.advance(start);
+                buffer.freeze()
+            }
+        };
+        if output.is_empty() {
+            return None;
+        }
+        Some(self.complete_aligning(output, now))
+    }
 
     pub fn push(&mut self, chunk: Bytes, now: Instant) -> SpliceOutput {
         let (head, body) = self.whole_packets(chunk);
@@ -134,9 +224,9 @@ impl TsSpliceAligner {
 
     fn emit_packets(&mut self, packets: Bytes, now: Instant) -> Option<Bytes> {
         if self.aligning.is_some() {
-            return self.push_aligning(&packets, now);
+            return self.push_aligning(packets, now);
         }
-        (!packets.is_empty()).then(|| self.process_emitted(packets))
+        (!packets.is_empty()).then(|| self.process_emitted(packets, now))
     }
 
     /// Whole packets of `chunk` plus what was carried over: the packet completed from the carry
@@ -182,80 +272,98 @@ impl TsSpliceAligner {
         self.carry.split_to(whole).freeze()
     }
 
-    fn push_aligning(&mut self, packets: &[u8], now: Instant) -> Option<Bytes> {
+    fn push_aligning(&mut self, packets: Bytes, now: Instant) -> Option<Bytes> {
         let mut aligning = self.aligning.take()?;
-        let mut start = None;
-        for packet in packets.as_chunks::<TS_PACKET_SIZE>().0 {
-            let position = aligning.buffer.len();
-            aligning.buffer.extend_from_slice(packet);
-            if start.is_some() {
-                continue;
-            }
-            let view = TsPacket(packet);
-            if view.pid() == PAT_PID && view.payload_unit_start() {
-                aligning.first_pat.get_or_insert(position);
-                aligning.last_pat = Some(position);
-                aligning.pmt_after_last_pat = false;
-            }
-            if self.programs.observe(view) && aligning.last_pat.is_some() {
-                aligning.pmt_after_last_pat = true;
-                if self.programs.video().is_none() {
-                    start = aligning.last_pat;
-                    continue;
+        let output = match &mut aligning {
+            Aligning::FirstRap(state) => {
+                let mut start = None;
+                for packet in packets.as_chunks::<TS_PACKET_SIZE>().0 {
+                    let position = state.buffer.len();
+                    state.buffer.extend_from_slice(packet);
+                    if start.is_some() {
+                        continue;
+                    }
+                    let view = TsPacket(packet);
+                    if view.pid() == PAT_PID && view.payload_unit_start() {
+                        state.first_pat.get_or_insert(position);
+                        state.last_pat = Some(position);
+                        state.pmt_after_last_pat = false;
+                    }
+                    if self.programs.observe(view) && state.last_pat.is_some() {
+                        if self.programs.video().is_none() {
+                            state.pmt_after_last_pat = true;
+                            start = state.last_pat;
+                            continue;
+                        }
+                        if self.programs.video_pmt() == Some(view.pid()) {
+                            state.pmt_after_last_pat = true;
+                        }
+                    }
+                    if !state.pmt_after_last_pat {
+                        continue;
+                    }
+                    if self.is_keyframe(view) {
+                        start = state.last_pat;
+                    } else if let Some(pat) = self.continue_open_pes(state, view) {
+                        start = Some(pat);
+                    }
                 }
+                let over_budget = state.buffer.len() > self.budget_bytes
+                    || now.saturating_duration_since(state.started) >= self.first_rap_budget;
+                let start = match start {
+                    Some(start) => start,
+                    None if over_budget => state.first_pat.unwrap_or(0),
+                    None => {
+                        self.aligning = Some(aligning);
+                        return None;
+                    }
+                };
+                // Dropping the skipped head keeps the buffer the only owner, so the PSI rewrite below
+                // edits it in place instead of copying it.
+                let mut buffer = std::mem::take(&mut state.buffer);
+                buffer.advance(start);
+                buffer.freeze()
             }
-            if !aligning.pmt_after_last_pat {
-                continue;
-            }
-            if self.is_keyframe(view) {
-                start = aligning.last_pat;
-            } else if let Some(pat) = self.continue_open_pes(&mut aligning, view) {
-                start = Some(pat);
-            }
-        }
-        let over_budget =
-            aligning.buffer.len() > self.budget_bytes || now.saturating_duration_since(aligning.started) >= self.budget;
-        let start = match start {
-            Some(start) => start,
-            None if over_budget => aligning.first_pat.unwrap_or(0),
-            None => {
-                self.aligning = Some(aligning);
-                return None;
-            }
+            Aligning::Trim(trim) => match trim.push(packets, now) {
+                TrimOutput::Hold => {
+                    self.aligning = Some(aligning);
+                    return None;
+                }
+                TrimOutput::Emit(output) => output,
+            },
         };
-        // Dropping the skipped head keeps the buffer the only owner, so the PSI rewrite below
-        // edits it in place instead of copying it.
-        let mut buffer = aligning.buffer;
-        buffer.advance(start);
-        let output = buffer.freeze();
-        // The emitted part is observed again from its PAT on for versions and discontinuity.
+        Some(self.complete_aligning(output, now))
+    }
+
+    fn complete_aligning(&mut self, output: Bytes, now: Instant) -> Bytes {
+        // The emitted part is observed again from its start on for versions and discontinuity.
         self.programs.reset();
-        Some(self.process_emitted(output))
+        self.process_emitted(output, now)
     }
 
     /// Follows the elementary data of a video PES across its packets; returns the PAT before the
     /// PES start once a keyframe shows up within its first bytes.
-    fn continue_open_pes(&self, aligning: &mut Aligning, view: TsPacket<'_>) -> Option<usize> {
+    fn continue_open_pes(&self, state: &mut FirstRapState, view: TsPacket<'_>) -> Option<usize> {
         let (pid, stream_type) = self.programs.video()?;
         if view.pid() != pid {
             return None;
         }
         if view.payload_unit_start() {
             // A new PES without keyframe in its start packet: its next packets may hold it.
-            aligning.open_pes = aligning.last_pat.zip(pes_elementary_data(view.payload()).map(<[u8]>::to_vec));
+            state.open_pes = state.last_pat.zip(pes_elementary_data(view.payload()).map(<[u8]>::to_vec));
             return None;
         }
-        let (pat, data) = aligning.open_pes.as_mut()?;
+        let (pat, data) = state.open_pes.as_mut()?;
         let room = KEYFRAME_SCAN_BYTES.saturating_sub(data.len());
         let payload = view.payload();
         data.extend_from_slice(&payload[..payload.len().min(room)]);
         if es_has_keyframe(stream_type, data) {
             let pat = *pat;
-            aligning.open_pes = None;
+            state.open_pes = None;
             return Some(pat);
         }
         if data.len() >= KEYFRAME_SCAN_BYTES {
-            aligning.open_pes = None;
+            state.open_pes = None;
         }
         None
     }
@@ -271,11 +379,23 @@ impl TsSpliceAligner {
 
     /// Observes packets about to be emitted and applies the version rewrite and discontinuity
     /// flags of a member after the first. Copies only when a packet changes.
-    fn process_emitted(&mut self, packets: Bytes) -> Bytes {
+    fn process_emitted(&mut self, packets: Bytes, now: Instant) -> Bytes {
+        if self.new_member_pending {
+            self.new_member_pending = false;
+            self.emitted_clock.begin_member();
+        }
+        self.buffer_at(now);
+
         let rewrite = self.members > 1;
         let mut edits: Vec<PacketEdit> = Vec::new();
+        let mut media_delta = Duration::ZERO;
+
         for (index, packet) in packets.as_chunks::<TS_PACKET_SIZE>().0.iter().enumerate() {
             let view = TsPacket(packet);
+            match self.emitted_clock.observe(view) {
+                PcrProgress::Advance { delta, .. } => media_delta = media_delta.saturating_add(delta),
+                PcrProgress::None | PcrProgress::First { .. } | PcrProgress::Discontinuity { .. } => {}
+            }
             self.programs.observe(view);
             let offset = index * TS_PACKET_SIZE;
             let pid = view.pid();
@@ -291,6 +411,8 @@ impl TsSpliceAligner {
                 }
             }
         }
+        self.buffer = self.buffer.saturating_add(media_delta);
+
         if edits.is_empty() {
             return packets;
         }

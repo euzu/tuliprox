@@ -324,6 +324,14 @@ impl Config {
             .map_or_else(shared::defaults::default_provider_affinity_ttl_secs, |s| s.provider_affinity_ttl_secs)
     }
 
+    #[must_use]
+    pub fn shared_burst_secs(&self) -> u64 {
+        self.reverse_proxy
+            .as_ref()
+            .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
+            .map_or_else(shared::defaults::default_shared_burst_secs, |stream| stream.shared_burst_secs)
+    }
+
     pub fn get_hls_wrap_media_playlist(&self) -> bool {
         self.reverse_proxy.as_ref().and_then(|r| r.stream.as_ref()).is_none_or(|s| s.hls_wrap_media_playlist)
     }
@@ -541,5 +549,31 @@ mod tests {
         assert_eq!(recording.directory, "/srv/recordings");
         assert_eq!(video.extensions, [".mp4"]);
         assert_eq!(video.web_search.as_deref(), Some("https://example.test/search"));
+    }
+
+    #[test]
+    fn shared_burst_secs_returns_configured_or_default() {
+        let empty = Config::default();
+        assert_eq!(empty.shared_burst_secs(), shared::defaults::default_shared_burst_secs());
+
+        let with_default_stream = ConfigDto {
+            reverse_proxy: Some(shared::model::ReverseProxyConfigDto {
+                stream: Some(shared::model::StreamConfigDto::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = Config::from(&with_default_stream);
+        assert_eq!(config.shared_burst_secs(), shared::defaults::default_shared_burst_secs());
+
+        let custom = ConfigDto {
+            reverse_proxy: Some(shared::model::ReverseProxyConfigDto {
+                stream: Some(shared::model::StreamConfigDto { shared_burst_secs: 15, ..Default::default() }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config_custom = Config::from(&custom);
+        assert_eq!(config_custom.shared_burst_secs(), 15);
     }
 }

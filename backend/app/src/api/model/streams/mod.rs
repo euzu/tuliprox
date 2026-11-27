@@ -23,6 +23,7 @@ mod provisioning_stream;
 mod timed_client_stream;
 // mod chunked_buffer;
 mod active_client_stream;
+mod live_edge_trim_stream;
 mod metering_stream;
 mod provider_stream;
 mod provider_stream_factory;
@@ -31,7 +32,7 @@ mod throttled_stream;
 // Moved to `utils::network::persist_pipe`; re-exported so api call sites keep
 // their existing names.
 pub(in crate::api) use self::{
-    active_client_stream::*, custom_video_stream::*, metering_stream::*, provider_stream::*,
+    active_client_stream::*, custom_video_stream::*, live_edge_trim_stream::*, metering_stream::*, provider_stream::*,
     provider_stream_factory::*, provisioning_stream::*, throttled_stream::*, timed_client_stream::*,
 };
 pub(crate) use crate::mpegts::transport_stream_buffer::*;

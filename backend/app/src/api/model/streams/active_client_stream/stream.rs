@@ -6,7 +6,7 @@ use crate::api::{
     api_utils::failover_group_runtime::{GroupEnd, GroupPoll, MemberHost, RuntimeMember},
     model::{
         connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
-        open_provider_stream_with_lifecycle, AppState, BoxedProviderStream, ProviderStreamOpen,
+        open_provider_stream_with_lifecycle, AppState, BoxedProviderStream, LiveEdgeTrimStream, ProviderStreamOpen,
         ProviderStreamOpenLifecycle, StreamError, TimedClientStream,
     },
 };
@@ -274,6 +274,7 @@ impl Stream for ActiveClientStream {
                                             .provider_handle
                                             .as_ref()
                                             .and_then(ProviderStreamOpenLifecycle::from_managed);
+                                        let live_edge_trim = context.live_edge_trim;
                                         let future = Box::pin(async move {
                                             match open_provider_stream_with_lifecycle(
                                                 &app_state.provider_stream_ctx(),
@@ -304,7 +305,12 @@ impl Stream for ActiveClientStream {
                                                     )
                                                 }
                                                 Some(ProviderStreamOpen::Stream(response)) => {
-                                                    DeferredProviderOpenOutcome::Stream(response.stream)
+                                                    let stream = if let Some(target) = live_edge_trim {
+                                                        LiveEdgeTrimStream::new(response.stream, target).boxed()
+                                                    } else {
+                                                        response.stream
+                                                    };
+                                                    DeferredProviderOpenOutcome::Stream(stream)
                                                 }
                                                 Some(ProviderStreamOpen::UpstreamStatus { .. }) | None => {
                                                     DeferredProviderOpenOutcome::Failed

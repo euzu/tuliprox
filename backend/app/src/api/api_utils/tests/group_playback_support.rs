@@ -120,6 +120,130 @@ pub(crate) fn member_ts(video_pid: u16, continuation: usize) -> Vec<u8> {
     ts
 }
 
+/// A synthetic MPEG-TS GOP for testing: PCR on `video_pid`, PAT, PMT, keyframe with PCR, and `continuation` packets.
+pub(crate) fn member_pcr_gop(video_pid: u16, pcr_secs: u64, continuation: usize) -> Vec<u8> {
+    fn section(mut body: Vec<u8>) -> Vec<u8> {
+        let length = u8::try_from(body.len() - 3 + 4).expect("section length");
+        body[1] = 0xB0;
+        body[2] = length;
+        let crc = tuliprox_mpegts::packet::mpeg2_crc32(&body);
+        body.extend_from_slice(&crc.to_be_bytes());
+        let mut payload = vec![0x00];
+        payload.extend(body);
+        payload
+    }
+
+    let pcr_27mhz = pcr_secs * 27_000_000;
+    let base = pcr_27mhz / 300;
+    let ext = pcr_27mhz % 300;
+    let byte = |value: u64| u8::try_from(value & 0xFF).expect("byte");
+    let pcr_bytes = [
+        byte(base >> 25),
+        byte(base >> 17),
+        byte(base >> 9),
+        byte(base >> 1),
+        byte((base & 1) << 7) | 0x7E | byte(ext >> 8),
+        byte(ext),
+    ];
+
+    let pid = video_pid.to_be_bytes();
+    let pat = section(vec![0x00, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00]);
+    let pmt = section(vec![
+        0x02,
+        0,
+        0,
+        0x00,
+        0x01,
+        0xC1,
+        0x00,
+        0x00,
+        0xE0 | pid[0],
+        pid[1],
+        0xF0,
+        0x00,
+        0x1B,
+        0xE0 | pid[0],
+        pid[1],
+        0xF0,
+        0x00,
+    ]);
+    let keyframe = [
+        0x00, 0x00, 0x01, 0xE0, 0x00, 0x00, 0x80, 0x80, 0x05, 0x21, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x65,
+    ];
+
+    let mut ts = Vec::with_capacity(188 * (4 + continuation));
+
+    // 1. PCR packet on video_pid to establish PCR clock before PAT
+    let mut pcr_packet = vec![0x47, pid[0] & 0x1F, pid[1], 0x20, 183, 0x10];
+    pcr_packet.extend_from_slice(&pcr_bytes);
+    pcr_packet.resize(188, 0xFF);
+    ts.extend(pcr_packet);
+
+    // 2. PAT packet
+    let mut pat_packet = vec![0x47, 0x40, 0x00, 0x10];
+    pat_packet.extend_from_slice(&pat);
+    pat_packet.resize(188, 0xFF);
+    ts.extend(pat_packet);
+
+    // 3. PMT packet
+    let mut program_map_packet = vec![0x47, 0x50, 0x00, 0x10];
+    program_map_packet.extend_from_slice(&pmt);
+    program_map_packet.resize(188, 0xFF);
+    ts.extend(program_map_packet);
+
+    // 4. Keyframe packet with random access and PCR
+    let adaptation_len = 183 - keyframe.len();
+    let mut kf_packet = vec![
+        0x47,
+        0x40 | (pid[0] & 0x1F),
+        pid[1],
+        0x30,
+        u8::try_from(adaptation_len).expect("adaptation length"),
+        0x50,
+    ];
+    kf_packet.extend_from_slice(&pcr_bytes);
+    let stuffing = adaptation_len - 1 - pcr_bytes.len();
+    kf_packet.extend(std::iter::repeat_n(0xFF, stuffing));
+    kf_packet.extend_from_slice(&keyframe);
+    kf_packet.resize(188, 0xFF);
+    ts.extend(kf_packet);
+
+    // 5. Continuation packets
+    for _ in 0..continuation {
+        let mut cont_packet = vec![0x47, pid[0] & 0x1F, pid[1], 0x10];
+        cont_packet.extend([0x11; 184]);
+        ts.extend(cont_packet);
+    }
+
+    ts
+}
+
+/// Extracts the PCR in 90kHz ticks from the first keyframe packet on `video_pid`.
+pub(crate) fn first_keyframe_pcr(bytes: &[u8], video_pid: u16) -> Option<u64> {
+    for chunk in bytes.as_chunks::<188>().0 {
+        let pid = (u16::from(chunk[1] & 0x1F) << 8) | u16::from(chunk[2]);
+        if pid == video_pid {
+            let has_adaptation = (chunk[3] & 0x20) != 0;
+            if has_adaptation && chunk[4] >= 7 {
+                let flags = chunk[5];
+                let is_keyframe = (flags & 0x40) != 0;
+                let has_pcr = (flags & 0x10) != 0;
+                if is_keyframe && has_pcr {
+                    let pcr_bytes = &chunk[6..12];
+                    let base = (u64::from(pcr_bytes[0]) << 25)
+                        | (u64::from(pcr_bytes[1]) << 17)
+                        | (u64::from(pcr_bytes[2]) << 9)
+                        | (u64::from(pcr_bytes[3]) << 1)
+                        | (u64::from(pcr_bytes[4]) >> 7);
+                    return Some(base);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Whether `bytes` holds a TS packet on `pid` at a packet boundary.
 pub(crate) fn has_pid(bytes: &[u8], pid: u16) -> bool {
     bytes
@@ -150,6 +274,17 @@ pub(crate) async fn read_body_until(
             Err(_) => return (read, false),
         }
     }
+}
+
+/// Disables shared burst in the environment configuration.
+pub(crate) fn disable_burst(env: &GroupPlaybackEnv) {
+    let mut config = (**env.app_state.app_config.config.load()).clone();
+    if let Some(ref mut reverse_proxy) = config.reverse_proxy {
+        if let Some(ref mut stream) = reverse_proxy.stream {
+            stream.shared_burst_secs = 0;
+        }
+    }
+    env.app_state.app_config.config.store(Arc::new(config));
 }
 
 pub(crate) struct TrackedOrigin {

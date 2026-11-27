@@ -97,6 +97,10 @@ impl<'a> TsPacket<'a> {
         self.adaptation_len().is_some_and(|len| len >= 1 && self.0[5] & 0x40 != 0)
     }
 
+    pub(crate) fn discontinuity(self) -> bool {
+        self.adaptation_len().is_some_and(|len| len >= 1 && self.0[5] & 0x80 != 0)
+    }
+
     pub(crate) fn payload(self) -> &'a [u8] {
         if self.0[3] & 0x10 == 0 {
             return &[];

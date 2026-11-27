@@ -299,6 +299,7 @@ pub(crate) async fn create_active_client_stream(
     let has_deferred_open = stream_details.has_deferred_provider_open();
     let deferred_plugin_headers =
         deferred_open_plugin_headers(app_state, &stream_details, &stream_channel, &user.username).await;
+    let has_group_runtime = group_failover.is_some();
     let deferred_provider_open = create_deferred_provider_open_future(
         app_state,
         &stream_details,
@@ -306,6 +307,7 @@ pub(crate) async fn create_active_client_stream(
         &stream_channel,
         req_headers,
         deferred_plugin_headers.as_deref(),
+        has_group_runtime,
     );
     let timed_stream_context = deferred_provider_open
         .as_ref()

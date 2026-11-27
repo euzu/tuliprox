@@ -1,12 +1,7 @@
-use crate::{
-    packet::{TsPacket, TS_PACKET_SIZE},
-    transport_stream_buffer::decode_pcr,
-};
+use super::pcr_clock::{PcrClock, PcrProgress};
+use crate::packet::{TsPacket, TS_PACKET_SIZE};
 use std::time::{Duration, Instant};
 
-const PCR_HZ: u64 = 27_000_000;
-/// PCR wraps at 2^33 * 300.
-const PCR_MODULUS: u64 = (1 << 33) * 300;
 const BUCKET: Duration = Duration::from_secs(1);
 /// A bucket in which the consumer waited less than this never counts as an underrun: the
 /// provider delivered faster than the consumer read.
@@ -17,8 +12,7 @@ const MIN_BUCKET_WAIT: Duration = Duration::from_millis(100);
 pub struct RealtimeMeter {
     ratio_pct: u8,
     window: Duration,
-    pcr_pid: Option<u16>,
-    last_pcr: Option<u64>,
+    clock: PcrClock,
     bucket_start: Option<Instant>,
     bucket_media: Duration,
     bucket_waited: Duration,
@@ -31,8 +25,7 @@ impl RealtimeMeter {
         Self {
             ratio_pct,
             window,
-            pcr_pid: None,
-            last_pcr: None,
+            clock: PcrClock::new(),
             bucket_start: None,
             bucket_media: Duration::ZERO,
             bucket_waited: Duration::ZERO,
@@ -47,9 +40,17 @@ impl RealtimeMeter {
             return false;
         }
         for packet in packets.as_chunks::<TS_PACKET_SIZE>().0 {
-            self.observe_pcr(TsPacket(packet), now);
+            match self.clock.observe(TsPacket(packet)) {
+                PcrProgress::Advance { delta, .. } => {
+                    self.bucket_media += delta;
+                }
+                PcrProgress::Discontinuity { .. } => {
+                    self.reset_bucket(now);
+                }
+                PcrProgress::None | PcrProgress::First { .. } => {}
+            }
         }
-        if self.pcr_pid.is_none() {
+        if !self.clock.has_pcr_pid() {
             return false;
         }
         self.bucket_waited += waited;
@@ -71,35 +72,19 @@ impl RealtimeMeter {
 
     /// Starts measuring a new member: its PCR may run on another PID than the previous one's.
     pub fn begin_member(&mut self, now: Instant) {
-        self.pcr_pid = None;
-        self.reset(now);
+        self.clock.begin_member();
+        self.reset_bucket(now);
     }
 
     pub fn reset(&mut self, now: Instant) {
-        self.last_pcr = None;
+        self.clock.reset();
+        self.reset_bucket(now);
+    }
+
+    fn reset_bucket(&mut self, now: Instant) {
         self.bucket_start = Some(now);
         self.bucket_media = Duration::ZERO;
         self.bucket_waited = Duration::ZERO;
         self.streak_start = None;
-    }
-
-    fn observe_pcr(&mut self, packet: TsPacket<'_>, now: Instant) {
-        if !packet.has_pcr() {
-            return;
-        }
-        let pid = packet.pid();
-        if *self.pcr_pid.get_or_insert(pid) != pid {
-            return;
-        }
-        let pcr = decode_pcr(&packet.0[6..12]);
-        let Some(last) = self.last_pcr.replace(pcr) else { return };
-        let delta = (pcr + PCR_MODULUS - last) % PCR_MODULUS;
-        if delta > PCR_HZ {
-            // A jump forward or backwards is a new timeline, not delivery speed.
-            self.reset(now);
-            self.last_pcr = Some(pcr);
-            return;
-        }
-        self.bucket_media += Duration::from_nanos(delta * 1_000 / 27);
     }
 }

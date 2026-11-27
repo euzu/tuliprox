@@ -1,5 +1,7 @@
 use super::{
-    group_playback_support::{has_pid, member_ts, read_body_until, GroupPlaybackEnv},
+    group_playback_support::{
+        disable_burst, first_keyframe_pcr, has_pid, member_pcr_gop, member_ts, read_body_until, GroupPlaybackEnv,
+    },
     support::FakeOriginMode,
 };
 use shared::model::{EventMessage, FailoverGroupRuntimeConfig, SwitchReason};
@@ -35,6 +37,7 @@ async fn switches_member_on_upstream_eof_without_client_reconnect() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     assert_eq!(response.status(), 200);
     let (body, ended) = read_body_until(response, Duration::from_secs(5), |read| has_pid(read, KORATH_PID)).await;
@@ -52,6 +55,7 @@ async fn switches_member_on_stall() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     let (body, ended) = read_body_until(response, Duration::from_secs(5), |read| has_pid(read, KORATH_PID)).await;
     assert!(!ended);
@@ -66,6 +70,7 @@ async fn provider_slot_released_on_switch() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     let (_body, ended) = read_body_until(response, Duration::from_secs(5), |read| has_pid(read, KORATH_PID)).await;
     assert!(!ended);
@@ -98,6 +103,7 @@ async fn runtime_switch_does_not_use_grace() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let _korath_full = env.hold("korath", 0);
     let response = env.get_xtream_live(env.group_vid).await;
     let (body, ended) = read_body_until(response, Duration::from_secs(6), |_| false).await;
@@ -114,6 +120,7 @@ async fn switch_emits_member_switched_event() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let mut events = env.app_state.event_manager.get_event_channel();
     let response = env.get_xtream_live(env.group_vid).await;
     let (_body, _) = read_body_until(response, Duration::from_secs(5), |read| has_pid(read, KORATH_PID)).await;
@@ -153,6 +160,7 @@ async fn switch_continues_at_pat_with_new_version() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     let (body, _) = read_body_until(response, Duration::from_secs(5), |read| has_pid(read, KORATH_PID)).await;
     let packets: Vec<&[u8]> = body.as_chunks::<188>().0.iter().map(<[u8; 188]>::as_slice).collect();
@@ -176,6 +184,7 @@ async fn shared_group_stream_switches_member_and_moves_allocation() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     assert_eq!(response.status(), 200);
     let (body, ended) = read_body_until(response, Duration::from_secs(5), |read| has_pid(read, KORATH_PID)).await;
@@ -203,6 +212,7 @@ async fn group_stream_sleep_timer_ends_without_switch() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     tokio::time::pause();
     let (_body, ended) = read_body_until(response, Duration::from_secs(120), |_| false).await;
@@ -222,6 +232,7 @@ async fn start_skips_member_whose_open_hangs() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = tokio::time::timeout(Duration::from_secs(6), env.get_xtream_live(env.group_vid))
         .await
         .expect("the hanging open is bounded");
@@ -274,6 +285,7 @@ async fn retry_same_member_on_single_connection_account() {
         .origin_mode("solis", FakeOriginMode::TsThenStall(member_ts(SOLIS_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let _korath_full = env.hold("korath", 0);
     let response = env.get_xtream_live(env.group_vid).await;
     let (_body, ended) = read_body_until(response, Duration::from_secs(6), |_| env.origin_hits("solis") >= 2).await;
@@ -337,6 +349,7 @@ async fn group_session_provider_follows_selected_member() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     let (_body, _) = read_body_until(response, Duration::from_secs(3), |read| has_pid(read, KORATH_PID)).await;
     assert_eq!(session_provider(&env).await, "korath");
@@ -350,6 +363,7 @@ async fn group_session_provider_follows_runtime_switch() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     let (_body, _) = read_body_until(response, Duration::from_secs(5), |read| has_pid(read, KORATH_PID)).await;
     assert_eq!(session_provider(&env).await, "korath");
@@ -432,6 +446,7 @@ async fn failed_switch_shows_channel_unavailable_video() {
         .origin_mode("korath", FakeOriginMode::Status(503))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     // The fixture's video PID 0x100 shows the channel-unavailable clip.
     let (body, _) = read_body_until(response, Duration::from_secs(8), |read| has_pid(read, 0x100)).await;
@@ -493,10 +508,32 @@ async fn disabled_failover_ends_stream_with_its_member() {
         .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
         .build()
         .await;
+    disable_burst(&env);
     let response = env.get_xtream_live(env.group_vid).await;
     let (body, ended) = read_body_until(response, Duration::from_secs(5), |_| false).await;
     assert!(ended, "the response ends with its member");
     assert!(has_pid(&body, SOLIS_PID));
     assert!(!has_pid(&body, KORATH_PID), "no switch without failover");
     assert_eq!(env.origin_hits("korath"), 0);
+}
+
+#[tokio::test]
+async fn default_burst_trims_first_member_to_target() {
+    let mut burst = Vec::new();
+    for i in 0..=5 {
+        burst.extend(member_pcr_gop(SOLIS_PID, i, 2));
+    }
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .with_qos("solis", 1, 95)
+        .with_failover(runtime_selection(4, 20))
+        .origin_mode("solis", FakeOriginMode::TsThenStall(burst))
+        .origin_mode("korath", FakeOriginMode::TsStream(member_ts(KORATH_PID, 40)))
+        .build()
+        .await;
+    let response = env.get_xtream_live(env.group_vid).await;
+    assert_eq!(response.status(), 200);
+    let (body, _ended) = read_body_until(response, Duration::from_secs(5), |read| has_pid(read, SOLIS_PID)).await;
+    let gop2 = member_pcr_gop(SOLIS_PID, 2, 2);
+    assert_eq!(&body[..188], &gop2[188..376], "starts at GOP 2 PAT");
+    assert_eq!(first_keyframe_pcr(&body, SOLIS_PID), Some(180_000), "GOP 2 keyframe PCR is 2s = 180_000 ticks");
 }

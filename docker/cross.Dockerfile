@@ -12,7 +12,7 @@
 # -----------------------------------------------------------------
 # We use a static build to ensure it works in the scratch image without libraries
 # Static ffmpeg image is multi-arch, so it pulls correct arch automatically
-FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg-static
+FROM mwader/static-ffmpeg:9.1@sha256:dd09509d8c2152bfa601c8c20e3dd166bde906d37951b9f7e8bbd922267f5ac9 AS ffmpeg-static
 
 # The cross image provides the target compiler and sysroot, but no Rust toolchain.
 FROM rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS rust-toolchain
@@ -62,7 +62,7 @@ RUN mkdir -p frontend/src backend/app/src/tools tools/tuliprox-testkit/src && \
 # -----------------------------------------------------------------
 # Stage 1: Build the Rust binary for production
 # -----------------------------------------------------------------
-FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main@sha256:4043a111de4bdb21628be33eb1a9e90dcfcb07ea96ed9df43bb2e9be53b32a05 AS rust-build
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main@sha256:de9ccd1ae2d7068f7a91d737a4a1b5464ee5ab06f9d22624f61c4ff0f754a8ac AS rust-build
 
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
@@ -189,7 +189,7 @@ RUN apk add --no-cache tzdata \
 # -----------------------------------------------------------------
 # Final Image #1: Debugging Environment (Alpine-based)
 # -----------------------------------------------------------------
-FROM rust:1.99.1-alpine3.24@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS debug
+FROM rust:1.100.0-alpine3.24@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS debug
 
 # For Alpine, the correct target architecture uses 'musl'
 ARG RUST_TARGET=x86_64-unknown-linux-musl

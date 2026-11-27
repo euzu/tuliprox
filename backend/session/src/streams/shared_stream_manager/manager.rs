@@ -565,10 +565,7 @@ impl SharedStreamManager {
                         stream.shared_subscriber_idle_timeout_secs
                     }),
                 )
-                .with_burst_secs(
-                    stream_config
-                        .map_or_else(shared::defaults::default_shared_burst_secs, |stream| stream.shared_burst_secs),
-                );
+                .with_burst_secs(config.shared_burst_secs());
         shared_state.subscriber_max_duration =
             config.sleep_timer_mins.filter(|mins| *mins > 0).map(|mins| Duration::from_secs(u64::from(mins) * 60));
         let shared_state = Arc::new(shared_state);
