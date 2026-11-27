@@ -163,17 +163,9 @@ impl TsSpliceAligner {
 
     /// Re-evaluates a running hold: returns held bytes if ready to emit, or `None`.
     pub fn poll_hold(&mut self, now: Instant) -> Option<Bytes> {
-        match &self.aligning {
-            Some(Aligning::Trim(_)) => self.push_aligning(Bytes::new(), now).filter(|b| !b.is_empty()),
-            Some(Aligning::FirstRap(state)) => {
-                if now.saturating_duration_since(state.started) >= self.first_rap_budget {
-                    self.finish_at(now)
-                } else {
-                    None
-                }
-            }
-            None => None,
-        }
+        // The same path as a packet push, so a first-RAP hold over its budget starts at the first PAT or, without
+        // one, at the first packet. `finish_at` (member end) keeps dropping a member that never sent a PAT.
+        self.push_aligning(Bytes::new(), now).filter(|bytes| !bytes.is_empty())
     }
 
     /// Starts the next member: its bytes are held until the splice point.

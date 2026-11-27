@@ -450,6 +450,49 @@ impl SettleTracker {
         let media_advance = current_media_time.saturating_sub(old.media_time);
         growth < SETTLE_GROWTH_MICROS && media_advance >= SETTLE_MIN_MEDIA_ADVANCE
     }
+
+    fn next_settle_instant(&self, now: Instant, first_pcr_wall: Instant, media_time: Duration) -> Option<Instant> {
+        let media_micros = i64::try_from(media_time.as_micros()).unwrap_or(i64::MAX);
+        for i in 0..self.len {
+            let idx = (self.head + i) % RING_CAP;
+            let Some(s) = self.samples.get(idx).copied().flatten() else {
+                continue;
+            };
+            let next_sample = if i + 1 < self.len {
+                let next_idx = (self.head + i + 1) % RING_CAP;
+                self.samples.get(next_idx).copied().flatten()
+            } else {
+                None
+            };
+            let end_window = next_sample.map(|next| next.wall + SETTLE_WINDOW);
+            if let Some(end) = end_window {
+                if end <= now {
+                    continue;
+                }
+            }
+            let media_advance = media_time.saturating_sub(s.media_time);
+            if media_advance < SETTLE_MIN_MEDIA_ADVANCE {
+                break;
+            }
+            let growth_instant = {
+                let threshold = media_micros.saturating_sub(s.lead_micros).saturating_sub(SETTLE_GROWTH_MICROS);
+                if threshold < 0 {
+                    first_pcr_wall
+                } else {
+                    let needed_wall_micros = u64::try_from(threshold.saturating_add(1)).unwrap_or(0);
+                    first_pcr_wall + Duration::from_micros(needed_wall_micros)
+                }
+            };
+            let candidate = (s.wall + SETTLE_WINDOW).max(growth_instant);
+            if let Some(end) = end_window {
+                if candidate >= end {
+                    continue;
+                }
+            }
+            return Some(candidate);
+        }
+        None
+    }
 }
 
 struct PatHistory {
@@ -585,11 +628,22 @@ impl TsLiveEdgeTrim {
             }
         }
 
-        if holding.candidates.is_empty() {
+        if holding.clock.has_pcr_pid() {
             if let Some(first_wall) = holding.first_pcr_wall {
-                let rap_wait = first_wall + FIRST_RAP_WAIT;
-                if rap_wait > now {
-                    wake = wake.min(rap_wait);
+                if !holding.lead_exceeded_no_burst && !holding.candidates.is_empty() {
+                    let probe = first_wall + NO_BURST_PROBE;
+                    if probe > now {
+                        wake = wake.min(probe);
+                    }
+                }
+
+                let media = holding.clock.media_time();
+                if let Some(settle) = holding.settle_tracker.next_settle_instant(now, first_wall, media) {
+                    let settle_wake =
+                        if holding.candidates.is_empty() { settle.max(first_wall + FIRST_RAP_WAIT) } else { settle };
+                    if settle_wake > now {
+                        wake = wake.min(settle_wake);
+                    }
                 }
             }
         }

@@ -1225,3 +1225,84 @@ fn no_pcr_hold_wakes_and_releases_at_settle_window() {
     assert_eq!(emitted.as_ref(), packet.as_slice());
     assert_eq!(trim.next_wake(settle), None);
 }
+
+#[test]
+fn next_wake_no_burst_realtime_releases_at_first_candidate_after_300ms() {
+    let target = Duration::from_secs(3);
+    let max_hold = Duration::from_secs(10);
+    let max_bytes = 1_000_000;
+    let mut trim = TsLiveEdgeTrim::new(target, max_hold, max_bytes);
+    let base = Instant::now();
+
+    let gop0 = join(&[pat(0), video_pmt(0), pes_with_pcr(VIDEO_PID, true, 0, &[&h264(5)])]);
+    assert_eq!(trim.push(gop0.clone(), base), TrimOutput::Hold);
+
+    let pcr40 = 40 * (PCR_HZ / 1000);
+    let pkt40 = pes_with_pcr(VIDEO_PID, false, pcr40, &[&h264(1)]);
+    let at_40 = base + Duration::from_millis(40);
+    assert_eq!(trim.push(Bytes::from(pkt40), at_40), TrimOutput::Hold);
+
+    let pcr80 = 80 * (PCR_HZ / 1000);
+    let pkt80 = pes_with_pcr(VIDEO_PID, false, pcr80, &[&h264(1)]);
+    let at_80 = base + Duration::from_millis(80);
+    assert_eq!(trim.push(Bytes::from(pkt80), at_80), TrimOutput::Hold);
+
+    let expected_wake = base + Duration::from_millis(300);
+    assert_eq!(trim.next_wake(at_80), Some(expected_wake));
+
+    let TrimOutput::Emit(emitted) = trim.push(Bytes::new(), expected_wake) else {
+        panic!("expected emit at no-burst wake instant");
+    };
+    assert!(!trim.is_holding());
+    assert_eq!(&emitted[..TS_PACKET_SIZE], &pat(0)[..], "emits at first candidate RAP");
+}
+
+#[test]
+fn next_wake_settle_by_aging_and_growth_exact_instant() {
+    let target = Duration::from_secs(3);
+    let max_hold = Duration::from_secs(10);
+    let max_bytes = 1_000_000;
+    let mut trim = TsLiveEdgeTrim::new(target, max_hold, max_bytes);
+    let base = Instant::now();
+
+    let pcr200 = 200 * (PCR_HZ / 1000);
+    let gop = join(&[pat(0), video_pmt(0), pes_with_pcr(VIDEO_PID, true, pcr200, &[&h264(5)])]);
+    assert_eq!(trim.push(gop, base), TrimOutput::Hold);
+
+    let at_100 = base + Duration::from_millis(100);
+    let pcr700 = 700 * (PCR_HZ / 1000);
+    let pkt700 = pcr_packet(VIDEO_PID, pcr700);
+    assert_eq!(trim.push(Bytes::from(pkt700), at_100), TrimOutput::Hold);
+
+    let expected_wake = base + Duration::from_micros(400_001);
+    assert_eq!(trim.next_wake(at_100), Some(expected_wake));
+
+    let before_wake = base + Duration::from_millis(400);
+    assert_eq!(trim.push(Bytes::new(), before_wake), TrimOutput::Hold);
+
+    let output = trim.push(Bytes::new(), expected_wake);
+    assert!(matches!(output, TrimOutput::Emit(_)), "emits at exact wake instant");
+    assert!(!trim.is_holding());
+}
+
+#[test]
+fn next_wake_negative_idle_stream_low_media_advance_returns_hold_deadline() {
+    let max_hold = Duration::from_secs(5);
+    let mut trim = TsLiveEdgeTrim::new(Duration::from_secs(3), max_hold, 1_000_000);
+    let base = Instant::now();
+
+    let first_packet = pcr_packet(VIDEO_PID, 0);
+    assert_eq!(trim.push(Bytes::from(first_packet), base), TrimOutput::Hold);
+
+    let t_mid = base + Duration::from_millis(50);
+    let mid_packet = pcr_packet(VIDEO_PID, 100 * (PCR_HZ / 1000));
+    assert_eq!(trim.push(Bytes::from(mid_packet), t_mid), TrimOutput::Hold);
+
+    let t_last = base + Duration::from_millis(100);
+    let last_packet = pcr_packet(VIDEO_PID, 200 * (PCR_HZ / 1000));
+    assert_eq!(trim.push(Bytes::from(last_packet), t_last), TrimOutput::Hold);
+
+    let hold_deadline = base + max_hold;
+    let query_time = base + Duration::from_millis(150);
+    assert_eq!(trim.next_wake(query_time), Some(hold_deadline));
+}

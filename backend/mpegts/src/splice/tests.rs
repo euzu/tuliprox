@@ -182,6 +182,25 @@ fn falls_back_after_time_budget() {
 }
 
 #[test]
+fn first_rap_timeout_without_pat_emits_from_first_packet_on_poll_hold() {
+    let now = Instant::now();
+    let budget = Duration::from_secs(5);
+    let packets_in = join(&[video_cont(false), video_cont(false)]);
+
+    let mut aligner = switched_aligner(0, now);
+    assert!(matches!(aligner.push(packets_in.clone(), now), SpliceOutput::Hold));
+    assert_eq!(aligner.poll_hold(now + Duration::from_millis(4999)), None, "holds within the budget");
+    assert!(aligner.is_aligning());
+    assert_eq!(aligner.poll_hold(now + budget), Some(packets_in.clone()), "starts at the first packet");
+    assert!(!aligner.is_aligning());
+
+    // A member that ends before it sent a PAT emits nothing.
+    let mut ended = switched_aligner(0, now);
+    assert!(matches!(ended.push(packets_in, now), SpliceOutput::Hold));
+    assert_eq!(ended.finish_at(now + budget), None);
+}
+
+#[test]
 fn sets_discontinuity_only_with_existing_adaptation_field() {
     let now = Instant::now();
     let mut aligner = switched_aligner(0, now);
