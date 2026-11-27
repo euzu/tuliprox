@@ -369,6 +369,31 @@ impl HoldingState {
         let span = newest_media_time.saturating_sub(rap_media_time);
         span <= eff.saturating_add(FRESH_RAP_SLACK)
     }
+
+    /// Instant at which the chosen RAP of a switch hold becomes fresh without new data, while the player buffer
+    /// drains above its floor. Without new data the newest media time and the candidates are fixed and the
+    /// threshold `newest - eff` only falls, so the chosen RAP stays the same until it is fresh.
+    fn fresh_instant(
+        &self,
+        player_buffer: Option<(Duration, Instant)>,
+        target: Duration,
+        now: Instant,
+    ) -> Option<Instant> {
+        let (buffer, sampled_at) = player_buffer?;
+        let remaining_now = buffer.saturating_sub(now.saturating_duration_since(sampled_at));
+        if remaining_now <= PLAYER_BUFFER_FLOOR {
+            return None;
+        }
+        let eff_now = target.saturating_sub(remaining_now);
+        let c = self.chosen_rap_media_time(eff_now)?;
+        let n = self.clock.media_time();
+        let needed_eff = n.saturating_sub(c).saturating_sub(FRESH_RAP_SLACK);
+        if needed_eff <= eff_now {
+            return None;
+        }
+        let needed_remaining = target.checked_sub(needed_eff)?;
+        Some(sampled_at + buffer.saturating_sub(needed_remaining))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -618,6 +643,12 @@ impl TsLiveEdgeTrim {
             let floor_instant = sampled_at + buffer.saturating_sub(PLAYER_BUFFER_FLOOR);
             if floor_instant > now {
                 wake = wake.min(floor_instant);
+            }
+        }
+
+        if let Some(fresh) = holding.fresh_instant(self.player_buffer, self.target, now) {
+            if fresh > now {
+                wake = wake.min(fresh);
             }
         }
 

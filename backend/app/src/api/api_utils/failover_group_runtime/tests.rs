@@ -824,10 +824,11 @@ mod switcher {
         tx.unbounded_send(Ok(Bytes::from(burst))).unwrap();
         let res = poll_once(&mut switcher, &mut host);
         assert!(matches!(res, GroupPoll::Pending), "holding the burst got: {res:?}");
+        // Without more data the RAP (span 2 s) would turn fresh once the effective target reaches 1.5 s.
         assert_eq!(
             switcher.driver.aligner.hold_deadline(clock_now()),
-            Some(floor_instant.into_std()),
-            "the next wake is the floor instant, not the hold deadline"
+            Some((switch_instant + Duration::from_millis(1500)).into_std()),
+            "the next wake is the fresh-RAP instant, not the hold deadline"
         );
 
         for step in 1..=19_u64 {

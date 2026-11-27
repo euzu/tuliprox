@@ -1306,3 +1306,87 @@ fn next_wake_negative_idle_stream_low_media_advance_returns_hold_deadline() {
     let query_time = base + Duration::from_millis(150);
     assert_eq!(trim.next_wake(query_time), Some(hold_deadline));
 }
+
+#[test]
+fn switch_hold_wakes_and_releases_at_fresh_rap_instant() {
+    let target = Duration::from_secs(4);
+    let max_hold = Duration::from_secs(10);
+    let max_bytes = 10_000_000;
+    let mut trim = TsLiveEdgeTrim::new(target, max_hold, max_bytes);
+
+    let base = Instant::now();
+    trim.set_player_buffer(Duration::from_secs(4), base);
+
+    // 2-second GOPs (50 frames at 40 ms each = 2000 ms).
+    // Burst: push GOP 0..2 (media 0..6000 ms) over 100 ms.
+    for i in 0..3 {
+        let gop = make_gop_with_frames(i, 0, 50);
+        let out = trim.push(join(&gop), base + Duration::from_millis(50 * i));
+        assert_eq!(out, TrimOutput::Hold, "holding during burst at GOP {i}");
+    }
+
+    // GOP 3 starts at 6000 ms (PAT, PMT, IDR keyframe).
+    // Burst continues with GOP 3 start and frames up to 6660 ms at wall 150 ms.
+    let gop3 = make_gop_with_frames(3, 0, 50);
+    let mut gop3_burst = gop3[..3].to_vec();
+    gop3_burst.push(pes_with_pcr(VIDEO_PID, false, 6660 * (PCR_HZ / 1000), &[&h264(1)]));
+    let out_burst = trim.push(join(&gop3_burst), base + Duration::from_millis(150));
+    assert_eq!(out_burst, TrimOutput::Hold, "holding at GOP 3 partial burst");
+
+    // Real-time delivery starts after burst ended at 150 ms (media at 6.66 s).
+    // Feeds settle tracker in 100 ms steps (PCR = wall_ms + 6510 ms).
+    for wall_ms in (250..=950).step_by(100) {
+        let pcr_ms = wall_ms + 6510;
+        let pkt = pes_with_pcr(VIDEO_PID, false, pcr_ms * (PCR_HZ / 1000), &[&h264(1)]);
+        let out = trim.push(Bytes::from(pkt), base + Duration::from_millis(wall_ms));
+        assert_eq!(out, TrimOutput::Hold, "holding in real time at {wall_ms} ms");
+    }
+
+    // Data stops at 950 ms with PCR = 7460 ms (exactly 50 ms before computed fresh instant 1000 ms).
+    // GOP 3 PAT was recorded at media time 5960 ms (last PCR before IDR), so c = 5960 ms.
+    // Span = 7460 ms - 5960 ms = 1500 ms.
+    // Needed eff = span - FRESH_RAP_SLACK = 1500 ms - 500 ms = 1000 ms.
+    // Needed remaining = target (4000 ms) - 1000 ms = 3000 ms.
+    // Fresh instant = base + buffer (4000 ms) - 3000 ms = base + 1000 ms.
+    // Floor instant = base + 4000 ms - 1000 ms = base + 3000 ms.
+    let fresh_instant = base + Duration::from_millis(1000);
+    let floor_instant = base + Duration::from_millis(3000);
+    assert!(fresh_instant < floor_instant);
+
+    let query_now = base + Duration::from_millis(950);
+    assert_eq!(trim.next_wake(query_now), Some(fresh_instant));
+
+    // 1 ms before fresh instant: still holds.
+    let before_fresh = base + Duration::from_millis(999);
+    assert_eq!(trim.push(Bytes::new(), before_fresh), TrimOutput::Hold);
+
+    // At fresh instant: emits starting at GOP 3 PAT!
+    let out_fresh = trim.push(Bytes::new(), fresh_instant);
+    let emitted = match out_fresh {
+        TrimOutput::Emit(bytes) => bytes,
+        TrimOutput::Hold => panic!("expected emit at fresh instant on empty push"),
+    };
+    assert!(!trim.is_holding());
+    assert_eq!(&emitted[..TS_PACKET_SIZE], &gop3[0][..], "emits at GOP 3 PAT");
+    assert_eq!(trim.next_wake(fresh_instant), None, "no wake when not holding");
+}
+
+#[test]
+fn next_wake_negative_no_player_buffer_has_no_fresh_term() {
+    let target = Duration::from_secs(3);
+    let max_hold = Duration::from_secs(10);
+    let mut trim = TsLiveEdgeTrim::new(target, max_hold, 10_000_000);
+    let base = Instant::now();
+
+    for i in 0..3 {
+        let gop = make_gop_with_frames(i, 0, 50);
+        let out = trim.push(join(&gop), base + Duration::from_millis(50 * i));
+        assert_eq!(out, TrimOutput::Hold);
+    }
+
+    // After no-burst probe window (300 ms) and without real-time progress to settle,
+    // next_wake without a player buffer returns the hold deadline (no floor or fresh terms).
+    let query_time = base + Duration::from_millis(350);
+    let hold_deadline = base + max_hold;
+    assert_eq!(trim.next_wake(query_time), Some(hold_deadline));
+}
