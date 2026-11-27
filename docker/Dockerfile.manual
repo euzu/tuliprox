@@ -12,7 +12,7 @@ RUN apk add --no-cache tzdata \
   && cp /etc/ssl/certs/ca-certificates.crt /output/etc/ssl/certs/ca-certificates.crt
 
 # Fetch static FFmpeg binaries
-FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg-static
+FROM mwader/static-ffmpeg:9.1@sha256:dd09509d8c2152bfa601c8c20e3dd166bde906d37951b9f7e8bbd922267f5ac9 AS ffmpeg-static
 
 # Binary selector stage
 FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS binary-selector

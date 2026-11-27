@@ -8,7 +8,7 @@
 # Stage 0: Fetch static FFmpeg binaries
 # -----------------------------------------------------------------
 # We use a static build to ensure it works in the scratch image without libraries
-FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg-static
+FROM mwader/static-ffmpeg:9.1@sha256:dd09509d8c2152bfa601c8c20e3dd166bde906d37951b9f7e8bbd922267f5ac9 AS ffmpeg-static
 
 # Workspace skeleton shared by the backend and frontend dependency builds.
 FROM rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS workspace-skeleton
@@ -189,7 +189,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends unzip make pyth
 # -----------------------------------------------------------------
 # Final Image #1: Debugging Environment (Alpine-based)
 # -----------------------------------------------------------------
-FROM rust:1.99.1-alpine3.24@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS debug
+FROM rust:1.100.0-alpine3.24@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS debug
 
 # Make the build-time argument available as a run-time environment variable
 ARG RUST_TARGET=x86_64-unknown-linux-musl
