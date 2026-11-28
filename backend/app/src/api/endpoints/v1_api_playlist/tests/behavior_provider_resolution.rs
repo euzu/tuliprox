@@ -1,7 +1,6 @@
 use super::{behavior::spawn_stalker_mock_server, resolve_provider_url_for_request, test_app_config, test_app_state};
 use crate::model::{
-    AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigInputUpdateQuality, ConfigProvider, ConfigSource,
-    ConfigTarget, SourcesConfig,
+    AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigProvider, ConfigSource, ConfigTarget, SourcesConfig,
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::{
@@ -307,15 +306,7 @@ async fn playlist_live_input_route_supports_stalker_inputs() {
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: crate::model::ConfigInputFlagsSet::new(),
-            update_quality: ConfigInputUpdateQuality::default(),
-            resolve_delay: shared::defaults::default_resolve_delay_secs(),
-            probe_delay: shared::defaults::default_probe_delay_secs(),
-            probe_live_interval_hours: 120,
-            resolve_filter: None,
-            probe_filter: None,
-            flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
-            flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
-            default_container_extension: None,
+            ..ConfigInputOptions::defaults().clone()
         }),
         stalker: Some(crate::model::StalkerInputConfig {
             device: None,
@@ -455,15 +446,7 @@ async fn initial_stalker_playback_resolution_uses_the_requested_items_own_comman
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: crate::model::ConfigInputFlagsSet::new(),
-            update_quality: ConfigInputUpdateQuality::default(),
-            resolve_delay: shared::defaults::default_resolve_delay_secs(),
-            probe_delay: shared::defaults::default_probe_delay_secs(),
-            probe_live_interval_hours: 120,
-            resolve_filter: None,
-            probe_filter: None,
-            flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
-            flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
-            default_container_extension: None,
+            ..ConfigInputOptions::defaults().clone()
         }),
         stalker: Some(crate::model::StalkerInputConfig {
             device: None,

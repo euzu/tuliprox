@@ -22,7 +22,10 @@ use axum::response::IntoResponse;
 use serde_json::json;
 use shared::{
     model::{ImdbRatingSource, InputPersistence, TargetType, UiPlaylistItem, XtreamCluster},
-    utils::{concat_path, concat_path_leading_slash, interner_gc, seal_web_ui_resource_url, Internable},
+    utils::{
+        concat_path, concat_path_leading_slash, interner_gc, is_valid_provider_rating, seal_web_ui_resource_url,
+        Internable,
+    },
 };
 use std::sync::Arc;
 use tokio_stream::StreamExt;
@@ -200,7 +203,12 @@ pub(crate) fn apply_raw_item_effective_rating(
     imdb_config: Option<&ImdbConfig>,
 ) -> UiPlaylistItem {
     let enabled_config = imdb_config.filter(|cfg| cfg.enabled);
-    if item.rating > 0.0 && item.effective_rating.is_none() {
+    // A stored effective rating outside the 0-10 scale (written before the range check existed) is dropped and
+    // derived again from the provider rating, so the origin below matches the value the explorer shows.
+    if item.effective_rating.is_some_and(|value| !is_valid_provider_rating(value)) {
+        item.effective_rating = None;
+    }
+    if is_valid_provider_rating(item.rating) && item.effective_rating.is_none() {
         item.set_provider_rating(Some(item.rating), imdb_rating_source(imdb_config));
     }
     item.rating_origin = shared::model::compute_policy_rating_origin(
@@ -728,5 +736,23 @@ mod tests {
         neg_item.rating = -1.0;
         let neg_item = super::apply_raw_item_effective_rating(neg_item, None);
         assert_eq!(neg_item.effective_rating, None);
+    }
+
+    #[test]
+    fn raw_item_effective_rating_ignores_provider_rating_outside_zero_to_ten() {
+        let mut over_item = sample_item("");
+        over_item.rating = 10.5;
+        let over_item = super::apply_raw_item_effective_rating(over_item, None);
+        assert_eq!(over_item.effective_rating, None);
+
+        let mut max_item = sample_item("");
+        max_item.rating = 10.0;
+        let max_item = super::apply_raw_item_effective_rating(max_item, None);
+        assert_eq!(max_item.effective_rating, Some(10.0));
+        let mut stale_item = sample_item("");
+        stale_item.rating = 7.0;
+        stale_item.effective_rating = Some(85.0);
+        let stale_item = super::apply_raw_item_effective_rating(stale_item, None);
+        assert_eq!(stale_item.effective_rating, Some(7.0));
     }
 }

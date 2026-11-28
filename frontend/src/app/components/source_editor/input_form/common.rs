@@ -1,6 +1,8 @@
 use super::{
     input_persist_hint_key, input_url_hint_key, ConfigInputFormAction, ConfigInputFormState,
     ConfigInputOptionsDtoFormState, ConfigInputOptionsFormAction, LABEL_CACHE_DURATION, LABEL_CONTAINER_EXTENSION,
+    LABEL_CONTAINER_EXTENSION_SAMPLING, LABEL_CONTAINER_EXTENSION_SAMPLING_MAX_CALLS,
+    LABEL_CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL, LABEL_CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS,
     LABEL_DISABLE_HLS_STREAMING, LABEL_ENABLED, LABEL_EXP_DATE, LABEL_FETCH_METHOD, LABEL_FLUSSONIC_HLS_AUDIO_TRACKS,
     LABEL_HEADERS, LABEL_LIVE, LABEL_LIVE_STREAMS, LABEL_MAX_CONNECTIONS, LABEL_METADATA, LABEL_NAME, LABEL_PASSWORD,
     LABEL_PERSIST, LABEL_PLAYBACK_PROVIDER, LABEL_PRIORITY, LABEL_PROBE, LABEL_PROBE_DELAY_SEC, LABEL_PROBE_FILTER,
@@ -22,7 +24,10 @@ use crate::{
     utils::content_cluster_presentation,
 };
 use shared::{
-    model::{ConfigInputUpdateQualityDto, FlussonicHlsCatchup, InputFetchMethod, XtreamCluster},
+    model::{
+        ConfigInputUpdateQualityDto, ContainerExtensionSamplingDto, FlussonicHlsCatchup, InputFetchMethod,
+        XtreamCluster,
+    },
     utils::BATCH_SCHEME_PREFIX,
 };
 use std::{collections::HashMap, rc::Rc};
@@ -196,6 +201,8 @@ pub(super) enum OptionsKind {
 
 impl OptionsKind {
     pub(super) const fn supports_update_quality(self) -> bool { !matches!(self, Self::Basic) }
+
+    pub(super) const fn supports_container_extension_sampling(self) -> bool { matches!(self, Self::Stalker) }
 }
 
 fn update_quality_value(update_quality: ConfigInputUpdateQualityDto, cluster: XtreamCluster) -> u8 {
@@ -267,6 +274,84 @@ fn update_quality_options(
             }
         },
     )
+}
+
+/// The opt-in sampling block inside the container-extension card.
+///
+/// Sampling spends portal requests, so the limits sit beside the toggle that enables them: an operator
+/// who turns it on sees the call budget, the pause between calls and the refusal limit in one place.
+fn container_extension_sampling_options(
+    state: &UseReducerHandle<ConfigInputOptionsDtoFormState>,
+    translate: &YewI18n,
+    allow_write: bool,
+) -> Html {
+    let sampling = state.form.container_extension_sampling;
+
+    let enabled = if allow_write {
+        let state = state.clone();
+        html! {
+            <crate::app::components::ToggleSwitch
+                value={sampling.enabled}
+                readonly={false}
+                on_change={Callback::from(move |enabled| {
+                    let mut sampling = state.form.container_extension_sampling;
+                    sampling.enabled = enabled;
+                    state.dispatch(ConfigInputOptionsFormAction::ContainerExtensionSampling(sampling));
+                })} />
+        }
+    } else {
+        html! { <crate::app::components::ToggleSwitch value={sampling.enabled} readonly={true} /> }
+    };
+
+    html! { <>
+        { config_field_child!(translate.t(LABEL_CONTAINER_EXTENSION_SAMPLING), "container_extension_sampling", "/EXPLANATION/CONFIG_INPUT_OPTIONS/CONTAINER_EXTENSION_SAMPLING", {
+            html! { <>{enabled}</> }
+        }) }
+        <div class="tp__config-view__cols-2">
+            { sampling_number_field(state, translate, allow_write, LABEL_CONTAINER_EXTENSION_SAMPLING_MAX_CALLS, "container_extension_sampling_max_calls", sampling.max_calls_per_update, |sampling, value| sampling.max_calls_per_update = value) }
+            { sampling_number_field(state, translate, allow_write, LABEL_CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL, "container_extension_sampling_min_interval", sampling.min_interval_secs, |sampling, value| sampling.min_interval_secs = value) }
+        </div>
+        { sampling_number_field(state, translate, allow_write, LABEL_CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS, "container_extension_sampling_stop_after_refusals", u16::from(sampling.stop_after_refusals), |sampling, value| sampling.stop_after_refusals = u8::try_from(value).unwrap_or(u8::MAX)) }
+    </> }
+}
+
+/// One numeric sampling limit. Editable writes the whole block back through one action, because the
+/// limits live in a nested option block rather than beside the other input options.
+fn sampling_number_field(
+    state: &UseReducerHandle<ConfigInputOptionsDtoFormState>,
+    translate: &YewI18n,
+    allow_write: bool,
+    label: &str,
+    name: &'static str,
+    value: u16,
+    set: impl Fn(&mut ContainerExtensionSamplingDto, u16) + 'static,
+) -> Html {
+    if allow_write {
+        let state = state.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__number">
+                <crate::app::components::number_input::NumberInput
+                    label={translate.t(label)}
+                    name={name}
+                    field_id={Some(crate::app::components::dto_field_id(&state.form, name))}
+                    value={i64::from(value)}
+                    on_change={Callback::from(move |value: Option<i64>| {
+                        let value = value.and_then(|value| u16::try_from(value).ok()).unwrap_or(0);
+                        let mut sampling = state.form.container_extension_sampling;
+                        set(&mut sampling, value);
+                        state.dispatch(ConfigInputOptionsFormAction::ContainerExtensionSampling(sampling));
+                    })}
+                />
+            </div>
+        }
+    } else {
+        html! {
+            <div class="tp__form-field tp__form-field__number">
+                <crate::app::components::FieldLabel label={translate.t(label)} field_id={name.to_string()} />
+                <span class="tp__form-field__value">{value.to_string()}</span>
+            </div>
+        }
+    }
 }
 
 fn flussonic_hls_catchup_options(selected: FlussonicHlsCatchup) -> Rc<Vec<DropDownOption>> {
@@ -394,6 +479,9 @@ pub(super) fn InputOptionsForm(props: &InputOptionsFormProps) -> Html {
                     { edit_field_text_option!(state, translate.t(LABEL_CONTAINER_EXTENSION), default_container_extension, ConfigInputOptionsFormAction::DefaultContainerExtension, false, "/EXPLANATION/CONFIG_INPUT_OPTIONS/DEFAULT_CONTAINER_EXTENSION") }
                 } else {
                     { config_field_optional!(state.form, translate.t(LABEL_CONTAINER_EXTENSION), default_container_extension) }
+                }
+                if props.kind.supports_container_extension_sampling() {
+                    { container_extension_sampling_options(&state, &translate, props.allow_write) }
                 }
             </TitledCard>
             <TitledCard title={translate.t(LABEL_METADATA)}>

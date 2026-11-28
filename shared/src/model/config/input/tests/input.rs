@@ -325,3 +325,113 @@ fn playback_provider_round_trips_yaml() {
     assert_eq!(dto.playback_provider.as_deref(), Some("cdn"));
     assert!(serde_saphyr::to_string(&dto).expect("serialize").contains("playback_provider: cdn"));
 }
+
+fn sampling_dto(enabled: bool) -> ConfigInputOptionsDto {
+    ConfigInputOptionsDto {
+        container_extension_sampling: ContainerExtensionSamplingDto {
+            enabled,
+            ..ContainerExtensionSamplingDto::default()
+        },
+        ..ConfigInputOptionsDto::default()
+    }
+}
+
+#[test]
+fn container_extension_sampling_defaults_are_opt_out_and_bounded() {
+    let dto = ContainerExtensionSamplingDto::default();
+    assert!(!dto.enabled, "sampling stays off unless the input opts in");
+    assert_eq!(dto.max_calls_per_update, 20);
+    assert_eq!(dto.min_interval_secs, 3);
+    assert_eq!(dto.stop_after_refusals, 2);
+    assert!(dto.is_disabled());
+
+    let mut options = ConfigInputOptionsDto::default();
+    options.prepare(None).expect("defaults prepare");
+    assert!(options.is_empty(), "an untouched block keeps the options empty");
+}
+
+#[test]
+fn container_extension_sampling_parses_partial_blocks_with_defaults() {
+    let yaml = "name: portal\ntype: stalker\nurl: http://portal.example/c/\noptions:\n  container_extension_sampling:\n    enabled: true\n";
+    let dto: ConfigInputDto = serde_saphyr::from_str(yaml).expect("sampling block should deserialize");
+    let sampling = dto.options.as_ref().expect("options").container_extension_sampling;
+    assert!(sampling.enabled);
+    assert_eq!(sampling.max_calls_per_update, 20);
+    assert_eq!(sampling.min_interval_secs, 3);
+    assert_eq!(sampling.stop_after_refusals, 2);
+
+    let yaml = "name: portal\ntype: stalker\nurl: http://portal.example/c/\noptions:\n  container_extension_sampling:\n    enabled: true\n    max_calls_per_update: 200\n    min_interval_secs: 5\n    stop_after_refusals: 1\n";
+    let dto: ConfigInputDto = serde_saphyr::from_str(yaml).expect("explicit limits should deserialize");
+    let sampling = dto.options.as_ref().expect("options").container_extension_sampling;
+    assert_eq!(sampling.max_calls_per_update, 200);
+    assert_eq!(sampling.min_interval_secs, 5);
+    assert_eq!(sampling.stop_after_refusals, 1);
+}
+
+#[test]
+fn container_extension_sampling_validates_its_limits() {
+    let cases = [
+        (
+            ConfigInputOptionsDto {
+                container_extension_sampling: ContainerExtensionSamplingDto {
+                    max_calls_per_update: 0,
+                    ..ContainerExtensionSamplingDto::default()
+                },
+                ..ConfigInputOptionsDto::default()
+            },
+            "max_calls_per_update",
+        ),
+        (
+            ConfigInputOptionsDto {
+                container_extension_sampling: ContainerExtensionSamplingDto {
+                    max_calls_per_update: 201,
+                    ..ContainerExtensionSamplingDto::default()
+                },
+                ..ConfigInputOptionsDto::default()
+            },
+            "max_calls_per_update",
+        ),
+        (
+            ConfigInputOptionsDto {
+                container_extension_sampling: ContainerExtensionSamplingDto {
+                    min_interval_secs: 0,
+                    ..ContainerExtensionSamplingDto::default()
+                },
+                ..ConfigInputOptionsDto::default()
+            },
+            "min_interval_secs",
+        ),
+        (
+            ConfigInputOptionsDto {
+                container_extension_sampling: ContainerExtensionSamplingDto {
+                    stop_after_refusals: 0,
+                    ..ContainerExtensionSamplingDto::default()
+                },
+                ..ConfigInputOptionsDto::default()
+            },
+            "stop_after_refusals",
+        ),
+    ];
+    for (mut dto, field) in cases {
+        let error = dto.prepare(None).expect_err("an out-of-range limit must be rejected");
+        assert!(error.to_string().contains(field), "unexpected error for {field}: {error}");
+    }
+
+    let mut dto = sampling_dto(true);
+    dto.prepare(None).expect("the default limits prepare");
+    assert!(!dto.is_empty(), "an enabled block is part of the configuration");
+}
+
+#[test]
+fn container_extension_sampling_block_is_omitted_while_disabled() {
+    let dto = ConfigInputOptionsDto::default();
+    let json = serde_json::to_string(&dto).expect("serialize");
+    assert!(!json.contains("container_extension_sampling"), "a disabled block is not written: {json}");
+
+    let mut enabled = sampling_dto(true);
+    enabled.prepare(None).expect("prepare");
+    let json = serde_json::to_string(&enabled).expect("serialize");
+    assert!(json.contains("container_extension_sampling"), "an enabled block is written: {json}");
+    let decoded: ConfigInputOptionsDto = serde_json::from_str(&json).expect("deserialize");
+    assert!(decoded.container_extension_sampling.enabled);
+}

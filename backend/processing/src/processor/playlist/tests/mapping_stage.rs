@@ -92,6 +92,7 @@ fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
         processed_inputs: Arc::default(),
         input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
+        epg_downloads: Arc::default(),
         provider_manager: None,
         metadata_manager: None,
         pre_processed_inputs: None,

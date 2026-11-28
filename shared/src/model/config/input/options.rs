@@ -41,6 +41,99 @@ fn is_default_flussonic_hls_catchup_max_duration_secs(value: &u32) -> bool {
     *value == default_flussonic_hls_catchup_max_duration_secs()
 }
 
+pub const DEFAULT_CONTAINER_EXTENSION_SAMPLING_MAX_CALLS: u16 = 20;
+pub const MAX_CONTAINER_EXTENSION_SAMPLING_CALLS: u16 = 200;
+pub const DEFAULT_CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL_SECS: u16 = 3;
+pub const DEFAULT_CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS: u8 = 2;
+
+const fn default_container_extension_sampling_max_calls() -> u16 { DEFAULT_CONTAINER_EXTENSION_SAMPLING_MAX_CALLS }
+
+fn is_default_container_extension_sampling_max_calls(value: &u16) -> bool {
+    *value == DEFAULT_CONTAINER_EXTENSION_SAMPLING_MAX_CALLS
+}
+
+const fn default_container_extension_sampling_min_interval_secs() -> u16 {
+    DEFAULT_CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL_SECS
+}
+
+fn is_default_container_extension_sampling_min_interval_secs(value: &u16) -> bool {
+    *value == DEFAULT_CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL_SECS
+}
+
+const fn default_container_extension_sampling_stop_after_refusals() -> u8 {
+    DEFAULT_CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS
+}
+
+fn is_default_container_extension_sampling_stop_after_refusals(value: &u8) -> bool {
+    *value == DEFAULT_CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS
+}
+
+/// Opt-in, budgeted sampling of the provider's `create_link` answer for Stalker VOD items.
+///
+/// A Stalker portal states a movie's container only in the playback answer, so learning it costs a
+/// portal request. The limits keep that cost bounded: every playlist update samples at most
+/// `max_calls_per_update` items, waits `min_interval_secs` between calls, and stops the run after
+/// `stop_after_refusals` consecutive auth or rate refusals (401/403/429).
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerExtensionSamplingDto {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    #[serde(
+        default = "default_container_extension_sampling_max_calls",
+        skip_serializing_if = "is_default_container_extension_sampling_max_calls"
+    )]
+    pub max_calls_per_update: u16,
+    #[serde(
+        default = "default_container_extension_sampling_min_interval_secs",
+        skip_serializing_if = "is_default_container_extension_sampling_min_interval_secs"
+    )]
+    pub min_interval_secs: u16,
+    #[serde(
+        default = "default_container_extension_sampling_stop_after_refusals",
+        skip_serializing_if = "is_default_container_extension_sampling_stop_after_refusals"
+    )]
+    pub stop_after_refusals: u8,
+}
+
+impl Default for ContainerExtensionSamplingDto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_calls_per_update: DEFAULT_CONTAINER_EXTENSION_SAMPLING_MAX_CALLS,
+            min_interval_secs: DEFAULT_CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL_SECS,
+            stop_after_refusals: DEFAULT_CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS,
+        }
+    }
+}
+
+impl ContainerExtensionSamplingDto {
+    /// `true` when the block holds nothing but defaults, so it is omitted from the document.
+    pub fn is_disabled(&self) -> bool { *self == Self::default() }
+
+    pub fn clean(&mut self) { *self = Self::default(); }
+
+    fn validate(&self) -> Result<(), TuliproxError> {
+        if !(1..=MAX_CONTAINER_EXTENSION_SAMPLING_CALLS).contains(&self.max_calls_per_update) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "options.container_extension_sampling.max_calls_per_update must be between 1 and \
+                 {MAX_CONTAINER_EXTENSION_SAMPLING_CALLS}"
+            )));
+        }
+        if self.min_interval_secs == 0 {
+            return Err(TuliproxError::ConfigInput(
+                "options.container_extension_sampling.min_interval_secs must be at least 1".to_string(),
+            ));
+        }
+        if self.stop_after_refusals == 0 {
+            return Err(TuliproxError::ConfigInput(
+                "options.container_extension_sampling.stop_after_refusals must be at least 1".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigInputOptionsDto {
@@ -111,6 +204,9 @@ pub struct ConfigInputOptionsDto {
     /// fills a blank field in the Xtream response and never overrides a provider value.
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub default_container_extension: Option<String>,
+    /// Opt-in sampling of the provider's playback answer for Stalker VOD container extensions.
+    #[serde(default, skip_serializing_if = "ContainerExtensionSamplingDto::is_disabled")]
+    pub container_extension_sampling: ContainerExtensionSamplingDto,
 }
 
 impl Default for ConfigInputOptionsDto {
@@ -143,6 +239,7 @@ impl Default for ConfigInputOptionsDto {
             t_probe_filter: None,
             stalker_bulk_epg: false,
             default_container_extension: None,
+            container_extension_sampling: ContainerExtensionSamplingDto::default(),
         }
     }
 }
@@ -174,6 +271,7 @@ impl ConfigInputOptionsDto {
             && self.probe_filter.as_ref().is_none_or(|s| s.trim().is_empty())
             && !self.stalker_bulk_epg
             && self.default_container_extension.as_ref().is_none_or(|s| s.trim().is_empty())
+            && self.container_extension_sampling.is_disabled()
     }
 
     pub fn clean(&mut self) {
@@ -204,6 +302,7 @@ impl ConfigInputOptionsDto {
         self.t_probe_filter = None;
         self.stalker_bulk_epg = false;
         self.default_container_extension = None;
+        self.container_extension_sampling.clean();
     }
 }
 
@@ -223,6 +322,7 @@ impl Prepare for ConfigInputOptionsDto {
         if let Some(raw_filter) = &self.probe_filter {
             self.t_probe_filter = Some(get_filter(raw_filter, templates)?);
         }
+        self.container_extension_sampling.validate()?;
         if let Some(raw_extension) = self.default_container_extension.as_deref() {
             if raw_extension.trim().is_empty() {
                 self.default_container_extension = None;

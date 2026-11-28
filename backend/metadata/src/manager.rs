@@ -81,6 +81,9 @@ pub struct MetadataUpdateManager {
     enqueue_state_load_retry_at_ts: Arc<DashMap<Arc<str>, i64>>,
     /// Periodic prune marker for stale producer-side resolve suppression entries.
     last_resolve_enqueue_suppression_prune_at_ts: AtomicI64,
+    /// Inputs whose container-extension sampling run is queued or in flight, so a repeated update
+    /// does not start a second run that would spend the same portal budget twice.
+    sampling_inputs: Arc<DashMap<Arc<str>, ()>>,
 }
 
 /// Generate `collect_{vod,series,live}_virtual_updates` from a single body.
@@ -204,6 +207,7 @@ mod tests;
 mod publication;
 mod retry;
 mod retry_store;
+mod sampling;
 mod settings;
 mod task_processing;
 mod task_queue;

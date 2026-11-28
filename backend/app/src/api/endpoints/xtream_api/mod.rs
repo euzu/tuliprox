@@ -1,5 +1,6 @@
 // https://github.com/tellytv/go.xtream-codes/blob/master/structs.go
 // Xtream api -> https://9tzx6f0ozj.apidog.io/
+use super::m3u_api::{apply_generated_archive_provider_template, resolve_effective_source_url};
 use crate::{
     api::{
         api_utils,
@@ -46,7 +47,7 @@ use crate::{
         ProxyUserCredentials,
     },
     repository::{
-        get_target_id_mapping, get_target_id_mapping_file, get_target_storage_path, user_get_bouquet_filter,
+        get_target_id_mapping, get_target_id_mapping_file, get_target_storage_path, user_get_xtream_bouquet_names,
         xtream_get_item_for_stream_id, xtream_load_rewrite_playlist, xtream_read_playlist_categories, BPlusTreeQuery,
         GroupMember, VirtualIdRecord,
     },
@@ -80,6 +81,7 @@ use shared::{
     },
 };
 use std::{
+    borrow::Cow,
     fmt::{Display, Formatter, Write},
     str::FromStr,
     sync::Arc,
@@ -459,10 +461,26 @@ async fn xtream_player_api_stream_with_query(
         let mut pli = cand_pli;
         let virtual_id = pli.virtual_id;
         let input_option = app_state.app_config.get_input_by_name(&pli.input_name);
-        let stream_ext = input_option
+        let client_stream_ext = input_option
             .as_deref()
             .map_or(stream_ext, |input| override_live_hls_extension(stream_req.context, input, stream_ext));
-        let is_hls_manifest_request = stream_ext == Some(HLS_EXT);
+        // Resolve M3U timeshift once before the admission/output gates so HLS-ness checks
+        // observe the resolved archive URL extension while preserving error precedence.
+        let m3u_timeshift_result = if stream_req.context == ApiStreamContext::Timeshift {
+            input_option
+                .as_deref()
+                .map_or(Ok(None), |input| resolve_m3u_xtream_timeshift(input, &pli, stream_req.action_path))
+        } else {
+            Ok(None)
+        };
+        let has_m3u_timeshift = matches!(m3u_timeshift_result, Ok(Some(_)));
+        if let Ok(Some(resolved)) = m3u_timeshift_result.as_ref() {
+            pli.url = resolved.url.as_str().intern();
+        }
+        let requested_extension =
+            resolve_effective_playback_extension(has_m3u_timeshift, client_stream_ext, &pli).unwrap_or_default();
+        let effective_stream_ext = (!requested_extension.is_empty()).then_some(requested_extension.as_str());
+        let is_hls_manifest_request = effective_stream_ext == Some(HLS_EXT);
 
         let output_scope =
             if stream_req.context == ApiStreamContext::Timeshift || pli.item_type == PlaylistItemType::Catchup {
@@ -506,7 +524,7 @@ async fn xtream_player_api_stream_with_query(
 
         if user.permission_denied(&app_state.app_config) {
             let stream_channel = create_stream_channel_with_type(target.id, &pli, pli.item_type);
-            if is_hls_playback_request(stream_ext, &pli) {
+            if is_hls_playback_request(effective_stream_ext, &pli) {
                 return hls_admission_failure_manifest_response(
                     app_state,
                     fingerprint,
@@ -529,41 +547,41 @@ async fn xtream_player_api_stream_with_query(
             );
         }
 
-        let m3u_timeshift = if stream_req.context == ApiStreamContext::Timeshift {
-            match resolve_m3u_xtream_timeshift(&input, &pli, stream_req.action_path) {
-                Ok(m) => m,
-                Err(err) => {
-                    if is_last {
-                        debug!("M3U Xtream timeshift rejected for stream {virtual_id}: {err}");
-                        return axum::http::StatusCode::BAD_REQUEST.into_response();
-                    }
-                    continue;
+        let m3u_timeshift = match m3u_timeshift_result {
+            Ok(m) => m,
+            Err(err) => {
+                if is_last {
+                    debug!("M3U Xtream timeshift rejected for stream {virtual_id}: {err}");
+                    return axum::http::StatusCode::BAD_REQUEST.into_response();
                 }
+                continue;
             }
-        } else {
-            None
         };
-        if let Some(resolved) = m3u_timeshift.as_ref() {
-            pli.url = resolved.url.as_str().intern();
-        }
 
         if pli.item_type.is_local() {
             let playback_session_token =
                 create_session_fingerprint(fingerprint, &user.username, virtual_id.get(), false);
             let user_session =
                 app_state.active_users.get_and_update_user_session(&user.username, &playback_session_token).await;
-            let (admission, _grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
-                &app_state.admission_ctx(),
+            let playback_id = crate::api::api_utils::effective_playback_id_for_user(
+                &app_state.app_config.config.load(),
                 &user,
-                fingerprint,
-                user_session.as_ref(),
-                playback_session_token.as_str(),
-                false,
-                crate::api::api_utils::EvictionReentryGuard::Session(playback_session_token.as_str()),
-                false,
-                false,
-            )
-            .await;
+                req_headers,
+            );
+            let (admission, _grace_mode, request_class) =
+                crate::api::api_utils::resolve_playback_request_admission_with_playback_id(
+                    &app_state.admission_ctx(),
+                    &user,
+                    fingerprint,
+                    user_session.as_ref(),
+                    playback_session_token.as_str(),
+                    false,
+                    crate::api::api_utils::EvictionReentryGuard::Session(playback_session_token.as_str()),
+                    false,
+                    false,
+                    playback_id,
+                )
+                .await;
             if admission.is_reentry_suppressed() {
                 return reentry_suppressed_response();
             }
@@ -592,6 +610,7 @@ async fn xtream_player_api_stream_with_query(
                 (pli.xtream_cluster, pli.item_type)
             };
 
+        let url_before_stalker = Arc::clone(&pli.url);
         if !is_group {
             pli.url = match resolve_initial_stalker_playback_url(
                 app_state,
@@ -615,12 +634,11 @@ async fn xtream_player_api_stream_with_query(
             };
         }
 
-        let requested_extension = if m3u_timeshift.is_some() {
-            extract_extension_from_url(&pli.url).map(|ext| concat_string!(".", ext))
+        let requested_extension = if !has_m3u_timeshift && !is_group && !Arc::ptr_eq(&url_before_stalker, &pli.url) {
+            resolve_xtream_playback_extension(client_stream_ext, &pli).unwrap_or_default()
         } else {
-            resolve_xtream_playback_extension(stream_ext, &pli)
-        }
-        .unwrap_or_default();
+            requested_extension
+        };
         let stream_ext = (!requested_extension.is_empty()).then_some(requested_extension.as_str());
 
         debug_if_enabled!(
@@ -734,7 +752,11 @@ async fn xtream_player_api_stream_with_query(
                 .into_response();
             }
 
-            session.stream_url.clone()
+            if m3u_timeshift.is_some() {
+                pli.url.clone()
+            } else {
+                session.stream_url.clone()
+            }
         } else {
             pli.url.clone()
         };
@@ -757,8 +779,25 @@ async fn xtream_player_api_stream_with_query(
             .await;
         }
 
+        let playback_id = if crate::api::api_utils::should_redirect_playback(
+            app_state,
+            &input,
+            &target,
+            &user,
+            item_type,
+            pli.url.as_ref(),
+            stream_ext,
+        ) {
+            None
+        } else {
+            crate::api::api_utils::effective_playback_id_for_user(
+                &app_state.app_config.config.load(),
+                &user,
+                req_headers,
+            )
+        };
         let (connection_admission, grace_mode, request_class) =
-            crate::api::api_utils::resolve_playback_request_admission(
+            crate::api::api_utils::resolve_playback_request_admission_with_playback_id(
                 &app_state.admission_ctx(),
                 &user,
                 fingerprint,
@@ -768,6 +807,7 @@ async fn xtream_player_api_stream_with_query(
                 eviction_reentry_guard,
                 false,
                 false,
+                playback_id,
             )
             .await;
         let connection_permission = connection_admission.permission();
@@ -981,6 +1021,18 @@ pub(crate) fn get_query_path(
     get_query_path_with_sources(action_path, stream_ext, pli, sources.as_ref())
 }
 
+fn resolve_effective_playback_extension(
+    has_m3u_timeshift: bool,
+    stream_ext: Option<&str>,
+    pli: &XtreamPlaylistItem,
+) -> Option<String> {
+    if has_m3u_timeshift {
+        extract_extension_from_url(&pli.url).map(ToString::to_string)
+    } else {
+        resolve_xtream_playback_extension(stream_ext, pli)
+    }
+}
+
 fn resolve_xtream_playback_extension(stream_ext: Option<&str>, pli: &XtreamPlaylistItem) -> Option<String> {
     let requested_extension = stream_ext.filter(|ext| !ext.is_empty()).map(ToString::to_string);
     let canonical_extension = pli
@@ -1019,8 +1071,11 @@ fn resolve_m3u_xtream_timeshift(
         .catchup
         .as_ref()
         .ok_or_else(|| TuliproxError::ApiXtream("M3U Xtream timeshift item has no catch-up metadata".to_string()))?;
-    let resolved_source = input.resolve_url(&item.url)?;
-    let resolved = resolve_xtream_m3u_catchup_url(resolved_source.as_ref(), catchup, start, duration)?;
+    let resolved_source = resolve_effective_source_url(&item.url, input)?;
+    let mut effective_catchup = Cow::Borrowed(catchup);
+    apply_generated_archive_provider_template(input, resolved_source.as_ref(), &mut effective_catchup);
+    let resolved =
+        resolve_xtream_m3u_catchup_url(resolved_source.as_ref(), effective_catchup.as_ref(), start, duration)?;
     Ok(Some(resolved))
 }
 
@@ -1935,13 +1990,18 @@ async fn xtream_player_api_handle_content_action(
     let (mut categories, provider_owns_recording_category) =
         match xtream_read_playlist_categories(&app_state.app_config, target_name, cluster).await {
             Ok(content) => {
-                let filter =
-                    user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
+                let bouquet_names = user_get_xtream_bouquet_names(&config, &user.username, cluster).await;
+                let requested_category_id = category_id.filter(|&cid| cid > 0);
                 match serde_json::from_str::<Vec<XtreamCategoryEntry>>(&content) {
                     Ok(mut categories) => {
                         let provider_owns_recording_category = provider_publishes_reserved_vod_category(&categories);
-                        if let Some(fltr) = filter {
-                            categories.retain(|category| fltr.contains(&category.category_id));
+                        if requested_category_id.is_some() || bouquet_names.is_some() {
+                            categories.retain(|category| {
+                                requested_category_id.is_none_or(|cid| category.category_id.parse::<u32>() == Ok(cid))
+                                    && bouquet_names
+                                        .as_ref()
+                                        .is_none_or(|names| names.contains(category.category_name.as_str()))
+                            });
                         }
                         // Hide categories fully filtered out by the user's content filter.
                         if let Some(visible) = crate::api::endpoints::user_visibility::collect_visible_category_ids(

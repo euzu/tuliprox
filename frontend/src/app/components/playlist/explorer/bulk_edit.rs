@@ -5,8 +5,12 @@ use crate::{
         playlist::explorer::{
             edit_panel::explorer_rating_source,
             epg_picker::EpgPicker,
-            identity::{item_override_id, Id},
+            identity::{item_override_id, CatalogGeneration, GroupOrderUpdate, Id},
             image_preview::ImagePreview,
+            sidebar::{
+                handle_group_order_save_result, insert_group_after, merge_group_order, target_group_cluster,
+                GroupOrderSaveOutcome,
+            },
         },
         DropDownOption, DropDownSelection, FieldLabel, IconButton, Select, TextButton,
     },
@@ -16,7 +20,8 @@ use crate::{
 use shared::{
     model::{
         FieldError, ImdbRatingSource, ItemOverridePatch, ItemPatchDto, OverrideFieldOp, OverrideItemKind,
-        OverrideProvenanceDto, OverrideSaveRequest, OverrideScopeDto, UiPlaylistItem,
+        OverrideProvenanceDto, OverrideSaveRequest, OverrideScopeDto, Permission, TargetGroupOrderSaveRequest,
+        UiPlaylistItem,
     },
     utils::parse_localized_float,
 };
@@ -329,6 +334,171 @@ impl BulkFormData {
     }
 }
 
+/// Returns `true` when bulk-edit navigation and scope controls are interactive (not saving).
+#[must_use]
+pub const fn is_bulk_panel_interactive(is_saving: bool) -> bool { !is_saving }
+
+/// Returns `true` when an async bulk-edit operation still belongs to the mounted component
+/// and active source/target/cluster generation.
+#[must_use]
+pub fn is_bulk_request_active(
+    mounted: bool,
+    expected_generation: &CatalogGeneration,
+    current_generation: &CatalogGeneration,
+) -> bool {
+    mounted && expected_generation.matches_source(current_generation)
+}
+
+/// What a confirmed bulk save does after an `await`.
+///
+/// The user confirmed the save, so every remaining override and group-order request runs even when
+/// the panel went stale: the commits reflect what the user asked for. Only the UI reconciliation
+/// (item patches, the results dialog, and the placement report) needs the panel's source generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BulkSaveProgress {
+    /// The panel still matches its source generation.
+    Current,
+    /// The panel went stale: keep persisting, but stop updating the UI.
+    StalePersist,
+}
+
+impl BulkSaveProgress {
+    #[must_use]
+    pub const fn after_await(is_active: bool) -> Self {
+        if is_active {
+            Self::Current
+        } else {
+            Self::StalePersist
+        }
+    }
+
+    /// Returns `true` when item patches, the results dialog, and the placement report apply.
+    #[must_use]
+    pub const fn reconciles_ui(self) -> bool { matches!(self, Self::Current) }
+}
+
+/// What a target-scope bulk save does after its single override request settled.
+///
+/// The new-group placement stores `source.yml` for the user, so it follows the committed overrides
+/// and not the panel generation: a stale panel only suppresses the item patches and the placement
+/// report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetBulkSavePlan {
+    /// Re-patch the edited items from the committed overrides and emit them to the panel.
+    pub patch_items: bool,
+    /// Store the new group of a target-scope edit directly after its anchor group.
+    pub place_group: bool,
+}
+
+#[must_use]
+pub const fn plan_target_bulk_save(save_succeeded: bool, progress: BulkSaveProgress) -> TargetBulkSavePlan {
+    TargetBulkSavePlan { patch_items: save_succeeded && progress.reconciles_ui(), place_group: save_succeeded }
+}
+
+/// Group placement after the item overrides of a bulk edit were committed.
+///
+/// The committed overrides stay `Saved`; a failed placement is tracked here so the results dialog
+/// can retry only the group-order save with the latest stored order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum BulkPlacementState {
+    #[default]
+    Idle,
+    Failed {
+        new_group: String,
+        anchor_group: String,
+        error: String,
+    },
+    Retrying {
+        new_group: String,
+        anchor_group: String,
+    },
+}
+
+impl BulkPlacementState {
+    #[must_use]
+    pub fn failed(new_group: String, anchor_group: String, error: String) -> Self {
+        Self::Failed { new_group, anchor_group, error }
+    }
+
+    /// Message of a failed placement; `None` while idle, retrying, or after a successful retry.
+    #[must_use]
+    pub fn failure(&self) -> Option<&str> {
+        match self {
+            Self::Failed { error, .. } => Some(error),
+            Self::Idle | Self::Retrying { .. } => None,
+        }
+    }
+
+    /// The `(new_group, anchor_group)` pair to retry; only a failed placement offers one, so a
+    /// running retry cannot start a second time.
+    #[must_use]
+    pub fn retry_target(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Failed { new_group, anchor_group, .. } => Some((new_group, anchor_group)),
+            Self::Idle | Self::Retrying { .. } => None,
+        }
+    }
+
+    /// Marks the placement as retrying, keeping the new group and its anchor.
+    #[must_use]
+    pub fn retrying(&self) -> Self {
+        match self.retry_target() {
+            Some((new_group, anchor_group)) => {
+                Self::Retrying { new_group: new_group.to_string(), anchor_group: anchor_group.to_string() }
+            }
+            None => self.clone(),
+        }
+    }
+}
+
+/// Returns the placement failure carried by a group-order save outcome, or `None` when the
+/// placement was saved or the panel went stale.
+#[must_use]
+pub fn placement_failure(outcome: &GroupOrderSaveOutcome) -> Option<String> {
+    match outcome {
+        GroupOrderSaveOutcome::Saved { .. } | GroupOrderSaveOutcome::Stale => None,
+        GroupOrderSaveOutcome::ConflictReloaded { error, .. } => Some(error.clone()),
+        GroupOrderSaveOutcome::Failed(msg) => Some(msg.clone()),
+    }
+}
+
+/// Builds the order for a placement retry: the latest stored order merged with the current group
+/// titles, with the new group inserted after its anchor.
+#[must_use]
+pub fn placement_retry_order(
+    stored: &[String],
+    current: &[String],
+    new_group: &str,
+    anchor_group: &str,
+) -> Vec<String> {
+    insert_group_after(&merge_group_order(stored, current), new_group, anchor_group)
+}
+
+/// Returns `(new_group, anchor_group)` when a target-scope bulk edit sets `group` to a name that
+/// does not exist in `existing_groups` yet and a real sidebar group is selected.
+#[must_use]
+pub fn pending_new_group_order_insertion(
+    scope: OverrideScopeDto,
+    can_write_sources: bool,
+    target_name: &str,
+    patch: &ItemOverridePatch,
+    existing_groups: &[String],
+    selected_real_group: Option<&str>,
+) -> Option<(String, String)> {
+    if scope != OverrideScopeDto::Target || !can_write_sources || target_name.trim().is_empty() {
+        return None;
+    }
+    let anchor = selected_real_group.map(str::trim).filter(|g| !g.is_empty())?;
+    let Some(OverrideFieldOp::Set(ref new_group)) = patch.group else {
+        return None;
+    };
+    let trimmed = new_group.trim();
+    if trimmed.is_empty() || existing_groups.iter().any(|group| group == trimmed) {
+        return None;
+    }
+    Some((trimmed.to_string(), anchor.to_string()))
+}
+
 #[derive(Properties, PartialEq, Clone)]
 pub struct BulkEditPanelProps {
     /// `Id` keeps the prop comparison at a pointer check.
@@ -338,8 +508,16 @@ pub struct BulkEditPanelProps {
     pub target_id: Option<u16>,
     #[prop_or_default]
     pub target_name: Option<String>,
+    #[prop_or_default]
+    pub generation: CatalogGeneration,
+    #[prop_or_default]
+    pub selected_real_group: Option<String>,
+    #[prop_or_default]
+    pub cluster_groups: Rc<Vec<String>>,
+    #[prop_or_default]
+    pub on_group_order_saved: Option<Callback<GroupOrderUpdate>>,
     pub on_close: Callback<()>,
-    pub on_saved: Callback<Vec<UiPlaylistItem>>,
+    pub on_saved: Callback<(CatalogGeneration, Vec<UiPlaylistItem>)>,
 }
 
 #[component]
@@ -352,6 +530,19 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
     let is_saving = use_state(|| false);
     let confirm_open = use_state(|| false);
     let results_summary = use_state(|| None::<BulkResultsSummary>);
+    let placement_state = use_state(BulkPlacementState::default);
+    let is_mounted = use_mut_ref(|| true);
+    let latest_generation = use_mut_ref(|| props.generation.clone());
+    *latest_generation.borrow_mut() = props.generation.clone();
+
+    {
+        let is_mounted = is_mounted.clone();
+        use_effect_with((), move |()| {
+            move || {
+                *is_mounted.borrow_mut() = false;
+            }
+        });
+    }
 
     let items = props.items.clone();
     let count = items.len();
@@ -361,7 +552,9 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
     };
 
     let kind = OverrideItemKind::from(first_item.item_type);
+    let item_cluster = first_item.xtream_cluster;
     let is_target_view = props.target_id.is_some();
+    let can_write_sources = services.auth.has_permission(Permission::SourceWrite);
 
     // Grouping summary for the confirmation dialog, built once per selection.
     let input_counts: Rc<BTreeMap<String, usize>> = use_memo(items.clone(), |items| {
@@ -375,10 +568,11 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
     let on_save_click = {
         let confirm_open = confirm_open.clone();
         let form_data = form_data.clone();
+        let is_saving = is_saving.clone();
         let scope = *props.active_scope;
 
         Callback::from(move |_: String| {
-            if !form_data.has_changes() {
+            if *is_saving || !form_data.has_changes() {
                 return;
             }
             if scope == OverrideScopeDto::Input {
@@ -397,31 +591,54 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
         let is_saving = is_saving.clone();
         let confirm_open = confirm_open.clone();
         let results_summary = results_summary.clone();
+        let placement_state = placement_state.clone();
         let scope = *props.active_scope;
         let on_saved = props.on_saved.clone();
         let target_name = props.target_name.clone().unwrap_or_default();
         let target_id = props.target_id;
+        let selected_real_group = props.selected_real_group.clone();
+        let existing_groups = (*props.cluster_groups).clone();
+        let on_group_order_saved = props.on_group_order_saved.clone();
         let translate = translate.clone();
+        let expected_gen = props.generation.clone();
+        let is_mounted = is_mounted.clone();
+        let latest_generation = latest_generation.clone();
 
         Callback::from(move |_: String| {
+            if *is_saving {
+                return;
+            }
             confirm_open.set(false);
             is_saving.set(true);
+            placement_state.set(BulkPlacementState::Idle);
 
             let services = services.clone();
             let items = items.clone();
             let patch = form_data.build_patch(kind);
             let results_summary = results_summary.clone();
+            let placement_state = placement_state.clone();
             let is_saving = is_saving.clone();
             let on_saved = on_saved.clone();
             let target_name = target_name.clone();
+            let selected_real_group = selected_real_group.clone();
+            let existing_groups = existing_groups.clone();
+            let on_group_order_saved = on_group_order_saved.clone();
             let translate = translate.clone();
+            let expected_gen = expected_gen.clone();
+            let is_mounted = is_mounted.clone();
+            let latest_generation = latest_generation.clone();
 
             spawn_local(async move {
+                let is_still_active =
+                    || is_bulk_request_active(*is_mounted.borrow(), &expected_gen, &latest_generation.borrow());
+
                 if scope == OverrideScopeDto::Input {
                     let grouped = group_patches_by_parent_input(&items[..], &patch);
                     let mut base_revisions = HashMap::new();
                     let mut input_results = Vec::new();
 
+                    // Every request finishes once the user confirmed the save; a stale panel only
+                    // suppresses the UI reconciliation below.
                     for (input_name, patches) in &grouped {
                         match services.playlist.get_overrides(OverrideScopeDto::Input, input_name).await {
                             Ok(Some(f)) => {
@@ -463,24 +680,26 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                     }
 
                     let summary = summarize_bulk_results(input_results);
-                    let successful_inputs: HashSet<String> = summary.successful_inputs().into_iter().collect();
+                    if BulkSaveProgress::after_await(is_still_active()).reconciles_ui() {
+                        let successful_inputs: HashSet<String> = summary.successful_inputs().into_iter().collect();
 
-                    // Locally patch items from successful inputs
-                    let patched_items = patch_saved_items(
-                        &services,
-                        items.iter().filter(|it| successful_inputs.contains(it.input_name.as_ref())),
-                        &patch,
-                        scope,
-                        target_id,
-                        rating_source,
-                    )
-                    .await;
+                        // Locally patch items from successful inputs
+                        let patched_items = patch_saved_items(
+                            &services,
+                            items.iter().filter(|it| successful_inputs.contains(it.input_name.as_ref())),
+                            &patch,
+                            scope,
+                            target_id,
+                            rating_source,
+                        )
+                        .await;
 
-                    if !patched_items.is_empty() {
-                        on_saved.emit(patched_items);
+                        if !patched_items.is_empty() {
+                            on_saved.emit((expected_gen.clone(), patched_items));
+                        }
+
+                        results_summary.set(Some(summary));
                     }
-
-                    results_summary.set(Some(summary));
                 } else {
                     // Target scope: one request
                     let current_rev =
@@ -488,11 +707,13 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                             Ok(Some(f)) => f.revision,
                             Ok(None) => String::new(),
                             Err(err) => {
-                                results_summary.set(Some(summarize_bulk_results(vec![BulkInputResult {
-                                    input: target_name.clone(),
-                                    count: items.len(),
-                                    status: BulkInputStatus::Error(err.to_string()),
-                                }])));
+                                if BulkSaveProgress::after_await(is_still_active()).reconciles_ui() {
+                                    results_summary.set(Some(summarize_bulk_results(vec![BulkInputResult {
+                                        input: target_name.clone(),
+                                        count: items.len(),
+                                        status: BulkInputStatus::Error(err.to_string()),
+                                    }])));
+                                }
                                 is_saving.set(false);
                                 return;
                             }
@@ -500,7 +721,6 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
 
                     let req = prepare_bulk_target_save_request(&target_name, &current_rev, &items[..], &patch);
                     let save_res = services.playlist.save_overrides(&req).await;
-
                     let status = match save_res {
                         crate::services::OverrideSaveResult::Ok(rev) => BulkInputStatus::Saved(rev.revision),
                         crate::services::OverrideSaveResult::Conflict(c) => BulkInputStatus::Conflict(
@@ -513,19 +733,103 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                     };
 
                     let summary = summarize_bulk_results(vec![BulkInputResult {
-                        input: target_name,
+                        input: target_name.clone(),
                         count: items.len(),
                         status,
                     }]);
                     let is_success = summary.is_all_success();
+                    let plan = plan_target_bulk_save(is_success, BulkSaveProgress::after_await(is_still_active()));
 
-                    if is_success {
+                    if plan.patch_items {
                         let patched_items =
                             patch_saved_items(&services, items.iter(), &patch, scope, target_id, rating_source).await;
-                        on_saved.emit(patched_items);
+                        on_saved.emit((expected_gen.clone(), patched_items));
                     }
 
-                    results_summary.set(Some(summary));
+                    if plan.place_group {
+                        if let Some((new_group, anchor_group)) = pending_new_group_order_insertion(
+                            scope,
+                            can_write_sources,
+                            &target_name,
+                            &patch,
+                            &existing_groups,
+                            selected_real_group.as_deref(),
+                        ) {
+                            let cluster = target_group_cluster(item_cluster);
+                            match services.playlist.get_group_order(&target_name, cluster).await {
+                                Ok(dto_opt) => {
+                                    let stored = dto_opt.map(|dto| dto.groups).unwrap_or_default();
+                                    let merged = merge_group_order(&stored, &existing_groups);
+                                    let next_order = insert_group_after(&merged, &new_group, &anchor_group);
+                                    let req = TargetGroupOrderSaveRequest {
+                                        target: target_name.clone(),
+                                        cluster,
+                                        groups: next_order,
+                                    };
+                                    let save_order_res = services.playlist.save_group_order(&req).await;
+                                    let outcome = handle_group_order_save_result(
+                                        &services,
+                                        &translate,
+                                        &req,
+                                        &existing_groups,
+                                        save_order_res,
+                                        false,
+                                        is_still_active,
+                                    )
+                                    .await;
+                                    // The order is stored either way; only the panel update and the
+                                    // placement report need the current generation.
+                                    if BulkSaveProgress::after_await(is_still_active()).reconciles_ui() {
+                                        match &outcome {
+                                            GroupOrderSaveOutcome::Stale => {}
+                                            GroupOrderSaveOutcome::Saved { groups, pending } => {
+                                                if let Some(ref cb) = on_group_order_saved {
+                                                    cb.emit(GroupOrderUpdate {
+                                                        generation: expected_gen.clone(),
+                                                        groups: groups.clone(),
+                                                        pending: Some(*pending),
+                                                    });
+                                                }
+                                            }
+                                            GroupOrderSaveOutcome::ConflictReloaded { merged_groups, .. } => {
+                                                if let Some(ref cb) = on_group_order_saved {
+                                                    cb.emit(GroupOrderUpdate {
+                                                        generation: expected_gen.clone(),
+                                                        groups: merged_groups.clone(),
+                                                        pending: None,
+                                                    });
+                                                }
+                                            }
+                                            GroupOrderSaveOutcome::Failed(_) => {}
+                                        }
+                                        placement_state.set(placement_failure(&outcome).map_or(
+                                            BulkPlacementState::Idle,
+                                            |error| {
+                                                BulkPlacementState::failed(
+                                                    new_group.clone(),
+                                                    anchor_group.clone(),
+                                                    error,
+                                                )
+                                            },
+                                        ));
+                                    }
+                                }
+                                Err(err) => {
+                                    if BulkSaveProgress::after_await(is_still_active()).reconciles_ui() {
+                                        let msg = translate
+                                            .t("MESSAGES.PLAYLIST_EXPLORER.GROUP_ORDER_LOAD_FAILED")
+                                            .replace("{error}", &err.to_string());
+                                        services.toastr.error(msg.clone());
+                                        placement_state.set(BulkPlacementState::failed(new_group, anchor_group, msg));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if BulkSaveProgress::after_await(is_still_active()).reconciles_ui() {
+                        results_summary.set(Some(summary));
+                    }
                 }
 
                 is_saving.set(false);
@@ -533,11 +837,110 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
         })
     };
 
+    let on_retry_placement = {
+        let services = services.clone();
+        let translate = translate.clone();
+        let target_name = props.target_name.clone().unwrap_or_default();
+        let cluster = target_group_cluster(item_cluster);
+        let cluster_groups = (*props.cluster_groups).clone();
+        let placement_state = placement_state.clone();
+        let on_group_order_saved = props.on_group_order_saved.clone();
+        let is_saving = is_saving.clone();
+        let expected_gen = props.generation.clone();
+        let is_mounted = is_mounted.clone();
+        let latest_generation = latest_generation.clone();
+
+        Callback::from(move |_: String| {
+            let Some((new_group, anchor_group)) =
+                placement_state.retry_target().map(|(new_group, anchor)| (new_group.to_string(), anchor.to_string()))
+            else {
+                return;
+            };
+            if *is_saving || target_name.trim().is_empty() {
+                return;
+            }
+            placement_state.set(placement_state.retrying());
+            is_saving.set(true);
+
+            let services = services.clone();
+            let translate = translate.clone();
+            let target_name = target_name.clone();
+            let cluster_groups = cluster_groups.clone();
+            let placement_state = placement_state.clone();
+            let on_group_order_saved = on_group_order_saved.clone();
+            let is_saving = is_saving.clone();
+            let expected_gen = expected_gen.clone();
+            let is_mounted = is_mounted.clone();
+            let latest_generation = latest_generation.clone();
+
+            spawn_local(async move {
+                let is_still_active =
+                    || is_bulk_request_active(*is_mounted.borrow(), &expected_gen, &latest_generation.borrow());
+
+                // Retry only the placement: the item overrides already committed, so the order is
+                // rebuilt from the latest stored order and the current group titles.
+                let (next_state, update) = match services.playlist.get_group_order(&target_name, cluster).await {
+                    Ok(dto_opt) => {
+                        let stored = dto_opt.map(|dto| dto.groups).unwrap_or_default();
+                        let groups = placement_retry_order(&stored, &cluster_groups, &new_group, &anchor_group);
+                        let req = TargetGroupOrderSaveRequest { target: target_name.clone(), cluster, groups };
+                        let save_res = services.playlist.save_group_order(&req).await;
+                        let outcome = handle_group_order_save_result(
+                            &services,
+                            &translate,
+                            &req,
+                            &cluster_groups,
+                            save_res,
+                            true,
+                            is_still_active,
+                        )
+                        .await;
+                        let update = match &outcome {
+                            GroupOrderSaveOutcome::Saved { groups, pending } => Some(GroupOrderUpdate {
+                                generation: expected_gen.clone(),
+                                groups: groups.clone(),
+                                pending: Some(*pending),
+                            }),
+                            GroupOrderSaveOutcome::ConflictReloaded { merged_groups, .. } => Some(GroupOrderUpdate {
+                                generation: expected_gen.clone(),
+                                groups: merged_groups.clone(),
+                                pending: None,
+                            }),
+                            GroupOrderSaveOutcome::Stale | GroupOrderSaveOutcome::Failed(_) => None,
+                        };
+                        let state = placement_failure(&outcome).map_or(BulkPlacementState::Idle, |error| {
+                            BulkPlacementState::failed(new_group, anchor_group, error)
+                        });
+                        (state, update)
+                    }
+                    Err(err) => {
+                        let msg = translate
+                            .t("MESSAGES.PLAYLIST_EXPLORER.GROUP_ORDER_LOAD_FAILED")
+                            .replace("{error}", &err.to_string());
+                        (BulkPlacementState::failed(new_group, anchor_group, msg), None)
+                    }
+                };
+
+                if !BulkSaveProgress::after_await(is_still_active()).reconciles_ui() {
+                    is_saving.set(false);
+                    return;
+                }
+                if let (Some(update), Some(cb)) = (update, on_group_order_saved) {
+                    cb.emit(update);
+                }
+                placement_state.set(next_state);
+                is_saving.set(false);
+            });
+        })
+    };
+
     let on_close_results = {
         let results_summary = results_summary.clone();
+        let placement_state = placement_state.clone();
         let on_close = props.on_close.clone();
         Callback::from(move |_: String| {
             results_summary.set(None);
+            placement_state.set(BulkPlacementState::Idle);
             on_close.emit(());
         })
     };
@@ -554,16 +957,57 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
 
     let on_close_results_dialog = {
         let results_summary = results_summary.clone();
+        let placement_state = placement_state.clone();
         let on_close = props.on_close.clone();
         Callback::from(move |()| {
             results_summary.set(None);
+            placement_state.set(BulkPlacementState::Idle);
             on_close.emit(());
         })
     };
 
+    let placement_row = {
+        let retrying = matches!(*placement_state, BulkPlacementState::Retrying { .. });
+        if placement_state.failure().is_some() || retrying {
+            let new_group = match &*placement_state {
+                BulkPlacementState::Failed { new_group, .. } | BulkPlacementState::Retrying { new_group, .. } => {
+                    new_group.clone()
+                }
+                BulkPlacementState::Idle => String::new(),
+            };
+            html! {
+                <div class="tp__explorer-bulk-result-row tp__explorer-bulk-placement">
+                    <span class="input-name">
+                        { translate.t("LABEL.EXPLORER_REORDER_GROUPS") }
+                        { ": " }
+                        { new_group }
+                    </span>
+                    <span class="badge status-error">
+                        { placement_state.failure().unwrap_or_default().to_string() }
+                    </span>
+                    <TextButton
+                        class="secondary"
+                        name="retry_placement"
+                        icon="Refresh"
+                        title={translate.t("LABEL.RETRY")}
+                        disabled={retrying || *is_saving}
+                        onclick={on_retry_placement.clone()}
+                    />
+                </div>
+            }
+        } else {
+            html! {}
+        }
+    };
+
     let toggle_scope = {
         let active_scope = props.active_scope.clone();
-        Callback::from(move |new_scope: OverrideScopeDto| active_scope.set(new_scope))
+        let is_saving = is_saving.clone();
+        Callback::from(move |new_scope: OverrideScopeDto| {
+            if is_bulk_panel_interactive(*is_saving) {
+                active_scope.set(new_scope);
+            }
+        })
     };
 
     html! {
@@ -573,9 +1017,18 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                     <IconButton
                         name="close_bulk"
                         icon="Back"
-                        class="tp__explorer-panel-back"
+                        class={if *is_saving { "tp__explorer-panel-back disabled" } else { "tp__explorer-panel-back" }}
                         aria_label={Some(translate.t("LABEL.BACK"))}
-                        onclick={let on_close = props.on_close.clone(); Callback::from(move |(_name, _): (String, MouseEvent)| on_close.emit(()))}
+                        aria_disabled={Some(*is_saving)}
+                        onclick={
+                            let on_close = props.on_close.clone();
+                            let is_saving = is_saving.clone();
+                            Callback::from(move |(_name, _): (String, MouseEvent)| {
+                                if is_bulk_panel_interactive(*is_saving) {
+                                    on_close.emit(());
+                                }
+                            })
+                        }
                     />
                     <h2>{ translate.t("LABEL.EXPLORER_BULK_EDIT") }</h2>
                     <div class="meta">
@@ -591,6 +1044,7 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                         class={if *props.active_scope == OverrideScopeDto::Input { "active" } else { "" }}
                         name="scope_input"
                         title={translate.t("LABEL.EXPLORER_SCOPE_INPUT")}
+                        disabled={*is_saving}
                         onclick={let toggle_scope = toggle_scope.clone(); Callback::from(move |_: String| toggle_scope.emit(OverrideScopeDto::Input))}
                     />
                     {
@@ -600,6 +1054,7 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                                     class={if *props.active_scope == OverrideScopeDto::Target { "active" } else { "" }}
                                     name="scope_target"
                                     title={translate.t("LABEL.EXPLORER_SCOPE_TARGET")}
+                                    disabled={*is_saving}
                                     onclick={let toggle_scope = toggle_scope.clone(); Callback::from(move |_: String| toggle_scope.emit(OverrideScopeDto::Target))}
                                 />
                             }
@@ -801,7 +1256,16 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                             name="cancel"
                             icon="Cancel"
                             title={translate.t("LABEL.CANCEL")}
-                            onclick={let on_close = props.on_close.clone(); Callback::from(move |_: String| on_close.emit(()))}
+                            disabled={*is_saving}
+                            onclick={
+                                let on_close = props.on_close.clone();
+                                let is_saving = is_saving.clone();
+                                Callback::from(move |_: String| {
+                                    if !*is_saving {
+                                        on_close.emit(());
+                                    }
+                                })
+                            }
                         />
                     </div>
                     <div class="tp__dialog__toolbar-right">
@@ -905,6 +1369,7 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                                             </div>
                                         }
                                     })}
+                                    { placement_row.clone() }
                                 </div>
                             </div>
                             <div class="tp__dialog__toolbar">

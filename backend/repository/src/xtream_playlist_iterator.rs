@@ -1,12 +1,12 @@
 use crate::{
-    get_file_path_for_db_index, user_get_bouquet_filter, xtream_get_file_path, xtream_get_item_for_stream_id,
+    get_file_path_for_db_index, user_get_xtream_bouquet_names, xtream_get_file_path, xtream_get_item_for_stream_id,
     xtream_get_storage_path, LockedReceiverStream, PlaylistStorageState,
 };
 use futures::{Stream, StreamExt};
 use log::error;
 use shared::{
     error::TuliproxError,
-    model::{TargetType, XtreamCluster, XtreamMappingOptions, XtreamPlaylistItem},
+    model::{XtreamCluster, XtreamMappingOptions, XtreamPlaylistItem},
 };
 use std::{
     collections::HashSet,
@@ -39,7 +39,8 @@ fn is_cluster_allowed_for_user(user: &ProxyUserCredentials, cluster: XtreamClust
 /// the same user, so the per-item checks live here and both use them.
 struct XtreamItemFilter {
     cluster: XtreamCluster,
-    filter_ids: Option<HashSet<u32>>,
+    category_id: Option<u32>,
+    bouquet_names: Option<HashSet<Arc<str>>>,
     user_filter: Option<Arc<shared::foundation::Filter>>,
 }
 
@@ -50,21 +51,13 @@ impl XtreamItemFilter {
         category_id: Option<u32>,
         user: &ProxyUserCredentials,
     ) -> Self {
-        let filter = user_get_bouquet_filter(config, &user.username, category_id, TargetType::Xtream, cluster).await;
-        // Parse bouquet filter (strings) once into u32 set to minimize per-item allocations
-        let filter_ids: Option<HashSet<u32>> = filter.as_ref().map(|set| {
-            set.iter()
-                .filter_map(|s| {
-                    s.parse::<u32>()
-                        .map_err(|e| {
-                            error!("Failed to parse bouquet filter id '{s}': {e}");
-                            e
-                        })
-                        .ok()
-                })
-                .collect()
-        });
-        Self { cluster, filter_ids, user_filter: user.t_filter.clone() }
+        let bouquet_names = user_get_xtream_bouquet_names(config, &user.username, cluster).await;
+        Self {
+            cluster,
+            category_id: category_id.filter(|&cid| cid > 0),
+            bouquet_names,
+            user_filter: user.t_filter.clone(),
+        }
     }
 
     #[inline]
@@ -73,9 +66,14 @@ impl XtreamItemFilter {
             return false;
         }
 
-        // category_id-Filter
-        if let Some(set) = &self.filter_ids {
-            if !set.contains(&item.category_id) {
+        if let Some(category_id) = self.category_id {
+            if item.category_id != category_id {
+                return false;
+            }
+        }
+
+        if let Some(names) = &self.bouquet_names {
+            if !names.contains(&item.group) {
                 return false;
             }
         }
@@ -391,9 +389,18 @@ mod tests {
             shared::foundation::get_filter(r#"NOT Group ~ "^VIP.*""#, None).expect("filter parses"),
         );
 
-        let without_filter = XtreamItemFilter { cluster: XtreamCluster::Live, filter_ids: None, user_filter: None };
-        let with_filter =
-            XtreamItemFilter { cluster: XtreamCluster::Live, filter_ids: None, user_filter: Some(filter) };
+        let without_filter = XtreamItemFilter {
+            cluster: XtreamCluster::Live,
+            category_id: None,
+            bouquet_names: None,
+            user_filter: None,
+        };
+        let with_filter = XtreamItemFilter {
+            cluster: XtreamCluster::Live,
+            category_id: None,
+            bouquet_names: None,
+            user_filter: Some(filter),
+        };
 
         // no filter: everything passes
         assert!(without_filter.matches(&make_item("VIP Sports")));
@@ -697,5 +704,212 @@ mod tests {
             mem_items.iter().map(|(item, has_next)| (item.virtual_id.get(), *has_next)).collect::<Vec<_>>(),
             vec![(2, true), (3, true), (1, false)]
         );
+    }
+
+    fn live_group(id: u32, name: &str) -> shared::model::PlaylistGroup {
+        use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
+        let group_name = name.intern();
+        let mut header = PlaylistItemHeader {
+            id: id.to_string().intern(),
+            name: format!("Channel {name}").intern(),
+            title: format!("Channel {name}").intern(),
+            group: group_name.clone(),
+            item_type: PlaylistItemType::Live,
+            xtream_cluster: XtreamCluster::Live,
+            url: format!("http://example.test/live/{id}").intern(),
+            ..Default::default()
+        };
+        header.gen_uuid();
+        PlaylistGroup {
+            id,
+            title: group_name,
+            channels: vec![PlaylistItem { header }],
+            xtream_cluster: XtreamCluster::Live,
+        }
+    }
+
+    #[tokio::test]
+    async fn xtream_bouquet_survives_category_absence_and_id_change() {
+        use crate::{
+            persist_playlist, save_user_bouquet,
+            test_config::{app_config_from, empty_paths},
+            xtream_get_playlist_categories, TargetPlaylistPersistOptions, XtreamUserItemLookup,
+        };
+        use shared::model::{PlaylistBouquetDto, PlaylistClusterBouquetDto};
+        use tuliprox_core::model::Config;
+
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let config = Config {
+            storage_dir: temp.path().join("storage").to_string_lossy().into_owned(),
+            user_config_dir: Some(temp.path().join("users").to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        let app_config = std::sync::Arc::new(app_config_from(config, empty_paths(), None));
+        let target = target_with_output(
+            "bouquet-target",
+            TargetOutput::Xtream(XtreamTargetOutput { flags: XtreamTargetFlagsSet::new(), trakt: None, filter: None }),
+        );
+
+        persist_playlist(
+            &app_config,
+            &mut [live_group(1, "A"), live_group(2, "B")],
+            None,
+            &target,
+            None,
+            TargetPlaylistPersistOptions::default(),
+        )
+        .await
+        .expect("initial publish should succeed");
+
+        let initial_cats = xtream_get_playlist_categories(&app_config, &target.name, XtreamCluster::Live)
+            .await
+            .expect("initial categories should exist");
+        let initial_a_id = initial_cats.iter().find(|c| c.name == "A").expect("category A").id;
+
+        let bouquet = PlaylistBouquetDto {
+            xtream: Some(PlaylistClusterBouquetDto { live: Some(vec!["A".to_string()]), ..Default::default() }),
+            m3u: None,
+        };
+        save_user_bouquet(&app_config, &target.name, "alice", &bouquet).await.expect("save bouquet");
+
+        // Publish without A, then publish with A again so A gets a new category_id.
+        persist_playlist(
+            &app_config,
+            &mut [live_group(2, "B")],
+            None,
+            &target,
+            None,
+            TargetPlaylistPersistOptions::default(),
+        )
+        .await
+        .expect("publish without A should succeed");
+
+        persist_playlist(
+            &app_config,
+            &mut [live_group(1, "A"), live_group(2, "B")],
+            None,
+            &target,
+            None,
+            TargetPlaylistPersistOptions::default(),
+        )
+        .await
+        .expect("republish with A should succeed");
+
+        let republished_cats = xtream_get_playlist_categories(&app_config, &target.name, XtreamCluster::Live)
+            .await
+            .expect("republished categories should exist");
+        let new_a_id = republished_cats.iter().find(|c| c.name == "A").expect("category A").id;
+        let b_id = republished_cats.iter().find(|c| c.name == "B").expect("category B").id;
+        assert_ne!(new_a_id, initial_a_id, "category A must receive a new id after temporary absence");
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "alice".to_string();
+        user.output_clusters = ClusterFlags::all();
+        let playlists = PlaylistStorageState::default();
+
+        let iter = XtreamPlaylistIterator::new(XtreamCluster::Live, &app_config, &playlists, &target, None, &user)
+            .await
+            .expect("iterator should open");
+        let items: Vec<XtreamPlaylistItem> =
+            iter.collect::<Vec<_>>().await.into_iter().map(|entry| entry.expect("ok").0).collect();
+        let groups: Vec<&str> = items.iter().map(|item| item.group.as_ref()).collect();
+        assert_eq!(groups, vec!["A"]);
+
+        let lookup = XtreamUserItemLookup::new(&app_config, &playlists, &target, &user, &[XtreamCluster::Live]).await;
+        assert!(lookup.get(items[0].virtual_id.get(), XtreamCluster::Live).await.is_some());
+
+        let foreign_iter =
+            XtreamPlaylistIterator::new(XtreamCluster::Live, &app_config, &playlists, &target, Some(b_id), &user)
+                .await
+                .expect("iterator for foreign category should open");
+        let foreign_items: Vec<XtreamPlaylistItem> =
+            foreign_iter.collect::<Vec<_>>().await.into_iter().map(|entry| entry.expect("ok").0).collect();
+        assert!(foreign_items.is_empty(), "category outside bouquet must yield no items");
+
+        let allowed_iter =
+            XtreamPlaylistIterator::new(XtreamCluster::Live, &app_config, &playlists, &target, Some(new_a_id), &user)
+                .await
+                .expect("iterator for allowed category should open");
+        let allowed_groups: Vec<String> = allowed_iter
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|entry| entry.expect("ok").0.group.to_string())
+            .collect();
+        assert_eq!(allowed_groups, vec!["A"]);
+    }
+
+    #[tokio::test]
+    async fn xtream_request_category_id_outside_bouquet_yields_no_items() {
+        use crate::{
+            persist_playlist, save_user_bouquet,
+            test_config::{app_config_from, empty_paths},
+            xtream_get_playlist_categories, TargetPlaylistPersistOptions,
+        };
+        use shared::model::{PlaylistBouquetDto, PlaylistClusterBouquetDto};
+        use tuliprox_core::model::Config;
+
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let config = Config {
+            storage_dir: temp.path().join("storage").to_string_lossy().into_owned(),
+            user_config_dir: Some(temp.path().join("users").to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        let app_config = std::sync::Arc::new(app_config_from(config, empty_paths(), None));
+        let target = target_with_output(
+            "bouquet-and-target",
+            TargetOutput::Xtream(XtreamTargetOutput { flags: XtreamTargetFlagsSet::new(), trakt: None, filter: None }),
+        );
+
+        persist_playlist(
+            &app_config,
+            &mut [live_group(1, "A"), live_group(2, "B")],
+            None,
+            &target,
+            None,
+            TargetPlaylistPersistOptions::default(),
+        )
+        .await
+        .expect("publish should succeed");
+
+        let cats = xtream_get_playlist_categories(&app_config, &target.name, XtreamCluster::Live)
+            .await
+            .expect("categories should exist");
+        let a_id = cats.iter().find(|c| c.name == "A").expect("category A").id;
+        let b_id = cats.iter().find(|c| c.name == "B").expect("category B").id;
+
+        let bouquet = PlaylistBouquetDto {
+            xtream: Some(PlaylistClusterBouquetDto { live: Some(vec!["A".to_string()]), ..Default::default() }),
+            m3u: None,
+        };
+        save_user_bouquet(&app_config, &target.name, "alice", &bouquet).await.expect("save bouquet");
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "alice".to_string();
+        user.output_clusters = ClusterFlags::all();
+        let playlists = PlaylistStorageState::default();
+
+        // Requesting B's category_id explicitly must still be denied by the bouquet.
+        let b_iter =
+            XtreamPlaylistIterator::new(XtreamCluster::Live, &app_config, &playlists, &target, Some(b_id), &user)
+                .await
+                .expect("iterator should open");
+        let b_items: Vec<XtreamPlaylistItem> =
+            b_iter.collect::<Vec<_>>().await.into_iter().map(|entry| entry.expect("ok").0).collect();
+        assert!(b_items.is_empty(), "category_id outside bouquet must yield no items");
+
+        // Requesting A's category_id succeeds, and category_id=0 keeps the bouquet filter.
+        for cid in [Some(a_id), Some(0)] {
+            let iter = XtreamPlaylistIterator::new(XtreamCluster::Live, &app_config, &playlists, &target, cid, &user)
+                .await
+                .expect("iterator should open");
+            let groups: Vec<String> = iter
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .map(|entry| entry.expect("ok").0.group.to_string())
+                .collect();
+            assert_eq!(groups, vec!["A"]);
+        }
     }
 }

@@ -79,6 +79,8 @@ pub enum DeduplicateMatchBy {
     Caption,
     Name,
     Title,
+    Tmdb,
+    TmdbThenCaption,
 }
 
 /// Which member of a duplicate group survives. Spelled `best_quality`,
@@ -135,6 +137,10 @@ impl<'de> serde::Deserialize<'de> for DeduplicateKeep {
 
 /// Quality-aware duplicate removal: channels with the same normalized match
 /// value (quality tokens stripped) collapse to a single entry.
+///
+/// Matching by caption, name, or title operates target-wide across each cluster,
+/// whereas TMDB modes (`tmdb` and `tmdb_then_caption`) are scoped to individual
+/// playlist groups.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DeduplicateConfig {
@@ -196,4 +202,25 @@ impl ConfigTargetOptions {
     pub fn share_live_mpeg_ts_enabled(&self) -> bool { self.share_live_streams.mpeg_ts }
 
     pub fn share_live_any_enabled(&self) -> bool { self.share_live_hls_enabled() || self.share_live_mpeg_ts_enabled() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deduplicate_match_by_serde_roundtrip() {
+        for (variant, expected_str) in [
+            (DeduplicateMatchBy::Caption, "\"caption\""),
+            (DeduplicateMatchBy::Name, "\"name\""),
+            (DeduplicateMatchBy::Title, "\"title\""),
+            (DeduplicateMatchBy::Tmdb, "\"tmdb\""),
+            (DeduplicateMatchBy::TmdbThenCaption, "\"tmdb_then_caption\""),
+        ] {
+            let serialized = serde_json::to_string(&variant).expect("serialize");
+            assert_eq!(serialized, expected_str);
+            let deserialized: DeduplicateMatchBy = serde_json::from_str(&serialized).expect("deserialize");
+            assert_eq!(deserialized, variant);
+        }
+    }
 }

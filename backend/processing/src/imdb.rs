@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use shared::{
     defaults::default_imdb_url,
     model::{ImdbRatingSource, InputFetchMethod, PlaylistItem, PlaylistItemHeader, StreamProperties},
-    utils::{parse_imdb_id_from_title, Internable},
+    utils::{is_valid_provider_rating, parse_imdb_id_from_title, Internable},
 };
 use std::{
     collections::HashMap,
@@ -329,7 +329,7 @@ pub fn apply_imdb_ratings(items: &mut [PlaylistItem], mut lookup: Option<&mut Im
                     imdb_votes: &mut video.imdb_votes,
                     effective_rating: &mut video.effective_rating,
                 },
-                video.rating.map(rating_to_f32),
+                valid_provider_rating(video.rating),
                 title,
                 name,
                 lookup.as_deref_mut(),
@@ -342,7 +342,7 @@ pub fn apply_imdb_ratings(items: &mut [PlaylistItem], mut lookup: Option<&mut Im
                     imdb_votes: &mut series.imdb_votes,
                     effective_rating: &mut series.effective_rating,
                 },
-                Some(rating_to_f32(series.rating)),
+                valid_provider_rating(Some(series.rating)),
                 title,
                 name,
                 lookup.as_deref_mut(),
@@ -351,6 +351,13 @@ pub fn apply_imdb_ratings(items: &mut [PlaylistItem], mut lookup: Option<&mut Im
             StreamProperties::Live(_) | StreamProperties::Episode(_) => {}
         }
     }
+}
+
+/// The provider rating as the stored `f32`, or `None` when it is outside the 0-10 scale.
+///
+/// The range is checked on the original `f64`: narrowing first would round a value just above 10 down to 10.
+fn valid_provider_rating(rating: Option<f64>) -> Option<f32> {
+    rating.filter(|&value| is_valid_provider_rating(value)).map(rating_to_f32)
 }
 
 /// Narrows a provider rating (0-10) to the stored `f32`. The value range and the
@@ -388,7 +395,6 @@ fn apply_rating_fields(
     *fields.imdb_rating = found.map(|rating| rating.rating);
     *fields.imdb_votes = found.map(|rating| rating.votes);
 
-    let provider_rating = provider_rating.filter(|value| value.is_finite() && *value > 0.0);
     *fields.effective_rating = if cfg.enabled {
         match cfg.rating_source {
             ImdbRatingSource::ImdbThenProvider => imdb_effective_rating(found, cfg.min_votes).or(provider_rating),
@@ -650,6 +656,27 @@ mod tests {
         let mut strict = [video_item("A [tt1111111]", Some(6.8))];
         apply_imdb_ratings(&mut strict, None, &enabled_config(0, ImdbRatingSource::Imdb));
         assert_eq!(video_props(&strict[0]).effective_rating, None);
+    }
+
+    #[test]
+    fn provider_rating_outside_zero_to_ten_is_ignored() {
+        let enabled = enabled_config(0, ImdbRatingSource::Provider);
+        let disabled = ImdbConfig { enabled: false, ..enabled_config(0, ImdbRatingSource::Provider) };
+        for cfg in [&enabled, &disabled] {
+            let mut items = [
+                video_item("A", Some(10.0)),
+                video_item("B", Some(10.5)),
+                video_item("C", Some(-1.0)),
+                video_item("D", Some(0.1)),
+                video_item("E", Some(10.000_000_1)),
+            ];
+            apply_imdb_ratings(&mut items, None, cfg);
+            assert_eq!(video_props(&items[0]).effective_rating, Some(10.0));
+            assert_eq!(video_props(&items[1]).effective_rating, None);
+            assert_eq!(video_props(&items[2]).effective_rating, None);
+            assert_eq!(video_props(&items[3]).effective_rating, Some(0.1));
+            assert_eq!(video_props(&items[4]).effective_rating, None);
+        }
     }
 
     #[test]

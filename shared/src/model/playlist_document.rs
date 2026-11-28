@@ -7,7 +7,7 @@ use crate::{
     },
     utils::{
         arc_str_null_is_none_serde, arc_str_option_null_if_empty_serde, arc_str_serde, arc_str_vec_serde,
-        resolve_container_extension, Internable,
+        resolve_container_extension_with_ledger, Internable,
     },
 };
 use indexmap::IndexMap;
@@ -125,6 +125,7 @@ impl XtreamPlaylistItem {
                     self.virtual_id,
                     self.category_id,
                     &self.url,
+                    options.sampled_container_extension(&self.input_name, self.provider_id),
                     options.default_container_extension(&self.input_name),
                 );
             }
@@ -141,20 +142,27 @@ impl XtreamPlaylistItem {
     /// usable to append. The provider URL still carries the extension, so it is the fallback here, the
     /// same one `create_vod_info_from_item` already applies to its info document.
     ///
-    /// A Stalker item has no URL until playback, so both earlier steps miss. `configured_extension` is
-    /// the input's `options.default_container_extension`, read from the request-scoped mapping options
-    /// and never written back, so a config change applies to the next response.
+    /// A Stalker item has no URL until playback, so both earlier steps miss. The sampled value and the
+    /// input's `options.default_container_extension` come from the request-scoped mapping options and are
+    /// never written back, so a config change applies to the next response.
     fn container_extension_or_url_fallback(
         &self,
         container_extension: &Arc<str>,
-        configured_extension: Option<&Arc<str>>,
+        options: &XtreamMappingOptions,
     ) -> Arc<str> {
-        // `resolve_container_extension` rejects placeholders, strips the leading dot that
+        // `resolve_container_extension_with_ledger` rejects placeholders, strips the leading dot that
         // `extract_extension_from_url` yields and ends at the built-in default, so a movie never
-        // publishes an empty or malformed extension.
-        resolve_container_extension(container_extension, &self.url, configured_extension.map(Arc::as_ref))
-            .as_ref()
-            .intern()
+        // publishes an empty or malformed extension. The sampled value sits between the item URL and
+        // the configured default: the Stalker sampler fills the gap the portal leaves open.
+        let sampled = options.sampled_container_extension(&self.input_name, self.provider_id);
+        resolve_container_extension_with_ledger(
+            container_extension,
+            &self.url,
+            sampled.map(Arc::as_ref),
+            options.default_container_extension(&self.input_name).map(Arc::as_ref),
+        )
+        .as_ref()
+        .intern()
     }
 
     fn to_info_document_no_props(&self, options: &XtreamMappingOptions) -> XtreamInfoDocument {
@@ -206,10 +214,7 @@ impl XtreamPlaylistItem {
                         added: Arc::clone(&empty_str),
                         category_id: self.category_id.intern(),
                         category_ids: vec![self.category_id],
-                        container_extension: self.container_extension_or_url_fallback(
-                            &empty_str,
-                            options.default_container_extension(&self.input_name),
-                        ),
+                        container_extension: self.container_extension_or_url_fallback(&empty_str, options),
                         custom_sid: None,
                         direct_source: Arc::clone(&empty_str),
                     },
@@ -348,10 +353,7 @@ impl XtreamPlaylistItem {
             is_adult: video.is_adult,
             category_id: self.category_id.intern(),
             category_ids: vec![self.category_id],
-            container_extension: self.container_extension_or_url_fallback(
-                &video.container_extension,
-                options.default_container_extension(&self.input_name),
-            ),
+            container_extension: self.container_extension_or_url_fallback(&video.container_extension, options),
             custom_sid: video.custom_sid.clone(),
             direct_source: if options.flags.contains(XtreamMappingFlags::SkipVideoDirectSource) {
                 empty_str
@@ -421,10 +423,7 @@ impl XtreamPlaylistItem {
                 is_adult: 0,
                 category_id: self.category_id.intern(),
                 category_ids: vec![self.category_id],
-                container_extension: self.container_extension_or_url_fallback(
-                    &empty_str,
-                    options.default_container_extension(&self.input_name),
-                ),
+                container_extension: self.container_extension_or_url_fallback(&empty_str, options),
                 custom_sid: None,
                 direct_source: Arc::clone(&empty_str),
             }),
@@ -503,6 +502,7 @@ mod tests {
             web_ui_request: false,
             encrypt_secret: [0u8; 16],
             resource_host_policies: Arc::default(),
+            sampled_container_extensions: Arc::default(),
             default_container_extensions: Arc::default(),
             replace_rating: false,
         }
@@ -662,6 +662,78 @@ mod tests {
 
         let url = video_item("http://provider.example/movie/u/p/813563.avi", Some(video_properties("", false)));
         assert_eq!(video_doc_extension_with(&url, &options_with_default("provider", "mp4")).as_ref(), "avi");
+    }
+
+    /// Mapping options carrying one input's sampled extensions, as a request snapshots them.
+    fn options_with_sampled(input_name: &str, extension: &str, configured: Option<&str>) -> XtreamMappingOptions {
+        let mut options =
+            configured.map_or_else(sample_options, |configured| options_with_default(input_name, configured));
+        options.sampled_container_extensions = Arc::new(std::collections::HashMap::from([(
+            Arc::<str>::from(input_name),
+            Arc::new(std::collections::HashMap::from([(813_563, Arc::<str>::from(extension))])),
+        )]));
+        options
+    }
+
+    #[test]
+    fn a_sampled_extension_fills_a_blank_video_extension_before_the_configured_default() {
+        let mut item = video_item("", Some(video_properties("", false)));
+        item.input_name = "provider".intern();
+
+        assert_eq!(
+            video_doc_extension_with(&item, &options_with_sampled("provider", "mkv", Some("mp4"))).as_ref(),
+            "mkv"
+        );
+        assert_eq!(
+            video_info_doc_extension_with(&item, &options_with_sampled("provider", "mkv", Some("mp4"))).as_ref(),
+            "mkv"
+        );
+
+        // A URL extension still wins, because the sampler never samples an item that states one.
+        item.url = Arc::<str>::from("http://provider.example/movie/u/p/813563.avi");
+        assert_eq!(
+            video_doc_extension_with(&item, &options_with_sampled("provider", "mkv", Some("mp4"))).as_ref(),
+            "avi"
+        );
+
+        // Without a sampled value delivery keeps the configured default.
+        item.url = "".intern();
+        assert_eq!(video_doc_extension_with(&item, &options_with_default("provider", "mp4")).as_ref(), "mp4");
+    }
+
+    #[test]
+    fn a_sampled_extension_applies_to_info_document_when_item_has_details() {
+        let mut item = video_item("", Some(video_properties("", true)));
+        item.input_name = "provider".intern();
+        assert!(item.has_details());
+
+        let options = options_with_sampled("provider", "mkv", Some("mp4"));
+        assert_eq!(video_doc_extension_with(&item, &options).as_ref(), "mkv");
+        assert_eq!(
+            video_info_doc_extension_with(&item, &options).as_ref(),
+            "mkv",
+            "info document for an item with details must also publish the sampled extension"
+        );
+    }
+
+    #[test]
+    fn a_sampled_extension_belongs_to_its_input_and_stream() {
+        let mut other_stream = video_item("", Some(video_properties("", false)));
+        other_stream.input_name = "provider".intern();
+        other_stream.provider_id = 813_564;
+        assert_eq!(
+            video_doc_extension_with(&other_stream, &options_with_sampled("provider", "mkv", None)).as_ref(),
+            crate::defaults::DEFAULT_CONTAINER_EXTENSION,
+            "the ledger entry of another stream does not apply"
+        );
+
+        let mut other_input = video_item("", Some(video_properties("", false)));
+        other_input.input_name = "another-input".intern();
+        assert_eq!(
+            video_doc_extension_with(&other_input, &options_with_sampled("provider", "mkv", None)).as_ref(),
+            crate::defaults::DEFAULT_CONTAINER_EXTENSION,
+            "the ledger entry of another input does not apply"
+        );
     }
 
     #[test]

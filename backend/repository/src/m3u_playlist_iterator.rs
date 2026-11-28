@@ -1,6 +1,6 @@
 use crate::{
     ensure_target_storage_path, get_file_path_for_db_index, m3u_get_file_path_for_db, m3u_get_item_for_stream_id,
-    open_playlist_reader, storage_const, user_get_bouquet_filter, LockedReceiverStream, PlaylistStorageState,
+    open_playlist_reader, storage_const, user_get_m3u_bouquet_filter, LockedReceiverStream, PlaylistStorageState,
 };
 use futures::{Stream, StreamExt};
 use log::error;
@@ -9,7 +9,7 @@ use shared::{
     error::TuliproxError,
     model::{
         ClusterFlags, ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, ResourceOutputPolicy,
-        StreamProperties, TargetType, XtreamCluster,
+        StreamProperties, XtreamCluster,
     },
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX},
 };
@@ -308,7 +308,7 @@ impl M3uItemPipeline {
             TuliproxError::Config(format!("Unexpected failure, missing m3u target output for target {}", target.name))
         })?;
         let config = cfg.config.load();
-        let filter = user_get_bouquet_filter(&config, &user.username, None, TargetType::M3u, XtreamCluster::Live).await;
+        let filter = user_get_m3u_bouquet_filter(&config, &user.username, XtreamCluster::Live).await;
         let mut flags = M3uPlaylistIteratorFlagsSet::new();
         if m3u_output.include_type_in_url {
             flags.set(M3uPlaylistIteratorFlags::IncludeTypeInUrl);

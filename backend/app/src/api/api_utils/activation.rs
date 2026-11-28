@@ -1,6 +1,7 @@
 use super::{
-    classify_playback_request, resolve_admission_with_strategies, AdmissionRequest, EvictionReentryGuard,
-    PlaybackRequestClass, PlaybackRequestFacts,
+    classify_playback_request, resolve_admission_with_strategies_with_placeholder,
+    resolve_playback_request_admission_with_placeholder, AdmissionRequest, EvictionReentryGuard, PlaybackRequestClass,
+    PlaybackRequestFacts,
 };
 use crate::{
     api::model::{AppState, PendingProviderReason},
@@ -33,13 +34,24 @@ pub(super) struct PlaybackActivationResult {
     pub(super) grace_mode: Option<crate::api::model::GraceMode>,
     pub(super) grace_context: Option<crate::api::model::GraceResolutionContext>,
     pub(super) placeholder_transition_version: Option<u64>,
+    pub(super) placeholder_identity: Option<tuliprox_session::SessionIdentity>,
 }
 
 /// # Panics
+#[cfg(test)]
 #[allow(clippy::too_many_lines)]
 pub(super) async fn activate_session_before_stream_open(
     app_state: &Arc<AppState>,
     request: SessionActivationRequest<'_>,
+) -> PlaybackActivationResult {
+    activate_session_before_stream_open_with_playback_id(app_state, request, None).await
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn activate_session_before_stream_open_with_playback_id(
+    app_state: &Arc<AppState>,
+    request: SessionActivationRequest<'_>,
+    playback_id: Option<&str>,
 ) -> PlaybackActivationResult {
     let SessionActivationRequest {
         fingerprint,
@@ -93,22 +105,27 @@ pub(super) async fn activate_session_before_stream_open(
     // GracePeriod permission is already resolved — skip admission strategies (re-run
     // would evict the same session again). But we must still materialize the grace
     // lifecycle (PendingProvider / GraceActive) so the session state is consistent.
+    let placeholder_params = crate::api::model::CreateUserSessionParams {
+        user,
+        session_token,
+        virtual_id: virtual_id.get(),
+        provider: input.name.as_ref(),
+        stream_url,
+        addr: &fingerprint.addr,
+        connection_permission,
+        connection_kind: Some(connection_kind),
+        socket_bound,
+    };
+
     if connection_permission == UserConnectionPermission::GracePeriod {
+        let mut placeholder_identity =
+            loaded_session.as_ref().and_then(|s| s.as_ref().map(tuliprox_session::UserSession::identity));
         if loaded_session.as_ref().is_none_or(Option::is_none) {
-            app_state
+            let (_, identity) = app_state
                 .active_users
-                .ensure_user_session_placeholder(crate::api::model::CreateUserSessionParams {
-                    user,
-                    session_token,
-                    virtual_id: virtual_id.get(),
-                    provider: input.name.as_ref(),
-                    stream_url,
-                    addr: &fingerprint.addr,
-                    connection_permission,
-                    connection_kind: Some(connection_kind),
-                    socket_bound,
-                })
+                .ensure_user_session_placeholder_with_identity(placeholder_params, playback_id, true)
                 .await;
+            placeholder_identity = Some(identity);
         }
         // Materialize grace lifecycle under the guard so the session state is consistent.
         let current_session = match loaded_session {
@@ -187,13 +204,55 @@ pub(super) async fn activate_session_before_stream_open(
             grace_mode: resolved_grace,
             grace_context: None,
             placeholder_transition_version: None,
+            placeholder_identity,
         };
+    }
+    let eviction_reentry_guard = if socket_bound {
+        EvictionReentryGuard::SocketPlayback { virtual_id }
+    } else {
+        EvictionReentryGuard::Session(session_token)
+    };
+    // No limits: still honor playback-id replacement and atomic placeholder creation on non-follow-up / non-prepare requests.
+    if !limits_enabled
+        && effective_request_class != PlaybackRequestClass::FollowUp
+        && effective_request_class != PlaybackRequestClass::Prepare
+    {
+        if let Some(playback_id) = playback_id {
+            let (admission, _, _, placeholder_info) = resolve_playback_request_admission_with_placeholder(
+                &app_state.admission_ctx(),
+                user,
+                fingerprint,
+                None,
+                session_token,
+                true,
+                eviction_reentry_guard,
+                false,
+                false,
+                Some(playback_id),
+                Some(placeholder_params),
+            )
+            .await;
+            let (placeholder_transition_version, placeholder_identity) = match placeholder_info {
+                Some((version, identity)) => (Some(version), Some(identity)),
+                None => (None, None),
+            };
+            return PlaybackActivationResult {
+                admission,
+                grace_mode: None,
+                grace_context: None,
+                placeholder_transition_version,
+                placeholder_identity,
+            };
+        }
+        app_state.active_users.clear_ended_session_for_activation(session_token).await;
     }
     // No limits: skip admission entirely. FollowUp / Prepare: no re-admission needed.
     if !limits_enabled
         || effective_request_class == PlaybackRequestClass::FollowUp
         || effective_request_class == PlaybackRequestClass::Prepare
     {
+        let existing_identity =
+            loaded_session.as_ref().and_then(|s| s.as_ref().map(tuliprox_session::UserSession::identity));
         return PlaybackActivationResult {
             admission: crate::api::model::ConnectionAdmission::from_permission(
                 connection_permission,
@@ -202,45 +261,46 @@ pub(super) async fn activate_session_before_stream_open(
             grace_mode: None,
             grace_context: None,
             placeholder_transition_version: None,
+            placeholder_identity: existing_identity,
         };
     }
 
-    let placeholder_transition_version = Some(
-        app_state
-            .active_users
-            .ensure_user_session_placeholder(crate::api::model::CreateUserSessionParams {
-                user,
-                session_token,
-                virtual_id: virtual_id.get(),
-                provider: input.name.as_ref(),
-                stream_url,
-                addr: &fingerprint.addr,
-                connection_permission,
-                connection_kind: Some(connection_kind),
-                socket_bound,
-            })
-            .await,
-    );
-
-    let result = resolve_admission_with_strategies(
-        &app_state.admission_ctx(),
-        AdmissionRequest {
-            username: &user.username,
-            max_connections: user.max_connections,
-            soft_connections: user.soft_connections,
-            client_ip: &fingerprint.client_ip,
-            request_addr: &fingerprint.addr,
-            use_session_admission: true,
-            session_token: Some(session_token),
-            activate_unbound_session: true,
-            eviction_reentry_guard: if socket_bound {
-                EvictionReentryGuard::SocketPlayback { virtual_id }
-            } else {
-                EvictionReentryGuard::Session(session_token)
-            },
-        },
-    )
-    .await;
+    let admission_request = AdmissionRequest {
+        username: &user.username,
+        max_connections: user.max_connections,
+        soft_connections: user.soft_connections,
+        client_ip: &fingerprint.client_ip,
+        request_addr: &fingerprint.addr,
+        use_session_admission: true,
+        session_token: Some(session_token),
+        activate_unbound_session: true,
+        eviction_reentry_guard,
+    };
+    let (result, placeholder_transition_version, placeholder_identity) = if playback_id.is_some() {
+        let (result, placeholder_info) = resolve_admission_with_strategies_with_placeholder(
+            &app_state.admission_ctx(),
+            admission_request,
+            playback_id,
+            Some(placeholder_params),
+        )
+        .await;
+        let (version, identity) = match placeholder_info {
+            Some((version, identity)) => (Some(version), Some(identity)),
+            None => (None, None),
+        };
+        (result, version, identity)
+    } else {
+        let (version, identity) =
+            app_state.active_users.ensure_user_session_placeholder_with_identity(placeholder_params, None, true).await;
+        let (result, _) = resolve_admission_with_strategies_with_placeholder(
+            &app_state.admission_ctx(),
+            admission_request,
+            None,
+            None,
+        )
+        .await;
+        (result, Some(version), Some(identity))
+    };
     let admission = result.admission;
     let grace_mode = result.grace_mode;
     let grace_context = result.grace_context;
@@ -260,7 +320,13 @@ pub(super) async fn activate_session_before_stream_open(
         }
     }
 
-    PlaybackActivationResult { admission, grace_mode, grace_context, placeholder_transition_version }
+    PlaybackActivationResult {
+        admission,
+        grace_mode,
+        grace_context,
+        placeholder_transition_version,
+        placeholder_identity,
+    }
 }
 
 /// Session and account binding a forced resource request must still belong to after acquiring capacity.

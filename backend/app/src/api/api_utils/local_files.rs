@@ -1,8 +1,8 @@
 use super::{
-    activate_session_before_stream_open, get_stream_throttle, is_socket_bound_playback_session, is_throttled_stream,
-    mark_response_as_uncompressed, prepare_stream_metering, record_connect_failed_attempt,
-    release_reservation_and_exhausted_response, stream_admission_rejected_response, try_unwrap_body,
-    ConnectFailedAttempt, PlaybackRequestClass, SessionActivationRequest,
+    activate_session_before_stream_open_with_playback_id, effective_playback_id_for_user, get_stream_throttle,
+    is_socket_bound_playback_session, is_throttled_stream, mark_response_as_uncompressed, prepare_stream_metering,
+    record_connect_failed_attempt, release_reservation_and_exhausted_response, stream_admission_rejected_response,
+    try_unwrap_body, ConnectFailedAttempt, PlaybackRequestClass, SessionActivationRequest,
 };
 use crate::{
     api::{
@@ -13,7 +13,7 @@ use crate::{
         static_headers::CT_OCTET,
     },
     auth::Fingerprint,
-    model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
+    model::{ConfigInput, ConfigTarget, GracePeriodOptions, ProxyUserCredentials},
     utils::{
         async_file_reader, get_file_extension,
         request::{content_type_from_ext, parse_range},
@@ -148,16 +148,17 @@ pub(crate) async fn activate_local_file_stream(
     req_headers: &HeaderMap,
     input: &ConfigInput,
     user: &ProxyUserCredentials,
-    mut connection_permission: UserConnectionPermission,
-    mut connection_kind: crate::api::model::ConnectionKind,
+    connection_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
     playback_session_token: Option<&str>,
     request_class: Option<PlaybackRequestClass>,
     stream: crate::api::model::BoxedProviderStream,
 ) -> Result<crate::api::model::BoxedProviderStream, Box<Response<Body>>> {
-    let mut grace_mode = None;
+    let grace_admitted = connection_permission == UserConnectionPermission::GracePeriod;
     let socket_bound = is_socket_bound_playback_session(pli.item_type, extract_extension_from_url(&pli.url));
-    if let Some(session_token) = playback_session_token {
-        let activation = activate_session_before_stream_open(
+    let playback_id = effective_playback_id_for_user(&app_state.app_config.config.load(), user, req_headers);
+    let admission = if let Some(session_token) = playback_session_token {
+        activate_local_file_session(
             app_state,
             SessionActivationRequest {
                 fingerprint,
@@ -173,25 +174,132 @@ pub(crate) async fn activate_local_file_stream(
                 granted_grace_mode: None,
                 socket_bound,
             },
+            playback_id,
+        )
+        .await?
+    } else {
+        LocalFileStreamAdmission {
+            grace_mode: None,
+            placeholder_identity: None,
+            connection_permission,
+            connection_kind,
+        }
+    };
+    let LocalFileStreamAdmission { grace_mode, mut placeholder_identity, connection_permission, connection_kind } =
+        admission;
+    let (grace_period_options, resolved_connection_kind) = resolve_local_file_stream_options(
+        app_state,
+        user,
+        playback_session_token,
+        connection_permission,
+        connection_kind,
+        grace_mode,
+    )
+    .await;
+    if let Some(session_token) = playback_session_token {
+        let session_params = crate::api::model::CreateUserSessionParams {
+            user,
+            session_token,
+            virtual_id: pli.virtual_id,
+            provider: input.name.as_ref(),
+            stream_url: &pli.url,
+            addr: &fingerprint.addr,
+            connection_permission,
+            connection_kind: Some(resolved_connection_kind),
+            socket_bound,
+        };
+        placeholder_identity =
+            register_local_file_session(app_state, session_params, placeholder_identity, playback_id)
+                .await
+                .map_err(|error| Box::new(stream_admission_rejected_response(error, &user.username)))?;
+    }
+    let metering = prepare_stream_metering(app_state, &pli.url, false, true, false);
+    let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
+    if let Some(identity) = placeholder_identity {
+        let limits_enabled = app_state.app_config.config.load().user_access_control
+            && (user.max_connections > 0 || user.soft_connections > 0);
+        stream_details.session_registration = Some(tuliprox_session::PlaybackSessionRegistration {
+            identity,
+            enforce_limits: limits_enabled,
+            grace_admitted,
+        });
+    }
+    let outcome = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+        stream_details,
+        app_state,
+        user,
+        connection_permission,
+        connection_kind: resolved_connection_kind,
+        fingerprint,
+        stream_channel: pli.clone(),
+        socket_bound,
+        session_token: playback_session_token,
+        req_headers,
+        meter_uid: metering.meter_uid,
+        meter_stream: metering.meter_stream,
+        group_failover: None,
+    })
+    .await
+    .map_err(|error| Box::new(stream_admission_rejected_response(error, &user.username)))?;
+    Ok(crate::api::model::ActiveClientStreamOutcome::into_stream(outcome))
+}
+
+/// Values an activated local-file session contributes to its stream registration.
+struct LocalFileStreamAdmission {
+    grace_mode: Option<crate::api::model::GraceMode>,
+    placeholder_identity: Option<tuliprox_session::SessionIdentity>,
+    connection_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
+}
+
+/// Activates the local-file playback session before its first byte is served.
+///
+/// Returns the admission values the stream registration needs. A session that lost its slot
+/// during activation is answered with the exhausted response instead.
+async fn activate_local_file_session(
+    app_state: &Arc<AppState>,
+    request: SessionActivationRequest<'_>,
+    playback_id: Option<&str>,
+) -> Result<LocalFileStreamAdmission, Box<Response<Body>>> {
+    let fingerprint = request.fingerprint;
+    let user = request.user;
+    let session_token = request.session_token;
+    let fallback_kind = request.connection_kind;
+    let activation = activate_session_before_stream_open_with_playback_id(app_state, request, playback_id).await;
+    let connection_permission = activation.admission.permission();
+    let connection_kind = activation.admission.kind().unwrap_or(fallback_kind);
+    if connection_permission == UserConnectionPermission::Exhausted {
+        let response = release_reservation_and_exhausted_response(
+            app_state,
+            user,
+            session_token,
+            activation.placeholder_transition_version,
+            activation.admission.is_reentry_suppressed(),
+            fingerprint,
         )
         .await;
-        grace_mode = activation.grace_mode;
-        connection_permission = activation.admission.permission();
-        connection_kind = activation.admission.kind().unwrap_or(connection_kind);
-
-        if connection_permission == UserConnectionPermission::Exhausted {
-            let response = release_reservation_and_exhausted_response(
-                app_state,
-                user,
-                session_token,
-                activation.placeholder_transition_version,
-                activation.admission.is_reentry_suppressed(),
-                fingerprint,
-            )
-            .await;
-            return Err(Box::new(response));
-        }
+        return Err(Box::new(response));
     }
+    Ok(LocalFileStreamAdmission {
+        grace_mode: activation.grace_mode,
+        placeholder_identity: activation.placeholder_identity,
+        connection_permission,
+        connection_kind,
+    })
+}
+
+/// Resolves the grace period options and connection kind for an activated local-file stream.
+///
+/// A stream outside the grace period runs without a grace window. A session that already stores
+/// a connection kind keeps it.
+async fn resolve_local_file_stream_options(
+    app_state: &Arc<AppState>,
+    user: &ProxyUserCredentials,
+    playback_session_token: Option<&str>,
+    connection_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
+    grace_mode: Option<crate::api::model::GraceMode>,
+) -> (GracePeriodOptions, crate::api::model::ConnectionKind) {
     let mut grace_period_options = app_state.get_grace_options();
     if connection_permission != UserConnectionPermission::GracePeriod {
         grace_period_options.period_millis = 0;
@@ -209,41 +317,31 @@ pub(crate) async fn activate_local_file_stream(
     } else {
         connection_kind
     };
-    if let Some(session_token) = playback_session_token {
-        let _ = app_state
-            .active_users
-            .create_user_session(crate::api::model::CreateUserSessionParams {
-                user,
-                session_token,
-                virtual_id: pli.virtual_id,
-                provider: input.name.as_ref(),
-                stream_url: &pli.url,
-                addr: &fingerprint.addr,
-                connection_permission,
-                connection_kind: Some(resolved_connection_kind),
-                socket_bound,
-            })
-            .await;
-    }
-    let metering = prepare_stream_metering(app_state, &pli.url, false, true, false);
-    create_active_client_stream(crate::api::model::ActiveClientStreamParams {
-        stream_details: StreamDetails::from_stream(stream, grace_period_options),
-        app_state,
-        user,
-        connection_permission,
-        connection_kind: resolved_connection_kind,
-        fingerprint,
-        stream_channel: pli.clone(),
-        socket_bound,
-        session_token: playback_session_token,
-        req_headers,
-        meter_uid: metering.meter_uid,
-        meter_stream: metering.meter_stream,
-        group_failover: None,
-    })
-    .await
-    .map(crate::api::model::ActiveClientStreamOutcome::into_stream)
-    .map_err(|error| Box::new(stream_admission_rejected_response(error, &user.username)))
+    (grace_period_options, resolved_connection_kind)
+}
+
+/// Registers the activated local-file session and returns its refreshed placeholder identity.
+///
+/// An unfenced registration never fails. A refresh that no longer matches the placeholder is
+/// rejected.
+async fn register_local_file_session(
+    app_state: &Arc<AppState>,
+    session_params: crate::api::model::CreateUserSessionParams<'_>,
+    placeholder_identity: Option<tuliprox_session::SessionIdentity>,
+    playback_id: Option<&str>,
+) -> Result<Option<tuliprox_session::SessionIdentity>, crate::api::model::StreamAdmissionError> {
+    let Some(identity) = placeholder_identity else {
+        let _ = app_state.active_users.create_user_session_with_playback_id(session_params, playback_id).await;
+        return Ok(None);
+    };
+    let Some((_, refreshed_identity)) = app_state
+        .active_users
+        .create_user_session_checked_with_playback_id(session_params, Some((identity, None)), playback_id)
+        .await
+    else {
+        return Err(crate::api::model::StreamAdmissionError::RegistrationRejected);
+    };
+    Ok(Some(refreshed_identity))
 }
 
 /// Applies the configured stream throttle to a local byte stream.

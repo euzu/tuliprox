@@ -2,19 +2,43 @@ use super::match_key::{dedup_match_by, extract_normalized_match_key, raw_match_v
 use indexmap::IndexMap;
 use shared::{
     model::{
-        DeduplicateConfig, DeduplicateKeep, PlaylistGroup, PlaylistItem, PluginDuplicateGroup, PluginKeepers, UUIDType,
-        XtreamCluster,
+        ChannelMatchBy, DeduplicateConfig, DeduplicateKeep, DeduplicateMatchBy, PlaylistGroup, PlaylistItem,
+        PluginDuplicateGroup, PluginKeepers, StreamProperties, UUIDType, XtreamCluster,
     },
     utils::quality_rank,
 };
 use std::collections::HashSet;
 
 fn match_value(config: &DeduplicateConfig, item: &PlaylistItem) -> String {
-    extract_normalized_match_key(&item.header, dedup_match_by(config.match_by), config.match_as_ascii, None)
+    if let Some(match_by) = dedup_match_by(config.match_by) {
+        return extract_normalized_match_key(&item.header, match_by, config.match_as_ascii, None);
+    }
+    if matches!(item.header.additional_properties.as_ref(), Some(StreamProperties::Episode(_))) {
+        return String::new();
+    }
+    let tmdb_id = match item.header.additional_properties.as_ref() {
+        Some(StreamProperties::Video(video)) => video.tmdb,
+        Some(StreamProperties::Series(series)) => series.tmdb,
+        _ => None,
+    };
+    if let Some(id) = tmdb_id.filter(|&id| id > 0) {
+        return format!("tmdb:{id}");
+    }
+    if config.match_by == DeduplicateMatchBy::TmdbThenCaption {
+        let mut norm = extract_normalized_match_key(&item.header, ChannelMatchBy::Caption, config.match_as_ascii, None);
+        if !norm.is_empty() {
+            norm.insert_str(0, "caption:");
+            return norm;
+        }
+    }
+    String::new()
 }
 
-fn item_raw_match_value<'a>(config: &DeduplicateConfig, item: &'a PlaylistItem) -> &'a str {
-    raw_match_value(&item.header, dedup_match_by(config.match_by))
+fn item_raw_quality_value<'a>(config: &DeduplicateConfig, item: &'a PlaylistItem) -> &'a str {
+    match dedup_match_by(config.match_by) {
+        Some(match_by) => raw_match_value(&item.header, match_by),
+        None => raw_match_value(&item.header, ChannelMatchBy::Caption),
+    }
 }
 
 /// Failover group items and their members never take part in deduplication.
@@ -30,6 +54,8 @@ pub(in crate::processor) struct DuplicateSet {
     pub(in crate::processor) members: Vec<(usize, usize)>,
 }
 
+type DuplicateGroupKey = (XtreamCluster, Option<usize>, String);
+
 /// The sets of two or more duplicates in `playlist`, ordered by their first
 /// member. Pure: nothing is removed. Empty match keys never form a set.
 pub(in crate::processor) fn group_duplicates(
@@ -37,7 +63,8 @@ pub(in crate::processor) fn group_duplicates(
     playlist: &[PlaylistGroup],
     skip: &HashSet<UUIDType>,
 ) -> Vec<DuplicateSet> {
-    let mut sets: IndexMap<(XtreamCluster, String), Vec<(usize, usize)>> = IndexMap::new();
+    let mut sets: IndexMap<DuplicateGroupKey, Vec<(usize, usize)>> = IndexMap::new();
+    let group_scoped = matches!(config.match_by, DeduplicateMatchBy::Tmdb | DeduplicateMatchBy::TmdbThenCaption);
     for (group_idx, group) in playlist.iter().enumerate() {
         for (channel_idx, channel) in group.channels.iter().enumerate() {
             if should_skip(channel, skip) {
@@ -47,12 +74,13 @@ pub(in crate::processor) fn group_duplicates(
             if key_value.is_empty() {
                 continue;
             }
-            sets.entry((group.xtream_cluster, key_value)).or_default().push((group_idx, channel_idx));
+            let scope_idx = if group_scoped { Some(group_idx) } else { None };
+            sets.entry((group.xtream_cluster, scope_idx, key_value)).or_default().push((group_idx, channel_idx));
         }
     }
     sets.into_iter()
         .filter(|(_, members)| members.len() > 1)
-        .map(|((_, key), members)| DuplicateSet { key, members })
+        .map(|((_, _, key), members)| DuplicateSet { key, members })
         .collect()
 }
 
@@ -77,7 +105,7 @@ fn host_winner(config: &DeduplicateConfig, playlist: &[PlaylistGroup], set: &Dup
     }
     let mut winner = (0usize, 0u8);
     for (index, &(group, channel)) in set.members.iter().enumerate() {
-        let rank = quality_rank(item_raw_match_value(config, &playlist[group].channels[channel]));
+        let rank = quality_rank(item_raw_quality_value(config, &playlist[group].channels[channel]));
         // strictly greater: ties keep the first occurrence
         if index == 0 || rank > winner.1 {
             winner = (index, rank);
@@ -127,7 +155,22 @@ pub(in crate::processor) fn deduplicate_playlist(
         let kept = keepers
             .and_then(|keepers| plugin_keepers(&keepers[index], set.members.len()))
             .unwrap_or_else(|| vec![host_winner(config, playlist, set)]);
-        losers.extend(set.members.iter().enumerate().filter(|(member, _)| !kept.contains(member)).map(|(_, at)| *at));
+        for (member, &(group, channel)) in set.members.iter().enumerate() {
+            if !kept.contains(&member) {
+                losers.insert((group, channel));
+                if log::log_enabled!(log::Level::Debug) {
+                    let removed_title = &playlist[group].channels[channel].header.title;
+                    let kept_title = kept.first().map_or("", |&first_kept| {
+                        let (kg, kc) = set.members[first_kept];
+                        playlist[kg].channels[kc].header.title.as_ref()
+                    });
+                    log::debug!(
+                        "deduplicate removed duplicate channel '{removed_title}', kept '{kept_title}' (key: '{}')",
+                        set.key
+                    );
+                }
+            }
+        }
     }
 
     let mut removed = 0;
@@ -157,7 +200,10 @@ pub(in crate::processor) fn deduplicate_playlist(
 mod tests {
     use super::*;
     use shared::{
-        model::{DeduplicateMatchBy, PlaylistItemHeader},
+        model::{
+            DeduplicateMatchBy, EpisodeStreamProperties, PlaylistItemHeader, SeriesStreamProperties, StreamProperties,
+            VideoStreamProperties,
+        },
         utils::Internable,
     };
 
@@ -327,6 +373,249 @@ mod tests {
         let skip: HashSet<UUIDType> = [group_item.header.uuid].into_iter().collect();
         let mut playlist = vec![make_group("News", vec![group_item, excluded])];
         let removed = deduplicate_playlist(&DeduplicateConfig::default(), &mut playlist, None, &skip);
+        assert_eq!(removed, 0);
+        assert_eq!(playlist[0].channels.len(), 2);
+    }
+
+    fn make_vod_item(title: &str, tmdb: Option<u32>) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                title: title.intern(),
+                xtream_cluster: XtreamCluster::Video,
+                additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                    tmdb,
+                    ..VideoStreamProperties::default()
+                }))),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn make_vod_group(title: &str, channels: Vec<PlaylistItem>) -> PlaylistGroup {
+        PlaylistGroup { id: 1, title: title.intern(), channels, xtream_cluster: XtreamCluster::Video }
+    }
+
+    #[test]
+    fn tmdb_collapses_two_vod_items_with_same_tmdb_id_and_different_titles_inside_one_group_and_keeps_better_quality_by_caption(
+    ) {
+        let mut playlist = vec![make_vod_group(
+            "Sci-Fi",
+            vec![make_vod_item("Matrix Revolutions HD", Some(605)), make_vod_item("Matrix 3 [4K]", Some(605))],
+        )];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::Tmdb,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
+        assert_eq!(removed, 1);
+        assert_eq!(playlist[0].channels.len(), 1);
+        assert_eq!(playlist[0].channels[0].header.title.as_ref(), "Matrix 3 [4K]");
+    }
+
+    #[test]
+    fn tmdb_same_tmdb_id_in_two_groups_stays() {
+        let mut playlist = vec![
+            make_vod_group("Favorites", vec![make_vod_item("The Matrix HD", Some(603))]),
+            make_vod_group("Sci-Fi", vec![make_vod_item("The Matrix [4K]", Some(603))]),
+        ];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::Tmdb,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
+        assert_eq!(removed, 0);
+        assert_eq!(playlist.len(), 2);
+        assert_eq!(playlist[0].channels.len(), 1);
+        assert_eq!(playlist[1].channels.len(), 1);
+    }
+
+    #[test]
+    fn tmdb_items_without_tmdb_id_untouched() {
+        let mut playlist = vec![make_vod_group(
+            "Indie",
+            vec![
+                make_vod_item("Indie Film HD", None),
+                make_vod_item("Indie Film [4K]", None),
+                make_vod_item("Zero TMDB HD", Some(0)),
+                make_vod_item("Zero TMDB [4K]", Some(0)),
+            ],
+        )];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::Tmdb,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
+        assert_eq!(removed, 0);
+        assert_eq!(playlist[0].channels.len(), 4);
+    }
+
+    #[test]
+    fn tmdb_then_caption_collapses_same_tmdb_preserves_remakes_and_collapses_missing_tmdb_within_group_only() {
+        let mut playlist = vec![
+            make_vod_group(
+                "Movies",
+                vec![
+                    // Same TMDB id collapses
+                    make_vod_item("Dune HD", Some(438_631)),
+                    make_vod_item("Dune [4K]", Some(438_631)),
+                    // Two remakes with the same caption but different TMDB ids stay
+                    make_vod_item("Total Recall HD", Some(861)),
+                    make_vod_item("Total Recall [FHD]", Some(64_635)),
+                    // Items without TMDB id collapse by caption within the group only
+                    make_vod_item("Local Special HD", None),
+                    make_vod_item("Local Special FHD", None),
+                ],
+            ),
+            make_vod_group(
+                "Bonus",
+                vec![
+                    // Same caption as in group 1, but no TMDB id; remains untouched due to group scope
+                    make_vod_item("Local Special SD", None),
+                ],
+            ),
+        ];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::TmdbThenCaption,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
+        assert_eq!(removed, 2);
+        let group0_titles: Vec<_> = playlist[0].channels.iter().map(|c| c.header.title.to_string()).collect();
+        assert_eq!(group0_titles, vec!["Dune [4K]", "Total Recall HD", "Total Recall [FHD]", "Local Special FHD"]);
+        let group1_titles: Vec<_> = playlist[1].channels.iter().map(|c| c.header.title.to_string()).collect();
+        assert_eq!(group1_titles, vec!["Local Special SD"]);
+    }
+
+    #[test]
+    fn tmdb_live_items_untouched() {
+        let mut playlist = vec![make_group("Live TV", vec![make_item("News HD"), make_item("News FHD")])];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::Tmdb,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
+        assert_eq!(removed, 0);
+        assert_eq!(playlist[0].channels.len(), 2);
+    }
+
+    fn make_series_item(title: &str, tmdb: Option<u32>) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                title: title.intern(),
+                xtream_cluster: XtreamCluster::Series,
+                additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                    tmdb,
+                    ..SeriesStreamProperties::default()
+                }))),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn make_episode_item(title: &str, tmdb: Option<u32>) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                title: title.intern(),
+                xtream_cluster: XtreamCluster::Series,
+                additional_properties: Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
+                    episode_id: 1,
+                    episode: 1,
+                    season: 1,
+                    added: None,
+                    release_date: None,
+                    series_release_date: None,
+                    plot: None,
+                    tmdb,
+                    movie_image: "".intern(),
+                    container_extension: "mp4".intern(),
+                    video: None,
+                    audio: None,
+                }))),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn make_series_group(title: &str, channels: Vec<PlaylistItem>) -> PlaylistGroup {
+        PlaylistGroup { id: 1, title: title.intern(), channels, xtream_cluster: XtreamCluster::Series }
+    }
+
+    #[test]
+    fn tmdb_series_episodes_sharing_series_tmdb_id_are_not_deduplicated() {
+        let mut playlist = vec![make_series_group(
+            "Breaking Bad",
+            vec![
+                make_series_item("Breaking Bad", Some(1396)),
+                make_episode_item("Breaking Bad S01E01", Some(1396)),
+                make_episode_item("Breaking Bad S01E02", Some(1396)),
+                make_episode_item("Breaking Bad S01E03", Some(1396)),
+            ],
+        )];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::Tmdb,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
+        assert_eq!(removed, 0);
+        assert_eq!(playlist[0].channels.len(), 4);
+    }
+
+    #[test]
+    fn tmdb_then_caption_series_episodes_sharing_series_tmdb_id_fall_back_to_distinct_captions() {
+        let mut playlist = vec![make_series_group(
+            "Breaking Bad",
+            vec![
+                make_series_item("Breaking Bad", Some(1396)),
+                make_episode_item("Breaking Bad S01E01", Some(1396)),
+                make_episode_item("Breaking Bad S01E02", Some(1396)),
+                make_episode_item("Breaking Bad S01E03", Some(1396)),
+            ],
+        )];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::TmdbThenCaption,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
+        assert_eq!(removed, 0);
+        assert_eq!(playlist[0].channels.len(), 4);
+    }
+
+    #[test]
+    fn tmdb_collapses_duplicate_series_info_items_in_same_group() {
+        let mut playlist = vec![make_series_group(
+            "Breaking Bad",
+            vec![make_series_item("Breaking Bad HD", Some(1396)), make_series_item("Breaking Bad [4K]", Some(1396))],
+        )];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::Tmdb,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
+        assert_eq!(removed, 1);
+        assert_eq!(playlist[0].channels.len(), 1);
+        assert_eq!(playlist[0].channels[0].header.title.as_ref(), "Breaking Bad [4K]");
+    }
+
+    #[test]
+    fn tmdb_then_caption_does_not_deduplicate_episodes_sharing_title_with_different_series_tmdb() {
+        let mut playlist = vec![make_series_group(
+            "Pilots",
+            vec![make_episode_item("Pilot", Some(1396)), make_episode_item("Pilot", Some(1399))],
+        )];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::TmdbThenCaption,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+        let removed = deduplicate_playlist(&config, &mut playlist, None, &HashSet::new());
         assert_eq!(removed, 0);
         assert_eq!(playlist[0].channels.len(), 2);
     }

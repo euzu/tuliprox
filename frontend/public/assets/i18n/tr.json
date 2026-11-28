@@ -373,6 +373,7 @@
     },
     "CONFIG_INPUT_OPTIONS": {
       "DEFAULT_CONTAINER_EXTENSION": "Ne sağlayıcı ne de akış URL'si bir uzantı belirtmediğinde filmler ve dizi bölümleri için yayınlanan uzantı. Varsayılan mp4'tür; yapılandırılan değer varsayılanın yerine geçer ve hiçbir zaman sağlayıcı değerini geçersiz kılmaz. Playlist sunulurken uygulanır, asla saklanmaz.",
+      "CONTAINER_EXTENSION_SAMPLING": "İsteğe bağlı. Bir playlist güncellemesinden sonra Tuliprox, kapsayıcısını belirtmeyen filmler için Stalker portalına sorar ve yanıtı yayınlar. Güncelleme başına en fazla bu kadar çağrı, aralarında en az yapılandırılan bekleme. Çalışma, bu sayıda art arda kimlik doğrulama veya hız reddinden (401/403/429) sonra durur. Portal isteği harcadığı için varsayılan olarak kapalıdır.",
       "PROBE_DELAY": "Delay in seconds between probe requests (default 2) to reduce provider pressure.",
       "PROBE_LIVE": "Enables background technical analysis for live channels to detect codecs and resolution.",
       "PROBE_LIVE_INTERVAL_HOURS": "Interval in hours between re-probing live channels (default: 120).",
@@ -2162,6 +2163,10 @@
     "STREAM_HISTORY_CONFIDENCE": "Confidence",
     "CONTAINER": "Container",
     "CONTAINER_EXTENSION": "Kapsayıcı uzantısı",
+    "CONTAINER_EXTENSION_SAMPLING": "Kapsayıcı uzantılarını portaldan öğren",
+    "CONTAINER_EXTENSION_SAMPLING_MAX_CALLS": "Güncelleme başına çağrı",
+    "CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL": "Çağrılar arası saniye",
+    "CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS": "Redden sonra dur",
     "STREAM_HISTORY_TIME": "Time",
     "STREAM_HISTORY_TO": "To",
     "STREAM_HISTORY_ENABLED": "Enable stream history",
@@ -2744,6 +2749,10 @@
     "EXPLORER_STATUS_CONFLICT": "Çakışma",
     "EXPLORER_STATUS_VALIDATION_ERROR": "Doğrulama Hatası",
     "EXPLORER_STATUS_ERROR": "Hata",
+    "EXPLORER_REORDER_GROUPS": "Grupları sırala",
+    "EXPLORER_MOVE_GROUP_UP": "Grubu yukarı taşı",
+    "EXPLORER_MOVE_GROUP_DOWN": "Grubu aşağı taşı",
+    "EXPLORER_DRAG_GROUP": "Grubu sıralamak için sürükle",
     "LOGO_SMALL": "Küçük Logo",
     "EPG_CHANNEL_ID": "EPG Kanal Kimliği",
     "CHNO": "Kanal Numarası",
@@ -2830,7 +2839,11 @@
       "EPG_SEARCH_FAILED": "EPG araması başarısız oldu: {error}",
       "PARSE_ERROR": "Geçersiz kılma dosyası bozuk: {error}",
       "SCHEMA_ERROR": "Desteklenmeyen geçersiz kılma şema sürümü: {version}",
-      "SAVE_FAILED_ERROR": "Kaydetme başarısız oldu: {error}"
+      "SAVE_FAILED_ERROR": "Kaydetme başarısız oldu: {error}",
+      "GROUP_ORDER_SAVED": "Grup sırası kaydedildi",
+      "GROUP_ORDER_LOAD_FAILED": "Grup sırası yüklenemedi: {error}",
+      "GROUP_ORDER_CONFLICT": "Yapılandırma çakışması: source.yml sunucuda güncellendi. Kayıtlı grup sırası yeniden yükleniyor...",
+      "GROUP_ORDER_TOO_MANY_GROUPS": "Bu kümede {max} adetten fazla grup bulunduğu için grup sıralama devre dışı bırakıldı."
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content.",
@@ -3327,6 +3340,9 @@
     "invalid_title": "Başlık boş olamaz ve başında/sonunda boşluk içeremez",
     "invalid_group": "Grup boş olamaz ve başında/sonunda boşluk içeremez",
     "invalid_type": "Geçersiz alan türü",
-    "unknown_field": "Bilinmeyen alan"
+    "unknown_field": "Bilinmeyen alan",
+    "too_many_groups": "Sıra listesinde çok fazla grup var",
+    "empty_group_name": "Grup adı boş olamaz",
+    "duplicate_group_name": "Yinelenen grup adı"
   }
 }

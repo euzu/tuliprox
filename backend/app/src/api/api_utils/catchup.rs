@@ -42,6 +42,9 @@ pub(super) struct DetectedCatchupHlsResponseParams<'a> {
     pub(super) connection_permission: UserConnectionPermission,
     pub(super) connection_kind: crate::api::model::ConnectionKind,
     pub(super) fallback_stream_url: &'a str,
+    pub(super) playback_id: Option<&'a str>,
+    pub(super) placeholder_identity: Option<tuliprox_session::SessionIdentity>,
+    pub(super) bound_member: Option<&'a tuliprox_session::MemberBinding>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -61,6 +64,9 @@ pub(super) async fn detected_catchup_hls_response(
         connection_permission,
         connection_kind,
         fallback_stream_url,
+        playback_id,
+        placeholder_identity,
+        bound_member,
     } = params;
 
     let Some(provider) = stream_details.provider_name.clone() else {
@@ -107,20 +113,33 @@ pub(super) async fn detected_catchup_hls_response(
     );
 
     let request_url = stream_details.request_url.as_deref().unwrap_or(fallback_stream_url);
-    let created_session_token = app_state
-        .active_users
-        .create_user_session(crate::api::model::CreateUserSessionParams {
-            user,
-            session_token,
-            virtual_id: virtual_id.get(),
-            provider: &provider,
-            stream_url: request_url,
-            addr: &fingerprint.addr,
-            connection_permission,
-            connection_kind: Some(connection_kind),
-            socket_bound: false,
-        })
-        .await;
+    let session_params = crate::api::model::CreateUserSessionParams {
+        user,
+        session_token,
+        virtual_id: virtual_id.get(),
+        provider: &provider,
+        stream_url: request_url,
+        addr: &fingerprint.addr,
+        connection_permission,
+        connection_kind: Some(connection_kind),
+        socket_bound: false,
+    };
+    let created_session_token = if let Some(identity) = placeholder_identity {
+        let Some((token, _)) = app_state
+            .active_users
+            .create_user_session_checked_with_playback_id(session_params, Some((identity, bound_member)), playback_id)
+            .await
+        else {
+            cleanup_failed_detected_catchup_hls(app_state, &mut stream_details, &user.username, session_token).await;
+            return super::stream_admission_rejected_response(
+                crate::api::model::StreamAdmissionError::RegistrationRejected,
+                &user.username,
+            );
+        };
+        token
+    } else {
+        app_state.active_users.create_user_session_with_playback_id(session_params, playback_id).await
+    };
     if let Some(stream_index) = stream_details.user_agent_stream_index {
         app_state
             .active_users

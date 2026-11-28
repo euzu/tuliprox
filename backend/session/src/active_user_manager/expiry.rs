@@ -250,6 +250,7 @@ impl ActiveUserManager {
                                 connection_data.decrement_kind(kind);
                             }
                             connection_data.stream_normal_priorities.remove(&removed_stream.uid);
+                            connection_data.stream_playback_ids.remove(&removed_stream.uid);
                             if let Some(action) = connection_data.try_promote_soft_stream() {
                                 let promoted_stream =
                                     connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned();

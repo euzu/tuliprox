@@ -1,6 +1,6 @@
 use crate::model::PlaylistItemType;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Display};
 
 pub const OVERRIDE_SCHEMA_VERSION: u32 = 1;
 
@@ -1109,4 +1109,58 @@ pub struct OverrideDiscardRequest {
 pub struct EpgSearchResultDto {
     pub id: String,
     pub display_name: String,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Explorer group order of a target cluster
+// ---------------------------------------------------------------------------------------------
+
+/// Cluster of a target whose group order the Playlist Explorer edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetGroupCluster {
+    Live,
+    Vod,
+    Series,
+}
+
+impl TargetGroupCluster {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Vod => "vod",
+            Self::Series => "series",
+        }
+    }
+}
+
+impl Display for TargetGroupCluster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
+}
+
+/// Body of a successful `GET /playlist/group_order`: the stored order of one cluster.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetGroupOrderDto {
+    #[serde(default)]
+    pub groups: Vec<String>,
+}
+
+/// Body of `PUT /playlist/group_order`.
+///
+/// An empty `groups` list removes the stored order of the cluster, so unlisted groups keep their
+/// source order again. The list itself is required: a body without `groups` is malformed rather
+/// than a request to clear the order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetGroupOrderSaveRequest {
+    pub target: String,
+    pub cluster: TargetGroupCluster,
+    pub groups: Vec<String>,
+}
+
+/// Body of a successful `PUT /playlist/group_order`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetGroupOrderSaveResponse {
+    pub groups: Vec<String>,
+    /// `true` when this save changed `source.yml`; a playlist update is needed for the new order to show up.
+    pub pending: bool,
 }

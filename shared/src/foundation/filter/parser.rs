@@ -13,7 +13,7 @@ use strum::IntoEnumIterator;
 #[grammar_inline = r#"
 WHITESPACE = _{ " " | "\t" | "\r" | "\n"}
 field = { ^"group" | ^"title" | ^"name" | ^"genre" | ^"url" | ^"input" | ^"caption" | ^"epgid"}
-numeric_field = { ^"chno" | ^"quality" | ^"rating" | ^"votes" }
+numeric_field = { ^"chno" | ^"quality" | ^"rating" | ^"votes" | ^"year" }
 and = { ^"and" }
 or = { ^"or" }
 not = { ^"not" }
@@ -204,6 +204,8 @@ fn get_parser_numeric_comparison(expr: Pair<Rule>) -> Result<Leaf, TuliproxError
         ItemField::Rating
     } else if field_text.eq_ignore_ascii_case("votes") {
         ItemField::Votes
+    } else if field_text.eq_ignore_ascii_case("year") {
+        ItemField::Year
     } else {
         return Err(TuliproxError::FilterParse(format!("unknown numeric field: {field_text}")));
     };

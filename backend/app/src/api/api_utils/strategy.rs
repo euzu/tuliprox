@@ -13,7 +13,7 @@ use crate::{
         endpoints::xtream_api::get_xtream_player_api_stream_url,
         model::{AppState, ProviderStreamState},
     },
-    model::ConfigInput,
+    model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
     utils::debug_if_enabled,
 };
 use axum::{http::StatusCode, response::IntoResponse};
@@ -113,6 +113,72 @@ pub(super) fn should_defer_provider_open_for_grace_hold(
     !(!item_type.is_live() && item_type.requires_provider_affinity() && is_reopen)
 }
 
+/// Redirect decision for a playback request.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaybackRedirectDecision {
+    /// Input in maintenance or a media-server playback URL: the request is never redirected.
+    Disabled,
+    /// The request stays on this listener.
+    Proxied,
+    /// Redirect to the provider URL unchanged.
+    Plain,
+    /// Redirect to the HLS variant of the provider URL.
+    Hls,
+    /// Redirect to the DASH variant of the provider URL.
+    Dash,
+    /// HLS playlist item requested with a DASH extension: an M3u redirect ends as DASH, an Xtream redirect as HLS.
+    HlsAndDash,
+}
+
+impl PlaybackRedirectDecision {
+    fn is_disabled(self) -> bool { matches!(self, Self::Disabled) }
+    fn should_redirect(self) -> bool { matches!(self, Self::Plain | Self::Hls | Self::Dash | Self::HlsAndDash) }
+    fn is_hls(self) -> bool { matches!(self, Self::Hls | Self::HlsAndDash) }
+    fn is_dash(self) -> bool { matches!(self, Self::Dash | Self::HlsAndDash) }
+}
+
+fn classify_playback_redirect(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    target: &ConfigTarget,
+    user: &ProxyUserCredentials,
+    item_type: PlaylistItemType,
+    provider_url: &str,
+    stream_ext: Option<&str>,
+) -> PlaybackRedirectDecision {
+    if blocks_new_playback(app_state, input, user, false) || is_media_server_playback_url(input, provider_url) {
+        return PlaybackRedirectDecision::Disabled;
+    }
+
+    let redirect_request = user.proxy.is_redirect(item_type) || target.is_force_redirect(item_type);
+    let is_hls_request = item_type == PlaylistItemType::LiveHls || stream_ext == Some(HLS_EXT);
+    let is_dash_request = (!is_hls_request && item_type == PlaylistItemType::LiveDash) || stream_ext == Some(DASH_EXT);
+
+    // Recording playback keeps provider headers and proxy handling on this listener.
+    // DASH redirects because relative MPD resource URLs are not rewritten.
+    if is_dash_request || (!user.is_recording_proxy_user() && redirect_request) {
+        return match (is_hls_request, is_dash_request) {
+            (true, true) => PlaybackRedirectDecision::HlsAndDash,
+            (true, false) => PlaybackRedirectDecision::Hls,
+            (false, true) => PlaybackRedirectDecision::Dash,
+            (false, false) => PlaybackRedirectDecision::Plain,
+        };
+    }
+    PlaybackRedirectDecision::Proxied
+}
+
+pub(crate) fn should_redirect_playback(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    target: &ConfigTarget,
+    user: &ProxyUserCredentials,
+    item_type: PlaylistItemType,
+    provider_url: &str,
+    stream_ext: Option<&str>,
+) -> bool {
+    classify_playback_redirect(app_state, input, target, user, item_type, provider_url, stream_ext).should_redirect()
+}
+
 pub async fn redirect_response<'a, P>(
     app_state: &Arc<AppState>,
     params: &'a RedirectParams<'a, P>,
@@ -120,30 +186,30 @@ pub async fn redirect_response<'a, P>(
 where
     P: PlaylistEntry,
 {
-    // An input in maintenance is never redirected to its provider; the proxied
-    // path that follows answers with the maintenance clip.
-    if blocks_new_playback(app_state, params.input, params.user, false) {
-        return None;
-    }
     let item_type = params.item.get_item_type();
     let provider_url = params.item.get_provider_url();
-    if is_media_server_playback_url(params.input, provider_url.as_ref()) {
+    // An input in maintenance or media server playback is never redirected to its provider.
+    let decision = classify_playback_redirect(
+        app_state,
+        params.input,
+        params.target,
+        params.user,
+        item_type,
+        provider_url.as_ref(),
+        params.stream_ext,
+    );
+    if decision.is_disabled() {
         return None;
     }
+    let is_hls_request = decision.is_hls();
+    let is_dash_request = decision.is_dash();
 
-    let redirect_request = params.user.proxy.is_redirect(item_type) || params.target.is_force_redirect(item_type);
-    let is_hls_request = item_type == PlaylistItemType::LiveHls || params.stream_ext == Some(HLS_EXT);
-    let is_dash_request =
-        (!is_hls_request && item_type == PlaylistItemType::LiveDash) || params.stream_ext == Some(DASH_EXT);
-
-    // Recording playback keeps provider headers and proxy handling on this listener.
-    // DASH redirects because relative MPD resource URLs are not rewritten.
     if params.user.is_recording_proxy_user() && !is_dash_request {
         return None;
     }
 
     if params.target_type == TargetType::M3u {
-        if redirect_request || is_dash_request {
+        if decision.should_redirect() {
             let redirect_url: Arc<str> = if is_hls_request {
                 replace_url_extension(&provider_url, HLS_EXT).into()
             } else {
@@ -167,7 +233,7 @@ where
             return Some(StatusCode::BAD_REQUEST.into_response());
         };
 
-        if redirect_request || is_dash_request {
+        if decision.should_redirect() {
             let target_name = params.target.name.as_str();
             let virtual_id = params.item.get_virtual_id();
             let stream_url = match get_xtream_player_api_stream_url(

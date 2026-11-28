@@ -102,6 +102,15 @@ impl StalkerError {
         }
     }
 
+    /// `true` for an auth or rate refusal: the portal rejected our identity or told us to slow down.
+    ///
+    /// Background work that costs a portal request per item stops after a run of these instead of
+    /// continuing against a portal that is refusing it, which is what turns a rate limit into a ban.
+    #[must_use]
+    pub fn is_rate_or_auth_refusal(&self) -> bool {
+        self.is_token_rejected() || matches!(self, Self::BadStatus { status: 429, .. })
+    }
+
     pub fn is_unsupported_catalog_action(&self) -> bool {
         match self {
             Self::ActionUnsupported { .. } | Self::BodyDecode { .. } | Self::HtmlResponse { .. } => true,
@@ -226,6 +235,29 @@ mod tests {
             StalkerError::BadStatus { status: 403, action: StalkerAction::GetOrderedList, body_snippet: String::new() };
         assert_eq!(as_status.kind(), StalkerErrorKind::Auth);
         assert!(!as_status.is_retryable(), "looping on a rejected token is never right");
+    }
+
+    /// A refusal is either an identity rejection or a rate limit; anything else is a different
+    /// problem and must not stop a budgeted sampling run.
+    #[test]
+    fn rate_and_auth_refusals_are_distinguished_from_other_failures() {
+        let status = |code| StalkerError::BadStatus {
+            status: code,
+            action: StalkerAction::CreateLink,
+            body_snippet: String::new(),
+        };
+        for refused in [status(401), status(403), status(429), StalkerError::TokenRejected { status: 401, url: None }] {
+            assert!(refused.is_rate_or_auth_refusal(), "{refused} must count as a refusal");
+        }
+        for other in [
+            status(500),
+            status(404),
+            StalkerError::EmptyBody { action: StalkerAction::CreateLink },
+            StalkerError::PortalRefusedCmd { reason: "no cmd".to_string() },
+            StalkerError::UnsupportedScheme { scheme: "file".to_string() },
+        ] {
+            assert!(!other.is_rate_or_auth_refusal(), "{other} must not count as a refusal");
+        }
     }
 
     #[test]

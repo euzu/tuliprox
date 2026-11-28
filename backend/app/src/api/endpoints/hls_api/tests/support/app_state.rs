@@ -298,6 +298,13 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
             templates: None,
         }));
     }
+    test_app_state_with_config_and_hls_proxy(app_config, hls_proxy)
+}
+
+pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_config_and_hls_proxy(
+    app_config: Arc<AppConfig>,
+    hls_proxy: Arc<HlsProxyManager>,
+) -> Arc<AppState> {
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(&app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
@@ -352,6 +359,58 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
         failover_switch_registry: Arc::default(),
         plugins: crate::api::model::AppPlugins::default(),
     })
+}
+
+pub(in crate::api::endpoints::hls_api::tests) fn test_stalker_app_state(
+    input_name: &str,
+    portal_url: &str,
+    storage_dir: &std::path::Path,
+) -> (Arc<AppState>, Arc<ConfigInput>, ConfigTarget) {
+    let app_config = test_app_config_with_storage_dir(storage_dir);
+    let mut config = (**app_config.config.load()).clone();
+    config.reverse_proxy = Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
+        stream: Some(shared::model::StreamConfigDto {
+            hls_wrap_media_playlist: false,
+            ..shared::model::StreamConfigDto::default()
+        }),
+        ..ReverseProxyConfigDto::default()
+    }));
+    app_config.config.store(Arc::new(config));
+
+    let input = Arc::new(ConfigInput {
+        id: 7,
+        name: input_name.intern(),
+        input_type: InputType::Stalker,
+        url: portal_url.to_string(),
+        enabled: true,
+        max_connections: 1,
+        options: Some(crate::model::ConfigInputOptions {
+            flags: crate::model::ConfigInputFlagsSet::new(),
+            ..crate::model::ConfigInputOptions::defaults().clone()
+        }),
+        stalker: Some(crate::model::StalkerInputConfig {
+            device: None,
+            auth_mode: shared::model::StalkerAuthMode::Auto,
+            mag_preset: shared::model::StalkerMagPreset::GenericSafe,
+            endpoint_preference: shared::model::StalkerEndpointPreference::ServerLoad,
+            size_caps: None,
+            catalog_max_pages: None,
+            ..Default::default()
+        }),
+        ..ConfigInput::default()
+    });
+    let target = test_hls_share_target(false);
+    let inputs = vec![Arc::clone(&input)];
+    app_config.sources.store(Arc::new(SourcesConfig {
+        batch_files: vec![],
+        provider: vec![],
+        group_lookup: build_group_lookup(&inputs),
+        inputs,
+        sources: vec![ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![Arc::new(target.clone())] }],
+        templates: None,
+    }));
+    let app_state = test_app_state_with_config_and_hls_proxy(app_config, Arc::new(HlsProxyManager::new()));
+    (app_state, input, target)
 }
 
 pub(in crate::api::endpoints::hls_api::tests) fn single_hls_provider_input(name: &str) -> ConfigInput {

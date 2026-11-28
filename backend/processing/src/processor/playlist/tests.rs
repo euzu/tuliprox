@@ -22,6 +22,8 @@ mod mapping_stage;
 
 mod curation_effect_gate;
 
+mod sampling_trigger;
+
 mod watch_contexts;
 
 mod failover_groups;
@@ -136,6 +138,8 @@ mod disk_epg_wireup_tests {
 mod curation_selection;
 
 mod filter_rename;
+
+mod group_order;
 
 mod imdb_ratings;
 

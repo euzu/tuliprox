@@ -745,6 +745,7 @@ async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() 
             processed_inputs: Arc::default(),
             input_completions: Arc::default(),
             input_locks: Arc::default(),
+            epg_downloads: Arc::default(),
             provider_manager: None,
             metadata_manager: None,
             pre_processed_inputs: None,

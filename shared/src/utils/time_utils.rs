@@ -84,6 +84,33 @@ fn normalize_ts(ts: i64) -> Option<i64> {
     }
 }
 
+/// Extracts the first standalone run of exactly 4 ASCII digits whose value is in `1870..=2100`.
+#[must_use]
+pub fn extract_year(input: &str) -> Option<u32> {
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i - start == 4 {
+                let year = u32::from(bytes[start] - b'0') * 1000
+                    + u32::from(bytes[start + 1] - b'0') * 100
+                    + u32::from(bytes[start + 2] - b'0') * 10
+                    + u32::from(bytes[start + 3] - b'0');
+                if (1870..=2100).contains(&year) {
+                    return Some(year);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 // Note: On wasm32, the `format` parameter is ignored; output is always `YYYY-MM-DD HH:MM:SS`.
 #[cfg(target_arch = "wasm32")]
 pub fn unix_ts_to_str_with_format(ts: i64, _format: &str) -> Option<String> {
@@ -190,5 +217,31 @@ mod tests {
             assert_eq!(parse_duration_millis(input, false), None, "input {input:?} should be rejected");
             assert_eq!(parse_duration_millis(input, true), None, "input {input:?} should be rejected");
         }
+    }
+
+    #[test]
+    fn extract_year_parses_standalone_four_digit_years_in_range() {
+        assert_eq!(extract_year("2024-05-01"), Some(2024));
+        assert_eq!(extract_year("01.05.2024"), Some(2024));
+        assert_eq!(extract_year("2024"), Some(2024));
+        assert_eq!(extract_year("May 1999"), Some(1999));
+        assert_eq!(extract_year("1870"), Some(1870));
+        assert_eq!(extract_year("2100"), Some(2100));
+        assert_eq!(extract_year("1600 / 2024"), Some(2024));
+        assert_eq!(extract_year("12345 2024"), Some(2024));
+        assert_eq!(extract_year("Jahr 2024 – März"), Some(2024));
+    }
+
+    #[test]
+    fn extract_year_rejects_empty_non_four_digit_runs_and_out_of_range() {
+        assert_eq!(extract_year(""), None);
+        assert_eq!(extract_year("   "), None);
+        assert_eq!(extract_year("12345"), None);
+        assert_eq!(extract_year("20240501"), None);
+        assert_eq!(extract_year("1600-01-01"), None);
+        assert_eq!(extract_year("1869"), None);
+        assert_eq!(extract_year("2101"), None);
+        assert_eq!(extract_year("0999"), None);
+        assert_eq!(extract_year("unknown"), None);
     }
 }

@@ -339,6 +339,7 @@ specific provider.
 | `resolve_filter`                           | String   | -       | Filter expression to selectively resolve only entries matching the condition. Uses the same Filter syntax.                                                                                                                             |
 | `probe_filter`                             | String   | -       | Filter expression to selectively probe only entries matching the condition. Uses the same Filter syntax.                                                                                                                               |
 | `default_container_extension`              | String   | `mp4`   | Extension published when neither the provider nor the stream URL states one (default `mp4`). Applied at delivery, never stored; a configured value replaces the default but never overrides a provider value. Needed for Stalker VOD.  |
+| `container_extension_sampling`             | Object   | off     | Opt-in Stalker-only sampling of the portal's playback answer to learn VOD container extensions. See below.                                                                                                                             |
 
 For M3U inputs, `flussonic_hls_catchup: bounded_archive` generates a `catchup-source` for live entries with
 `catchup="fs"`, no existing source, and a `/CHANNEL/mono.m3u8` URL. The generated URL uses
@@ -354,6 +355,42 @@ fallback to live playback or moving timeshift playlists. Omit the option or set 
 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are
 > updated.
+
+#### Stalker container extension sampling
+
+A Stalker portal names a movie's container only in its playback answer (`create_link`), so the playlist serves the
+configured `default_container_extension` until something asks the portal. This opt-in block asks for the movies that
+still have no extension and publishes what the portal answers.
+
+```yaml
+inputs:
+  - name: stalker-portal
+    type: stalker
+    url: http://portal.example/stalker_portal/c/
+    options:
+      container_extension_sampling:
+        enabled: true            # default false
+        max_calls_per_update: 20 # default 20, maximum 200
+        min_interval_secs: 3     # default 3, minimum 1
+        stop_after_refusals: 2   # default 2, minimum 1
+```
+
+The run starts after a playlist update of that input, in the background, and never inside a client request. It:
+
+* samples only movies whose provider value and URL state no extension and that have no sampled value yet,
+* calls `create_link` through the input's Stalker account, never opening a media stream,
+* makes at most `max_calls_per_update` calls, waits at least `min_interval_secs` between two calls, and stops the run
+  after `stop_after_refusals` consecutive auth or rate refusals (401/403/429),
+* does not run while the input is in maintenance or when its update failed, and never retries inside a run.
+
+Learned values are stored in a per-input ledger file, `container_extension_ledger.json` beside the published Stalker
+catalog, independent of the import, and are pruned when their items disappear from the catalog. Delivery order becomes:
+provider value, URL extension, sampled value, configured `default_container_extension`, built-in `mp4`. Every published
+token is canonical. Delete the ledger file to forget all sampled values; set `enabled: false` to stop sampling
+altogether.
+
+> **Note:** This is the only option that sends Stalker requests beyond the playlist import. Leave it off unless the
+> provider tolerates the extra calls; the answers are also what makes `default_container_extension` unnecessary.
 
 #### Update quality guard
 
@@ -516,6 +553,13 @@ epg:
 | **`channel_title`** | String |    No    |         | Optional display name for the generated ICS EPG channel. If omitted, `channel_id` is used as fallback. This value is also used as a Smart Match candidate.                                                             |
 | **`match_names`**   | List   |    No    | `[]`    | Optional additional names for matching the generated ICS channel to playlist entries. Useful when the playlist channel name differs from the calendar title, for example `F1`, `Formula One`, or `Formel 1`.           |
 | **`ics`**           | Object | ICS only |         | Additional configuration for `type: ics`. See [ICS Calendar Source Parameters](#ics-calendar-source-parameters-ics).                                                                                                   |
+
+#### Shared EPG downloads
+
+Within one playlist update, Tuliprox downloads each EPG source only once when several inputs use the same URL, source
+type, request method, headers and ICS size limit (for example one EPG service configured on many inputs). The other inputs get a
+hard link of the downloaded file in their own cache directory, or a copy when a hard link is not possible. The input
+`cache_duration` still applies first: an input with a fresh cached file does not download it again.
 
 #### XMLTV Sources
 
@@ -1716,6 +1760,10 @@ Tuliprox supports the following filter expression types:
 * Numeric comparison on the detected quality tier: `Quality >= 3` <br>
   The tier is derived from quality tokens in the caption: `5` = 4K/UHD/2160p, `4` = QHD/1440p, `3` = FHD/1080p,
   `2` = HD/720p, `1` = SD/480p/576p, `0` = no recognized quality token.
+* Numeric comparison on the release year: `Year >= 2020`, `Year = 2024`, `Year < 2000` <br>
+  `Year` extracts the 4-digit release year (`1870` to `2100`) from the stream's release date (VOD details, series, or
+  episodes). Live channels and items without a valid release date never match a numeric comparison, so select them with
+  `Year IS EMPTY`; `Year IS NOT EMPTY` matches items with a known year.
 * Numeric comparison on the IMDb rating: `Rating = 8`, `Rating != 8`, `Rating > 6`, `Rating >= 6.5`, `Rating < 5`,
   `Rating <= 5.5` <br>
   `Rating` is the effective rating from `0` to `10` with one fraction digit. An unrated item never matches a numeric
@@ -1898,6 +1946,9 @@ Each sort rule supports the following entries:
 > equal, the next rule decides — so a `channel` rule on `group` followed by one on `caption`
 > produces group-then-caption ordering.
 
+The Playlist Explorer can write a group order rule for you (`sequence` of anchored group names with
+`filter: Type = live|vod|series`); see [Group order](playlist-overrides.md#125-group-order).
+
 #### Sort Example
 
 ```yaml
@@ -1991,7 +2042,7 @@ targets:
 | `share_live_streams.hls`                   | Bool | No       | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `share_live_streams.mpeg_ts`               | Bool | No       | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.                                                                                                                                                                                                                                                                                                                                                                |
 | `remove_duplicates`                        | Bool | No       | `false` | Legacy pre-transform identity deduplication. It runs independently for each input before the F/R/M pipe and removes repeated source identities before mapping can emit additional items. The field remains supported for backward compatibility.                                                                                                                                                                                                                                                                                                                                                  |
-| `deduplicate`                              | Map  | No       | -       | Post-merge, quality-aware content deduplication. It runs after all inputs have been transformed and merged. Channels whose match value is identical after stripping quality tokens (`4K`, `UHD`, `2160p`, `QHD`, `1440p`, `FHD`, `1080p`, `HD`, `720p`, `SD`, `480p`, `576p`) collapse to one entry. Sub-keys: `match_by` (`caption` (default), `name`, `title`), `keep` (`best_quality` (default), `first`) and `match_as_ascii` (default `false`). Matching is per cluster across all groups; ties keep the first occurrence. This lets mappings affect the final duplicate comparison results. |
+| `deduplicate`                              | Map  | No       | -       | Post-merge, quality-aware content deduplication. See [Quality-Aware Deduplication](#quality-aware-deduplication-example).                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `epg_output.clear_invalid_ids`             | Bool | No       | `false` | Clears an EPG ID when it does not resolve to the processed EPG data. Playlist entries are never removed. Smart matching runs first, and IDs introduced or changed by later mappings are validated again before the `persist` filter.                                                                                                                                                                                                                                                                                                                                                              |
 | `epg_output.adopt_guide_id_case`           | Bool | No       | `true`  | Rewrites a live channel EPG id that matches a guide channel only case-insensitively (for example `usa4k.us` against `<channel id="USA4K.us">`) to the guide's exact spelling, so the M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV `<channel id>` and EPG API lookups use the same id. Set `false` to keep the playlist's original spelling. Changing this option requires a full target refresh.                                                                                                                                                                                                  |
 | `epg_output.lowercase_ids`                 | Bool | No       | `false` | Canonicalizes visible technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV channel/programme references, and EPG API responses. Changing this option requires a full target refresh.                                                                                                                                                                                                                                                                                                                                                                        |
@@ -2013,6 +2064,23 @@ targets:
 
 #### Quality-Aware Deduplication Example
 
+`deduplicate` runs after all inputs have been transformed and merged, so mappings affect the comparison. Channels
+whose match value is identical after stripping quality tokens (`4K`, `UHD`, `2160p`, `QHD`, `1440p`, `FHD`, `1080p`,
+`HD`, `720p`, `SD`, `480p`, `576p`) collapse to one entry. Sub-keys:
+
+* `match_by`: `caption` (default), `name`, `title`, `tmdb` or `tmdb_then_caption`.
+  * `caption`, `name` and `title` match per cluster across all groups.
+  * `tmdb` matches movies and series by TMDB id, only within the same group. Live channels, episodes and items
+    without a TMDB id are ignored (episodes carry the TMDB id of their series, so they are never matched by it).
+  * `tmdb_then_caption` uses the TMDB id when the item has one and the caption otherwise, also only within the same
+    group. Two films with the same title but different TMDB ids (remakes) stay separate. Episodes are never
+    deduplicated in this mode either, because two episodes with the same title can belong to different series.
+* `keep`: `best_quality` (default, ranked from the caption), `first`, or `plugin:<id>`.
+* `match_as_ascii`: default `false`.
+
+Ties keep the first occurrence. TMDB ids come from the provider or from the background metadata resolution, so an
+id found by the resolution is used from the next update on.
+
 Keep only the best-quality copy of every channel, collapsing entries like `News HD`, `News FHD`, and `NEWS [4K]`
 into the single `NEWS [4K]` entry:
 
@@ -2022,7 +2090,7 @@ targets:
     filter: 'Group ~ ".*"'
     options:
       deduplicate:
-        match_by: caption      # caption (default) | name | title
+        match_by: caption      # caption (default) | name | title | tmdb | tmdb_then_caption
         keep: best_quality     # best_quality (default) | first
         match_as_ascii: false  # true: "Café HD" matches "Cafe FHD"
     output:

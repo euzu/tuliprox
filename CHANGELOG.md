@@ -228,6 +228,49 @@
 
 ## 🌟 New Features
 
+- **Stalker VOD container extension sampling (opt-in).** A Stalker input can learn the real container of movies
+  whose portal entry has none: with `options.container_extension_sampling.enabled: true`, a background run after a
+  successful playlist update asks the portal's `create_link` for at most `max_calls_per_update` items (default 20,
+  max 200), `min_interval_secs` apart (default 3), and stops after `stop_after_refusals` consecutive auth or rate
+  refusals (default 2). Results are kept in a ledger per input and published before the configured
+  `default_container_extension`. It never opens a media stream and is off by default, because every sample is a
+  portal request.
+
+- **Player playback id.** Players with the Player API can send `X-Tuliprox-Playback-Id` (or Apple's
+  `X-Playback-Session-Id`) on stream requests. A new request of the same user with the same id replaces the old
+  connection at once, so a reconnect after an abrupt drop no longer runs into the connection limit.
+
+- **Reorder groups in the Playlist Explorer.** In a target view, users with `source.write` can drag groups into a new
+  order (or use move up and move down) and save it. The order is stored in `source.yml` as the first group sort rule
+  of the target cluster (`sequence` of the group names), so it stays config-first and takes effect with the next
+  playlist update. A new group created by a target-scope bulk edit is placed below the selected group. Only block-style
+  `sort` blocks are edited; other layouts answer `409` and stay unchanged. New endpoints:
+  `GET`/`PUT /api/v1/playlist/group_order`.
+
+- **Deduplicate movies and series by TMDB id.** `deduplicate.match_by` accepts `tmdb` and `tmdb_then_caption`.
+  `tmdb` collapses movies and series with the same TMDB id inside one group and ignores everything else (live
+  channels, episodes, items without an id). `tmdb_then_caption` uses the TMDB id when present and the caption
+  otherwise, also inside one group, and skips episodes; remakes with the same title but different TMDB ids stay
+  separate. `keep: best_quality` ranks by the caption. The existing `caption`, `name` and `title` modes are unchanged
+  (per cluster across all groups).
+
+- **One EPG download per URL and update.** Inputs that use the same EPG URL, source type, request method, headers
+  and ICS size limit now share one download per playlist update; the other inputs receive a hard link (or a copy) of the file in their own cache
+  directory. Parallel inputs wait for the running download instead of starting a second one. A failed download is
+  retried by the next input.
+
+- **Release year, rating and votes in mappings and filters.** The mapper DSL has the read-only fields `@year`,
+  `@rating` and `@votes`, and Rhai mapping scripts read `item.year`, `item.rating` and `item.votes`. The filter DSL
+  has the numeric field `Year` (`Year >= 2020`, `Year IS EMPTY`). The year is the first four-digit year
+  (`1870`-`2100`) in the release date of a movie, series or episode; live channels and items without a usable date
+  have no year. With `resolve_background: true` (the default), dates found by the background resolution arrive with
+  the next update. Example in [Mapper DSL](docs/src/configuration/mapping-dsl.md): append the year in parentheses to titles
+  without a year.
+
+- **Documentation: fallback outgoing proxies with GOST.** The outgoing proxy section explains how to put a local
+  GOST instance with several upstream SOCKS5 proxies in front of `proxy.url`, so a dead proxy is replaced by the
+  next one. A proxy IP that the provider bans is not detected by this setup.
+
 - **Xtream catch-up table from the local EPG.** `player_api.php?action=get_simple_data_table&stream_id=<virtual id>`
   now answers from the target's local EPG database instead of the provider, like `get_short_epg`. The listing starts
   at the oldest programme that ends inside the channel's archive window (`tv_archive_duration`, the longest playable
@@ -1779,6 +1822,43 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Xtream timeshift error responses for M3U HLS archives.** An expired user or a denied request on an M3U HLS
+  archive received the MPEG-TS style error answer, because the HLS decision used the client's `.ts` extension before
+  the archive URL was resolved. The archive is now resolved first.
+
+- **Explorer group order hardening.** Comments inside the stored Explorer rule (between or after the group names,
+  or in a rule that is rewritten), a no-op save on an unsupported
+  layout, a failed read-back after a write error, names like `Sports !HD!`, and apostrophes in plain YAML values
+  (`family's.m3u`) are handled correctly; bulk edits keep committed overrides when the group placement fails and
+  offer a retry of the placement only.
+
+- **Direct live streams start at once again.** Since the live edge trim, every live MPEG-TS stream was held until
+  the provider's start-up burst was over (up to 5 seconds), which slowed down channel switching. The start trim now
+  applies only to shared live streams and failover groups; a direct stream passes through immediately and keeps the
+  provider burst, as before. `shared_burst_secs` keeps controlling joins, shared starts and group switches.
+
+- **Xtream timeshift for M3U inputs follows the playback provider.** The Xtream timeshift bridge built the archive
+  URL from the first provider URL and the stored generated Flussonic archive template, so it ignored provider
+  priority and failover. It now resolves the archive through the playback provider like the M3U catch-up route:
+  the preferred mirror serves the archive, and a failing mirror fails over to the next one. Explicit catch-up
+  sources keep their destination.
+  HLS archives requested through Xtream timeshift now also use the HLS session handler; the playback extension
+  was computed as `..m3u8`, so such archives fell back to a plain playlist rewrite.
+
+- **User category selection no longer loses groups after a target bouquet change.** A user's Xtream category
+  selection matched categories by id. A group that a target bouquet removed for one update received a new id when
+  it came back, so it disappeared for the user until the selection was saved again. The selection now matches by
+  category name; stored selections work unchanged. A client request with a `category_id` outside the user's
+  selection now returns no entries instead of bypassing the selection.
+
+- **Provider ratings outside 0 to 10 no longer become the effective rating.** Negative ratings or ratings above 10
+  from the provider are ignored for the effective rating (filters `Rating`, `@rating`, sorting, `replace_rating`
+  output and the Web UI explorer rating badge); IMDb can still supply one. The raw provider `rating` field is
+  passed through unchanged. A rating override of `0` clears the provider rating; another value outside 0 to 10 is ignored.
+  The rating source documentation no longer claims a TMDB rating fallback for Xtream and M3U items. The Xtream
+  series info `year` now uses the same year rule as `@year` (for example `01.05.2024` gives `2024` instead of
+  `105`).
 
 - **Recording database from earlier releases opens again.** The Xtream VOD ids for recordings added two fields in
   the middle of the stored recording library entry. The recording database stores fields by position, so tuliprox

@@ -131,6 +131,7 @@ impl Leaf {
                     ItemField::Quality => Some(u64::from(provider.quality_rank()) * 10),
                     ItemField::Votes => provider.pli.header.get_imdb_votes().map(|v| u64::from(v) * 10),
                     ItemField::Rating => provider.pli.header.effective_rating_tenths(),
+                    ItemField::Year => provider.pli.header.get_release_year().map(|y| u64::from(y) * 10),
                     _ => return false,
                 };
                 let Some(actual) = actual else {

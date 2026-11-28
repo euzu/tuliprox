@@ -202,13 +202,19 @@ resolution found the id. Title tags and provider ids work on the first update.
 
 The result of the rating lookup is the **effective rating**:
 
-* `imdb_then_provider` (default): the IMDb rating when its votes reach `min_votes`, else the provider or TMDB
-  rating, else no rating. This is the same approach as the Jellyfin IMDb rating updater.
+* `imdb_then_provider` (default): the IMDb rating when its votes reach `min_votes`, else the item's own rating (the
+  provider rating; for local library items the NFO or TMDB rating), else no rating. This is the same approach as the
+  Jellyfin IMDb rating updater. Xtream and M3U items do not receive a TMDB rating.
 * `imdb`: only IMDb ratings that pass `min_votes`; every other item stays unrated. Use `Rating IS EMPTY` in a filter
   to find these items.
 * `provider`: the provider rating only. The filter fields still work.
 
 When IMDb is disabled, the effective rating is the provider rating.
+
+A provider rating counts for the effective rating only when it is above `0` and at most `10`. Values outside this
+range (some providers send negative numbers or values above 10) are treated as missing for the effective rating, so
+`imdb_then_provider` leaves the effective rating empty unless IMDb has a rating. The raw provider `rating` field in
+the Xtream output is passed through unchanged.
 
 ### Why `min_votes` Matters
 
@@ -228,6 +234,9 @@ Series use the series rating. Episode ratings are not supported.
 * `Rating > 6`
 * `Rating >= 6.5 AND Votes >= 5000`
 * `Type = movie AND (Rating >= 7 OR Rating IS EMPTY)`
+
+The same values are also exposed as read-only `@rating` and `@votes` fields in
+[mapping DSL](mapping-dsl.md#21-the-mapper-dsl-mapper) scripts.
 
 See [Filter](source.md#322-filter) for the complete operator syntax.
 

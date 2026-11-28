@@ -1261,6 +1261,8 @@ pub(super) async fn try_shared_stream_response_if_any(
     session_token: &str,
     req_headers: &HeaderMap,
     placeholder_transition_version: Option<u64>,
+    placeholder_identity: Option<tuliprox_session::SessionIdentity>,
+    playback_id: Option<&str>,
     is_free_join: bool,
 ) -> Option<impl IntoResponse> {
     let subscriber_id =
@@ -1318,20 +1320,40 @@ pub(super) async fn try_shared_stream_response_if_any(
         // creation; `is_over_limit` on an unknown provider is a no-op.
         let provider_name = stream_details.provider_name.as_deref().unwrap_or("shared");
         let effective_permission = if is_free_join { UserConnectionPermission::Allowed } else { connect_permission };
-        let _ = app_state
-            .active_users
-            .create_user_session(crate::api::model::CreateUserSessionParams {
-                user,
-                session_token,
-                virtual_id: stream_channel.virtual_id,
-                provider: provider_name,
-                stream_url,
-                addr: &fingerprint.addr,
-                connection_permission: effective_permission,
-                connection_kind: Some(connection_kind),
-                socket_bound,
-            })
-            .await;
+        let session_params = crate::api::model::CreateUserSessionParams {
+            user,
+            session_token,
+            virtual_id: stream_channel.virtual_id,
+            provider: provider_name,
+            stream_url,
+            addr: &fingerprint.addr,
+            connection_permission: effective_permission,
+            connection_kind: Some(connection_kind),
+            socket_bound,
+        };
+        if let Some(identity) = placeholder_identity {
+            let refreshed = app_state
+                .active_users
+                .create_user_session_checked_with_playback_id(session_params, Some((identity, None)), playback_id)
+                .await;
+            if refreshed.is_none() {
+                app_state
+                    .active_users
+                    .release_unbound_session_reservation(
+                        &user.username,
+                        session_token,
+                        placeholder_transition_version,
+                        placeholder_transition_version.is_some(),
+                    )
+                    .await;
+                return Some(stream_admission_rejected_response(
+                    crate::api::model::StreamAdmissionError::RegistrationRejected,
+                    &user.username,
+                ));
+            }
+        } else {
+            let _ = app_state.active_users.create_user_session_with_playback_id(session_params, playback_id).await;
+        }
         stream_channel.shared = true;
         stream_channel.shared_joined_existing = Some(true);
         // Joining an existing origin reuses its meter identity. When metrics are disabled

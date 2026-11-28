@@ -11,8 +11,8 @@ use shared::{
         XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc,
     },
     utils::{
-        get_i64_from_serde_value, get_string_from_serde_value, resolve_container_extension, sanitize_sensitive_info,
-        Internable, PROVIDER_SCHEME_PREFIX,
+        get_i64_from_serde_value, get_string_from_serde_value, resolve_container_extension_with_ledger,
+        sampled_container_extension, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{collections::HashMap, future::Future, io::Error, str::FromStr, sync::Arc};
@@ -1147,15 +1147,21 @@ fn check_alias_user_state<E: EventSink>(events: &E, input: &ConfigInput) {
 /// Build the `get_vod_info` document for one item.
 ///
 /// `configured_extension` is the input's `options.default_container_extension`. It answers after the
-/// provider value and the item URL and never overrides either; when it is unset too, the built-in
-/// default applies.
+/// provider value, the item URL and a sampled value, and never overrides them; when it is unset too, the
+/// built-in default applies. This path builds one document per request, so the sampled value is read
+/// directly from the published map: a memory lookup, no I/O.
 pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem, configured_extension: Option<&str>) -> String {
     let category_id = pli.category_id;
     let added = pli.additional_properties.as_ref().and_then(StreamProperties::get_last_modified).unwrap_or(0);
     let name = &pli.name;
     let stored_extension = pli.get_container_extension();
-    let extension =
-        resolve_container_extension(stored_extension.as_deref().unwrap_or(""), &pli.url, configured_extension);
+    let sampled_extension = sampled_container_extension(&pli.input_name, pli.provider_id);
+    let extension = resolve_container_extension_with_ledger(
+        stored_extension.as_deref().unwrap_or(""),
+        &pli.url,
+        sampled_extension.as_deref(),
+        configured_extension,
+    );
 
     let mut doc = XtreamVideoInfoDoc::default();
     doc.info.name.clone_from(name);

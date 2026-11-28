@@ -9,11 +9,11 @@ use shared::{
     error::TuliproxError,
     foundation::Filter,
     model::{
-        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, EpgConfigDto,
-        EpgSourceTypeDto, FlussonicHlsCatchup, InputFetchMethod, InputPersistence, InputType,
-        MediaServerCatalogConfigDto, MediaServerInputConfigDto, MediaServerLibrarySelector, PluginHook, PluginHost,
-        ProviderAccountIdentity, StagedInputType, StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference,
-        StalkerInputConfigDto, StalkerMagPreset,
+        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
+        ContainerExtensionSamplingDto, EpgConfigDto, EpgSourceTypeDto, FlussonicHlsCatchup, InputFetchMethod,
+        InputPersistence, InputType, MediaServerCatalogConfigDto, MediaServerInputConfigDto,
+        MediaServerLibrarySelector, PluginHook, PluginHost, ProviderAccountIdentity, StagedInputType, StalkerAuthMode,
+        StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
     },
     utils::{
         get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string,
@@ -74,6 +74,10 @@ pub struct ConfigInputOptions {
     /// stream URL states one. `None` means the built-in default applies. Applied at delivery, never
     /// persisted into a playlist item.
     pub default_container_extension: Option<String>,
+    /// Opt-in sampling of the provider's `create_link` answer for Stalker VOD items that carry no
+    /// container extension. Runs in the background after a playlist update; see
+    /// `ConfigInput::container_extension_sampling`.
+    pub container_extension_sampling: ContainerExtensionSamplingDto,
 }
 
 macros::from_impl!(ConfigInputOptions);
@@ -124,6 +128,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             resolve_filter: dto.t_resolve_filter.clone(),
             probe_filter: dto.t_probe_filter.clone(),
             default_container_extension: dto.default_container_extension.clone(),
+            container_extension_sampling: dto.container_extension_sampling,
         }
     }
 }
@@ -171,6 +176,15 @@ impl ConfigInput {
     #[inline]
     pub fn default_container_extension(&self) -> Option<&str> {
         self.options.as_ref()?.default_container_extension.as_deref()
+    }
+
+    /// Container-extension sampling limits, when the input opted in.
+    ///
+    /// The sampler reads this per run, so enabling or tuning it applies to the next update without a
+    /// restart. Disabled and absent are the same answer: no portal request is ever made.
+    #[inline]
+    pub fn container_extension_sampling(&self) -> Option<&ContainerExtensionSamplingDto> {
+        self.options.as_ref().map(|options| &options.container_extension_sampling).filter(|sampling| sampling.enabled)
     }
 
     /// Re-resolves declared XMLTV `auto` sources using the current account and alias data.
@@ -1481,6 +1495,52 @@ mod tests {
         let mut no_sources = media_server;
         no_sources.catalog.include_media_sources = false;
         assert!(!input.emby_client_settings(&no_sources).include_media_sources);
+    }
+
+    #[test]
+    fn input_container_extension_sampling_is_opt_in() {
+        let sampling = ContainerExtensionSamplingDto {
+            enabled: true,
+            max_calls_per_update: 7,
+            min_interval_secs: 4,
+            stop_after_refusals: 1,
+        };
+        let enabled = ConfigInput {
+            options: Some(ConfigInputOptions {
+                container_extension_sampling: sampling,
+                ..ConfigInputOptions::defaults().clone()
+            }),
+            ..ConfigInput::default()
+        };
+        let configured = enabled.container_extension_sampling().expect("an enabled block is exposed");
+        assert_eq!(configured.max_calls_per_update, 7);
+        assert_eq!(configured.min_interval_secs, 4);
+        assert_eq!(configured.stop_after_refusals, 1);
+
+        let disabled = ConfigInput {
+            options: Some(ConfigInputOptions {
+                container_extension_sampling: ContainerExtensionSamplingDto::default(),
+                ..ConfigInputOptions::defaults().clone()
+            }),
+            ..ConfigInput::default()
+        };
+        assert!(disabled.container_extension_sampling().is_none(), "the default block never samples");
+        assert!(ConfigInput::default().container_extension_sampling().is_none(), "no options means no sampling");
+    }
+
+    #[test]
+    fn input_options_conversion_carries_container_extension_sampling() {
+        let dto = ConfigInputOptionsDto {
+            container_extension_sampling: ContainerExtensionSamplingDto {
+                enabled: true,
+                max_calls_per_update: 9,
+                ..ContainerExtensionSamplingDto::default()
+            },
+            ..ConfigInputOptionsDto::default()
+        };
+
+        assert_eq!(ConfigInputOptions::from(&dto).container_extension_sampling.max_calls_per_update, 9);
+        assert!(!ConfigInputOptions::defaults().container_extension_sampling.enabled);
     }
 
     #[test]

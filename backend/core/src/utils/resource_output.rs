@@ -274,6 +274,7 @@ mod tests {
             web_ui_request: false,
             encrypt_secret: [0; 16],
             resource_host_policies: Arc::default(),
+            sampled_container_extensions: Arc::default(),
             default_container_extensions: Arc::default(),
             replace_rating: false,
         };

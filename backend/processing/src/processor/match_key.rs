@@ -8,11 +8,12 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-pub(in crate::processor) const fn dedup_match_by(value: DeduplicateMatchBy) -> ChannelMatchBy {
+pub(in crate::processor) const fn dedup_match_by(value: DeduplicateMatchBy) -> Option<ChannelMatchBy> {
     match value {
-        DeduplicateMatchBy::Caption => ChannelMatchBy::Caption,
-        DeduplicateMatchBy::Name => ChannelMatchBy::Name,
-        DeduplicateMatchBy::Title => ChannelMatchBy::Title,
+        DeduplicateMatchBy::Caption => Some(ChannelMatchBy::Caption),
+        DeduplicateMatchBy::Name => Some(ChannelMatchBy::Name),
+        DeduplicateMatchBy::Title => Some(ChannelMatchBy::Title),
+        DeduplicateMatchBy::Tmdb | DeduplicateMatchBy::TmdbThenCaption => None,
     }
 }
 

@@ -43,6 +43,13 @@ pub trait MetadataUpdateSink: Send + Sync + 'static {
 
     /// Enqueue a detail-resolution task without waiting for it to be accepted.
     fn queue_task_background(self: Arc<Self>, input_name: Arc<str>, task: UpdateTask);
+
+    /// Queue the opt-in Stalker container-extension sampling of one input.
+    ///
+    /// Called once per input whose playlist update published a catalog, so the run starts after the
+    /// update and off the request path. The worker serializes it against playlist updates like any other
+    /// background task.
+    fn queue_container_extension_sampling(self: Arc<Self>, input_name: Arc<str>);
 }
 
 /// The sink type parameter of a run that has no metadata worker.
@@ -66,4 +73,6 @@ impl MetadataUpdateSink for NoopMetadataSink {
     fn should_skip_enqueue(&self, _input_name: &str, _task: &UpdateTask) -> bool { true }
 
     fn queue_task_background(self: Arc<Self>, _input_name: Arc<str>, _task: UpdateTask) {}
+
+    fn queue_container_extension_sampling(self: Arc<Self>, _input_name: Arc<str>) {}
 }

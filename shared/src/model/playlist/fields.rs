@@ -10,6 +10,8 @@ use std::sync::Arc;
 pub enum FieldRef<'a> {
     /// An interned field. Cloning is a refcount bump.
     Shared(&'a Arc<str>),
+    /// An owned interned string, e.g. formatted rating or votes.
+    Owned(Arc<str>),
     /// A borrowed string that is not interned, e.g. `item_type.as_str()`.
     Str(&'a str),
     /// A numeric field, kept numeric.
@@ -22,6 +24,7 @@ impl FieldRef<'_> {
     pub fn as_cow(&self) -> std::borrow::Cow<'_, str> {
         match self {
             Self::Shared(value) => std::borrow::Cow::Borrowed(value.as_ref()),
+            Self::Owned(value) => std::borrow::Cow::Borrowed(value.as_ref()),
             Self::Str(value) => std::borrow::Cow::Borrowed(value),
             Self::Num(value) => std::borrow::Cow::Owned(value.to_string()),
         }
@@ -34,6 +37,7 @@ impl FieldRef<'_> {
     pub fn to_arc(&self) -> Arc<str> {
         match self {
             Self::Shared(value) => Arc::clone(value),
+            Self::Owned(value) => Arc::clone(value),
             Self::Str(value) => value.intern(),
             Self::Num(value) => value.to_string().intern(),
         }

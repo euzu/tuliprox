@@ -163,7 +163,7 @@ reverse_proxy:
 | `provider_affinity_ttl_secs` | Int | `120` | How long a reconnect-capable playback (HLS, DASH, Catchup, VOD) keeps returning to its last provider account after the reconnect window has ended. It holds no connection slot and never causes a grace over-allocation. `0` ends the preference together with the reconnect window; the maximum is `86400`. See [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup). |
 | `hls_wrap_media_playlist` | Bool | `true` | With the shared HLS cache off, a proxied live HLS entry request whose provider returns a media playlist is answered with a single-variant master playlist. The player then refreshes a sealed token URL instead of the entry URL, so the playback keeps its owner, lease and provider account when the client IP changes. Disable it for players that mishandle a master playlist. See [Playlist refreshes and client IP changes](#playlist-refreshes-and-client-ip-changes). |
 | `shared_burst_buffer_mb` | Int | `12` | Minimum size (in MB) of the burst ring buffer and lag reserve for slow subscribers on shared live streams. A larger channel buffer can raise the ring size, and a single chunk larger than the ring is kept whole. See notes on section [Shared Live Streams](#shared-live-streams) for details. |
-| `shared_burst_secs` | Int | `3` | Minimum seconds a new subscriber of a shared live stream starts behind live, aligned to the newest keyframe arriving at least this many seconds ago. Also the start point of a live MPEG-TS stream and of a failover member after a switch: the provider's start-up burst is held back and playback starts at the newest keyframe that is at least this many seconds of media behind the newest media, when the held media contains one. The value is a target, not a maximum: keyframe alignment adds up to one keyframe interval, and the fallbacks (no keyframe detected, hold limit reached) can start farther behind. `0` sends the whole burst buffer and turns the start trim off. See [Shared Live Streams](#shared-live-streams). |
+| `shared_burst_secs` | Int | `3` | Minimum seconds a new subscriber of a shared live stream starts behind live, aligned to the newest keyframe arriving at least this many seconds ago. Also the start point of a shared live MPEG-TS stream and of a failover group stream with `playback.failover.enabled: true`, item type `Live` and an MPEG-TS payload (first member and after a switch): the provider's start-up burst is held back and playback starts at the newest keyframe that is at least this many seconds of media behind the newest media, when the held media contains one. A direct live stream (not shared, and not a group stream with runtime failover) starts at once and keeps the provider burst; this includes a group member that is opened without runtime failover. The value is a target, not a maximum: keyframe alignment adds up to one keyframe interval, and the fallbacks (no keyframe detected, hold limit reached) can start farther behind. `0` sends the whole burst buffer and turns the start trim off. See [Shared Live Streams](#shared-live-streams). |
 | `cleanup_queue_capacity` | Int | `4096` | Maximum number of concurrent cleanup permits available to active response bodies and shared subscribers. Must be at least `1`. If all permits remain held, new stream admission waits for a bounded interval and then returns `503 Service Unavailable` instead of growing memory without limit. |
 | `recent_eviction_reentry_ttl_ms` | Int | `3000` | Time window after an eviction during which a retry of the evicted playback must not evict its replacement. The guard is scoped to the user, client address and channel, so unrelated clients are not blocked. Suppressed retries end quietly (no `user_connections_exhausted` video and no `ConnectionDenied` event), since they are not a real connection-limit refusal. Raise this for players with slow automatic retries; `0` disables the guard. The cumulative suppression count is exposed as `reentry_suppressed_total` in the server status (`GET /api/v1/status`). |
 
@@ -753,9 +753,12 @@ Setting `shared_burst_secs: 0` sends the whole burst buffer from its oldest byte
 
 Many providers send 15-25 seconds of media within the first one or two seconds of a new connection and then continue
 in real time. Without a trim, the first viewer of a channel plays that whole burst and stays that far behind live.
-Tuliprox therefore holds the start of every live MPEG-TS stream (shared or direct, `Live` channels only) until the
-burst is over and then starts at the newest keyframe that is at least `shared_burst_secs` of media behind the newest
-data. The media time comes from the stream's PCR clock, so the arrival time of the burst does not matter.
+Tuliprox therefore holds the start of shared live MPEG-TS streams (`Live` channels only) and of failover group
+streams with runtime failover (`playback.failover.enabled: true`, item type `Live`, MPEG-TS payload) until the burst
+is over and then starts at the newest keyframe that is at least `shared_burst_secs` of media behind the newest data.
+A direct live stream (not shared, and not a group stream with runtime failover) starts at once and keeps the provider
+burst; this includes a group member that is opened without runtime failover. The media time comes from the stream's
+PCR clock, so the arrival time of the burst does not matter.
 
 * The burst is over when, during the last 400 ms, the received media ran ahead of the clock by less than 100 ms.
 * The hold lasts at most 5 seconds and 32 MB; then playback starts at the best start point found so far.
@@ -765,8 +768,10 @@ data. The media time comes from the stream's PCR clock, so the arrival time of t
 * Streams that are not MPEG-TS pass through at once. Streams without PCR start after about 0.4 seconds with all held data.
 * A pause inside the burst shorter than 400 ms does not end the hold; after a longer pause the rest of the burst
   passes on. A very large burst (high bitrate) keeps only the newest part in memory and is still trimmed.
-* Failover group streams use the same trim for their first member and for every member spliced in on a switch, see
-  [Failover while watching](failover-groups-settings.md#failover-while-watching).
+* Failover group streams use the same trim for their first member and for every member spliced in on a switch, when
+  runtime failover is active (`playback.failover.enabled: true`, item type `Live`, MPEG-TS payload), see
+  [Failover while watching](failover-groups-settings.md#failover-while-watching). A group member opened without
+  runtime failover is a direct stream: it starts at once and keeps the provider burst.
 * `shared_burst_secs: 0` turns the trim off.
 
 Each viewer has a distinct subscriber identity even when several viewers arrive through the same reverse-proxy socket.

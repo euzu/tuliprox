@@ -19,6 +19,7 @@ pub enum ItemField {
     Quality,
     Rating,
     Votes,
+    Year,
 }
 
 impl<'de> Deserialize<'de> for ItemField {
@@ -47,6 +48,7 @@ impl Display for ItemField {
             Self::Quality => "Quality",
             Self::Rating => "Rating",
             Self::Votes => "Votes",
+            Self::Year => "Year",
         })
     }
 }
@@ -84,6 +86,9 @@ pub enum HeaderField {
     Chno,
     Genre,
     FailoverGroup,
+    Year,
+    Rating,
+    Votes,
 }
 
 impl HeaderField {
@@ -116,6 +121,9 @@ impl HeaderField {
             ("chno", HeaderField::Chno),
             ("genre", HeaderField::Genre),
             ("failover_group", HeaderField::FailoverGroup),
+            ("year", HeaderField::Year),
+            ("rating", HeaderField::Rating),
+            ("votes", HeaderField::Votes),
         ];
         TABLE.iter().find(|(key, _)| name.eq_ignore_ascii_case(key)).map(|(_, field)| *field)
     }
@@ -142,6 +150,9 @@ impl HeaderField {
             Self::Chno => "chno",
             Self::Genre => "genre",
             Self::FailoverGroup => "failover_group",
+            Self::Year => "year",
+            Self::Rating => "rating",
+            Self::Votes => "votes",
         }
     }
 }
@@ -171,7 +182,10 @@ impl ItemField {
             Self::Caption => Some(HeaderField::Caption),
             Self::EpgId => Some(HeaderField::EpgChannelId),
             Self::Chno => Some(HeaderField::Chno),
-            Self::Quality | Self::Rating | Self::Votes => None,
+            Self::Year => Some(HeaderField::Year),
+            Self::Rating => Some(HeaderField::Rating),
+            Self::Votes => Some(HeaderField::Votes),
+            Self::Quality => None,
         }
     }
 }
@@ -186,6 +200,8 @@ mod tests {
         assert_eq!(ItemField::from_str("TITLE").expect("upper case field parses"), ItemField::Title);
         assert_eq!(ItemField::from_str("Rating").expect("rating parses"), ItemField::Rating);
         assert_eq!(ItemField::from_str("votes").expect("votes parses"), ItemField::Votes);
+        assert_eq!(ItemField::from_str("Year").expect("year parses"), ItemField::Year);
+        assert_eq!(ItemField::from_str("YEAR").expect("upper year parses"), ItemField::Year);
     }
 
     #[test]
@@ -197,6 +213,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<ItemField>("\"TITLE\"").expect("upper case field parses"), ItemField::Title);
         assert_eq!(serde_json::from_str::<ItemField>("\"rating\"").expect("rating parses"), ItemField::Rating);
         assert_eq!(serde_json::from_str::<ItemField>("\"Votes\"").expect("votes parses"), ItemField::Votes);
+        assert_eq!(serde_json::from_str::<ItemField>("\"Year\"").expect("year parses"), ItemField::Year);
     }
 
     #[test]
@@ -204,5 +221,14 @@ mod tests {
         assert_eq!(serde_json::to_string(&ItemField::Group).expect("item field serializes"), "\"group\"");
         assert_eq!(serde_json::to_string(&ItemField::Rating).expect("item field serializes"), "\"rating\"");
         assert_eq!(serde_json::to_string(&ItemField::Votes).expect("item field serializes"), "\"votes\"");
+        assert_eq!(serde_json::to_string(&ItemField::Year).expect("item field serializes"), "\"year\"");
+    }
+
+    #[test]
+    fn item_field_header_field_mapping_covers_read_only_metadata_fields() {
+        assert_eq!(ItemField::Year.header_field(), Some(HeaderField::Year));
+        assert_eq!(ItemField::Rating.header_field(), Some(HeaderField::Rating));
+        assert_eq!(ItemField::Votes.header_field(), Some(HeaderField::Votes));
+        assert_eq!(ItemField::Quality.header_field(), None);
     }
 }

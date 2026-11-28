@@ -3,6 +3,7 @@ use crate::{
     api::model::{AppState, CustomVideoStreamType, StreamDetails, UserSession},
     auth::Fingerprint,
 };
+use axum::http::HeaderMap;
 use shared::{
     concat_string,
     defaults::{default_hls_session_ttl_secs, DASH_EXT, HLS_EXT},
@@ -10,6 +11,40 @@ use shared::{
 };
 use smallvec::SmallVec;
 use std::{net::SocketAddr, sync::Arc};
+
+pub(crate) const HEADER_TULIPROX_PLAYBACK_ID: &str = "X-Tuliprox-Playback-Id";
+pub(crate) const HEADER_PLAYBACK_SESSION_ID: &str = "X-Playback-Session-Id";
+const MAX_PLAYBACK_ID_LEN: usize = 128;
+
+fn parse_valid_playback_id_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let value = headers.get(name)?;
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_PLAYBACK_ID_LEN || !bytes.iter().all(u8::is_ascii_graphic) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()
+}
+
+/// Extracts a client-generated playback identifier from `X-Tuliprox-Playback-Id`,
+/// falling back to Apple's `X-Playback-Session-Id`. Values must be 1-128 visible
+/// ASCII characters; anything else is ignored.
+pub(crate) fn extract_valid_playback_id(headers: &HeaderMap) -> Option<&str> {
+    parse_valid_playback_id_header(headers, HEADER_TULIPROX_PLAYBACK_ID)
+        .or_else(|| parse_valid_playback_id_header(headers, HEADER_PLAYBACK_SESSION_ID))
+}
+
+/// Returns the effective client-generated playback identifier when the user has
+/// Player API access and is not an internal recording proxy user.
+pub(crate) fn effective_playback_id_for_user<'a>(
+    config: &crate::model::Config,
+    user: &crate::model::ProxyUserCredentials,
+    headers: &'a HeaderMap,
+) -> Option<&'a str> {
+    if user.is_recording_proxy_user() || !crate::api::auth_middleware::player_api_reachable(config, user) {
+        return None;
+    }
+    extract_valid_playback_id(headers)
+}
 
 pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
     get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs, default_hls_session_ttl_secs())

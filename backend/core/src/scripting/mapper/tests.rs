@@ -95,6 +95,59 @@ fn read_only_fields_reject_assignment() {
 }
 
 #[test]
+fn year_rating_votes_are_readable_and_match_dsl_formatting() {
+    use shared::model::{SeriesStreamProperties, StreamProperties};
+
+    let mut series = item("Show");
+    series.header.item_type = PlaylistItemType::Series;
+    series.header.additional_properties = Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+        release_date: Some("2024-05-01".intern()),
+        effective_rating: Some(8.4),
+        imdb_votes: Some(12345),
+        ..Default::default()
+    })));
+
+    let outcome = run(
+        r#"
+            if item.year + 1 == 2025 {
+                item.title = item.rating + " (" + item.votes + ")";
+            }
+            item.group = item["rating"] + "/" + item["votes"];
+        "#,
+        series,
+    );
+    let mapped = outcome.item.expect("item survives the script");
+    assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+    assert_eq!(mapped.header.title.as_ref(), "8.4 (12345)");
+    assert_eq!(mapped.header.group.as_ref(), "8.4/12345");
+
+    let empty = run(
+        r#"if item.year == () && item.rating == () && item.votes == () { item.group = "missing"; }"#,
+        item("Channel"),
+    );
+    let mapped_empty = empty.item.expect("item survives the script");
+    assert!(empty.diagnostics.is_empty(), "{:?}", empty.diagnostics);
+    assert_eq!(mapped_empty.header.group.as_ref(), "missing");
+}
+
+#[test]
+fn year_rating_votes_reject_assignment_as_read_only() {
+    for source in [
+        "item.year = 2024;",
+        r#"item.rating = "8.4";"#,
+        r#"item.votes = "12345";"#,
+        r#"item["year"] = "2024";"#,
+        r#"item["rating"] = "8.4";"#,
+        r#"item["votes"] = "12345";"#,
+    ] {
+        let outcome = run(source, item("Channel"));
+        assert!(outcome.item.is_some(), "item must survive failed assignment for {source}");
+        assert_eq!(outcome.diagnostics.len(), 1, "{source}: {:?}", outcome.diagnostics);
+        assert!(outcome.diagnostics[0].contains("read-only"), "{source}: {:?}", outcome.diagnostics);
+    }
+}
+
+#[test]
 fn genre_is_writable_on_an_item_that_carries_it() {
     // `MAPPER_FIELDS` is the legacy MapperOperation allow-list and omits genre, while the DSL
     // grammar accepts @genre. The script vocabulary must follow the DSL.

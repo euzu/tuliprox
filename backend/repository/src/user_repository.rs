@@ -566,58 +566,36 @@ pub async fn user_get_series_bouquet(cfg: &Config, username: &str, target: Targe
     user_get_cluster_bouquet(cfg, username, target, XtreamCluster::Series).await
 }
 
-/// Returns a filter set for bouquet categories based on user preferences.
-///
-/// # Arguments
-/// * `category_id` - Optional category filter:
-///   - `Some(id)` where id > 0: Returns only the specified category
-///   - `Some(0)`: Treated as uncategorized, uses bouquet filtering
-///   - `None`: Uses user's saved bouquet configuration
-///
-/// # Returns
-/// * `Some(HashSet)` - Set of category IDs or names to include
-/// * `None` - No filtering applied
-///
-/// TODO xtream converts ids to u32 again, separate m3u and xtream handling
-pub async fn user_get_bouquet_filter(
+/// Returns the allowed M3U group names for `username` in `cluster`, or `None` when no bouquet
+/// file restricts the user.
+pub async fn user_get_m3u_bouquet_filter(
     config: &Config,
     username: &str,
-    category_id: Option<u32>,
-    target: TargetType,
     cluster: XtreamCluster,
 ) -> Option<HashSet<String>> {
-    if let Some(cid) = category_id {
-        if cid > 0 {
-            return Some(HashSet::from([cid.to_string()]));
+    let bouquet_categories = user_get_cluster_bouquet(config, username, TargetType::M3u, cluster).await?;
+    let entries = serde_json::from_str::<Vec<String>>(&bouquet_categories).unwrap_or_default();
+    Some(entries.into_iter().collect())
+}
+
+/// Returns the allowed Xtream category names for `username` in `cluster`, or `None` when no
+/// bouquet file restricts the user.
+pub async fn user_get_xtream_bouquet_names(
+    config: &Config,
+    username: &str,
+    cluster: XtreamCluster,
+) -> Option<HashSet<Arc<str>>> {
+    let bouquet_categories = user_get_cluster_bouquet(config, username, TargetType::Xtream, cluster).await?;
+    let mut names = HashSet::new();
+    match serde_json::from_str::<Vec<PlaylistXtreamCategory>>(&bouquet_categories) {
+        Ok(entries) => {
+            names.extend(entries.into_iter().map(|c| Arc::<str>::from(c.name)));
+        }
+        Err(err) => {
+            error!("Failed to parse xtream bouquet file for user '{username}' ({cluster}): {err}");
         }
     }
-
-    let bouquet = match cluster {
-        XtreamCluster::Live => user_get_live_bouquet(config, username, target).await,
-        XtreamCluster::Video => user_get_vod_bouquet(config, username, target).await,
-        XtreamCluster::Series => user_get_series_bouquet(config, username, target).await,
-    };
-
-    match bouquet {
-        None => None,
-        Some(bouquet_categories) => {
-            let mut filter = HashSet::new();
-            let entries: Option<Vec<String>> = if target == TargetType::Xtream {
-                // xtream filter has PlaylistXtreamCategory
-                serde_json::from_str::<Vec<PlaylistXtreamCategory>>(&bouquet_categories)
-                    .ok()
-                    .map(|v| v.into_iter().map(|c| c.id.to_string()).collect())
-            } else {
-                // m3u filter has only group names
-                serde_json::from_str::<Vec<String>>(&bouquet_categories).ok()
-            };
-
-            if let Some(entries) = entries {
-                filter.extend(entries);
-            }
-            Some(filter)
-        }
-    }
+    Some(names)
 }
 
 #[cfg(test)]
@@ -855,5 +833,52 @@ mod tests {
             !file_exists_async(&bouquet_path).await,
             "xtream bouquet file should be removed when no explicit selection is stored"
         );
+    }
+
+    #[tokio::test]
+    async fn user_get_xtream_bouquet_names_handles_missing_valid_and_corrupt_files() {
+        let dir = tempdir().expect("tempdir should succeed");
+        let config = Config { user_config_dir: Some(dir.path().to_string_lossy().into_owned()), ..Config::default() };
+
+        // Missing file -> unrestricted (None).
+        assert_eq!(user_get_xtream_bouquet_names(&config, "alice", XtreamCluster::Live).await, None);
+
+        // Stored categories -> extracts category names regardless of stored ids.
+        let user_dir = dir.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.expect("create user dir");
+        let bouquet_path = user_get_live_bouquet_path(&user_dir, TargetType::Xtream);
+        let stored = vec![
+            PlaylistXtreamCategory { id: 10, name: "Sports".to_string() },
+            PlaylistXtreamCategory { id: 20, name: "News".to_string() },
+        ];
+        json_write_documents_to_file(&bouquet_path, &stored).await.expect("write bouquet");
+        let expected: HashSet<Arc<str>> = [Arc::from("Sports"), Arc::from("News")].into_iter().collect();
+        assert_eq!(user_get_xtream_bouquet_names(&config, "alice", XtreamCluster::Live).await, Some(expected));
+
+        // Corrupt JSON -> fail-closed empty set rather than unrestricted None.
+        tokio::fs::write(&bouquet_path, "{not-json").await.expect("write corrupt bouquet");
+        assert_eq!(user_get_xtream_bouquet_names(&config, "alice", XtreamCluster::Live).await, Some(HashSet::new()));
+    }
+
+    #[tokio::test]
+    async fn user_get_m3u_bouquet_filter_handles_missing_valid_and_corrupt_files() {
+        let dir = tempdir().expect("tempdir should succeed");
+        let config = Config { user_config_dir: Some(dir.path().to_string_lossy().into_owned()), ..Config::default() };
+
+        // Missing file -> unrestricted (None).
+        assert_eq!(user_get_m3u_bouquet_filter(&config, "alice", XtreamCluster::Live).await, None);
+
+        // Stored group names -> returns the allowed M3U group set.
+        let user_dir = dir.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.expect("create user dir");
+        let bouquet_path = user_get_live_bouquet_path(&user_dir, TargetType::M3u);
+        let stored = vec!["Sports".to_string(), "News".to_string()];
+        json_write_documents_to_file(&bouquet_path, &stored).await.expect("write bouquet");
+        let expected: HashSet<String> = ["Sports".to_string(), "News".to_string()].into_iter().collect();
+        assert_eq!(user_get_m3u_bouquet_filter(&config, "alice", XtreamCluster::Live).await, Some(expected));
+
+        // Corrupt JSON -> fail-closed empty set rather than unrestricted None.
+        tokio::fs::write(&bouquet_path, "{not-json").await.expect("write corrupt bouquet");
+        assert_eq!(user_get_m3u_bouquet_filter(&config, "alice", XtreamCluster::Live).await, Some(HashSet::new()));
     }
 }

@@ -62,6 +62,7 @@ pub(in crate::api::endpoints) mod epg_inspect;
 pub(in crate::api::endpoints) mod epg_status;
 mod error;
 mod filter_preview;
+mod group_order;
 pub(in crate::api::endpoints) mod inspect_common;
 pub(in crate::api::endpoints) mod items;
 mod overrides;
@@ -99,6 +100,7 @@ use self::{
     epg::playlist_epg,
     epg_inspect::{get_target_epg_channel, query_target_epg_channels},
     filter_preview::playlist_filter_preview,
+    group_order::{playlist_group_order, playlist_group_order_save},
     items::{list_playlist_sources, query_playlist_items},
     overrides::{
         playlist_epg_search, playlist_override_item, playlist_overrides_discard, playlist_overrides_get,

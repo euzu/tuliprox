@@ -34,6 +34,7 @@ mod admission_eviction_policy;
 mod admission_request_classification;
 mod admission_session_admission;
 mod admission_strategy_chain;
+mod playback_id_replacement;
 
 mod recording_shared_stream_rides;
 mod stream_responses_free_shared_joins;

@@ -32,6 +32,8 @@ mod lifecycle;
 
 mod retry;
 
+mod sampling;
+
 mod support;
 
 use self::support::create_test_worker;

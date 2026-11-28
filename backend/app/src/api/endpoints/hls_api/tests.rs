@@ -84,6 +84,7 @@ mod owner_token;
 mod reduced_retry;
 mod same_account_resume;
 mod stalker_manifest;
+mod stalker_pinned_retry;
 
 mod archive;
 mod bandwidth;
@@ -138,10 +139,10 @@ use self::support::{
     test_app_state_with_hls_proxy_and_inputs, test_app_state_with_inputs, test_custom_video_buffer, test_fingerprint,
     test_fingerprint_with_addr, test_hls_access_context, test_hls_access_context_with, test_hls_cache_dto,
     test_hls_entry_stream_context, test_hls_input, test_hls_sequence_iv, test_hls_share_target, test_m3u_hls_item,
-    test_m3u_hls_share_target, test_segment_entry, transient_manifest_body, transient_manifest_body_from_sequence,
-    try_test_hls_cached_manifest_response, wait_for_provider_connection_count, wait_for_runtime_policy_terminal_plan,
-    CanonicalOwnerHandoffFixture, RuntimePolicyEndpointFixture, TestBinaryOriginResponse, TestSegmentOrigin,
-    AES_TEST_KEY_BYTES, AES_TEST_MANIFEST, AES_TEST_PLAINTEXT_SEGMENT,
+    test_m3u_hls_share_target, test_segment_entry, test_stalker_app_state, transient_manifest_body,
+    transient_manifest_body_from_sequence, try_test_hls_cached_manifest_response, wait_for_provider_connection_count,
+    wait_for_runtime_policy_terminal_plan, CanonicalOwnerHandoffFixture, RuntimePolicyEndpointFixture,
+    TestBinaryOriginResponse, TestSegmentOrigin, AES_TEST_KEY_BYTES, AES_TEST_MANIFEST, AES_TEST_PLAINTEXT_SEGMENT,
 };
 
 mod provider_admission_account_overlap;

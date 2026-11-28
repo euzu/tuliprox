@@ -3,17 +3,9 @@ use serde_json::Value;
 pub struct InfoDocUtils {}
 
 impl InfoDocUtils {
+    #[must_use]
     pub fn extract_year_from_release_date(release_date: &str) -> Option<u32> {
-        // collect only digits
-        let digits_only: String = release_date.chars().filter(char::is_ascii_digit).take(4).collect();
-
-        // do we have 4 digits?
-        if digits_only.len() < 4 {
-            return None;
-        }
-
-        // and parse year
-        digits_only.parse::<u32>().ok()
+        crate::utils::extract_year(release_date)
     }
 
     pub fn limited(n: f64) -> String {
@@ -32,5 +24,18 @@ impl InfoDocUtils {
             }
         }
         Value::Array(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_year_from_release_date_cases() {
+        assert_eq!(InfoDocUtils::extract_year_from_release_date("2024-05-01"), Some(2024));
+        assert_eq!(InfoDocUtils::extract_year_from_release_date("01.05.2024"), Some(2024));
+        assert_eq!(InfoDocUtils::extract_year_from_release_date("1600-01-01"), None);
+        assert_eq!(InfoDocUtils::extract_year_from_release_date(""), None);
     }
 }

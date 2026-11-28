@@ -46,10 +46,42 @@ pub async fn create_link<Tr: StalkerTransport, C: Clock>(
     archive_start: Option<&str>,
     archive_end: Option<&str>,
 ) -> StalkerResult<StalkerResolvedStream> {
+    create_link_inner(client, handshake, kind, requested_mode, cmd, series_number, archive_start, archive_end, true)
+        .await
+}
+
+/// Resolves a `cmd` without re-handshaking or retrying remaining load URLs on auth/rate refusals.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_link_without_retry<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
+    handshake: &StalkerHandshake,
+    kind: StalkerStreamKind,
+    requested_mode: StalkerPlaybackMode,
+    cmd: &str,
+    series_number: Option<u32>,
+    archive_start: Option<&str>,
+    archive_end: Option<&str>,
+) -> StalkerResult<StalkerResolvedStream> {
+    create_link_inner(client, handshake, kind, requested_mode, cmd, series_number, archive_start, archive_end, false)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_link_inner<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
+    handshake: &StalkerHandshake,
+    kind: StalkerStreamKind,
+    requested_mode: StalkerPlaybackMode,
+    cmd: &str,
+    series_number: Option<u32>,
+    archive_start: Option<&str>,
+    archive_end: Option<&str>,
+    allow_retries: bool,
+) -> StalkerResult<StalkerResolvedStream> {
     let mut handshake = handshake.clone();
     // A rejected token invalidates every endpoint candidate at once, so the whole chain is
-    // retried once against a fresh session instead of failing the item.
-    let mut allow_session_retry = true;
+    // retried once against a fresh session instead of failing the item unless retries are disabled.
+    let mut allow_session_retry = allow_retries;
     'session: loop {
         let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
         let candidates = client.ordered_load_urls();
@@ -80,6 +112,9 @@ pub async fn create_link<Tr: StalkerTransport, C: Clock>(
                         handshake = client.handshake().await?;
                         allow_session_retry = false;
                         continue 'session;
+                    }
+                    if !allow_retries && err.is_rate_or_auth_refusal() {
+                        return Err(err);
                     }
                     last_err = Some(err);
                 }

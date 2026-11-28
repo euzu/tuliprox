@@ -538,6 +538,7 @@ impl<E: EventSink + Clone, M: MetadataUpdateSink, P: PluginHost> Clone for Playl
             processed_inputs: Arc::clone(&self.processed_inputs),
             input_completions: Arc::clone(&self.input_completions),
             input_locks: Arc::clone(&self.input_locks),
+            epg_downloads: Arc::clone(&self.epg_downloads),
             provider_manager: self.provider_manager.clone(),
             metadata_manager: self.metadata_manager.clone(),
             pre_processed_inputs: self.pre_processed_inputs.clone(),
@@ -578,11 +579,25 @@ impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost> Playl
 
     pub async fn is_input_downloaded(&self, input_name: &str) -> bool {
         let processed = self.processed_inputs.lock().await;
+        matches!(processed.get(input_name), Some(InputRunOutcome::Ready | InputRunOutcome::Degraded))
+    }
+
+    pub(crate) async fn is_input_sampling_eligible(&self, input_name: &str) -> bool {
+        if self.is_input_in_maintenance(input_name) {
+            return false;
+        }
+        let processed = self.processed_inputs.lock().await;
         matches!(processed.get(input_name), Some(InputRunOutcome::Ready))
     }
+
     pub async fn mark_input_downloaded(&self, input_name: Arc<str>) -> bool {
         let mut processed = self.processed_inputs.lock().await;
         !matches!(processed.insert(input_name, InputRunOutcome::Ready), Some(InputRunOutcome::Ready))
+    }
+
+    pub(super) async fn mark_input_degraded(&self, input_name: Arc<str>) {
+        let mut processed = self.processed_inputs.lock().await;
+        processed.entry(input_name).or_insert(InputRunOutcome::Degraded);
     }
 
     /// What acquiring the input left in this run, `None` while it was not acquired.

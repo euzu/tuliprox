@@ -1416,6 +1416,79 @@ Setting this forces **every** outgoing request (Playlist downloads, TMDB API cal
 Reverse-Proxy
 Video Streaming) through this proxy.
 
+### Fallback proxies (GOST)
+
+Tuliprox uses exactly one outgoing proxy. To fail over to a second proxy when the first one is unreachable, run a
+local [GOST v3](https://gost.run/) instance and point `proxy.url` at it. GOST keeps a list of upstream SOCKS5 proxies
+and uses the first one until it fails, then the next one.
+
+`gost.yml`:
+
+```yaml
+services:
+  - name: tuliprox-egress
+    addr: ":1080"
+    handler:
+      type: socks5
+      chain: upstream
+      retries: 1           # retry a failed connection once, through the next node of the chain
+    listener:
+      type: tcp
+chains:
+  - name: upstream
+    hops:
+      - name: proxies
+        selector:
+          strategy: fifo     # first node until it fails, then the next one
+          maxFails: 1        # failed connections before a node counts as dead
+          failTimeout: 60s   # how long a dead node is skipped
+        nodes:
+          - name: primary
+            addr: proxy-a.example:1080
+            connector:
+              type: socks5
+              auth:
+                username: user_a
+                password: pass_a
+            dialer:
+              type: tcp
+          - name: backup
+            addr: proxy-b.example:1080
+            connector:
+              type: socks5
+              auth:
+                username: user_b
+                password: pass_b
+            dialer:
+              type: tcp
+```
+
+Tuliprox `config.yml`:
+
+```yaml
+proxy:
+  url: socks5://gost:1080   # host name of the GOST container, or 127.0.0.1:1080
+```
+
+Notes:
+
+* GOST is a separate program (Docker image `gogost/gost`), not part of Tuliprox. Do not expose the GOST port
+  outside the host or container network: the example service has no authentication.
+* GOST detects a proxy that refuses or drops connections. It does **not** detect a proxy whose IP the provider has
+  banned: such a proxy still connects and the provider answers with an error such as HTTP 403. Replace that proxy
+  in `gost.yml` by hand and restart GOST; GOST does not reload `gost.yml` on its own (runtime changes go through
+  its Web API).
+* When every node of the hop is marked dead, current GOST versions still try one of the dead nodes instead of
+  going direct, so the request fails. A route that ends up without any node (for example when no node matches the
+  request) is dialed directly from the GOST host, and `retries` does not change that. To make sure traffic never
+  leaves without a proxy, allow outbound connections from the GOST host or container only to the upstream proxy
+  addresses (firewall or container network rules).
+* GOST 3.3 can also probe each node periodically (`probe` block on a node). Point a probe at a neutral address, never
+  at your provider: periodic requests to the provider can get the account banned.
+* See the GOST documentation for all options:
+  [selector](https://latest.gost.run/en/concepts/selector/), [chain](https://latest.gost.run/en/concepts/chain/),
+  [probe](https://latest.gost.run/en/tutorials/probe/).
+
 ---
 
 ## 8. IP-Check (`ipcheck`)

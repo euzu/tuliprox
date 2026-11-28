@@ -214,6 +214,7 @@ pub(super) struct UserConnectionData {
     pub(super) stream_request_claims: HashMap<u32, StreamRequestClaim>,
     pub(super) stream_kinds: HashMap<u32, ConnectionKind>,
     pub(super) stream_normal_priorities: HashMap<u32, i8>,
+    pub(super) stream_playback_ids: HashMap<u32, Arc<str>>,
     pub(super) ts: u64,
 }
 
@@ -231,6 +232,7 @@ impl UserConnectionData {
             stream_request_claims: HashMap::new(),
             stream_kinds: HashMap::new(),
             stream_normal_priorities: HashMap::new(),
+            stream_playback_ids: HashMap::new(),
             ts: current_time_secs(),
         }
     }
@@ -707,6 +709,7 @@ impl ActiveUserManager {
                             connection_data.decrement_kind(kind);
                         }
                         connection_data.stream_normal_priorities.remove(&removed_stream.uid);
+                        connection_data.stream_playback_ids.remove(&removed_stream.uid);
                         connection_changed = true;
                     }
                     if connection_data.connections < connection_data.max_connections {
@@ -861,6 +864,7 @@ impl ActiveUserManager {
                                         released_kinds.push(kind);
                                     }
                                     connection_data.stream_normal_priorities.remove(&stream_info.uid);
+                                    connection_data.stream_playback_ids.remove(&stream_info.uid);
                                     if let Some(token) = stream_info.session_token.as_ref() {
                                         removed_session_tokens.insert(token.clone());
                                     }
@@ -871,6 +875,7 @@ impl ActiveUserManager {
                                     released_kinds.push(kind);
                                 }
                                 connection_data.stream_normal_priorities.remove(&stream_info.uid);
+                                connection_data.stream_playback_ids.remove(&stream_info.uid);
                                 if let Some(token) = stream_info.session_token.as_ref() {
                                     removed_session_tokens.insert(token.clone());
                                 }

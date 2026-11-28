@@ -1,6 +1,6 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n"}
 field = { ^"group" | ^"title" | ^"name" | ^"genre" | ^"url" | ^"input" | ^"caption" | ^"epgid"}
-numeric_field = { ^"chno" | ^"quality" | ^"rating" | ^"votes" }
+numeric_field = { ^"chno" | ^"quality" | ^"rating" | ^"votes" | ^"year" }
 and = { ^"and" }
 or = { ^"or" }
 not = { ^"not" }
@@ -19,7 +19,14 @@ num_op = { ">=" | "<=" | "!=" | ">" | "<" | "=" }
 numeric_comparison = { numeric_field ~ num_op ~ number }
 set_values = { regexp ~ ("," ~ regexp)* }
 set_comparison = { field ~ ^"in" ~ "[" ~ set_values ~ "]" }
-comparison = { field_comparison | type_comparison | numeric_comparison | set_comparison | presence_comparison | string_comparison }
+plugin_ident = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+plugin_name = ${ ^"plugin" ~ "." ~ plugin_ident ~ "." ~ plugin_ident }
+plugin_bool = @{ (^"true" | ^"false") ~ !(ASCII_ALPHANUMERIC | "_" | "-") }
+plugin_number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+plugin_arg = { regexp | plugin_bool | plugin_number }
+plugin_args = { plugin_arg ~ ("," ~ plugin_arg)* }
+plugin_call = { plugin_name ~ "(" ~ plugin_args? ~ ")" }
+comparison = { field_comparison | type_comparison | numeric_comparison | set_comparison | presence_comparison | string_comparison | plugin_call }
 bool_op = { and | or }
 expr_group = { "(" ~ expr ~ ")" }
 basic_expr = _{ comparison | expr_group }

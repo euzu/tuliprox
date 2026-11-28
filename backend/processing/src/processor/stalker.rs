@@ -33,7 +33,11 @@ use std::{
 use tuliprox_core::model::{AppConfig, ConfigInput, ConfigInputFlags, StalkerInputConfig};
 use tuliprox_iptv::{
     provider::PlaylistFetch,
-    stalker::{client::StalkerApiClient, error::StalkerError, parser},
+    stalker::{
+        client::StalkerApiClient,
+        error::{safe_stalker_url, StalkerError},
+        parser,
+    },
 };
 use tuliprox_repository::{
     stalker_generation_repository::{load_active_manifest, load_checkpoint, readable_active_manifest},
@@ -483,7 +487,7 @@ fn cached_runtime_stalker_client(
 /// The persisted playback descriptor is authoritative. When it is absent or holds no usable
 /// command, the item's raw `cmd` column is still enough to call `create_link`, so an item is
 /// not declared unplayable while its stored command would have resolved.
-fn playback_candidates(item: &StalkerPlaylistItem) -> Vec<(&str, StalkerPlaybackMode)> {
+pub(crate) fn playback_candidates(item: &StalkerPlaylistItem) -> Vec<(&str, StalkerPlaybackMode)> {
     let mut candidates: Vec<(&str, StalkerPlaybackMode)> = item
         .playback_descriptor
         .as_ref()
@@ -514,6 +518,21 @@ fn stalker_account<'a>(input: &'a ConfigInput, account_name: &str) -> Option<Cow
     input.alias_by_name(account_name).map(|alias| Cow::Owned(input.as_input(alias)))
 }
 
+/// Why a Stalker link resolution produced no URL.
+///
+/// The two halves are kept apart because they answer different questions: a lookup failure is a
+/// configuration or storage problem, while a portal failure is the portal's own answer, and only the
+/// latter can be an auth or rate refusal.
+#[derive(Debug)]
+pub enum StalkerLinkFailure {
+    /// Config, storage or read failure on our side.
+    Lookup(TuliproxError),
+    /// The handshake failed. Playback surfaces this as an error rather than as "no URL".
+    Handshake(StalkerError),
+    /// Every command candidate failed. Playback logs the portal's answer and reports "no URL".
+    Commands(StalkerError),
+}
+
 /// Resolves a playable URL for `account_name` (the input itself or one of its aliases).
 /// The catalog is shared and always read through `input`; portal client and link cache use the account.
 pub async fn re_resolve_stalker_url(
@@ -525,17 +544,76 @@ pub async fn re_resolve_stalker_url(
     kind: StalkerStreamKind,
     force_refresh: bool,
 ) -> Result<Option<Arc<str>>, TuliproxError> {
+    match resolve_stalker_link(app_config, http_client, input, account_name, provider_id, kind, force_refresh).await {
+        Ok(url) => Ok(url),
+        Err(StalkerLinkFailure::Lookup(err)) => Err(err),
+        Err(StalkerLinkFailure::Handshake(err)) => Err(stalker_err_to_repo(err)),
+        Err(StalkerLinkFailure::Commands(err)) => {
+            // Playback failing silently is what makes a portal refusal indistinguishable from a
+            // missing catalog; the reason belongs in the operator's log.
+            warn!(
+                "Stalker runtime re-resolve failed for stream_id={provider_id}; invalidating stale stream_url (last portal error: {})",
+                sanitize_sensitive_info(&err.to_string())
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// One `create_link` resolution through the input's account, shared by playback and by the container
+/// extension sampler: account selection, the per-account client cache and the runtime link cache.
+#[derive(Clone, Copy)]
+struct StalkerLinkOptions {
+    force_refresh: bool,
+    allow_retries: bool,
+}
+
+async fn resolve_stalker_link(
+    app_config: &Arc<AppConfig>,
+    http_client: &reqwest::Client,
+    input: &ConfigInput,
+    account_name: &str,
+    provider_id: u32,
+    kind: StalkerStreamKind,
+    force_refresh: bool,
+) -> Result<Option<Arc<str>>, StalkerLinkFailure> {
+    resolve_stalker_link_inner(
+        app_config,
+        http_client,
+        input,
+        account_name,
+        provider_id,
+        kind,
+        StalkerLinkOptions { force_refresh, allow_retries: true },
+    )
+    .await
+}
+
+async fn resolve_stalker_link_inner(
+    app_config: &Arc<AppConfig>,
+    http_client: &reqwest::Client,
+    input: &ConfigInput,
+    account_name: &str,
+    provider_id: u32,
+    kind: StalkerStreamKind,
+    link_options: StalkerLinkOptions,
+) -> Result<Option<Arc<str>>, StalkerLinkFailure> {
     if provider_id == 0 {
         return Ok(None);
     }
     let stalker_cfg = input.stalker.as_ref().ok_or_else(|| {
-        TuliproxError::ConfigInput(format!("Stalker input '{}' has no stalker configuration block", input.name))
+        StalkerLinkFailure::Lookup(TuliproxError::ConfigInput(format!(
+            "Stalker input '{}' has no stalker configuration block",
+            input.name
+        )))
     })?;
-    let portal_url = resolve_stalker_portal_url(input)?;
+    let portal_url = resolve_stalker_portal_url(input).map_err(StalkerLinkFailure::Lookup)?;
     let identity_fingerprint = stalker_cfg.identity_fingerprint(&portal_url);
-    let storage_path = ensure_stalker_storage_path(app_config, &input.name).await?;
+    let storage_path =
+        ensure_stalker_storage_path(app_config, &input.name).await.map_err(StalkerLinkFailure::Lookup)?;
     // Read-only manifest lookup: a playback request must never start (or destroy) a refresh.
-    let (manifest, published) = readable_active_manifest(&storage_path, identity_fingerprint).await?;
+    let (manifest, published) =
+        readable_active_manifest(&storage_path, identity_fingerprint).await.map_err(StalkerLinkFailure::Lookup)?;
     if !published {
         warn!(
             "Stalker playback resolution for input '{}' found no published catalog for the configured portal identity; run a playlist update for this input",
@@ -562,19 +640,24 @@ pub async fn re_resolve_stalker_url(
         return Ok(None);
     };
     let account_cfg = account.stalker.as_ref().ok_or_else(|| {
-        TuliproxError::ConfigInput(format!("Stalker account '{}' has no stalker configuration block", account.name))
+        StalkerLinkFailure::Lookup(TuliproxError::ConfigInput(format!(
+            "Stalker account '{}' has no stalker configuration block",
+            account.name
+        )))
     })?;
-    let account_portal_url = resolve_stalker_portal_url(&account)?;
+    let account_portal_url = resolve_stalker_portal_url(&account).map_err(StalkerLinkFailure::Lookup)?;
     let link_key = RuntimeLinkKey {
         fingerprint: account_cfg.identity_fingerprint(&account_portal_url),
         generation,
         provider_id,
         kind,
     };
-    if let Some(url) = cached_resolved_link(link_key, force_refresh) {
+    if let Some(url) = cached_resolved_link(link_key, link_options.force_refresh) {
         return Ok(Some(url));
     }
-    let Some(item) = read_stalker_item_at(app_config, item_path, provider_id).await? else {
+    let Some(item) =
+        read_stalker_item_at(app_config, item_path, provider_id).await.map_err(StalkerLinkFailure::Lookup)?
+    else {
         warn!(
             "Stalker playback resolution for input '{}' found no {kind:?} item with provider id {provider_id} in generation {generation}",
             input.name
@@ -591,13 +674,19 @@ pub async fn re_resolve_stalker_url(
         );
         return Ok(None);
     }
-    let api_client = cached_runtime_stalker_client(http_client, account_portal_url, account_cfg)?;
+    let api_client = cached_runtime_stalker_client(http_client, account_portal_url, account_cfg)
+        .map_err(StalkerLinkFailure::Lookup)?;
     let series_number = (kind == StalkerStreamKind::Episode).then_some(item.number);
 
-    let mut last_error: Option<String> = None;
+    let mut last_error: Option<StalkerError> = None;
     for (cmd, mode) in &candidates {
-        let handshake = api_client.handshake().await.map_err(stalker_err_to_repo)?;
-        match api_client.create_link(&handshake, kind, *mode, cmd, series_number, None, None).await {
+        let handshake = api_client.handshake().await.map_err(StalkerLinkFailure::Handshake)?;
+        let result = if link_options.allow_retries {
+            api_client.create_link(&handshake, kind, *mode, cmd, series_number, None, None).await
+        } else {
+            api_client.create_link_without_retry(&handshake, kind, *mode, cmd, series_number, None, None).await
+        };
+        match result {
             Ok(resolved) => {
                 let url = Internable::intern(resolved.stream_url);
                 cache_resolved_link(link_key, Arc::clone(&url));
@@ -613,19 +702,43 @@ pub async fn re_resolve_stalker_url(
                     item.name,
                     sanitize_sensitive_info(&err.to_string())
                 );
-                last_error = Some(sanitize_sensitive_info(&err.to_string()).into_owned());
+                let stop_candidates = err.is_rate_or_auth_refusal();
+                last_error = Some(err);
+                if stop_candidates {
+                    break;
+                }
             }
         }
     }
 
-    warn!(
-        "Stalker runtime re-resolve failed for stream_id={} ({}); invalidating stale stream_url (last portal error: {})",
-        item.stream_id,
-        item.name,
-        last_error.as_deref().unwrap_or("none")
-    );
     RUNTIME_STALKER_LINKS.lock().pop(&link_key);
-    Ok(None)
+    Err(StalkerLinkFailure::Commands(
+        last_error.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(api_client.portal_url()) }),
+    ))
+}
+
+/// Resolves one item's link for the container extension sampler.
+///
+/// Reuses the playback resolution path, account selection, the per-account client and the runtime
+/// link cache, so sampling and playback share one `create_link` implementation and one cached answer,
+/// without retrying sessions or remaining candidates on auth/rate refusals.
+pub async fn resolve_stalker_link_for_sampling(
+    app_config: &Arc<AppConfig>,
+    http_client: &reqwest::Client,
+    input: &ConfigInput,
+    account_name: &str,
+    provider_id: u32,
+) -> Result<Option<Arc<str>>, StalkerLinkFailure> {
+    resolve_stalker_link_inner(
+        app_config,
+        http_client,
+        input,
+        account_name,
+        provider_id,
+        StalkerStreamKind::Movie,
+        StalkerLinkOptions { force_refresh: false, allow_retries: false },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -887,5 +1000,163 @@ mod tests {
 
         drop(refresh_permit);
         assert!(try_acquire_stalker_refresh(&input_name).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_stalker_link_for_sampling_stops_on_auth_or_rate_refusal_without_retrying_candidates_or_session() {
+        use arc_swap::{ArcSwap, ArcSwapOption};
+        use shared::model::{
+            ConfigInputOptionsDto, ConfigPaths, InputType, StalkerCommandVariantDto, StalkerPlaybackDescriptorDto,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tuliprox_core::{
+            model::{Config, ConfigInputOptions, MediaToolCapabilities, SourcesConfig},
+            utils::FileLockManager,
+        };
+        use tuliprox_repository::{
+            stalker_generation_repository::{save_active_manifest, ClusterFiles, StalkerActiveManifest},
+            stalker_repository::get_stalker_file_path,
+        };
+
+        for (status_line, label) in [("429 Too Many Requests", "429"), ("403 Forbidden", "403")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let handshake_calls = Arc::new(AtomicUsize::new(0));
+            let create_link_calls = Arc::new(AtomicUsize::new(0));
+            let h_calls = Arc::clone(&handshake_calls);
+            let c_calls = Arc::clone(&create_link_calls);
+            let status_owned = status_line.to_string();
+            let server = tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else { break };
+                    let h_calls = Arc::clone(&h_calls);
+                    let c_calls = Arc::clone(&c_calls);
+                    let status = status_owned.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        let n = socket.read(&mut buf).await.unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let (resp_status, body) = if req.contains("action=handshake") {
+                            h_calls.fetch_add(1, Ordering::AcqRel);
+                            ("200 OK".to_string(), r#"{"js":{"token":"tok"}}"#.to_string())
+                        } else if req.contains("action=create_link") {
+                            c_calls.fetch_add(1, Ordering::AcqRel);
+                            (status, r#"{"error":"refused"}"#.to_string())
+                        } else {
+                            ("200 OK".to_string(), r#"{"js":[]}"#.to_string())
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {resp_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    });
+                }
+            });
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stalker_cfg = stalker_cfg_with_mac("00:1A:79:00:00:99");
+            let portal_url = format!("http://{addr}/stalker_portal/c/");
+            let input = ConfigInput {
+                id: 1,
+                name: format!("sampling-refusal-{label}").into(),
+                input_type: InputType::Stalker,
+                url: portal_url.clone(),
+                enabled: true,
+                options: Some(ConfigInputOptions::from(&ConfigInputOptionsDto::default())),
+                stalker: Some(stalker_cfg.clone()),
+                ..ConfigInput::default()
+            };
+            let app_config = Arc::new(AppConfig {
+                config: Arc::new(ArcSwap::from_pointee(Config {
+                    storage_dir: dir.path().display().to_string(),
+                    ..Config::default()
+                })),
+                sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+                hdhomerun: Arc::new(ArcSwapOption::default()),
+                plugins: Arc::default(),
+                api_proxy: Arc::new(ArcSwapOption::default()),
+                file_locks: Arc::new(FileLockManager::default()),
+                paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                    home_path: dir.path().display().to_string(),
+                    config_path: dir.path().display().to_string(),
+                    storage_path: dir.path().display().to_string(),
+                    config_file_path: String::new(),
+                    sources_file_path: String::new(),
+                    mapping_file_path: None,
+                    mapping_files_used: None,
+                    template_file_path: None,
+                    template_files_used: None,
+                    failover_file_path: None,
+                    api_proxy_file_path: String::new(),
+                    custom_stream_response_path: None,
+                })),
+                custom_stream_response: Arc::new(ArcSwapOption::default()),
+                access_token_secret: [0; 32],
+                encrypt_secret: [0; 16],
+                media_tools: Arc::new(MediaToolCapabilities::new()),
+                failover: Arc::default(),
+            });
+
+            let storage = ensure_stalker_storage_path(&app_config, &input.name).await.expect("storage");
+            let item = StalkerPlaylistItem {
+                stream_id: 500,
+                name: "Refused Movie".intern(),
+                stream_kind: StalkerStreamKind::Movie,
+                cmd: "ffmpeg http://portal/vod/500".intern(),
+                playback_descriptor: Some(StalkerPlaybackDescriptorDto {
+                    primary_mode: StalkerPlaybackMode::TempLinkNginx,
+                    candidates: vec![
+                        StalkerCommandVariantDto {
+                            cmd: "ffmpeg http://portal/vod/500/a".to_string(),
+                            playback_mode: StalkerPlaybackMode::TempLinkNginx,
+                            ..Default::default()
+                        },
+                        StalkerCommandVariantDto {
+                            cmd: "ffmpeg http://portal/vod/500/b".to_string(),
+                            playback_mode: StalkerPlaybackMode::DirectUrl,
+                            ..Default::default()
+                        },
+                    ],
+                    capabilities: None,
+                }),
+                ..StalkerPlaylistItem::default()
+            };
+            tuliprox_repository::stalker_repository::persist_stalker_items(
+                &app_config,
+                &storage,
+                StalkerStreamKind::Movie,
+                &[item],
+            )
+            .await
+            .expect("persist vod");
+            let mut manifest = StalkerActiveManifest::empty(stalker_cfg.identity_fingerprint(&portal_url));
+            manifest.vod =
+                Some(ClusterFiles { generation: 1, data: get_stalker_file_path(&storage, StalkerStreamKind::Movie) });
+            save_active_manifest(&storage, &manifest).await.expect("manifest");
+
+            let http = reqwest::Client::new();
+            let err = resolve_stalker_link_for_sampling(&app_config, &http, &input, &input.name, 500)
+                .await
+                .expect_err("refusal should return error");
+            server.abort();
+
+            assert!(
+                matches!(err, StalkerLinkFailure::Commands(ref stalker_err) if stalker_err.is_rate_or_auth_refusal()),
+                "{label}: expected refusal error, got {err:?}"
+            );
+            assert_eq!(
+                create_link_calls.load(Ordering::Acquire),
+                1,
+                "{label}: sampling must stop after the first refusal without trying other candidates or load urls"
+            );
+            assert_eq!(
+                handshake_calls.load(Ordering::Acquire),
+                1,
+                "{label}: sampling must not re-handshake on refusal"
+            );
+        }
     }
 }
