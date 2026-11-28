@@ -2744,6 +2744,10 @@
     "EXPLORER_STATUS_CONFLICT": "Çakışma",
     "EXPLORER_STATUS_VALIDATION_ERROR": "Doğrulama Hatası",
     "EXPLORER_STATUS_ERROR": "Hata",
+    "EXPLORER_REORDER_GROUPS": "Grupları sırala",
+    "EXPLORER_MOVE_GROUP_UP": "Grubu yukarı taşı",
+    "EXPLORER_MOVE_GROUP_DOWN": "Grubu aşağı taşı",
+    "EXPLORER_DRAG_GROUP": "Grubu sıralamak için sürükle",
     "LOGO_SMALL": "Küçük Logo",
     "EPG_CHANNEL_ID": "EPG Kanal Kimliği",
     "CHNO": "Kanal Numarası",
@@ -2830,7 +2834,11 @@
       "EPG_SEARCH_FAILED": "EPG araması başarısız oldu: {error}",
       "PARSE_ERROR": "Geçersiz kılma dosyası bozuk: {error}",
       "SCHEMA_ERROR": "Desteklenmeyen geçersiz kılma şema sürümü: {version}",
-      "SAVE_FAILED_ERROR": "Kaydetme başarısız oldu: {error}"
+      "SAVE_FAILED_ERROR": "Kaydetme başarısız oldu: {error}",
+      "GROUP_ORDER_SAVED": "Grup sırası kaydedildi",
+      "GROUP_ORDER_LOAD_FAILED": "Grup sırası yüklenemedi: {error}",
+      "GROUP_ORDER_CONFLICT": "Yapılandırma çakışması: source.yml sunucuda güncellendi. Kayıtlı grup sırası yeniden yükleniyor...",
+      "GROUP_ORDER_TOO_MANY_GROUPS": "Bu kümede {max} adetten fazla grup bulunduğu için grup sıralama devre dışı bırakıldı."
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content.",
@@ -3327,6 +3335,10 @@
     "invalid_title": "Başlık boş olamaz ve başında/sonunda boşluk içeremez",
     "invalid_group": "Grup boş olamaz ve başında/sonunda boşluk içeremez",
     "invalid_type": "Geçersiz alan türü",
-    "unknown_field": "Bilinmeyen alan"
+    "unknown_field": "Bilinmeyen alan",
+    "too_many_groups": "Sıra listesinde çok fazla grup var",
+    "empty_group_name": "Grup adı boş olamaz",
+    "duplicate_group_name": "Yinelenen grup adı",
+    "group_name_template_placeholder": "Grup adı !word! şablon yer tutucusu içeremez"
   }
 }

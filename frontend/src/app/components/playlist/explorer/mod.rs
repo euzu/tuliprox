@@ -41,7 +41,7 @@ const RATING_FILTER_STEPS: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 pub use bulk_edit::BulkEditPanel;
 pub use detail_panel::*;
-use identity::{use_identity_revision, Id};
+use identity::{use_identity_revision, CatalogGeneration, GroupOrderUpdate, Id};
 pub use live_view::*;
 pub use orphans_view::ExplorerOrphansView;
 pub use poster_grid::*;
@@ -223,6 +223,47 @@ pub fn level_after_search(current: &ExplorerLevel) -> ExplorerLevel {
     }
 }
 
+/// Returns the default override scope for an explorer playlist source.
+#[must_use]
+pub const fn default_bulk_scope(request: Option<&PlaylistRequest>) -> OverrideScopeDto {
+    if matches!(request, Some(PlaylistRequest::Target(_))) {
+        OverrideScopeDto::Target
+    } else {
+        OverrideScopeDto::Input
+    }
+}
+
+/// Computes the pending-group-order cluster set after a save or conflict reload.
+///
+/// Only `Some(true)` marks a cluster as pending; `Some(false)` or `None` never clears an
+/// existing pending marker because only a full playlist reload applies stored changes.
+#[must_use]
+pub fn apply_pending_group_order_update(
+    current: &HashSet<XtreamCluster>,
+    cluster: XtreamCluster,
+    pending_flag: Option<bool>,
+) -> HashSet<XtreamCluster> {
+    let mut next = current.clone();
+    if pending_flag == Some(true) {
+        next.insert(cluster);
+    }
+    next
+}
+
+/// Computes the bulk-edit scope after a potential playlist source or revision change.
+#[must_use]
+pub const fn resolve_bulk_scope_after_source_change(
+    current_scope: OverrideScopeDto,
+    request: Option<&PlaylistRequest>,
+    source_changed: bool,
+) -> OverrideScopeDto {
+    if source_changed {
+        default_bulk_scope(request)
+    } else {
+        current_scope
+    }
+}
+
 #[derive(Properties, PartialEq)]
 pub struct PlaylistExplorerProps {
     pub stale_target: bool,
@@ -244,8 +285,21 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
 
     let service_ctx = use_service_context();
     let can_write = service_ctx.auth.has_permission(Permission::PlaylistWrite);
+    let can_write_sources = service_ctx.auth.has_permission(Permission::SourceWrite);
     let can_write_recordings = service_ctx.auth.has_permission(Permission::RecordingCreate);
     let is_admin_role = service_ctx.auth.is_admin();
+
+    let (target_id, target_name) = match context.playlist_request.as_ref() {
+        Some(PlaylistRequest::Target(id)) => {
+            let name = config_ctx
+                .config
+                .as_ref()
+                .and_then(|app_config| target_name_for_id(&app_config.sources, *id, None))
+                .or_else(|| (*context.target_name).clone());
+            (Some(*id), name)
+        }
+        _ => (None, None),
+    };
 
     let recording_padding = {
         let rec = config_ctx
@@ -273,6 +327,51 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     // effect can tell its own write apart from a freshly loaded playlist.
     let self_written_playlist = use_mut_ref(|| None::<Rc<UiPlaylistCategories>>);
 
+    let incoming_playlist = (*context.playlist).clone();
+    let context_playlist_revision = use_identity_revision(&context.playlist);
+    // Track external loads/reloads and source switches synchronously during render so in-flight
+    // async results observe the new generation before post-render effects run.
+    let seen_source =
+        use_mut_ref(|| (incoming_playlist.clone(), (*context.playlist_request).clone(), target_name.clone()));
+    let source_revision_ref = use_mut_ref(|| 0u32);
+    let latest_incoming_playlist = use_mut_ref(|| incoming_playlist.clone());
+    *latest_incoming_playlist.borrow_mut() = incoming_playlist.clone();
+    {
+        let mut seen = seen_source.borrow_mut();
+        let playlist_changed = match (&seen.0, &incoming_playlist) {
+            (Some(prev), Some(curr)) => !Rc::ptr_eq(prev, curr),
+            (None, None) => false,
+            _ => true,
+        };
+        let request_changed = seen.1 != *context.playlist_request;
+        let target_changed = seen.2 != target_name;
+        let is_self_write = if playlist_changed && !request_changed && !target_changed {
+            let written = self_written_playlist.borrow();
+            matches!((incoming_playlist.as_ref(), written.as_ref()), (Some(curr), Some(w)) if Rc::ptr_eq(curr, w))
+        } else {
+            false
+        };
+        if playlist_changed {
+            self_written_playlist.borrow_mut().take();
+        }
+        if (playlist_changed && !is_self_write) || request_changed || target_changed {
+            *seen = (incoming_playlist.clone(), (*context.playlist_request).clone(), target_name.clone());
+            let mut rev = source_revision_ref.borrow_mut();
+            *rev = rev.wrapping_add(1);
+        } else if playlist_changed {
+            seen.0 = incoming_playlist;
+        }
+    }
+    let source_revision = *source_revision_ref.borrow();
+    let current_generation = CatalogGeneration {
+        source_revision,
+        catalog_revision: context_playlist_revision,
+        target_name: target_name.clone(),
+        cluster: *active_cluster,
+    };
+    let latest_generation = use_mut_ref(|| current_generation.clone());
+    *latest_generation.borrow_mut() = current_generation.clone();
+
     let (default_sort, default_desc) = default_sort_for_kind(*active_cluster);
     let active_sort = use_state(|| default_sort);
     let active_desc = use_state(|| default_desc);
@@ -284,10 +383,17 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     let selected_ids = use_state(HashSet::<u32>::new);
     let is_bulk_edit_open = use_state(|| false);
     let is_orphans_open = use_state(|| false);
+    let pending_group_order_clusters = use_state(HashSet::<XtreamCluster>::new);
 
     let is_target_view = matches!(context.playlist_request.as_ref(), Some(PlaylistRequest::Target(_)));
-    let initial_bulk_scope = if is_target_view { OverrideScopeDto::Target } else { OverrideScopeDto::Input };
-    let bulk_scope = use_state(|| initial_bulk_scope);
+    let bulk_scope = use_state(|| default_bulk_scope(context.playlist_request.as_ref()));
+    {
+        let bulk_scope = bulk_scope.clone();
+        use_effect_with(((*context.playlist_request).clone(), source_revision), move |(req, _)| {
+            bulk_scope.set(resolve_bulk_scope_after_source_change(*bulk_scope, req.as_ref(), true));
+            || {}
+        });
+    }
 
     // Filter chip states
     let filter_without_epg = use_state(|| false);
@@ -357,8 +463,8 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         });
     }
 
-    // When a different playlist arrives, reset selection. Edits pushed by this component must
-    // not reset it: the detail panel stays open after a successful save.
+    // When an external playlist load or source switch arrives, reset selection. Edits pushed by
+    // this component do not bump `source_revision`: the detail panel stays open after a save.
     {
         let set_playlist = playlist.clone();
         let set_level = current_level.clone();
@@ -369,20 +475,11 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         let set_popup_is_open = popup_is_open.clone();
         let set_selected_channel = selected_channel.clone();
         let set_popup_anchor_ref = popup_anchor_ref.clone();
-        let self_written = self_written_playlist.clone();
-        let incoming_playlist = (*context.playlist).clone();
-        use_effect_with(Id::from_option(incoming_playlist), move |incoming: &Option<Id<UiPlaylistCategories>>| {
-            let incoming = incoming.as_ref().map(|id| id.clone().into_inner());
-            let is_self_write = {
-                let written = self_written.borrow();
-                match (incoming.as_ref(), written.as_ref()) {
-                    (Some(current), Some(written)) => Rc::ptr_eq(current, written),
-                    _ => false,
-                }
-            };
-            self_written.borrow_mut().take();
-            if !is_self_write {
-                // A self write already updated the local catalog (possibly a filtered view of it).
+        let pending_clusters = pending_group_order_clusters.clone();
+        let latest_incoming = latest_incoming_playlist.clone();
+        use_effect_with(source_revision, move |&rev| {
+            if rev > 0 {
+                let incoming = latest_incoming.borrow().clone();
                 set_playlist.set(incoming);
                 set_level.set(ExplorerLevel::Browser);
                 set_selected_item.set(None);
@@ -392,6 +489,7 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                 set_popup_is_open.set(false);
                 set_selected_channel.set(None);
                 set_popup_anchor_ref.set(None);
+                pending_clusters.set(HashSet::new());
             }
             || {}
         });
@@ -436,6 +534,18 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
             XtreamCluster::Series => cat.series.clone().map(Rc::new),
         })
     });
+
+    let all_cluster_groups = use_memo((context_playlist_revision, *active_cluster), |(_, cluster)| {
+        context.playlist.as_ref().and_then(|cat| match cluster {
+            XtreamCluster::Live => cat.live.clone().map(Rc::new),
+            XtreamCluster::Video => cat.vod.clone().map(Rc::new),
+            XtreamCluster::Series => cat.series.clone().map(Rc::new),
+        })
+    });
+    let all_cluster_group_names =
+        use_memo(Id::new(all_cluster_groups.clone()), |groups: &Id<Option<Rc<Vec<Rc<UiPlaylistGroup>>>>>| {
+            groups.as_ref().map(|list| list.iter().map(|g| g.title.to_string()).collect::<Vec<_>>()).unwrap_or_default()
+        });
 
     let all_items_for_cluster =
         use_memo(Id::new(groups_for_cluster.clone()), |groups: &Id<Option<Rc<Vec<Rc<UiPlaylistGroup>>>>>| {
@@ -1022,8 +1132,9 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         let set_playlist = playlist.clone();
         let self_written = self_written_playlist.clone();
         let selected_item = selected_item.clone();
-        Callback::from(move |patched_items: Vec<UiPlaylistItem>| {
-            if patched_items.is_empty() {
+        let latest_generation = latest_generation.clone();
+        Callback::from(move |(expected_gen, patched_items): (CatalogGeneration, Vec<UiPlaylistItem>)| {
+            if !expected_gen.matches_source(&latest_generation.borrow()) || patched_items.is_empty() {
                 return;
             }
             let patch_map = edit_panel::bulk_patch_map(patched_items);
@@ -1047,13 +1158,35 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         })
     };
 
-    let (target_id, target_name) = match context.playlist_request.as_ref() {
-        Some(PlaylistRequest::Target(id)) => {
-            let name =
-                config_ctx.config.as_ref().and_then(|app_config| target_name_for_id(&app_config.sources, *id, None));
-            (Some(*id), name)
-        }
-        _ => (None, None),
+    let can_reorder_groups = is_target_view && can_write_sources && target_name.is_some();
+
+    let handle_group_order_saved = {
+        let explorer_ctx = context.clone();
+        let set_playlist = playlist.clone();
+        let self_written = self_written_playlist.clone();
+        let pending_clusters = pending_group_order_clusters.clone();
+        let latest_generation = latest_generation.clone();
+        Callback::from(move |update: GroupOrderUpdate| {
+            if !update.generation.matches_source(&latest_generation.borrow()) {
+                return;
+            }
+            let cluster = update.generation.cluster;
+            let next_pending = apply_pending_group_order_update(&pending_clusters, cluster, update.pending);
+            if next_pending != *pending_clusters {
+                pending_clusters.set(next_pending);
+            }
+
+            if let Some(ref source) = *explorer_ctx.playlist {
+                let new_source = Rc::new(reorder_categories_groups(source, cluster, &update.groups));
+                let new_visible = (*set_playlist).as_ref().map_or_else(
+                    || new_source.clone(),
+                    |visible| Rc::new(reorder_categories_groups(visible, cluster, &update.groups)),
+                );
+                set_playlist.set(Some(new_visible));
+                *self_written.borrow_mut() = Some(new_source.clone());
+                explorer_ctx.playlist.set(Some(new_source));
+            }
+        })
     };
 
     let handle_select_group = {
@@ -1435,6 +1568,12 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                         <ExplorerSidebar
                             cluster={*active_cluster}
                             groups={Id::from_option((*groups_for_cluster).clone())}
+                            all_cluster_groups={Id::from_option((*all_cluster_groups).clone())}
+                            target_name={target_name.clone()}
+                            generation={current_generation.clone()}
+                            can_reorder={can_reorder_groups}
+                            group_order_pending={pending_group_order_clusters.contains(&*active_cluster)}
+                            on_group_order_saved={Some(handle_group_order_saved.clone())}
                             total_items={total_items}
                             edited_count={*edited_count}
                             without_epg_count={*without_epg_count}
@@ -1748,12 +1887,21 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                             })
                         };
 
+                        let selected_real_group = match &*selected_group {
+                            SelectedGroup::Group(title) => Some(title.to_string()),
+                            _ => None,
+                        };
+
                         html! {
                             <BulkEditPanel
                                 items={Id::new(selected_items)}
                                 active_scope={bulk_scope.clone()}
                                 target_id={target_id}
                                 target_name={target_name.clone()}
+                                generation={current_generation.clone()}
+                                selected_real_group={selected_real_group}
+                                cluster_groups={all_cluster_group_names.clone()}
+                                on_group_order_saved={Some(handle_group_order_saved.clone())}
                                 on_close={handle_bulk_close}
                                 on_saved={handle_bulk_updated.clone()}
                             />
@@ -2274,5 +2422,67 @@ mod tests {
         }
 
         assert!(missing.is_empty(), "Found missing i18n keys in explorer sources:\n{}", missing.join("\n"));
+    }
+
+    #[test]
+    fn explorer_resets_bulk_scope_when_source_changes() {
+        use shared::model::{PlaylistRequestM3u, PlaylistRequestXtream};
+
+        assert_eq!(default_bulk_scope(None), OverrideScopeDto::Input);
+        assert_eq!(default_bulk_scope(Some(&PlaylistRequest::Target(7))), OverrideScopeDto::Target);
+        assert_eq!(default_bulk_scope(Some(&PlaylistRequest::Input("prov-a".to_string()))), OverrideScopeDto::Input);
+        assert_eq!(
+            default_bulk_scope(Some(&PlaylistRequest::CustomXtream(PlaylistRequestXtream {
+                username: "u".to_string(),
+                password: "p".to_string(),
+                url: "http://example.com".to_string(),
+            }))),
+            OverrideScopeDto::Input
+        );
+        assert_eq!(
+            default_bulk_scope(Some(&PlaylistRequest::CustomM3u(PlaylistRequestM3u {
+                url: "http://example.com/list.m3u".to_string(),
+            }))),
+            OverrideScopeDto::Input
+        );
+
+        let target_req = PlaylistRequest::Target(7);
+        let input_req = PlaylistRequest::Input("prov-a".to_string());
+        // Unchanged source keeps an explicit user selection; source change resets to the new source default.
+        assert_eq!(
+            resolve_bulk_scope_after_source_change(OverrideScopeDto::Input, Some(&target_req), false),
+            OverrideScopeDto::Input
+        );
+        assert_eq!(
+            resolve_bulk_scope_after_source_change(OverrideScopeDto::Input, Some(&target_req), true),
+            OverrideScopeDto::Target
+        );
+        assert_eq!(
+            resolve_bulk_scope_after_source_change(OverrideScopeDto::Target, Some(&input_req), true),
+            OverrideScopeDto::Input
+        );
+        assert_eq!(
+            resolve_bulk_scope_after_source_change(OverrideScopeDto::Target, None, true),
+            OverrideScopeDto::Input
+        );
+    }
+
+    #[test]
+    fn pending_marker_is_not_cleared_by_save_with_pending_false() {
+        let mut initial = HashSet::new();
+        initial.insert(XtreamCluster::Live);
+
+        // Saving again with pending=false must keep an existing pending marker until playlist reload.
+        assert_eq!(apply_pending_group_order_update(&initial, XtreamCluster::Live, Some(false)), initial);
+        assert_eq!(apply_pending_group_order_update(&initial, XtreamCluster::Live, None), initial);
+
+        // Saving on an empty set with pending=false does not add the cluster.
+        assert_eq!(apply_pending_group_order_update(&HashSet::new(), XtreamCluster::Live, Some(false)), HashSet::new());
+
+        let after_vod = apply_pending_group_order_update(&initial, XtreamCluster::Video, Some(true));
+        let mut expected = HashSet::new();
+        expected.insert(XtreamCluster::Live);
+        expected.insert(XtreamCluster::Video);
+        assert_eq!(after_vod, expected);
     }
 }

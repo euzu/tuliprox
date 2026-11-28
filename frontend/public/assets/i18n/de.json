@@ -2744,6 +2744,10 @@
     "EXPLORER_STATUS_CONFLICT": "Konflikt",
     "EXPLORER_STATUS_VALIDATION_ERROR": "Validierungsfehler",
     "EXPLORER_STATUS_ERROR": "Fehler",
+    "EXPLORER_REORDER_GROUPS": "Gruppen sortieren",
+    "EXPLORER_MOVE_GROUP_UP": "Gruppe nach oben",
+    "EXPLORER_MOVE_GROUP_DOWN": "Gruppe nach unten",
+    "EXPLORER_DRAG_GROUP": "Zum Sortieren ziehen",
     "LOGO_SMALL": "Kleines Logo",
     "EPG_CHANNEL_ID": "EPG-Kanal-ID",
     "CHNO": "Kanalnummer",
@@ -2830,7 +2834,11 @@
       "EPG_SEARCH_FAILED": "EPG-Suche fehlgeschlagen: {error}",
       "PARSE_ERROR": "Die Überschreibungsdatei ist fehlerhaft: {error}",
       "SCHEMA_ERROR": "Nicht unterstützte Schema-Version für Überschreibungen: {version}",
-      "SAVE_FAILED_ERROR": "Speichern fehlgeschlagen: {error}"
+      "SAVE_FAILED_ERROR": "Speichern fehlgeschlagen: {error}",
+      "GROUP_ORDER_SAVED": "Gruppenreihenfolge gespeichert",
+      "GROUP_ORDER_LOAD_FAILED": "Gruppenreihenfolge konnte nicht geladen werden: {error}",
+      "GROUP_ORDER_CONFLICT": "Konfigurationskonflikt: source.yml wurde auf dem Server aktualisiert. Gespeicherte Gruppenreihenfolge wird neu geladen...",
+      "GROUP_ORDER_TOO_MANY_GROUPS": "Die Gruppensortierung ist deaktiviert, da dieser Cluster mehr als {max} Gruppen enthält."
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content.",
@@ -3327,6 +3335,10 @@
     "invalid_title": "Titel darf nicht leer sein oder führende/nachgestellte Leerzeichen enthalten",
     "invalid_group": "Gruppe darf nicht leer sein oder führende/nachgestellte Leerzeichen enthalten",
     "invalid_type": "Ungültiger Feldtyp",
-    "unknown_field": "Unbekanntes Feld"
+    "unknown_field": "Unbekanntes Feld",
+    "too_many_groups": "Zu viele Gruppen in der Reihenfolgeliste",
+    "empty_group_name": "Gruppenname darf nicht leer sein",
+    "duplicate_group_name": "Doppelter Gruppenname",
+    "group_name_template_placeholder": "Gruppenname darf keinen !word!-Vorlagenplatzhalter enthalten"
   }
 }

@@ -619,6 +619,47 @@ and watch the pending marker disappear.
 
 ---
 
+### 12.5 Group order
+
+In a target view, users with the `source.write` permission can change the order of the groups of the selected
+cluster: **Reorder groups** in the sidebar turns the group list into a sortable list (drag and drop, or the move up
+and move down buttons). **Save** stores the order; it takes effect with the next playlist update, like an override.
+
+The order is stored in `source.yml`, not in an override file, as the first group sort rule of the target:
+
+```yaml
+sort:
+  rules:
+    - target: group
+      field: group
+      order: none
+      filter: Type = live
+      sequence:
+        - ^Sports$
+        - ^News$
+```
+
+There is one such rule per cluster (`Type = live`, `Type = vod`, `Type = series`). The Explorer always saves the
+complete order of the cluster, so every listed group is placed by this rule before any other group rule of the target
+is consulted; a group rule you wrote yourself then only orders groups that are not in the list (new groups after the
+save). Groups that are not in the list keep their source order after the listed ones. The rule is evaluated on the
+first channel of a group: a live group whose first channel is a catch-up entry does not match `Type = live` and
+sorts after the listed groups. The Explorer only changes a rule of exactly this shape and never touches other rules.
+Saving an empty order removes the rule. Group names that contain a `!name!` template placeholder cannot be stored.
+
+When a bulk edit in target scope moves items to a new group, the new group is placed directly below the group that
+is selected in the sidebar.
+
+The Explorer edits only a `sort` block written in YAML block style. When the target's `sort` block uses another layout
+(flow style such as `sort: {rules: [...]}`, a comment or anchor on `sort:` or `rules:`, or an inline target mapping),
+saving answers `409` and leaves `source.yml` unchanged; edit the rule by hand in that case.
+
+REST: `GET /api/v1/playlist/group_order?target=<name>&cluster=<live|vod|series>` returns `{"groups": [...]}`
+(`playlist.read`). `PUT /api/v1/playlist/group_order` with `{"target": "...", "cluster": "live", "groups": [...]}`
+stores the order (`source.write`) and answers the stored order and `pending` (`true` when `source.yml` changed).
+Names are trimmed and must be unique and non-empty, at most 2000 per cluster (`422` with field errors otherwise); an
+unknown target answers `404`, a concurrent change of `source.yml` or an unsupported layout `409`.
+
 ## 13. Related documentation
 
 - [mapping.yml (Mapper DSL & Logic)](./mapping-dsl.md) — rules for many items, where overrides handle one.

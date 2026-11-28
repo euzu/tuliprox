@@ -1,8 +1,8 @@
 use crate::{
-    error::Error,
+    error::{Error, ErrorInfo},
     services::{
         get_base_href, request_get, request_get_binary, request_get_meta, request_post, request_post_meta,
-        request_post_with_error_body, Encoding, WriteFailure,
+        request_post_with_error_body, request_put_raw, Encoding, RawResponse, WriteFailure,
     },
 };
 use futures::join;
@@ -16,11 +16,14 @@ use shared::{
         OverrideProvenanceDto, OverrideRevisionDto, OverrideSaveRequest, OverrideScopeDto, PlaylistEpgRequest,
         PlaylistRequest, PlaylistUpdateRequestDto, PlaylistUpdateViewSnapshotDto, PlaylistUrlResolveRequest,
         SeriesStreamProperties, StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto,
+        TargetGroupCluster, TargetGroupOrderDto, TargetGroupOrderSaveRequest, TargetGroupOrderSaveResponse,
         UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
     utils::{concat_path_leading_slash, HEADER_IF_MATCH, HEADER_PLAYLIST_SCOPE_REVISION},
 };
 use std::rc::Rc;
+
+const GROUP_ORDER_ENDPOINT: &str = "group_order";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverrideSaveResult {
@@ -28,6 +31,37 @@ pub enum OverrideSaveResult {
     Conflict(OverrideConflictDto),
     FieldErrors(Vec<FieldError>),
     Err(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupOrderSaveResult {
+    Ok(TargetGroupOrderSaveResponse),
+    Conflict(String),
+    FieldErrors(Vec<FieldError>),
+    Err(String),
+}
+
+fn extract_raw_error_message(body: &str) -> String {
+    serde_json::from_str::<ErrorInfo>(body).map_or_else(|_| body.trim().to_string(), |info| info.error)
+}
+
+fn parse_group_order_save_response(raw: &RawResponse) -> GroupOrderSaveResult {
+    match raw.status {
+        200..=299 => serde_json::from_str::<TargetGroupOrderSaveResponse>(&raw.body)
+            .map_or_else(|err| GroupOrderSaveResult::Err(err.to_string()), GroupOrderSaveResult::Ok),
+        409 => GroupOrderSaveResult::Conflict(extract_raw_error_message(&raw.body)),
+        422 => serde_json::from_str::<OverrideFieldErrorsDto>(&raw.body).map_or_else(
+            |_| {
+                let message = extract_raw_error_message(&raw.body);
+                GroupOrderSaveResult::Err(if message.is_empty() { "422".to_string() } else { message })
+            },
+            |errors| GroupOrderSaveResult::FieldErrors(errors.field_errors),
+        ),
+        status => {
+            let message = extract_raw_error_message(&raw.body);
+            GroupOrderSaveResult::Err(if message.is_empty() { format!("HTTP {status}") } else { message })
+        }
+    }
 }
 
 async fn post_scoped<B, T>(
@@ -65,6 +99,7 @@ pub struct PlaylistService {
     overrides_discard_path: String,
     epg_search_path: String,
     overrides_orphans_path: String,
+    group_order_path: String,
     imdb_update_api_path: String,
 }
 impl Default for PlaylistService {
@@ -96,6 +131,7 @@ impl PlaylistService {
             overrides_discard_path: api("overrides/discard"),
             epg_search_path: api("epg/search"),
             overrides_orphans_path: api("overrides/orphans"),
+            group_order_path: api(GROUP_ORDER_ENDPOINT),
             imdb_update_api_path: concat_path_leading_slash(base_href, "api/v1/imdb/update"),
         }
     }
@@ -509,6 +545,31 @@ impl PlaylistService {
         }
         request_get(&url, None, None).await
     }
+
+    pub fn group_order_url(&self, target: &str, cluster: TargetGroupCluster) -> String {
+        format!(
+            "{}?target={}&cluster={}",
+            self.group_order_path,
+            shared::utils::percent_encode_unreserved(target),
+            cluster.as_str(),
+        )
+    }
+
+    pub async fn get_group_order(
+        &self,
+        target: &str,
+        cluster: TargetGroupCluster,
+    ) -> Result<Option<TargetGroupOrderDto>, Error> {
+        let url = self.group_order_url(target, cluster);
+        request_get(&url, None, None).await
+    }
+
+    pub async fn save_group_order(&self, request: &TargetGroupOrderSaveRequest) -> GroupOrderSaveResult {
+        match request_put_raw(&self.group_order_path, request).await {
+            Ok(raw) => parse_group_order_save_response(&raw),
+            Err(err) => GroupOrderSaveResult::Err(err.to_string()),
+        }
+    }
 }
 
 fn build_playlist_update_request(targets: &[&str]) -> PlaylistUpdateRequestDto {
@@ -773,6 +834,64 @@ mod tests {
         assert_eq!(service.overrides_discard_path, "/api/v1/playlist/overrides/discard");
         assert_eq!(service.epg_search_path, "/api/v1/playlist/epg/search");
         assert_eq!(service.overrides_orphans_path, "/api/v1/playlist/overrides/orphans");
+        assert_eq!(service.group_order_path, "/api/v1/playlist/group_order");
+        assert_eq!(
+            service.group_order_url("main target", shared::model::TargetGroupCluster::Vod),
+            "/api/v1/playlist/group_order?target=main%20target&cluster=vod"
+        );
+    }
+
+    #[test]
+    fn parse_group_order_save_response_maps_ok_conflict_field_errors_and_failures() {
+        use super::{parse_group_order_save_response, GroupOrderSaveResult};
+        use crate::services::RawResponse;
+        use shared::model::{FieldError, TargetGroupOrderSaveResponse};
+
+        let raw = |status: u16, body: &str| RawResponse { status, body: body.to_string() };
+
+        assert_eq!(
+            parse_group_order_save_response(&raw(200, r#"{"groups":["A","B"],"pending":true}"#)),
+            GroupOrderSaveResult::Ok(TargetGroupOrderSaveResponse {
+                groups: vec!["A".to_string(), "B".to_string()],
+                pending: true,
+            })
+        );
+        assert_eq!(
+            parse_group_order_save_response(&raw(409, r#"{"error":"source.yml changed"}"#)),
+            GroupOrderSaveResult::Conflict("source.yml changed".to_string())
+        );
+        assert_eq!(
+            parse_group_order_save_response(&raw(409, r#"{"error":"Unsupported sort layout"}"#)),
+            GroupOrderSaveResult::Conflict("Unsupported sort layout".to_string())
+        );
+        assert_eq!(
+            parse_group_order_save_response(&raw(409, r#"{"error":""}"#)),
+            GroupOrderSaveResult::Conflict(String::new())
+        );
+        assert_eq!(parse_group_order_save_response(&raw(409, "")), GroupOrderSaveResult::Conflict(String::new()));
+        assert_eq!(
+            parse_group_order_save_response(&raw(
+                422,
+                r#"{"field_errors":[{"entry":"News","field":"groups","message_key":"error.duplicate_group_name"}]}"#
+            )),
+            GroupOrderSaveResult::FieldErrors(vec![
+                FieldError::new("groups", "error.duplicate_group_name").with_entry("News"),
+            ])
+        );
+        assert_eq!(
+            parse_group_order_save_response(&raw(
+                422,
+                r#"{"field_errors":[{"entry":"!bad!","field":"groups","message_key":"error.group_name_template_placeholder"}]}"#
+            )),
+            GroupOrderSaveResult::FieldErrors(vec![
+                FieldError::new("groups", "error.group_name_template_placeholder").with_entry("!bad!"),
+            ])
+        );
+        assert_eq!(
+            parse_group_order_save_response(&raw(500, r#"{"error":"boom"}"#)),
+            GroupOrderSaveResult::Err("boom".to_string())
+        );
+        assert_eq!(parse_group_order_save_response(&raw(503, "")), GroupOrderSaveResult::Err("HTTP 503".to_string()));
     }
 
     #[test]

@@ -1,5 +1,42 @@
+use shared::model::XtreamCluster;
 use std::{cell::RefCell, fmt, ops::Deref, rc::Rc};
 use yew::prelude::*;
+
+/// Identifies the active explorer source, catalog revision, target, and cluster so async
+/// results from an earlier source, reload, target, cluster, or catalog edit cannot mutate
+/// or overwrite a newer state.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct CatalogGeneration {
+    /// Incremented on every external playlist load, reload, or source switch.
+    pub source_revision: u32,
+    /// Incremented on every `context.playlist` replacement (external loads and local edits).
+    pub catalog_revision: u32,
+    pub target_name: Option<String>,
+    pub cluster: XtreamCluster,
+}
+
+impl CatalogGeneration {
+    /// Returns `true` when `current` still belongs to the same source reload, target, and cluster.
+    #[must_use]
+    pub fn matches_source(&self, current: &Self) -> bool {
+        self.source_revision == current.source_revision
+            && self.target_name == current.target_name
+            && self.cluster == current.cluster
+    }
+
+    /// Returns `true` when `current` matches the exact catalog generation, including local edits.
+    #[must_use]
+    pub fn matches_catalog(&self, current: &Self) -> bool { self == current }
+}
+
+/// Group-order update payload emitted after saving or conflict-reloading a cluster's order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct GroupOrderUpdate {
+    pub generation: CatalogGeneration,
+    pub groups: Vec<String>,
+    /// `Some(pending)` after a save; `None` when reloading the stored order after a conflict.
+    pub pending: Option<bool>,
+}
 
 /// Identity handle for hook dependencies and component props.
 ///
@@ -148,5 +185,32 @@ mod tests {
     #[test]
     fn none_handles_are_equal() {
         assert_eq!(Id::<u8>::from_option(None), Id::<u8>::from_option(None));
+    }
+
+    #[test]
+    fn catalog_generation_distinguishes_local_edits_from_reloads_and_switches() {
+        let base = CatalogGeneration {
+            source_revision: 1,
+            catalog_revision: 3,
+            target_name: Some("main".to_string()),
+            cluster: XtreamCluster::Live,
+        };
+        let after_local_edit = CatalogGeneration { catalog_revision: 4, ..base.clone() };
+        let after_reload = CatalogGeneration { source_revision: 2, catalog_revision: 4, ..base.clone() };
+        let other_target = CatalogGeneration { target_name: Some("backup".to_string()), ..base.clone() };
+        let other_cluster = CatalogGeneration { cluster: XtreamCluster::Video, ..base.clone() };
+
+        assert!(base.matches_catalog(&base));
+        assert!(base.matches_source(&base));
+
+        // Local edits preserve source identity while invalidating exact catalog snapshots.
+        assert!(base.matches_source(&after_local_edit));
+        assert!(!base.matches_catalog(&after_local_edit));
+
+        // Reloads, target switches, and cluster switches invalidate both checks.
+        assert!(!base.matches_source(&after_reload));
+        assert!(!base.matches_catalog(&after_reload));
+        assert!(!base.matches_source(&other_target));
+        assert!(!base.matches_source(&other_cluster));
     }
 }

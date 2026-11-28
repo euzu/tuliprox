@@ -2733,6 +2733,10 @@
     "EXPLORER_STATUS_CONFLICT": "Конфликт",
     "EXPLORER_STATUS_VALIDATION_ERROR": "Ошибка проверки",
     "EXPLORER_STATUS_ERROR": "Ошибка",
+    "EXPLORER_REORDER_GROUPS": "Изменить порядок групп",
+    "EXPLORER_MOVE_GROUP_UP": "Переместить группу вверх",
+    "EXPLORER_MOVE_GROUP_DOWN": "Переместить группу вниз",
+    "EXPLORER_DRAG_GROUP": "Перетащите для изменения порядка",
     "LOGO_SMALL": "Маленький логотип",
     "EPG_CHANNEL_ID": "ID канала EPG",
     "CHNO": "Номер канала",
@@ -2822,7 +2826,11 @@
       "EPG_SEARCH_FAILED": "Ошибка поиска EPG: {error}",
       "PARSE_ERROR": "Файл переопределений поврежден: {error}",
       "SCHEMA_ERROR": "Неподдерживаемая версия схемы переопределения: {version}",
-      "SAVE_FAILED_ERROR": "Ошибка сохранения: {error}"
+      "SAVE_FAILED_ERROR": "Ошибка сохранения: {error}",
+      "GROUP_ORDER_SAVED": "Порядок групп сохранён",
+      "GROUP_ORDER_LOAD_FAILED": "Не удалось загрузить порядок групп: {error}",
+      "GROUP_ORDER_CONFLICT": "Конфликт конфигурации: файл source.yml обновлён на сервере. Перезагрузка сохранённого порядка групп...",
+      "GROUP_ORDER_TOO_MANY_GROUPS": "Сортировка групп отключена, так как в этом кластере более {max} групп."
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Выберите EPG для просмотра содержимого.",
@@ -3319,7 +3327,11 @@
     "invalid_title": "Название не может быть пустым или содержать начальные/конечные пробелы",
     "invalid_group": "Группа не может быть пустой или содержать начальные/конечные пробелы",
     "invalid_type": "Неверный тип поля",
-    "unknown_field": "Неизвестное поле"
+    "unknown_field": "Неизвестное поле",
+    "too_many_groups": "Слишком много групп в списке порядка",
+    "empty_group_name": "Название группы не может быть пустым",
+    "duplicate_group_name": "Повторяющееся название группы",
+    "group_name_template_placeholder": "Название группы не может содержать шаблон-заполнитель !word!"
   },
   "MANAGED_CHANNELS": {
     "POINT": "Точка вставки",

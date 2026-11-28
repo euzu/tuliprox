@@ -124,8 +124,10 @@
     background: var(--theme-brand-surface-soft);
     padding: var(--padding-small) 0;
     overflow-y: auto;
+    display: flex;
+    flex-direction: column;
 
-    button {
+    > button {
       width: 100%;
       padding: 6px 14px;
       display: flex;
@@ -157,6 +159,137 @@
       small {
         margin-left: auto;
         opacity: 0.8;
+      }
+    }
+
+    .tp__explorer-side-header {
+      padding: 0 var(--padding-small) var(--padding-small);
+      border-bottom: 1px solid var(--theme-brand-border);
+      margin-bottom: var(--gap-small);
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap-small);
+
+      .tp__text-button {
+        width: 100%;
+        justify-content: center;
+        padding: var(--padding-micro) var(--padding-mini);
+        font-size: var(--font-size-sm);
+      }
+
+      .tp__explorer-side-pending {
+        margin: 0;
+
+        .chip {
+          width: 100%;
+          justify-content: center;
+          text-align: center;
+          font-size: var(--font-size-xs);
+          padding: var(--padding-micro) var(--padding-mini);
+        }
+      }
+    }
+
+    .tp__explorer-side-notice {
+      margin: 0 var(--padding-small) var(--gap-small);
+      padding: var(--padding-micro) var(--padding-mini);
+      border-radius: var(--border-radius-small);
+      font-size: var(--font-size-xs);
+
+      &.warning {
+        background: var(--theme-brand-warning-background);
+        color: var(--theme-brand-warning-strong);
+        border: 1px solid var(--theme-brand-warning);
+      }
+    }
+
+    .tp__explorer-reorder-list {
+      display: flex;
+      flex-direction: column;
+      flex: 1 0 auto;
+    }
+
+    .tp__explorer-reorder-row {
+      display: flex;
+      align-items: center;
+      gap: var(--gap-micro);
+      padding: var(--padding-micro) var(--padding-mini);
+      border-bottom: 1px solid var(--theme-brand-border-table);
+      font-size: var(--font-size-sm);
+      color: var(--theme-brand-text);
+
+      &.drag-over {
+        background: var(--theme-brand-explorer-selected);
+        outline: 1px dashed var(--theme-brand-primary-border);
+      }
+
+      .tp__explorer-drag-handle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.15rem;
+        height: 1.15rem;
+        flex-shrink: 0;
+        cursor: grab;
+        color: var(--theme-brand-explorer-text-secondary);
+        fill: currentColor;
+
+        &:active {
+          cursor: grabbing;
+        }
+      }
+
+      .tp__explorer-reorder-title {
+        flex: 1 1 0;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tp__explorer-reorder-count {
+        flex-shrink: 0;
+        color: var(--theme-brand-explorer-text-secondary);
+        font-size: var(--font-size-xs);
+        opacity: 0.8;
+      }
+
+      .tp__explorer-reorder-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--gap-micro);
+        flex-shrink: 0;
+
+        .tp__icon-button {
+          width: 1.4rem;
+          height: 1.4rem;
+          padding: 2px;
+
+          &.disabled {
+            opacity: 0.35;
+            cursor: default;
+          }
+        }
+      }
+    }
+
+    .tp__explorer-reorder-toolbar {
+      position: sticky;
+      bottom: 0;
+      z-index: 1;
+      background: var(--theme-brand-surface-soft);
+      border-top: 1px solid var(--theme-brand-border);
+      padding: var(--padding-mini) var(--padding-small);
+      margin-top: auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: var(--gap-small);
+
+      .tp__text-button {
+        width: auto;
+        padding: var(--padding-micro) var(--padding-mini);
+        font-size: var(--font-size-sm);
       }
     }
   }
@@ -1566,6 +1699,11 @@
       .tp__explorer-panel-back {
         display: inline-flex;
         flex-shrink: 0;
+
+        &.disabled {
+          opacity: 0.35;
+          cursor: default;
+        }
       }
     }
   }

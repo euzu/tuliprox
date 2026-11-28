@@ -244,3 +244,112 @@ fn bulk_fetches_provenance_only_for_resets() {
     let rating_reset = ItemOverridePatch { rating: Some(OverrideFieldOp::Reset), ..Default::default() };
     assert!(patch_needs_provenance(&rating_reset));
 }
+
+#[test]
+fn pending_new_group_order_insertion_requires_target_permission_new_group_and_real_selection() {
+    let existing = vec!["News".to_string(), "Sports".to_string()];
+    let new_group_patch =
+        ItemOverridePatch { group: Some(OverrideFieldOp::Set("  Docs  ".to_string())), ..Default::default() };
+
+    // Valid: target scope, source.write, new group name, real group selected.
+    assert_eq!(
+        pending_new_group_order_insertion(
+            OverrideScopeDto::Target,
+            true,
+            "main",
+            &new_group_patch,
+            &existing,
+            Some("News"),
+        ),
+        Some(("Docs".to_string(), "News".to_string()))
+    );
+
+    // Input scope -> nothing extra.
+    assert_eq!(
+        pending_new_group_order_insertion(
+            OverrideScopeDto::Input,
+            true,
+            "main",
+            &new_group_patch,
+            &existing,
+            Some("News"),
+        ),
+        None
+    );
+
+    // Missing source.write -> nothing extra.
+    assert_eq!(
+        pending_new_group_order_insertion(
+            OverrideScopeDto::Target,
+            false,
+            "main",
+            &new_group_patch,
+            &existing,
+            Some("News"),
+        ),
+        None
+    );
+
+    // No real group selected -> nothing extra.
+    assert_eq!(
+        pending_new_group_order_insertion(OverrideScopeDto::Target, true, "main", &new_group_patch, &existing, None),
+        None
+    );
+
+    // Group already exists in the cluster -> nothing extra.
+    let existing_group_patch =
+        ItemOverridePatch { group: Some(OverrideFieldOp::Set("Sports".to_string())), ..Default::default() };
+    assert_eq!(
+        pending_new_group_order_insertion(
+            OverrideScopeDto::Target,
+            true,
+            "main",
+            &existing_group_patch,
+            &existing,
+            Some("News"),
+        ),
+        None
+    );
+
+    // Non-Set group op -> nothing extra.
+    let reset_patch = ItemOverridePatch { group: Some(OverrideFieldOp::Reset), ..Default::default() };
+    assert_eq!(
+        pending_new_group_order_insertion(
+            OverrideScopeDto::Target,
+            true,
+            "main",
+            &reset_patch,
+            &existing,
+            Some("News"),
+        ),
+        None
+    );
+}
+
+#[test]
+fn bulk_edit_disables_interactions_while_saving_and_guards_stale_generation() {
+    assert!(is_bulk_panel_interactive(false));
+    assert!(!is_bulk_panel_interactive(true));
+
+    let base = CatalogGeneration {
+        source_revision: 1,
+        catalog_revision: 2,
+        target_name: Some("main".to_string()),
+        cluster: XtreamCluster::Live,
+    };
+    assert!(is_bulk_request_active(true, &base, &base));
+    assert!(!is_bulk_request_active(false, &base, &base));
+
+    // Local catalog_revision bumps from item saves in the same source remain active.
+    let after_local_edit = CatalogGeneration { catalog_revision: 3, ..base.clone() };
+    assert!(is_bulk_request_active(true, &base, &after_local_edit));
+
+    let after_reload = CatalogGeneration { source_revision: 2, ..base.clone() };
+    assert!(!is_bulk_request_active(true, &base, &after_reload));
+
+    let other_target = CatalogGeneration { target_name: Some("backup".to_string()), ..base.clone() };
+    assert!(!is_bulk_request_active(true, &base, &other_target));
+
+    let other_cluster = CatalogGeneration { cluster: XtreamCluster::Video, ..base.clone() };
+    assert!(!is_bulk_request_active(true, &base, &other_cluster));
+}

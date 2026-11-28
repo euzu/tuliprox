@@ -228,6 +228,13 @@
 
 ## 🌟 New Features
 
+- **Reorder groups in the Playlist Explorer.** In a target view, users with `source.write` can drag groups into a new
+  order (or use move up and move down) and save it. The order is stored in `source.yml` as the first group sort rule
+  of the target cluster (`sequence` of the group names), so it stays config-first and takes effect with the next
+  playlist update. A new group created by a target-scope bulk edit is placed below the selected group. Only block-style
+  `sort` blocks are edited; other layouts answer `409` and stay unchanged. New endpoints:
+  `GET`/`PUT /api/v1/playlist/group_order`.
+
 - **Deduplicate movies and series by TMDB id.** `deduplicate.match_by` accepts `tmdb` and `tmdb_then_caption`.
   `tmdb` collapses movies and series with the same TMDB id inside one group and ignores everything else (live
   channels, episodes, items without an id). `tmdb_then_caption` uses the TMDB id when present and the caption

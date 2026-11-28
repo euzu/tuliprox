@@ -126,7 +126,7 @@ pub fn line_end_offset(text: &str, byte_pos: usize) -> usize {
 /// The lightweight scanner ignores quoted values and comments while tracking nested flow
 /// collections. Opening delimiters are only recognized at YAML token boundaries so braces in
 /// plain values such as environment placeholders do not create false flow scopes.
-fn flow_mapping_start_at(text: &str, byte_range: &Range<usize>) -> Option<usize> {
+pub fn flow_mapping_start_at(text: &str, byte_range: &Range<usize>) -> Option<usize> {
     let bytes = text.as_bytes();
     let limit = byte_range.start.min(bytes.len());
     let mut flow_stack = Vec::<(u8, usize)>::new();
@@ -197,7 +197,7 @@ fn flow_mapping_start_at(text: &str, byte_range: &Range<usize>) -> Option<usize>
     flow_stack.last().filter(|(delimiter, _)| *delimiter == b'{').map(|(_, start)| *start)
 }
 
-fn is_flow_style_mapping_at(text: &str, byte_range: &Range<usize>) -> bool {
+pub fn is_flow_style_mapping_at(text: &str, byte_range: &Range<usize>) -> bool {
     flow_mapping_start_at(text, byte_range).is_some()
 }
 

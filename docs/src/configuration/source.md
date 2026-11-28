@@ -1909,6 +1909,9 @@ Each sort rule supports the following entries:
 > equal, the next rule decides — so a `channel` rule on `group` followed by one on `caption`
 > produces group-then-caption ordering.
 
+The Playlist Explorer can write a group order rule for you (`sequence` of anchored group names with
+`filter: Type = live|vod|series`); see [Group order](playlist-overrides.md#125-group-order).
+
 #### Sort Example
 
 ```yaml

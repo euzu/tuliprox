@@ -2733,6 +2733,10 @@
     "EXPLORER_STATUS_CONFLICT": "تعارض",
     "EXPLORER_STATUS_VALIDATION_ERROR": "خطأ في التحقق",
     "EXPLORER_STATUS_ERROR": "خطأ",
+    "EXPLORER_REORDER_GROUPS": "إعادة ترتيب المجموعات",
+    "EXPLORER_MOVE_GROUP_UP": "نقل المجموعة لأعلى",
+    "EXPLORER_MOVE_GROUP_DOWN": "نقل المجموعة لأسفل",
+    "EXPLORER_DRAG_GROUP": "اسحب لإعادة ترتيب المجموعة",
     "LOGO_SMALL": "شعار صغير",
     "EPG_CHANNEL_ID": "معرف قناة EPG",
     "CHNO": "رقم القناة",
@@ -2822,7 +2826,11 @@
       "EPG_SEARCH_FAILED": "فشل البحث في EPG: {error}",
       "PARSE_ERROR": "ملف التجاوز غير صالح: {error}",
       "SCHEMA_ERROR": "إصدار مخطط التجاوز غير مدعوم: {version}",
-      "SAVE_FAILED_ERROR": "فشل الحفظ: {error}"
+      "SAVE_FAILED_ERROR": "فشل الحفظ: {error}",
+      "GROUP_ORDER_SAVED": "تم حفظ ترتيب المجموعات",
+      "GROUP_ORDER_LOAD_FAILED": "تعذر تحميل ترتيب المجموعات: {error}",
+      "GROUP_ORDER_CONFLICT": "تعارض في التكوين: تم تحديث source.yml على الخادم. جارٍ إعادة تحميل ترتيب المجموعات المحفوظ...",
+      "GROUP_ORDER_TOO_MANY_GROUPS": "تم تعطيل إعادة ترتيب المجموعات لأن هذه المجموعة تحتوي على أكثر من {max} مجموعة."
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "حدد EPG لعرض محتواه.",
@@ -3319,7 +3327,11 @@
     "invalid_title": "لا يمكن أن يكون العنوان فارغاً أو يحتوي على مسافات بادئة/لاحقة",
     "invalid_group": "لا يمكن أن تكون المجموعة فارغة أو تحتوي على مسافات بادئة/لاحقة",
     "invalid_type": "نوع الحقل غير صالح",
-    "unknown_field": "حقل غير معروف"
+    "unknown_field": "حقل غير معروف",
+    "too_many_groups": "عدد المجموعات في قائمة الترتيب كبير جداً",
+    "empty_group_name": "لا يمكن أن يكون اسم المجموعة فارغاً",
+    "duplicate_group_name": "اسم المجموعة مكرر",
+    "group_name_template_placeholder": "لا يمكن أن يحتوي اسم المجموعة على العنصر النائب للقالب !word!"
   },
   "MANAGED_CHANNELS": {
     "POINT": "نقطة الإدراج",

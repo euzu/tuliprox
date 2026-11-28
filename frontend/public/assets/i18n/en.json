@@ -2744,6 +2744,10 @@
     "EXPLORER_STATUS_CONFLICT": "Conflict",
     "EXPLORER_STATUS_VALIDATION_ERROR": "Validation Error",
     "EXPLORER_STATUS_ERROR": "Error",
+    "EXPLORER_REORDER_GROUPS": "Reorder groups",
+    "EXPLORER_MOVE_GROUP_UP": "Move group up",
+    "EXPLORER_MOVE_GROUP_DOWN": "Move group down",
+    "EXPLORER_DRAG_GROUP": "Drag to reorder group",
     "LOGO_SMALL": "Small Logo",
     "EPG_CHANNEL_ID": "EPG Channel ID",
     "CHNO": "Channel Number",
@@ -2830,7 +2834,11 @@
       "EPG_SEARCH_FAILED": "EPG search failed: {error}",
       "PARSE_ERROR": "The override file is malformed: {error}",
       "SCHEMA_ERROR": "Unsupported override schema version: {version}",
-      "SAVE_FAILED_ERROR": "Save failed: {error}"
+      "SAVE_FAILED_ERROR": "Save failed: {error}",
+      "GROUP_ORDER_SAVED": "Group order saved",
+      "GROUP_ORDER_LOAD_FAILED": "Could not load group order: {error}",
+      "GROUP_ORDER_CONFLICT": "Configuration conflict: source.yml was updated on the server. Reloading stored group order...",
+      "GROUP_ORDER_TOO_MANY_GROUPS": "Group reordering is disabled because this cluster has more than {max} groups."
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content.",
@@ -3327,6 +3335,10 @@
     "invalid_title": "Title cannot be empty or contain leading/trailing spaces",
     "invalid_group": "Group cannot be empty or contain leading/trailing spaces",
     "invalid_type": "Invalid field type",
-    "unknown_field": "Unknown field"
+    "unknown_field": "Unknown field",
+    "too_many_groups": "Too many groups in order list",
+    "empty_group_name": "Group name cannot be empty",
+    "duplicate_group_name": "Duplicate group name",
+    "group_name_template_placeholder": "Group name cannot contain a !word! template placeholder"
   }
 }
