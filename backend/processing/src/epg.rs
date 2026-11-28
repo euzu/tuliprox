@@ -147,6 +147,7 @@ async fn download_epg_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink
 
     {
         let mut downloads = ctx.epg_downloads.lock().await;
+        downloads.retain(|k, v| k == &download_key || v != &path);
         downloads.insert(download_key, path.clone());
     }
     Ok(path)
@@ -1251,5 +1252,67 @@ mod tests {
             epg_download_key(&provider_input.epg.as_ref().unwrap().sources[0], &ctx, &provider_input, None);
         let plain_key = epg_download_key(&plain_input.epg.as_ref().unwrap().sources[0], &ctx, &plain_input, None);
         assert_ne!(provider_key, plain_key);
+    }
+
+    #[tokio::test]
+    async fn shared_persist_path_overwritten_by_different_headers_invalidates_earlier_download_cache() {
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().into_owned();
+        let body_a = xmltv_body("content-a");
+        let body_b = xmltv_body("content-b");
+        let server = RecordingEpgServer::start_with_responses(
+            vec![
+                MockEpgResponse::ok(body_a.clone()),
+                MockEpgResponse::ok(body_b.clone()),
+                MockEpgResponse::ok(body_a.clone()),
+            ],
+            body_a.clone(),
+        )
+        .await;
+        let url = format!("{}/guide.xml", server.base_url);
+
+        let mut input_a = xmltv_input("input-a", &url);
+        input_a.persist = Some("shared.m3u".to_string());
+        input_a.headers.insert("X-Token".to_string(), "alpha".to_string());
+
+        let mut input_b = xmltv_input("input-b", &url);
+        input_b.persist = Some("shared.m3u".to_string());
+        input_b.headers.insert("X-Token".to_string(), "beta".to_string());
+
+        let mut input_c = xmltv_input("input-c", &url);
+        input_c.headers.insert("X-Token".to_string(), "alpha".to_string());
+
+        let ctx = test_epg_context(dir.path());
+
+        let source_a = &input_a.epg.as_ref().unwrap().sources[0];
+        let path_a = get_input_raw_epg_file_path(source_a, &input_a, &storage_dir).await.expect("path_a");
+        let source_b = &input_b.epg.as_ref().unwrap().sources[0];
+        let path_b = get_input_raw_epg_file_path(source_b, &input_b, &storage_dir).await.expect("path_b");
+        let source_c = &input_c.epg.as_ref().unwrap().sources[0];
+        let path_c = get_input_raw_epg_file_path(source_c, &input_c, &storage_dir).await.expect("path_c");
+
+        assert_eq!(path_a, path_b);
+        assert_ne!(path_a, path_c);
+
+        let (guide_a, err_a) = get_xmltv(&ctx, &input_a, None, &storage_dir).await;
+        assert!(err_a.is_empty(), "{err_a:?}");
+        assert!(guide_a.is_some());
+        assert_eq!(server.request_count(), 1);
+        assert_eq!(tokio::fs::read(&path_a).await.expect("read path_a"), body_a.as_bytes());
+
+        let (guide_b, err_b) = get_xmltv(&ctx, &input_b, None, &storage_dir).await;
+        assert!(err_b.is_empty(), "{err_b:?}");
+        assert!(guide_b.is_some());
+        assert_eq!(server.request_count(), 2);
+        assert_eq!(tokio::fs::read(&path_b).await.expect("read path_b"), body_b.as_bytes());
+
+        let (guide_c, err_c) = get_xmltv(&ctx, &input_c, None, &storage_dir).await;
+        assert!(err_c.is_empty(), "{err_c:?}");
+        assert!(guide_c.is_some());
+
+        let bytes_c = tokio::fs::read(&path_c).await.expect("read path_c");
+        assert_eq!(server.request_count(), 3, "Input C must trigger its own download");
+        assert_eq!(bytes_c, body_a.as_bytes(), "Input C must receive content A");
+        assert_ne!(bytes_c, body_b.as_bytes(), "Input C must never receive content B");
     }
 }

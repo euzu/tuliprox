@@ -1198,7 +1198,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         let config = app_state.app_config.config.load();
         let burst_secs = config.shared_burst_secs();
 
-        if should_apply_live_edge_trim(item_type, has_custom_video, has_group_runtime, burst_secs) {
+        if should_apply_live_edge_trim(item_type, is_stream_shared, has_custom_video, has_group_runtime, burst_secs) {
             if let Some(stream) = stream_details.stream.take() {
                 stream_details.stream =
                     Some(crate::api::model::LiveEdgeTrimStream::new(stream, Duration::from_secs(burst_secs)).boxed());
@@ -1486,16 +1486,21 @@ pub(crate) fn stream_details_has_custom_video(details: &crate::api::model::Strea
 
 /// Determines whether a stream qualifies for live edge startup trimming.
 ///
-/// Trimming applies only to raw live streams (not adaptive HLS/DASH, VOD, series or catch-up),
-/// without custom video substitution, without a failover group runtime (group streams are trimmed
-/// by the splice aligner instead), and with a non-zero burst target.
+/// Trimming applies only to shared raw live streams (not direct streams, adaptive HLS/DASH, VOD,
+/// series or catch-up), without custom video substitution, without a failover group runtime (group
+/// streams are trimmed by the splice aligner instead), and with a non-zero burst target.
 pub(crate) fn should_apply_live_edge_trim(
     item_type: PlaylistItemType,
+    is_stream_shared: bool,
     has_custom_video: bool,
     has_group_runtime: bool,
     shared_burst_secs: u64,
 ) -> bool {
-    item_type == PlaylistItemType::Live && !has_custom_video && !has_group_runtime && shared_burst_secs > 0
+    item_type == PlaylistItemType::Live
+        && is_stream_shared
+        && !has_custom_video
+        && !has_group_runtime
+        && shared_burst_secs > 0
 }
 
 #[cfg(test)]
@@ -1505,24 +1510,144 @@ mod tests {
 
     #[test]
     fn test_should_apply_live_edge_trim_matrix() {
-        // Base accepting case: Live, no custom video, no group runtime, burst > 0
-        assert!(should_apply_live_edge_trim(PlaylistItemType::Live, false, false, 3));
+        // Base accepting case: Live, shared, no custom video, no group runtime, burst > 0
+        assert!(should_apply_live_edge_trim(PlaylistItemType::Live, true, false, false, 3));
+
+        // Isolate is_stream_shared == false: direct streams must reject
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, false, false, false, 3));
 
         // Isolate item_type: non-Live variants must reject
-        assert!(!should_apply_live_edge_trim(PlaylistItemType::LiveHls, false, false, 3));
-        assert!(!should_apply_live_edge_trim(PlaylistItemType::LiveDash, false, false, 3));
-        assert!(!should_apply_live_edge_trim(PlaylistItemType::LiveUnknown, false, false, 3));
-        assert!(!should_apply_live_edge_trim(PlaylistItemType::Video, false, false, 3));
-        assert!(!should_apply_live_edge_trim(PlaylistItemType::Series, false, false, 3));
-        assert!(!should_apply_live_edge_trim(PlaylistItemType::Catchup, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::LiveHls, true, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::LiveDash, true, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::LiveUnknown, true, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Video, true, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Series, true, false, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Catchup, true, false, false, 3));
 
         // Isolate custom video: must reject
-        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, true, false, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, true, true, false, 3));
 
         // Isolate group runtime: must reject (group streams trimmed by splice aligner)
-        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, false, true, 3));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, true, false, true, 3));
 
         // Isolate burst_secs == 0: must reject
-        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, false, false, 0));
+        assert!(!should_apply_live_edge_trim(PlaylistItemType::Live, true, false, false, 0));
+    }
+
+    fn pcr_burst(video_pid: u16) -> Vec<u8> {
+        use crate::api::api_utils::tests::group_playback_support::member_pcr_gop;
+
+        let mut burst = Vec::new();
+        for pcr_secs in 0..=5 {
+            burst.extend(member_pcr_gop(video_pid, pcr_secs, 2));
+        }
+        burst
+    }
+
+    async fn open_plain_live_ts_response(
+        env: &crate::api::api_utils::tests::group_playback_support::GroupPlaybackEnv,
+        session_token: &str,
+        port: u16,
+    ) -> axum::response::Response {
+        let origin_url = format!("http://{}/live/viewer/secret/101.ts", env.origins["solis"].addr);
+        let input = env.app_state.app_config.get_input_by_name(&"solis".intern()).expect("solis input");
+        let mut user = ProxyUserCredentials::default();
+        user.username = "viewer".to_string();
+        user.password = "secret".to_string();
+        user.max_connections = 2;
+        user.proxy = shared::model::ProxyType::Reverse(None);
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let fingerprint = Fingerprint::new(format!("fp-{port}"), "127.0.0.1".to_string(), addr);
+        env.app_state.active_users.add_connection(&addr).await;
+        let stream_channel = StreamChannel {
+            target_id: env.target.id,
+            virtual_id: 9001,
+            group_virtual_id: None,
+            provider_id: 101,
+            input_name: Arc::clone(&input.name),
+            item_type: PlaylistItemType::Live,
+            cluster: shared::model::XtreamCluster::Live,
+            group: "General".intern(),
+            title: "Live TS".intern(),
+            url: origin_url.as_str().intern(),
+            shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
+            technical: None,
+            epg_channel_id: None,
+            epg_reference_ts: None,
+            upstream_user_agent: None,
+        };
+        crate::api::api_utils::streaming::stream_response(
+            &fingerprint,
+            &env.app_state,
+            session_token,
+            None,
+            stream_channel,
+            PlaybackSource::Single { input: &input, stream_url: &origin_url },
+            None,
+            &HeaderMap::new(),
+            &env.target,
+            &user,
+            UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
+            false,
+            None,
+            false,
+            false,
+        )
+        .await
+        .into_response()
+    }
+
+    #[tokio::test]
+    async fn test_direct_live_ts_stream_delivers_startup_burst_without_hold() {
+        use crate::api::api_utils::tests::group_playback_support::{
+            first_keyframe_pcr, has_pid, read_body_until, FakeOriginMode, GroupPlaybackEnv,
+        };
+
+        const VIDEO_PID: u16 = 0x200;
+        let env = GroupPlaybackEnv::builder(&["solis"])
+            .origin_mode("solis", FakeOriginMode::TsThenStall(pcr_burst(VIDEO_PID)))
+            .build()
+            .await;
+
+        let started = tokio::time::Instant::now();
+        let response = open_plain_live_ts_response(&env, "direct-live-burst", 55201).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let (body, ended) = read_body_until(response, Duration::from_secs(2), |read| has_pid(read, VIDEO_PID)).await;
+        let elapsed = started.elapsed();
+
+        assert!(has_pid(&body, VIDEO_PID), "direct live TS stream must deliver the startup burst without holding");
+        assert!(!ended, "origin remains open while stalled after the burst");
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "direct live TS stream must deliver first bytes before the settle window (elapsed: {elapsed:?})"
+        );
+        assert_eq!(
+            first_keyframe_pcr(&body, VIDEO_PID),
+            Some(0),
+            "direct live TS stream must keep the provider burst starting at GOP 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shared_live_ts_stream_holds_startup_burst() {
+        use crate::api::api_utils::tests::group_playback_support::{read_body_until, FakeOriginMode, GroupPlaybackEnv};
+
+        const VIDEO_PID: u16 = 0x200;
+        let env = GroupPlaybackEnv::builder(&["solis"])
+            .share_ts()
+            .origin_mode("solis", FakeOriginMode::TsThenStall(pcr_burst(VIDEO_PID)))
+            .build()
+            .await;
+
+        let response = open_plain_live_ts_response(&env, "shared-live-burst", 55202).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let (body, ended) = read_body_until(response, Duration::from_millis(500), |read| !read.is_empty()).await;
+        assert!(body.is_empty(), "shared live TS stream must hold stalled startup burst past the settle window");
+        assert!(!ended, "shared live TS stream must stay open while holding the startup burst");
     }
 }

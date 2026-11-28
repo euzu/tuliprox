@@ -271,7 +271,7 @@ async fn test_active_client_stream_immediate_provider_stream_emits_meter_batches
 }
 
 #[tokio::test]
-async fn test_deferred_provider_open_applies_live_edge_trim() {
+async fn test_deferred_provider_open_skips_live_edge_trim_for_direct_stream() {
     let app_state = create_test_app_state();
     let provider_name = "provider_1".intern();
     let addr = "127.0.0.1:55016".parse().unwrap();
@@ -289,6 +289,44 @@ async fn test_deferred_provider_open_applies_live_edge_trim() {
     let fingerprint = create_test_fingerprint(addr);
     let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
     stream_channel.item_type = PlaylistItemType::Live;
+
+    let deferred = create_deferred_provider_open_future(
+        &app_state,
+        &stream_details,
+        &fingerprint,
+        &stream_channel,
+        &HeaderMap::new(),
+        None,
+        false,
+    )
+    .expect("deferred provider open context");
+
+    let DeferredProviderOpenState::Pending(context) = deferred else { panic!("new deferred open must start pending") };
+    assert_eq!(context.live_edge_trim, None);
+    drop(context);
+    app_state.connection_manager.release_provider_handle(Some(provider_handle));
+}
+
+#[tokio::test]
+async fn test_deferred_provider_open_applies_live_edge_trim_for_shared_stream() {
+    let app_state = create_test_app_state();
+    let provider_name = "provider_1".intern();
+    let addr = "127.0.0.1:55021".parse().unwrap();
+    let provider_handle = app_state
+        .active_provider
+        .acquire_exact_connection_with_grace(&provider_name, &addr, true, 0, crate::api::model::ConnectionKind::Normal)
+        .expect("deferred provider allocation");
+    let stream_details = create_deferred_provider_grace_details(
+        &provider_name,
+        tuliprox_session::ManagedProviderHandle::new(
+            Arc::clone(&app_state.connection_manager.provider_manager),
+            provider_handle.clone(),
+        ),
+    );
+    let fingerprint = create_test_fingerprint(addr);
+    let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
+    stream_channel.item_type = PlaylistItemType::Live;
+    stream_channel.shared = true;
 
     let deferred = create_deferred_provider_open_future(
         &app_state,
@@ -330,6 +368,7 @@ async fn test_deferred_provider_open_live_edge_trim_rejects_zero_burst() {
     );
     let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
     stream_channel.item_type = PlaylistItemType::Live;
+    stream_channel.shared = true;
 
     let deferred = create_deferred_provider_open_future(
         &app_state,
@@ -375,6 +414,7 @@ async fn test_deferred_provider_open_live_edge_trim_rejects_non_live_item_types(
         );
         let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
         stream_channel.item_type = non_live;
+        stream_channel.shared = true;
 
         let deferred = create_deferred_provider_open_future(
             &app_state,
@@ -416,6 +456,7 @@ async fn test_deferred_provider_open_live_edge_trim_rejects_group_runtime() {
     );
     let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
     stream_channel.item_type = PlaylistItemType::Live;
+    stream_channel.shared = true;
 
     let deferred = create_deferred_provider_open_future(
         &app_state,
@@ -455,6 +496,7 @@ async fn test_deferred_provider_open_live_edge_trim_rejects_custom_video() {
     stream_details.custom_reason = Some(tuliprox_session::ProviderStreamCustomReason::ProviderExhausted);
     let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
     stream_channel.item_type = PlaylistItemType::Live;
+    stream_channel.shared = true;
 
     let deferred = create_deferred_provider_open_future(
         &app_state,

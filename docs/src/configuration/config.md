@@ -1478,6 +1478,11 @@ Notes:
   banned: such a proxy still connects and the provider answers with an error such as HTTP 403. Replace that proxy
   in `gost.yml` by hand and restart GOST; GOST does not reload `gost.yml` on its own (runtime changes go through
   its Web API).
+* When every node of the hop is marked dead, current GOST versions still try one of the dead nodes instead of
+  going direct, so the request fails. A route that ends up without any node (for example when no node matches the
+  request) is dialed directly from the GOST host, and `retries` does not change that. To make sure traffic never
+  leaves without a proxy, allow outbound connections from the GOST host or container only to the upstream proxy
+  addresses (firewall or container network rules).
 * GOST 3.3 can also probe each node periodically (`probe` block on a node). Point a probe at a neutral address, never
   at your provider: periodic requests to the provider can get the account banned.
 * See the GOST documentation for all options:

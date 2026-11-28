@@ -285,12 +285,17 @@ pub(super) fn create_deferred_provider_open_future(
     provider_stream_factory_options.apply_input_options(&input);
 
     let has_custom_video = stream_details_has_custom_video(stream_details);
-    let live_edge_trim =
-        if should_apply_live_edge_trim(stream_channel.item_type, has_custom_video, has_group_runtime, burst_secs) {
-            Some(Duration::from_secs(burst_secs))
-        } else {
-            None
-        };
+    let live_edge_trim = if should_apply_live_edge_trim(
+        stream_channel.item_type,
+        stream_channel.shared,
+        has_custom_video,
+        has_group_runtime,
+        burst_secs,
+    ) {
+        Some(Duration::from_secs(burst_secs))
+    } else {
+        None
+    };
 
     Some(DeferredProviderOpenState::Pending(Box::new(DeferredProviderOpenContext {
         app_state: Arc::clone(app_state),

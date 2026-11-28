@@ -1804,6 +1804,11 @@
 
 ## 🐛 Fixes
 
+- **Direct live streams start at once again.** Since the live edge trim, every live MPEG-TS stream was held until
+  the provider's start-up burst was over (up to 5 seconds), which slowed down channel switching. The start trim now
+  applies only to shared live streams and failover groups; a direct stream passes through immediately and keeps the
+  provider burst, as before. `shared_burst_secs` keeps controlling joins, shared starts and group switches.
+
 - **Xtream timeshift for M3U inputs follows the playback provider.** The Xtream timeshift bridge built the archive
   URL from the first provider URL and the stored generated Flussonic archive template, so it ignored provider
   priority and failover. It now resolves the archive through the playback provider like the M3U catch-up route:
