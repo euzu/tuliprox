@@ -66,6 +66,7 @@ async fn stalker_entry_reservation_without_portal_stream_fails_and_releases_the_
         ConnectionKind::Normal,
         false,
         None,
+        None,
     )
     .await;
 

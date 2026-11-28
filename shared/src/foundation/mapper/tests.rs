@@ -941,3 +941,13 @@ fn read_write_field_order_does_not_shadow_existing_fields() {
         assert!(MapperScript::parse(&script, None).is_ok(), "failed to parse @{field}");
     }
 }
+
+/// The `.pest` file is the documentation copy of the `#[grammar_inline = ...]` block in `parser.rs`.
+#[test]
+fn mapper_pest_matches_inline_grammar() {
+    crate::foundation::assert_pest_matches_inline_grammar(
+        include_str!("parser.rs"),
+        include_str!("../mapper.pest"),
+        "mapper.pest",
+    );
+}

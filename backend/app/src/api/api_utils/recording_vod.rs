@@ -15,7 +15,7 @@
 
 use super::{
     activate_local_file_stream, admit_local_file_connection, apply_stream_throttle, create_session_fingerprint,
-    resolve_playback_request_admission, EvictionReentryGuard,
+    effective_playback_id_for_user, resolve_playback_request_admission_with_playback_id, EvictionReentryGuard,
 };
 use crate::{
     api::{
@@ -337,7 +337,8 @@ pub(crate) async fn serve_recording_vod(
         app_state.active_users.acquire_playback_transition(&user.username, &playback_session_token).await;
     let user_session =
         app_state.active_users.get_and_update_user_session(&user.username, &playback_session_token).await;
-    let (admission, _grace_mode, request_class) = resolve_playback_request_admission(
+    let playback_id = effective_playback_id_for_user(&app_state.app_config.config.load(), user, req_headers);
+    let (admission, _grace_mode, request_class) = resolve_playback_request_admission_with_playback_id(
         &app_state.admission_ctx(),
         user,
         fingerprint,
@@ -347,6 +348,7 @@ pub(crate) async fn serve_recording_vod(
         EvictionReentryGuard::Session(playback_session_token.as_str()),
         false,
         false,
+        playback_id,
     )
     .await;
     if admission.is_reentry_suppressed() {

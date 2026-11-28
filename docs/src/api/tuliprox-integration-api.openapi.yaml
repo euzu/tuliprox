@@ -1907,6 +1907,8 @@ paths:
           schema:
             type: string
           example: "1001.ts"
+        - $ref: '#/components/parameters/XTuliproxPlaybackId'
+        - $ref: '#/components/parameters/XPlaybackSessionId'
       responses:
         '200':
           description: MPEG-TS video stream (or fallback video slate).
@@ -2007,6 +2009,8 @@ paths:
           schema:
             type: string
           example: bytes=0-1048575
+        - $ref: '#/components/parameters/XTuliproxPlaybackId'
+        - $ref: '#/components/parameters/XPlaybackSessionId'
       responses:
         '200':
           description: Full VOD media or recording stream.
@@ -2116,6 +2120,8 @@ paths:
           schema:
             type: string
           example: 7001.mkv
+        - $ref: '#/components/parameters/XTuliproxPlaybackId'
+        - $ref: '#/components/parameters/XPlaybackSessionId'
       responses:
         '200':
           description: Series episode media stream.
@@ -2161,6 +2167,8 @@ paths:
           schema:
             type: string
           example: 1001.ts
+        - $ref: '#/components/parameters/XTuliproxPlaybackId'
+        - $ref: '#/components/parameters/XPlaybackSessionId'
       responses:
         '200':
           description: |
@@ -2213,6 +2221,8 @@ paths:
           schema:
             type: string
           example: 5001.mp4
+        - $ref: '#/components/parameters/XTuliproxPlaybackId'
+        - $ref: '#/components/parameters/XPlaybackSessionId'
       responses:
         '200':
           description: VOD media stream.
@@ -2249,6 +2259,8 @@ paths:
           schema:
             type: string
           example: 7001.mkv
+        - $ref: '#/components/parameters/XTuliproxPlaybackId'
+        - $ref: '#/components/parameters/XPlaybackSessionId'
       responses:
         '200':
           description: Series episode media stream.
@@ -2439,6 +2451,37 @@ components:
       description: |
         JSON Web Token (JWT) issued by `POST {web_ui_path}/auth/token`.
         Include in the HTTP request as `Authorization: Bearer <token>`.
+
+  parameters:
+    XTuliproxPlaybackId:
+      name: X-Tuliprox-Playback-Id
+      in: header
+      required: false
+      description: |
+        Optional client-generated playback identifier (1-128 visible ASCII characters, `0x21..=0x7E`),
+        honored for users with effective Player API access (ignored for recording proxy users and invalid values).
+        A new stream request carrying the same ID as an existing connection of the same user immediately ends
+        that older connection (as by `DELETE /api/v1/me/streams/{uid}`) without counting it against `max_connections`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[!-~]{1,128}$'
+      example: player-session-01
+
+    XPlaybackSessionId:
+      name: X-Playback-Session-Id
+      in: header
+      required: false
+      description: |
+        Apple AVPlayer playback session fallback header used when `X-Tuliprox-Playback-Id` is absent or invalid.
+        Follows the same 1-128 visible ASCII validation and same-user replacement semantics.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[!-~]{1,128}$'
+      example: D4E8C542-8D94-4C6B-9E38-1234567890AB
 
   headers:
     X-Tuliprox-Player-Api-Path:

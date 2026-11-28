@@ -663,6 +663,7 @@ async fn hls_entry_origin_reservation_requires_real_provider_handle() {
         ConnectionKind::Normal,
         false,
         None,
+        None,
     )
     .await;
 

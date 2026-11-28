@@ -909,3 +909,13 @@ fn test_filter_year_eval_and_value_provider() {
     }
     assert_eq!(crate::foundation::value_provider::get_field_value(&p_mut, ItemField::Year).as_ref(), "2024");
 }
+
+/// The `.pest` file is the documentation copy of the `#[grammar_inline = ...]` block in `parser.rs`.
+#[test]
+fn filter_pest_matches_inline_grammar() {
+    crate::foundation::assert_pest_matches_inline_grammar(
+        include_str!("parser.rs"),
+        include_str!("../filter.pest"),
+        "filter.pest",
+    );
+}

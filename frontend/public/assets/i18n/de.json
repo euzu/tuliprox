@@ -373,6 +373,7 @@
     },
     "CONFIG_INPUT_OPTIONS": {
       "DEFAULT_CONTAINER_EXTENSION": "Dateiendung, die für Filme und Serien-Episoden ausgegeben wird, wenn weder der Provider noch die Stream-URL eine angeben. Standard ist mp4; ein konfigurierter Wert ersetzt den Standardwert und überschreibt niemals einen Provider-Wert. Wird beim Ausliefern der Playlist angewendet, niemals gespeichert.",
+      "CONTAINER_EXTENSION_SAMPLING": "Opt-in. Nach einem Playlist-Update fragt Tuliprox das Stalker-Portal nach dem Container von Filmen ohne Angabe und veröffentlicht die Antwort. Höchstens so viele Aufrufe pro Update, mindestens die konfigurierte Pause dazwischen. Der Lauf endet nach so vielen aufeinanderfolgenden Authentifizierungs- oder Raten-Ablehnungen (401/403/429). Standardmäßig aus, weil es Portal-Anfragen kostet.",
       "PROBE_DELAY": "Delay in seconds between probe requests (default 2) to reduce provider pressure.",
       "PROBE_LIVE": "Enables background technical analysis for live channels to detect codecs and resolution.",
       "PROBE_LIVE_INTERVAL_HOURS": "Interval in hours between re-probing live channels (default: 120).",
@@ -2162,6 +2163,10 @@
     "STREAM_HISTORY_CONFIDENCE": "Confidence",
     "CONTAINER": "Container",
     "CONTAINER_EXTENSION": "Container-Erweiterung",
+    "CONTAINER_EXTENSION_SAMPLING": "Container-Erweiterungen beim Portal erfragen",
+    "CONTAINER_EXTENSION_SAMPLING_MAX_CALLS": "Aufrufe pro Update",
+    "CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL": "Sekunden zwischen Aufrufen",
+    "CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS": "Stopp nach Ablehnungen",
     "STREAM_HISTORY_TIME": "Time",
     "STREAM_HISTORY_TO": "To",
     "STREAM_HISTORY_ENABLED": "Enable stream history",
@@ -3338,7 +3343,6 @@
     "unknown_field": "Unbekanntes Feld",
     "too_many_groups": "Zu viele Gruppen in der Reihenfolgeliste",
     "empty_group_name": "Gruppenname darf nicht leer sein",
-    "duplicate_group_name": "Doppelter Gruppenname",
-    "group_name_template_placeholder": "Gruppenname darf keinen !word!-Vorlagenplatzhalter enthalten"
+    "duplicate_group_name": "Doppelter Gruppenname"
   }
 }

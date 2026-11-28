@@ -881,10 +881,10 @@ mod tests {
         assert_eq!(
             parse_group_order_save_response(&raw(
                 422,
-                r#"{"field_errors":[{"entry":"!bad!","field":"groups","message_key":"error.group_name_template_placeholder"}]}"#
+                r#"{"field_errors":[{"entry":"Docs","field":"groups","message_key":"error.duplicate_group_name"}]}"#
             )),
             GroupOrderSaveResult::FieldErrors(vec![
-                FieldError::new("groups", "error.group_name_template_placeholder").with_entry("!bad!"),
+                FieldError::new("groups", "error.duplicate_group_name").with_entry("Docs"),
             ])
         );
         assert_eq!(

@@ -48,6 +48,7 @@ impl MetadataUpdateManager {
         self.tmdb_source_markers.clear();
         self.enqueue_state_loaded_inputs.clear();
         self.enqueue_state_load_retry_at_ts.clear();
+        self.sampling_inputs.clear();
     }
 
     /// Returns true once shutdown has been requested.

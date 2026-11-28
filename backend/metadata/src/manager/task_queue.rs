@@ -94,6 +94,7 @@ impl MetadataUpdateManager {
             enqueue_state_loaded_inputs: Arc::new(DashMap::new()),
             enqueue_state_load_retry_at_ts: Arc::new(DashMap::new()),
             last_resolve_enqueue_suppression_prune_at_ts: AtomicI64::new(0),
+            sampling_inputs: Arc::new(DashMap::new()),
         }
     }
 
@@ -714,6 +715,10 @@ impl tuliprox_processing::metadata_sink::MetadataUpdateSink for MetadataUpdateMa
 
     fn should_skip_enqueue(&self, input_name: &str, task: &UpdateTask) -> bool {
         self.should_skip_enqueue_cached(input_name, task)
+    }
+
+    fn queue_container_extension_sampling(self: Arc<Self>, input_name: Arc<str>) {
+        MetadataUpdateManager::spawn_container_extension_sampling(&self, input_name);
     }
 
     fn queue_task_background(self: Arc<Self>, input_name: Arc<str>, task: UpdateTask) {

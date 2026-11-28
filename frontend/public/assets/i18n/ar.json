@@ -365,6 +365,7 @@
     },
     "CONFIG_INPUT_OPTIONS": {
       "DEFAULT_CONTAINER_EXTENSION": "الامتداد المنشور للأفلام وحلقات المسلسلات عندما لا يحدّده المزوّد ولا رابط البث. القيمة الافتراضية mp4؛ والقيمة المضبوطة تحل مكان الافتراضية ولا تتجاوز قيمة المزوّد أبدًا. يُطبّق عند تقديم قائمة التشغيل ولا يُخزَّن.",
+      "CONTAINER_EXTENSION_SAMPLING": "اختياري. بعد تحديث قائمة التشغيل يطلب Tuliprox من بوابة Stalker حاوية الأفلام التي لا تحددها، وينشر الإجابة. بحد أقصى هذا العدد من الطلبات لكل تحديث، وبفاصل لا يقل عن المدة المضبوطة بينها. يتوقف التشغيل بعد هذا العدد من حالات الرفض المتتالية للمصادقة أو حد المعدل (401/403/429). معطّل افتراضيًا لأنه يستهلك طلبات البوابة.",
       "PROBE_DELAY": "التأخير بالثواني بين طلبات الفحص (الافتراضي 2) لتقليل الضغط على المزود.",
       "PROBE_LIVE": "يُفعّل التحليل التقني في الخلفية للقنوات المباشرة لاكتشاف برامج الترميز والدقة.",
       "PROBE_LIVE_INTERVAL_HOURS": "الفاصل الزمني بالساعات بين إعادة فحص القنوات المباشرة (الافتراضي: 120).",
@@ -2075,6 +2076,10 @@
     "STREAM_HISTORY_CONFIDENCE": "الثقة",
     "CONTAINER": "الحاوية",
     "CONTAINER_EXTENSION": "امتداد الحاوية",
+    "CONTAINER_EXTENSION_SAMPLING": "طلب امتدادات الحاوية من البوابة",
+    "CONTAINER_EXTENSION_SAMPLING_MAX_CALLS": "عدد الطلبات لكل تحديث",
+    "CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL": "الثواني بين الطلبات",
+    "CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS": "التوقف بعد الرفض",
     "STREAM_HISTORY_TIME": "الوقت",
     "STREAM_HISTORY_TO": "إلى",
     "STREAM_HISTORY_ENABLED": "تفعيل سجل البث",
@@ -2830,7 +2835,7 @@
       "GROUP_ORDER_SAVED": "تم حفظ ترتيب المجموعات",
       "GROUP_ORDER_LOAD_FAILED": "تعذر تحميل ترتيب المجموعات: {error}",
       "GROUP_ORDER_CONFLICT": "تعارض في التكوين: تم تحديث source.yml على الخادم. جارٍ إعادة تحميل ترتيب المجموعات المحفوظ...",
-      "GROUP_ORDER_TOO_MANY_GROUPS": "تم تعطيل إعادة ترتيب المجموعات لأن هذه المجموعة تحتوي على أكثر من {max} مجموعة."
+      "GROUP_ORDER_TOO_MANY_GROUPS": "تم تعطيل إعادة ترتيب المجموعات لأن عدد المجموعات في الفئة النشطة يتجاوز {max}."
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "حدد EPG لعرض محتواه.",
@@ -3330,8 +3335,7 @@
     "unknown_field": "حقل غير معروف",
     "too_many_groups": "عدد المجموعات في قائمة الترتيب كبير جداً",
     "empty_group_name": "لا يمكن أن يكون اسم المجموعة فارغاً",
-    "duplicate_group_name": "اسم المجموعة مكرر",
-    "group_name_template_placeholder": "لا يمكن أن يحتوي اسم المجموعة على العنصر النائب للقالب !word!"
+    "duplicate_group_name": "اسم المجموعة مكرر"
   },
   "MANAGED_CHANNELS": {
     "POINT": "نقطة الإدراج",

@@ -250,6 +250,49 @@ pub fn apply_pending_group_order_update(
     next
 }
 
+/// Saved group orders by cluster, re-applied whenever a later update changes the catalog.
+pub type SavedGroupOrders = HashMap<XtreamCluster, Vec<String>>;
+
+/// Applies a saved group order to the source catalog and to the visible (possibly
+/// search-filtered) catalog.
+///
+/// The source keeps local edits such as items moved into a new group; the visible catalog is
+/// reordered instead of replaced, so an active search keeps its filter.
+#[must_use]
+pub fn apply_group_order_update(
+    source: &UiPlaylistCategories,
+    visible: Option<&UiPlaylistCategories>,
+    cluster: XtreamCluster,
+    order: &[String],
+) -> (UiPlaylistCategories, Option<UiPlaylistCategories>) {
+    (
+        reorder_categories_groups(source, cluster, order),
+        visible.map(|visible| reorder_categories_groups(visible, cluster, order)),
+    )
+}
+
+/// Applies committed bulk item patches to the catalog current at completion and re-applies every
+/// saved group order.
+///
+/// A bulk result that lands after an order save therefore keeps that order, and the opposite
+/// completion order yields the same catalog.
+#[must_use]
+pub fn apply_bulk_update(
+    source: &UiPlaylistCategories,
+    visible: Option<&UiPlaylistCategories>,
+    patches: &edit_panel::BulkPatchMap,
+    saved_orders: &SavedGroupOrders,
+) -> (UiPlaylistCategories, Option<UiPlaylistCategories>) {
+    let apply = |categories: &UiPlaylistCategories| {
+        saved_orders
+            .iter()
+            .fold(edit_panel::apply_bulk_patches_to_categories(categories, patches), |current, (cluster, order)| {
+                reorder_categories_groups(&current, *cluster, order)
+            })
+    };
+    (apply(source), visible.map(apply))
+}
+
 /// Computes the bulk-edit scope after a potential playlist source or revision change.
 #[must_use]
 pub const fn resolve_bulk_scope_after_source_change(
@@ -326,6 +369,30 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     // Set when this component writes the context playlist itself (item/bulk updates) so the sync
     // effect can tell its own write apart from a freshly loaded playlist.
     let self_written_playlist = use_mut_ref(|| None::<Rc<UiPlaylistCategories>>);
+    // Catalogs as of the latest render or local write. Async result handlers reconcile against
+    // these instead of the snapshot of the render that dispatched them, so a late bulk or
+    // group-order result never rolls back an update that landed in between.
+    let current_source_catalog = use_mut_ref(|| (*context.playlist).clone());
+    let current_visible_catalog = use_mut_ref(|| (*playlist).clone());
+    // Orders saved in this session, keyed by cluster. A bulk completion re-applies them so item
+    // patches keep the saved order.
+    let saved_group_orders = use_mut_ref(SavedGroupOrders::new);
+
+    let commit_catalogs = {
+        let set_playlist = playlist.clone();
+        let explorer_ctx = context.clone();
+        let self_written = self_written_playlist.clone();
+        let current_source_catalog = current_source_catalog.clone();
+        let current_visible_catalog = current_visible_catalog.clone();
+        Rc::new(move |source: Rc<UiPlaylistCategories>, visible: Option<Rc<UiPlaylistCategories>>| {
+            let visible = visible.unwrap_or_else(|| source.clone());
+            *current_source_catalog.borrow_mut() = Some(source.clone());
+            *current_visible_catalog.borrow_mut() = Some(visible.clone());
+            set_playlist.set(Some(visible));
+            *self_written.borrow_mut() = Some(source.clone());
+            explorer_ctx.playlist.set(Some(source));
+        })
+    };
 
     let incoming_playlist = (*context.playlist).clone();
     let context_playlist_revision = use_identity_revision(&context.playlist);
@@ -477,9 +544,14 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         let set_popup_anchor_ref = popup_anchor_ref.clone();
         let pending_clusters = pending_group_order_clusters.clone();
         let latest_incoming = latest_incoming_playlist.clone();
+        let current_source_catalog = current_source_catalog.clone();
+        let current_visible_catalog = current_visible_catalog.clone();
+        let saved_group_orders = saved_group_orders.clone();
         use_effect_with(source_revision, move |&rev| {
             if rev > 0 {
                 let incoming = latest_incoming.borrow().clone();
+                *current_source_catalog.borrow_mut() = incoming.clone();
+                *current_visible_catalog.borrow_mut() = incoming.clone();
                 set_playlist.set(incoming);
                 set_level.set(ExplorerLevel::Browser);
                 set_selected_item.set(None);
@@ -490,6 +562,7 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                 set_selected_channel.set(None);
                 set_popup_anchor_ref.set(None);
                 pending_clusters.set(HashSet::new());
+                saved_group_orders.borrow_mut().clear();
             }
             || {}
         });
@@ -677,20 +750,24 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         let services = service_ctx.clone();
         let set_playlist = playlist.clone();
         let current_level = current_level.clone();
-        let context = context.clone();
+        let current_source_catalog = current_source_catalog.clone();
+        let current_visible_catalog = current_visible_catalog.clone();
         Callback::from(move |search_req| {
             current_level.set(level_after_search(&current_level));
+            let source = current_source_catalog.borrow().clone();
             match search_req {
-                SearchRequest::Clear => set_playlist.set((*context.playlist).clone()),
+                SearchRequest::Clear => {
+                    *current_visible_catalog.borrow_mut() = source.clone();
+                    set_playlist.set(source);
+                }
                 SearchRequest::Text(ref _text, ref _search_fields)
                 | SearchRequest::Regexp(ref _text, ref _search_fields) => {
                     services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
                     let set_playlist = set_playlist.clone();
-                    let context = context.clone();
+                    let current_visible_catalog = current_visible_catalog.clone();
                     let services = services.clone();
                     spawn_local(async move {
-                        let filtered = context
-                            .playlist
+                        let filtered = source
                             .as_ref()
                             .map(|categories| {
                                 categories.filter(&search_req).unwrap_or(UiPlaylistCategories {
@@ -700,6 +777,7 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                                 })
                             })
                             .map(Rc::new);
+                        *current_visible_catalog.borrow_mut() = filtered.clone();
                         set_playlist.set(filtered);
                         services.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
                     });
@@ -1077,22 +1155,21 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
 
     let handle_item_updated = {
         let selected_item = selected_item.clone();
-        let explorer_ctx = context.clone();
-        let set_playlist = playlist.clone();
-        let self_written = self_written_playlist.clone();
+        let current_source_catalog = current_source_catalog.clone();
+        let current_visible_catalog = current_visible_catalog.clone();
+        let commit_catalogs = commit_catalogs.clone();
         Callback::from(move |patched_item: Rc<UiPlaylistItem>| {
             selected_item.set(Some(patched_item.clone()));
-            if let Some(ref source) = *explorer_ctx.playlist {
+            let source = current_source_catalog.borrow().clone();
+            if let Some(ref source) = source {
                 let new_source = Rc::new(edit_panel::replace_item_in_categories(source, (*patched_item).clone()));
                 // The visible catalog may be a filtered view of the source; patching it
                 // directly keeps an active search or group filter alive across the save.
-                let new_visible = (*set_playlist).as_ref().map_or_else(
-                    || new_source.clone(),
-                    |visible| Rc::new(edit_panel::replace_item_in_categories(visible, (*patched_item).clone())),
-                );
-                set_playlist.set(Some(new_visible));
-                *self_written.borrow_mut() = Some(new_source.clone());
-                explorer_ctx.playlist.set(Some(new_source));
+                let new_visible = current_visible_catalog
+                    .borrow()
+                    .as_ref()
+                    .map(|visible| Rc::new(edit_panel::replace_item_in_categories(visible, (*patched_item).clone())));
+                commit_catalogs(new_source, new_visible);
             }
         })
     };
@@ -1128,12 +1205,15 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     let selected_ids_rc = Rc::new((*selected_ids).clone());
 
     let handle_bulk_updated = {
-        let explorer_ctx = context.clone();
-        let set_playlist = playlist.clone();
-        let self_written = self_written_playlist.clone();
         let selected_item = selected_item.clone();
         let latest_generation = latest_generation.clone();
+        let current_source_catalog = current_source_catalog.clone();
+        let current_visible_catalog = current_visible_catalog.clone();
+        let saved_group_orders = saved_group_orders.clone();
+        let commit_catalogs = commit_catalogs.clone();
         Callback::from(move |(expected_gen, patched_items): (CatalogGeneration, Vec<UiPlaylistItem>)| {
+            // The catalog revision may have moved on (a group order saved after dispatch); that is
+            // fine as long as the panel still belongs to the same source, target, and cluster.
             if !expected_gen.matches_source(&latest_generation.borrow()) || patched_items.is_empty() {
                 return;
             }
@@ -1145,15 +1225,12 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
                 }
             }
 
-            if let Some(ref cat) = *explorer_ctx.playlist {
-                let new_source = Rc::new(edit_panel::apply_bulk_patches_to_categories(cat, &patch_map));
-                let new_visible = (*set_playlist).as_ref().map_or_else(
-                    || new_source.clone(),
-                    |visible| Rc::new(edit_panel::apply_bulk_patches_to_categories(visible, &patch_map)),
-                );
-                set_playlist.set(Some(new_visible));
-                *self_written.borrow_mut() = Some(new_source.clone());
-                explorer_ctx.playlist.set(Some(new_source));
+            let source = current_source_catalog.borrow().clone();
+            if let Some(ref source) = source {
+                let visible = current_visible_catalog.borrow().clone();
+                let orders = saved_group_orders.borrow().clone();
+                let (new_source, new_visible) = apply_bulk_update(source, visible.as_deref(), &patch_map, &orders);
+                commit_catalogs(Rc::new(new_source), new_visible.map(Rc::new));
             }
         })
     };
@@ -1161,12 +1238,15 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
     let can_reorder_groups = is_target_view && can_write_sources && target_name.is_some();
 
     let handle_group_order_saved = {
-        let explorer_ctx = context.clone();
-        let set_playlist = playlist.clone();
-        let self_written = self_written_playlist.clone();
         let pending_clusters = pending_group_order_clusters.clone();
         let latest_generation = latest_generation.clone();
+        let current_source_catalog = current_source_catalog.clone();
+        let current_visible_catalog = current_visible_catalog.clone();
+        let saved_group_orders = saved_group_orders.clone();
+        let commit_catalogs = commit_catalogs.clone();
         Callback::from(move |update: GroupOrderUpdate| {
+            // A catalog edit after dispatch does not invalidate the saved order; only a source,
+            // target, or cluster change does.
             if !update.generation.matches_source(&latest_generation.borrow()) {
                 return;
             }
@@ -1175,16 +1255,14 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
             if next_pending != *pending_clusters {
                 pending_clusters.set(next_pending);
             }
+            saved_group_orders.borrow_mut().insert(cluster, update.groups.clone());
 
-            if let Some(ref source) = *explorer_ctx.playlist {
-                let new_source = Rc::new(reorder_categories_groups(source, cluster, &update.groups));
-                let new_visible = (*set_playlist).as_ref().map_or_else(
-                    || new_source.clone(),
-                    |visible| Rc::new(reorder_categories_groups(visible, cluster, &update.groups)),
-                );
-                set_playlist.set(Some(new_visible));
-                *self_written.borrow_mut() = Some(new_source.clone());
-                explorer_ctx.playlist.set(Some(new_source));
+            let source = current_source_catalog.borrow().clone();
+            if let Some(ref source) = source {
+                let visible = current_visible_catalog.borrow().clone();
+                let (new_source, new_visible) =
+                    apply_group_order_update(source, visible.as_deref(), cluster, &update.groups);
+                commit_catalogs(Rc::new(new_source), new_visible.map(Rc::new));
             }
         })
     };
@@ -1204,7 +1282,8 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
         let filter_edited = filter_edited.clone();
         let selected_group = selected_group.clone();
         let set_playlist = playlist.clone();
-        let context_playlist = (*context.playlist).clone();
+        let current_source_catalog = current_source_catalog.clone();
+        let current_visible_catalog = current_visible_catalog.clone();
         let active_cluster = *active_cluster;
         let search_reset_seq = search_reset_seq.clone();
         let set_selected_ids = selected_ids.clone();
@@ -1214,12 +1293,14 @@ pub fn PlaylistExplorer(props: &PlaylistExplorerProps) -> Html {
             filter_rating.set(false);
             filter_without_epg.set(false);
             filter_edited.set(false);
-            set_playlist.set(context_playlist.clone());
+            let source = current_source_catalog.borrow().clone();
+            *current_visible_catalog.borrow_mut() = source.clone();
+            set_playlist.set(source.clone());
             search_reset_seq.set(search_reset_seq.wrapping_add(1));
             set_selected_ids.set(HashSet::new());
             set_bulk_edit_open.set(false);
 
-            let cluster_channels = cluster_items(context_playlist.as_deref(), active_cluster);
+            let cluster_channels = cluster_items(source.as_deref(), active_cluster);
             if !group_has_matches(&selected_group, &cluster_channels) {
                 selected_group.set(SelectedGroup::All);
             }
@@ -2484,5 +2565,130 @@ mod tests {
         expected.insert(XtreamCluster::Live);
         expected.insert(XtreamCluster::Video);
         assert_eq!(after_vod, expected);
+    }
+
+    fn test_item(vid: u32, group: &str, title: &str, logo: &str) -> Rc<UiPlaylistItem> {
+        Rc::new(UiPlaylistItem {
+            virtual_id: vid,
+            group: std::sync::Arc::from(group),
+            title: std::sync::Arc::from(title),
+            name: std::sync::Arc::from(title),
+            logo: std::sync::Arc::from(logo),
+            xtream_cluster: XtreamCluster::Live,
+            item_type: shared::model::PlaylistItemType::Live,
+            category_id: 1,
+            ..Default::default()
+        })
+    }
+
+    fn test_group(title: &str, channels: Vec<Rc<UiPlaylistItem>>) -> Rc<UiPlaylistGroup> {
+        Rc::new(UiPlaylistGroup {
+            id: 1,
+            title: std::sync::Arc::from(title),
+            channels,
+            xtream_cluster: XtreamCluster::Live,
+        })
+    }
+
+    fn live_categories(groups: Vec<Rc<UiPlaylistGroup>>) -> UiPlaylistCategories {
+        UiPlaylistCategories { live: Some(groups), vod: None, series: None }
+    }
+
+    fn live_titles(categories: &UiPlaylistCategories) -> Vec<String> {
+        categories.live.as_ref().expect("live groups").iter().map(|group| group.title.to_string()).collect()
+    }
+
+    fn group_channel_titles(categories: &UiPlaylistCategories, title: &str) -> Vec<String> {
+        categories
+            .live
+            .as_ref()
+            .expect("live groups")
+            .iter()
+            .find(|group| group.title.as_ref() == title)
+            .expect("group exists")
+            .channels
+            .iter()
+            .map(|channel| channel.title.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn group_order_update_reorders_source_and_keeps_filtered_visible_catalog() {
+        let source = live_categories(vec![
+            test_group("A", vec![test_item(1, "A", "a1", "logo-a1"), test_item(2, "A", "a2", "logo-a2")]),
+            test_group("B", vec![test_item(3, "B", "b1", "logo-b1")]),
+        ]);
+        let visible = live_categories(vec![test_group("B", vec![test_item(3, "B", "b1", "logo-b1")])]);
+        let order = vec!["B".to_string(), "A".to_string()];
+
+        let (new_source, new_visible) = apply_group_order_update(&source, Some(&visible), XtreamCluster::Live, &order);
+        assert_eq!(live_titles(&new_source), order);
+        let new_visible = new_visible.expect("visible catalog kept");
+        assert_eq!(live_titles(&new_visible), vec!["B".to_string()], "the active search stays filtered");
+
+        assert!(apply_group_order_update(&source, None, XtreamCluster::Live, &order).1.is_none());
+    }
+
+    #[test]
+    fn group_order_update_keeps_local_group_moves() {
+        let source = live_categories(vec![
+            test_group("A", vec![test_item(1, "A", "a1", "logo-a1"), test_item(2, "A", "a2", "logo-a2")]),
+            test_group("B", vec![test_item(3, "B", "b1", "logo-b1")]),
+        ]);
+        // A local edit moves a2 into a new group C before the order result arrives.
+        let moved = edit_panel::replace_item_in_categories(&source, (*test_item(2, "C", "a2", "logo-a2")).clone());
+        let order = vec!["A".to_string(), "C".to_string(), "B".to_string()];
+
+        let (ordered, _) = apply_group_order_update(&moved, None, XtreamCluster::Live, &order);
+        assert_eq!(live_titles(&ordered), order);
+        assert_eq!(group_channel_titles(&ordered, "C"), vec!["a2".to_string()]);
+    }
+
+    #[test]
+    fn bulk_patches_and_saved_order_converge_in_both_completion_orders() {
+        let base = live_categories(vec![
+            test_group("A", vec![test_item(1, "A", "a1", "logo-a1"), test_item(2, "A", "a2", "logo-a2")]),
+            test_group("B", vec![test_item(3, "B", "b1", "logo-b1")]),
+        ]);
+        // The bulk edit moves a1 into a new group C and sets its logo.
+        let patches = edit_panel::bulk_patch_map(vec![(*test_item(1, "C", "a1", "logo-new")).clone()]);
+        let order = vec!["A".to_string(), "C".to_string(), "B".to_string()];
+        let saved_orders: SavedGroupOrders = [(XtreamCluster::Live, order.clone())].into_iter().collect();
+
+        // Order save first, bulk completion second.
+        let (ordered, _) = apply_group_order_update(&base, None, XtreamCluster::Live, &order);
+        let (bulk_last, _) = apply_bulk_update(&ordered, None, &patches, &saved_orders);
+
+        // Bulk completion first, order save second.
+        let (bulk_first, _) = apply_bulk_update(&base, None, &patches, &SavedGroupOrders::new());
+        let (order_last, _) = apply_group_order_update(&bulk_first, None, XtreamCluster::Live, &order);
+
+        assert_eq!(live_titles(&bulk_last), order, "a late bulk completion keeps the saved order");
+        assert_eq!(live_titles(&bulk_last), live_titles(&order_last), "both completion orders converge");
+        for result in [&bulk_last, &order_last] {
+            assert_eq!(group_channel_titles(result, "C"), vec!["a1".to_string()]);
+            let moved_group = result
+                .live
+                .as_ref()
+                .expect("live groups")
+                .iter()
+                .find(|group| group.title.as_ref() == "C")
+                .expect("group C exists");
+            assert_eq!(&*moved_group.channels[0].logo, "logo-new");
+        }
+    }
+
+    #[test]
+    fn bulk_update_keeps_active_search_filter() {
+        let source = live_categories(vec![
+            test_group("A", vec![test_item(1, "A", "a1", "logo-a1")]),
+            test_group("B", vec![test_item(3, "B", "b1", "logo-b1")]),
+        ]);
+        let visible = live_categories(vec![test_group("B", vec![test_item(3, "B", "b1", "logo-b1")])]);
+        let patches = edit_panel::bulk_patch_map(vec![(*test_item(3, "B", "b1", "logo-new")).clone()]);
+
+        let (new_source, new_visible) = apply_bulk_update(&source, Some(&visible), &patches, &SavedGroupOrders::new());
+        assert_eq!(live_titles(&new_source), vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(live_titles(&new_visible.expect("visible catalog kept")), vec!["B".to_string()]);
     }
 }

@@ -20,6 +20,7 @@
 // Wraps a `PlaylistSource` and a `TVGuide` for the duration of one fetch.
 // Both halves are pipeline concerns, which is why it could not stay in the
 // storage layer.
+pub mod container_extension_sampling;
 pub mod epg;
 pub mod fetched_playlist;
 pub mod geoip;

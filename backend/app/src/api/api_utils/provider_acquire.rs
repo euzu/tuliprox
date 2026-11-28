@@ -1,7 +1,7 @@
 use super::{
-    accepts_requested_stream_url, activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
-    cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
-    detected_catchup_hls_response,
+    accepts_requested_stream_url, activate_session_before_stream_open_with_playback_id, admission_failure_response,
+    blocks_new_playback, cleanup_failed_detected_catchup_hls, connection_priority_for_kind,
+    create_stream_response_details, detected_catchup_hls_response,
     failover_group::{
         acquire_group_member, group_playback_settings, group_representative, group_shared_key, open_failure_class,
         open_group_member, wait_for_user_capacity, GroupOpenRequest, GroupSelectionFailure, GroupSelectionRequest,
@@ -507,9 +507,10 @@ pub(crate) async fn stream_response_with_provider_handle(
     let item_type = stream_channel.item_type;
     let playback_extension = extract_extension_from_url(&initial_stream_url);
     let socket_bound = is_socket_bound_playback_session(item_type, playback_extension);
+    let playback_id = super::effective_playback_id_for_user(&app_state.app_config.config.load(), user, req_headers);
     let mut connection_permission = connection_permission;
     let mut connection_kind = connection_kind;
-    let activation = activate_session_before_stream_open(
+    let activation = activate_session_before_stream_open_with_playback_id(
         app_state,
         SessionActivationRequest {
             fingerprint,
@@ -525,6 +526,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             granted_grace_mode: grace_mode,
             socket_bound,
         },
+        playback_id,
     )
     .await;
     let grace_mode = activation.grace_mode.or(grace_mode);
@@ -559,6 +561,8 @@ pub(crate) async fn stream_response_with_provider_handle(
                 session_token,
                 req_headers,
                 activation.placeholder_transition_version,
+                activation.placeholder_identity,
+                playback_id,
                 is_free_join,
             )
             .await
@@ -582,6 +586,8 @@ pub(crate) async fn stream_response_with_provider_handle(
                 session_token,
                 req_headers,
                 activation.placeholder_transition_version,
+                activation.placeholder_identity,
+                playback_id,
                 is_free_join,
             )
             .await
@@ -727,6 +733,8 @@ pub(crate) async fn stream_response_with_provider_handle(
                 session_token,
                 req_headers,
                 activation.placeholder_transition_version,
+                activation.placeholder_identity,
+                playback_id,
                 false,
             )
             .await
@@ -738,6 +746,9 @@ pub(crate) async fn stream_response_with_provider_handle(
     }
 
     let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
+
+    let mut placeholder_identity = activation.placeholder_identity;
+    let mut bound_member: Option<tuliprox_session::MemberBinding> = None;
 
     // A group started on an MPEG-TS member can fail over at runtime.
     let (mut stream_details, input, stream_url, mut stream_channel, group_runtime) = match &source {
@@ -940,30 +951,53 @@ pub(crate) async fn stream_response_with_provider_handle(
             // The session plays the member's provider now, not the representative's.
             let member_provider =
                 opened.details.provider_name.clone().unwrap_or_else(|| Arc::clone(&opened.member.input_name));
-            app_state
-                .active_users
-                .bind_member(
-                    &user.username,
-                    session_token,
-                    tuliprox_session::MemberBinding {
-                        group_vid: group.group_vid.get(),
-                        member_vid: opened.member.member_vid.get(),
-                        member_index: opened.index,
-                        input_name: Arc::clone(&opened.member.input_name),
-                        member_title: Arc::clone(&opened.member.title),
-                        provider: Arc::clone(&member_provider),
-                    },
-                )
-                .await;
-            app_state
-                .active_users
-                .update_session_provider_binding(
-                    &user.username,
-                    session_token,
-                    member_provider,
-                    Arc::clone(&opened.url),
-                )
-                .await;
+            let member_binding = tuliprox_session::MemberBinding {
+                group_vid: group.group_vid.get(),
+                member_vid: opened.member.member_vid.get(),
+                member_index: opened.index,
+                input_name: Arc::clone(&opened.member.input_name),
+                member_title: Arc::clone(&opened.member.title),
+                provider: Arc::clone(&member_provider),
+            };
+            if let Some(identity) = placeholder_identity {
+                if let Some(updated) = app_state
+                    .active_users
+                    .bind_member_with_identity(
+                        &user.username,
+                        session_token,
+                        member_binding.clone(),
+                        identity.incarnation,
+                    )
+                    .await
+                {
+                    placeholder_identity = Some(updated);
+                    if let Some(updated) = app_state
+                        .active_users
+                        .update_session_provider_binding_with_identity(
+                            &user.username,
+                            session_token,
+                            member_provider,
+                            Arc::clone(&opened.url),
+                            updated.incarnation,
+                        )
+                        .await
+                    {
+                        placeholder_identity = Some(updated);
+                    }
+                }
+            } else {
+                app_state.active_users.bind_member(&user.username, session_token, member_binding.clone()).await;
+                app_state
+                    .active_users
+                    .update_session_provider_binding(
+                        &user.username,
+                        session_token,
+                        member_provider,
+                        Arc::clone(&opened.url),
+                    )
+                    .await;
+            }
+            bound_member = Some(member_binding);
             let OpenedGroupMember { index, details, input, url, channel, payload, .. } = opened;
             let runtime =
                 (playback.failover.enabled && payload == ProbedPayload::Ts && item_type == PlaylistItemType::Live)
@@ -992,6 +1026,9 @@ pub(crate) async fn stream_response_with_provider_handle(
                             connection_permission,
                             connection_kind,
                             fallback_stream_url: &stream_url,
+                            playback_id,
+                            placeholder_identity,
+                            bound_member: bound_member.as_ref(),
                         })
                         .await,
                     );
@@ -1135,23 +1172,30 @@ pub(crate) async fn stream_response_with_provider_handle(
         let created_media_session = if !is_stream_shared
             && !item_type.is_live()
             && item_type.requires_provider_affinity()
+            && placeholder_identity.is_none()
+            && request_class != Some(PlaybackRequestClass::FollowUp)
             && app_state.active_users.media_started_flag(&user.username, session_token).await.is_none()
         {
             if let Some(provider) = provider_name.as_deref() {
-                app_state
+                let (_, identity) = app_state
                     .active_users
-                    .ensure_user_session_placeholder(crate::api::model::CreateUserSessionParams {
-                        user,
-                        session_token,
-                        virtual_id,
-                        provider,
-                        stream_url: actual_request_url.as_ref(),
-                        addr: &fingerprint.addr,
-                        connection_permission,
-                        connection_kind: Some(connection_kind),
-                        socket_bound,
-                    })
+                    .ensure_user_session_placeholder_with_identity(
+                        crate::api::model::CreateUserSessionParams {
+                            user,
+                            session_token,
+                            virtual_id,
+                            provider,
+                            stream_url: actual_request_url.as_ref(),
+                            addr: &fingerprint.addr,
+                            connection_permission,
+                            connection_kind: Some(connection_kind),
+                            socket_bound,
+                        },
+                        playback_id,
+                        false,
+                    )
                     .await;
+                placeholder_identity = Some(identity);
                 true
             } else {
                 false
@@ -1205,6 +1249,14 @@ pub(crate) async fn stream_response_with_provider_handle(
             }
         }
         let open_failure = open_failure_class(&stream_details);
+        if let Some(identity) = placeholder_identity {
+            let limits_enabled = config.user_access_control && (user.max_connections > 0 || user.soft_connections > 0);
+            stream_details.session_registration = Some(tuliprox_session::PlaybackSessionRegistration {
+                identity,
+                enforce_limits: limits_enabled && !is_free_join,
+                grace_admitted: connection_permission == UserConnectionPermission::GracePeriod,
+            });
+        }
         let outcome = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -1360,20 +1412,32 @@ pub(crate) async fn stream_response_with_provider_handle(
                         | PlaylistItemType::LocalSeriesInfo
                         | PlaylistItemType::Catchup
                 ) {
-                    let _ = app_state
-                        .active_users
-                        .create_user_session(crate::api::model::CreateUserSessionParams {
-                            user,
-                            session_token,
-                            virtual_id,
-                            provider: &provider,
-                            stream_url: &session_url,
-                            addr: &fingerprint.addr,
-                            connection_permission,
-                            connection_kind: Some(connection_kind),
-                            socket_bound,
-                        })
-                        .await;
+                    let session_params = crate::api::model::CreateUserSessionParams {
+                        user,
+                        session_token,
+                        virtual_id,
+                        provider: &provider,
+                        stream_url: &session_url,
+                        addr: &fingerprint.addr,
+                        connection_permission,
+                        connection_kind: Some(connection_kind),
+                        socket_bound,
+                    };
+                    if let Some(identity) = placeholder_identity {
+                        let _ = app_state
+                            .active_users
+                            .create_user_session_checked_with_playback_id(
+                                session_params,
+                                Some((identity, bound_member.as_ref())),
+                                playback_id,
+                            )
+                            .await;
+                    } else {
+                        let _ = app_state
+                            .active_users
+                            .create_user_session_with_playback_id(session_params, playback_id)
+                            .await;
+                    }
                     if let Some(stream_index) = user_agent_stream_index {
                         app_state
                             .active_users

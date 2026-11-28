@@ -645,20 +645,22 @@ is consulted; a group rule you wrote yourself then only orders groups that are n
 save). Groups that are not in the list keep their source order after the listed ones. The rule is evaluated on the
 first channel of a group: a live group whose first channel is a catch-up entry does not match `Type = live` and
 sorts after the listed groups. The Explorer only changes a rule of exactly this shape and never touches other rules.
-Saving an empty order removes the rule. Group names that contain a `!name!` template placeholder cannot be stored.
+Saving an empty order removes the rule.
 
 When a bulk edit in target scope moves items to a new group, the new group is placed directly below the group that
 is selected in the sidebar.
 
 The Explorer edits only a `sort` block written in YAML block style. When the target's `sort` block uses another layout
-(flow style such as `sort: {rules: [...]}`, a comment or anchor on `sort:` or `rules:`, or an inline target mapping),
-saving answers `409` and leaves `source.yml` unchanged; edit the rule by hand in that case.
+(flow style such as `sort: {rules: [...]}`, a comment or anchor on `sort:` or `rules:`, a comment between the
+`sequence` entries, or an inline target mapping), saving answers `409` and leaves `source.yml` unchanged; edit the
+rule by hand in that case.
 
 REST: `GET /api/v1/playlist/group_order?target=<name>&cluster=<live|vod|series>` returns `{"groups": [...]}`
 (`playlist.read`). `PUT /api/v1/playlist/group_order` with `{"target": "...", "cluster": "live", "groups": [...]}`
 stores the order (`source.write`) and answers the stored order and `pending` (`true` when `source.yml` changed).
-Names are trimmed and must be unique and non-empty, at most 2000 per cluster (`422` with field errors otherwise); an
-unknown target answers `404`, a concurrent change of `source.yml` or an unsupported layout `409`.
+Names are stored exactly as sent; a name made only of whitespace is rejected, and names must be unique, at most
+10000 per cluster (`422` with field errors otherwise); an unknown target answers `404`, a concurrent change of
+`source.yml` or an unsupported layout `409`.
 
 ## 13. Related documentation
 

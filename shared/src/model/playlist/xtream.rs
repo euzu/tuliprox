@@ -7,7 +7,7 @@ use crate::{
     },
     utils::{
         arc_str_option_serde, arc_str_serde, concat_path, generate_runtime_playlist_uuid, seal_web_ui_resource_url,
-        Internable,
+        Internable, SampledContainerExtensionSnapshot,
     },
 };
 use dashmap::DashMap;
@@ -34,6 +34,12 @@ pub struct XtreamMappingOptions {
     pub web_ui_request: bool,
     pub encrypt_secret: [u8; 16],
     pub resource_host_policies: Arc<DashMap<String, ResourceOutputPolicy>>,
+    /// Sampled container extensions per input and provider stream id, snapshotted with the request.
+    ///
+    /// Fills the `container_extension` of items the Stalker sampler learned from the portal. A snapshot
+    /// keeps one response self-consistent and delivery free of file I/O; the sampler publishes into the
+    /// next snapshot only.
+    pub sampled_container_extensions: SampledContainerExtensionSnapshot,
     /// Per-input `options.default_container_extension`, keyed by input name.
     ///
     /// Fills the `container_extension` of movies and series episodes whose provider value is empty.
@@ -53,6 +59,12 @@ pub enum ResourceOutputPolicy {
 }
 
 impl XtreamMappingOptions {
+    /// Sampled container extension for one item of an input, if this request snapshotted one.
+    #[inline]
+    pub fn sampled_container_extension(&self, input_name: &Arc<str>, provider_id: u32) -> Option<&Arc<str>> {
+        self.sampled_container_extensions.get(input_name).and_then(|extensions| extensions.get(&provider_id))
+    }
+
     /// Configured container extension for the input that owns an item, if any.
     #[inline]
     pub fn default_container_extension(&self, input_name: &Arc<str>) -> Option<&Arc<str>> {
@@ -442,6 +454,7 @@ impl PlaylistEntry for XtreamPlaylistItem {
                     self.get_virtual_id(),
                     self.get_category_id().unwrap_or(0),
                     &self.url,
+                    options.sampled_container_extension(&self.input_name, self.provider_id),
                     options.default_container_extension(&self.input_name),
                 )
             })

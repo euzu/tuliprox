@@ -22,6 +22,8 @@ mod mapping_stage;
 
 mod curation_effect_gate;
 
+mod sampling_trigger;
+
 mod watch_contexts;
 
 mod failover_groups;

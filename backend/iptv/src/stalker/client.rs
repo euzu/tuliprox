@@ -377,6 +377,30 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_link_without_retry(
+        &self,
+        handshake: &StalkerHandshake,
+        kind: shared::model::stalker::StalkerStreamKind,
+        requested_mode: shared::model::stalker::StalkerPlaybackMode,
+        cmd: &str,
+        series_number: Option<u32>,
+        archive_start: Option<&str>,
+        archive_end: Option<&str>,
+    ) -> StalkerResult<StalkerResolvedStream> {
+        playback::create_link_without_retry(
+            self,
+            handshake,
+            kind,
+            requested_mode,
+            cmd,
+            series_number,
+            archive_start,
+            archive_end,
+        )
+        .await
+    }
+
     // -------------------------------------------------------------------------------------
     // Internal helpers — used by auth/catalog/epg/playback submodules
     // -------------------------------------------------------------------------------------

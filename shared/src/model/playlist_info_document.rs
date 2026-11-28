@@ -1,6 +1,6 @@
 use crate::{
     model::{PlaylistItemType, StreamProperties, VirtualId, XtreamMappingOptions},
-    utils::{resolve_container_extension, Internable},
+    utils::{resolve_container_extension_with_ledger, Internable},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -26,6 +26,7 @@ impl StreamProperties {
     ///
     /// `item_url` is the URL of the item whose document is built. It carries the stream extension when
     /// the provider omitted one, so it is part of the container-extension resolution of a movie.
+    #[allow(clippy::too_many_arguments)]
     pub fn to_info_document(
         &self,
         options: &XtreamMappingOptions,
@@ -33,6 +34,7 @@ impl StreamProperties {
         virtual_id: VirtualId,
         category_id: u32,
         item_url: &str,
+        sampled_extension: Option<&Arc<str>>,
         configured_extension: Option<&Arc<str>>,
     ) -> XtreamInfoDocument {
         match self {
@@ -43,12 +45,13 @@ impl StreamProperties {
             StreamProperties::Video(video) => {
                 let mut document = self.video_to_info_document(options, video, item_type, virtual_id, category_id);
                 // `StreamProperties` carries no URL, so the provider value is normalized and a blank one
-                // is filled here, where the item URL and the input's configured default are known.
+                // is filled here, where the item URL, sampled extension and configured default are known.
                 // Without this, a movie served from cached provider details publishes an empty or
                 // placeholder extension.
-                document.movie_data.container_extension = resolve_container_extension(
+                document.movie_data.container_extension = resolve_container_extension_with_ledger(
                     &document.movie_data.container_extension,
                     item_url,
+                    sampled_extension.map(Arc::as_ref),
                     configured_extension.map(Arc::as_ref),
                 )
                 .as_ref()

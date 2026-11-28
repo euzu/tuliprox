@@ -20,6 +20,7 @@ impl ActiveUserManager {
         let now = current_time_secs();
         UserSession {
             token: params.session_token.to_string(),
+            playback_id: params.playback_id.map(Arc::from),
             transition_version: 1,
             virtual_id: params.virtual_id,
             provider: params.provider.intern(),
@@ -50,8 +51,16 @@ impl ActiveUserManager {
     }
 
     pub async fn create_user_session(&self, request: CreateUserSessionParams<'_>) -> String {
+        self.create_user_session_with_playback_id(request, None).await
+    }
+
+    pub async fn create_user_session_with_playback_id(
+        &self,
+        request: CreateUserSessionParams<'_>,
+        playback_id: Option<&str>,
+    ) -> String {
         // Without a fence no refresh is ever rejected; the session token is returned either way.
-        self.create_user_session_inner(request, None).await.map_or_else(|token| token, |(token, _)| token)
+        self.create_user_session_inner(request, None, playback_id).await.map_or_else(|token| token, |(token, _)| token)
     }
 
     /// Creates a session, or refreshes the existing one with `session_token`, and returns its token.
@@ -68,7 +77,16 @@ impl ActiveUserManager {
         request: CreateUserSessionParams<'_>,
         fence: Option<(SessionIdentity, Option<&MemberBinding>)>,
     ) -> Option<(String, SessionIdentity)> {
-        self.create_user_session_inner(request, fence).await.ok()
+        self.create_user_session_checked_with_playback_id(request, fence, None).await
+    }
+
+    pub async fn create_user_session_checked_with_playback_id(
+        &self,
+        request: CreateUserSessionParams<'_>,
+        fence: Option<(SessionIdentity, Option<&MemberBinding>)>,
+        playback_id: Option<&str>,
+    ) -> Option<(String, SessionIdentity)> {
+        self.create_user_session_inner(request, fence, playback_id).await.ok()
     }
 
     /// Shared body of the unfenced and fenced session creation. Returns `Err(token)` for a refresh
@@ -81,6 +99,7 @@ impl ActiveUserManager {
         &self,
         request: CreateUserSessionParams<'_>,
         fence: Option<(SessionIdentity, Option<&MemberBinding>)>,
+        playback_id: Option<&str>,
     ) -> Result<(String, SessionIdentity), String> {
         let CreateUserSessionParams {
             user,
@@ -98,6 +117,9 @@ impl ActiveUserManager {
         let stream_log_value = || sanitize_sensitive_info(stream_url);
         let username = user.username.clone();
         let mut user_connections = self.write_connections().await;
+        if fence.is_some() && user_connections.is_token_ended(session_token) {
+            return Err(session_token.to_string());
+        }
         let entry_created = !user_connections.by_key.contains_key(&username);
         let connection_data = user_connections.by_key.entry(username.clone()).or_insert_with(|| {
             debug_if_enabled!("Creating first session for user {username} {}", stream_log_value());
@@ -105,6 +127,7 @@ impl ActiveUserManager {
             let session = Self::new_user_session(&UserSessionParams {
                 change_wakes: &self.deferred_wakes,
                 session_token,
+                playback_id,
                 virtual_id,
                 provider,
                 stream_url,
@@ -138,6 +161,9 @@ impl ActiveUserManager {
                 session.ts = current_time_secs();
                 session.socket_bound = socket_bound;
                 remember_session_addr(session, *addr);
+                if let Some(playback_id) = playback_id {
+                    session.playback_id = Some(Arc::from(playback_id));
+                }
                 Self::bump_session_transition_version(session);
                 session.set_stream_url(stream_url);
                 if &*session.provider != provider {
@@ -205,6 +231,7 @@ impl ActiveUserManager {
         let session = Self::new_user_session(&UserSessionParams {
             change_wakes: &self.deferred_wakes,
             session_token,
+            playback_id,
             virtual_id,
             provider,
             stream_url,
@@ -380,7 +407,18 @@ impl ActiveUserManager {
 
     pub async fn bind_member(&self, username: &str, token: &str, binding: MemberBinding) {
         let mut user_connections = self.write_connections().await;
-        self.apply_member_binding(&mut user_connections, username, token, binding);
+        self.apply_member_binding(&mut user_connections, username, token, binding, None);
+    }
+
+    pub async fn bind_member_with_identity(
+        &self,
+        username: &str,
+        token: &str,
+        binding: MemberBinding,
+        expected_incarnation: u64,
+    ) -> Option<SessionIdentity> {
+        let mut user_connections = self.write_connections().await;
+        self.apply_member_binding(&mut user_connections, username, token, binding, Some(expected_incarnation))
     }
 
     fn apply_member_binding(
@@ -389,14 +427,22 @@ impl ActiveUserManager {
         username: &str,
         token: &str,
         binding: MemberBinding,
-    ) {
+        expected_incarnation: Option<u64>,
+    ) -> Option<SessionIdentity> {
         let member_info = binding.to_stream_member_info();
         let mut matched_stream = false;
+        let mut updated_identity = None;
         if let Some(connection_data) = user_connections.by_key.get_mut(username) {
             if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
+                if expected_incarnation.is_some_and(|inc| session.incarnation != inc) {
+                    return None;
+                }
                 // A member change advances the binding generation, so every fence taken before it
                 // fails; the same binding written again is not a change.
                 session.set_member_binding(binding.clone());
+                updated_identity = Some(session.identity());
+            } else if expected_incarnation.is_some() {
+                return None;
             }
             for stream in &mut connection_data.streams {
                 if stream.session_token.as_deref() == Some(token) {
@@ -406,6 +452,8 @@ impl ActiveUserManager {
                         .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream.clone())));
                 }
             }
+        } else if expected_incarnation.is_some() {
+            return None;
         }
         if matched_stream {
             user_connections.pending_member_bindings.remove(token);
@@ -414,6 +462,7 @@ impl ActiveUserManager {
                 .pending_member_bindings
                 .insert(token.to_string(), (Instant::now() + Duration::from_secs(60), binding));
         }
+        updated_identity
     }
 
     /// Rebinds a legacy HLS group session to a new member and provider in one write, marks a
@@ -450,10 +499,10 @@ impl ActiveUserManager {
             }
         }
         let provider = Arc::clone(&binding.provider);
-        Self::apply_session_provider_binding(&mut user_connections, username, token, &provider, &stream_url);
+        Self::apply_session_provider_binding(&mut user_connections, username, token, &provider, &stream_url, None);
         // The member write runs before the identity is read: it may advance the binding
         // generation, and the caller fences its later plan on the identity this write published.
-        self.apply_member_binding(&mut user_connections, username, token, binding);
+        self.apply_member_binding(&mut user_connections, username, token, binding, None);
         user_connections
             .by_key
             .get_mut(username)

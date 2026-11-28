@@ -92,6 +92,11 @@ impl ActiveUserManager {
         let is_free_join = self.is_free_subscriber(uid).await;
         let (stream_info, divergence_snapshot, connection_count_changed) = {
             let mut user_connections = self.write_connections().await;
+            if let Some(token) = session_token {
+                if user_connections.is_token_ended(token) {
+                    return None;
+                }
+            }
             if let Some(requirement) = session_registration {
                 let token = session_token?;
                 let (data, session) = user_connections.current_session(username, token, requirement.identity)?;
@@ -280,6 +285,9 @@ impl ActiveUserManager {
             connection_data.stream_normal_priorities.insert(stream_info.uid, priority);
             if let Some(token) = session_token {
                 if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
+                    if let Some(playback_id) = session.playback_id.as_ref() {
+                        connection_data.stream_playback_ids.insert(stream_info.uid, Arc::clone(playback_id));
+                    }
                     if is_free_join {
                         session.permission = UserConnectionPermission::Allowed;
                         session.lifecycle = PlaybackLifecycle::Prepared;

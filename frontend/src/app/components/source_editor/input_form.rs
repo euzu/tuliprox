@@ -107,6 +107,11 @@ const LABEL_PROBE_LIVE: &str = "LABEL.PROBE_LIVE";
 const LABEL_PROBE_VOD: &str = "LABEL.PROBE_VOD";
 const LABEL_PROBE_SERIES: &str = "LABEL.PROBE_SERIES";
 const LABEL_CONTAINER_EXTENSION: &str = "LABEL.CONTAINER_EXTENSION";
+const LABEL_CONTAINER_EXTENSION_SAMPLING: &str = "LABEL.CONTAINER_EXTENSION_SAMPLING";
+const LABEL_CONTAINER_EXTENSION_SAMPLING_MAX_CALLS: &str = "LABEL.CONTAINER_EXTENSION_SAMPLING_MAX_CALLS";
+const LABEL_CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL: &str = "LABEL.CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL";
+const LABEL_CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS: &str =
+    "LABEL.CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS";
 const LABEL_RESOLVE_VOD: &str = "LABEL.RESOLVE_VOD";
 const LABEL_RESOLVE_SERIES: &str = "LABEL.RESOLVE_SERIES";
 const LABEL_METADATA: &str = "LABEL.METADATA";
@@ -409,6 +414,7 @@ generate_form_reducer!(
       ProbeFilter => probe_filter: Option<String>,
       StalkerBulkEpg => stalker_bulk_epg: bool,
       DefaultContainerExtension => default_container_extension: Option<String>,
+      ContainerExtensionSampling => container_extension_sampling: shared::model::ContainerExtensionSamplingDto,
     }
 );
 
@@ -1594,6 +1600,33 @@ mod tests {
 
         for (input_type, staged_type, expected) in cases {
             assert_eq!(options_kind_for(input_type, staged_type).supports_update_quality(), expected);
+        }
+    }
+
+    #[test]
+    fn container_extension_sampling_is_visible_only_for_stalker_inputs() {
+        let cases = [
+            (InputType::Stalker, StagedInputType::M3u, true),
+            (InputType::StalkerBatch, StagedInputType::M3u, true),
+            (InputType::Xtream, StagedInputType::M3u, false),
+            (InputType::XtreamBatch, StagedInputType::M3u, false),
+            (InputType::M3u, StagedInputType::M3u, false),
+            (InputType::M3uBatch, StagedInputType::M3u, false),
+            (InputType::Staged, StagedInputType::Xtream, false),
+            (InputType::Staged, StagedInputType::M3u, false),
+            (InputType::Library, StagedInputType::M3u, false),
+            (InputType::Emby, StagedInputType::M3u, false),
+            (InputType::Jellyfin, StagedInputType::M3u, false),
+            (InputType::Silo, StagedInputType::M3u, false),
+            (InputType::Plex, StagedInputType::M3u, false),
+        ];
+
+        for (input_type, staged_type, expected) in cases {
+            assert_eq!(
+                options_kind_for(input_type, staged_type).supports_container_extension_sampling(),
+                expected,
+                "unexpected sampling visibility for {input_type:?} / {staged_type:?}"
+            );
         }
     }
 

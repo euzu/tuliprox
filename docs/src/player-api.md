@@ -538,6 +538,32 @@ user. For HLS the session is terminated under a transition guard; the next segme
 `hls_session_or_lease_expired` fallback. With `player_features.event_stream: true` the caller's event socket receives
 `{"type":"stream_ended","uid":104,"virtual_id":1042,"reason":"stopped"}`.
 
+#### Client-generated playback ID
+
+When opening a stream at `max_connections` (or switching channels faster than TCP teardown completes), a player with
+effective Player API access can supply its own per-playback identifier on stream requests:
+
+- Primary request header: `X-Tuliprox-Playback-Id: <id>`
+- Fallback request header (for Apple AVPlayer): `X-Playback-Session-Id: <id>`
+
+Both header names are matched case-insensitively. Values must consist of **1-128 visible ASCII characters**
+(`0x21..=0x7E`, no whitespace, control characters, or non-ASCII bytes). Missing, empty, oversized, or malformed values
+are ignored, and standard `max_connections` enforcement applies unchanged. The headers are also ignored for users
+without effective Player API access and for internal recording proxy users.
+
+When an incoming stream request carries a valid playback ID that matches an existing active or preserved connection or
+session of the **same user**, the existing connection is ended immediately, performing the same cleanup, provider slot
+release, and `stream_ended` (`reason: "stopped"`) emission as `DELETE /api/v1/me/streams/{uid}`, and the new request is
+admitted without counting the replaced connection against `max_connections`:
+
+- **Cross-user isolation**: The same playback ID sent by a different user has no effect on other users.
+- **Shared streams**: Replacing a shared stream subscriber ends only that subscriber; the shared upstream producer and
+  any other listeners keep streaming.
+- **HLS**: Supplying the ID on follow-up `/hls/...` manifest and segment requests reuses the existing session without
+  replacing itself; sending a new HLS entry request (`.m3u8`) with the same ID replaces the previous session.
+- **Unsupported paths**: Not applied in `redirect` proxy mode (where playback connects directly to the upstream provider
+  rather than proxied stream admission) or on `/api/v1/*` recording media download routes.
+
 ### 4.2 Failover members and manual switch
 
 Both member routes and the switch require `player_features.source_switch: true`; otherwise they answer
@@ -1964,6 +1990,12 @@ Cache-Control: no-store
 On live MPEG-TS responses for users with Player API access: the `uid` of this connection in `GET /api/v1/me/streams`
 (see [Matching own streams](#matching-own-streams)). Omitted for HLS, VOD, series, catch-up, and recordings, and for
 users without Player API access.
+
+`X-Tuliprox-Playback-Id` / `X-Playback-Session-Id` (request headers):
+Optional client-generated playback identifier (1-128 visible ASCII characters, `X-Tuliprox-Playback-Id` primary with
+`X-Playback-Session-Id` fallback) honored for users with Player API access. A new stream request carrying the same ID as
+an active connection of the same user ends the older connection immediately and is admitted without counting it against
+`max_connections` (see [Client-generated playback ID](#client-generated-playback-id)).
 
 `X-Tuliprox-Fallback` values:
 

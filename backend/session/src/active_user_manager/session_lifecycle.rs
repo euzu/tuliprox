@@ -1,7 +1,7 @@
 use super::{
-    url_host_key, ActiveUserManager, CreateUserSessionParams, DeferredWakes, PendingProviderReason,
-    PendingProviderState, PendingProviderWakeSource, PlaybackLifecycle, SessionChangeSignal, SocketRegistration,
-    UserConnectionData, UserSession, NEXT_SESSION_INCARNATION,
+    observability::DivergenceSnapshot, url_host_key, ActiveUserManager, CreateUserSessionParams, DeferredWakes,
+    PendingProviderReason, PendingProviderState, PendingProviderWakeSource, PlaybackLifecycle, SessionChangeSignal,
+    SessionIdentity, SocketRegistration, UserConnectionData, UserConnections, UserSession, NEXT_SESSION_INCARNATION,
 };
 use crate::active_provider_manager::ConnectionKind;
 use log::debug;
@@ -67,6 +67,7 @@ impl Default for UserSession {
     fn default() -> Self {
         Self {
             token: String::new(),
+            playback_id: None,
             transition_version: 1,
             virtual_id: 0,
             provider: Arc::from(""),
@@ -196,6 +197,7 @@ pub(super) fn clear_session_addr(session: &mut UserSession, addr: &SocketAddr) -
 pub(super) struct UserSessionParams<'a> {
     pub(super) change_wakes: &'a Arc<DeferredWakes>,
     pub(super) session_token: &'a str,
+    pub(super) playback_id: Option<&'a str>,
     pub(super) virtual_id: u32,
     pub(super) provider: &'a str,
     pub(super) stream_url: &'a str,
@@ -278,6 +280,40 @@ impl ActiveUserManager {
     }
 
     pub async fn ensure_user_session_placeholder(&self, request: CreateUserSessionParams<'_>) -> u64 {
+        self.ensure_user_session_placeholder_with_playback_id(request, None).await
+    }
+
+    pub async fn ensure_user_session_placeholder_with_playback_id(
+        &self,
+        request: CreateUserSessionParams<'_>,
+        playback_id: Option<&str>,
+    ) -> u64 {
+        self.ensure_user_session_placeholder_with_identity(request, playback_id, false).await.0
+    }
+
+    pub async fn ensure_user_session_placeholder_with_identity(
+        &self,
+        request: CreateUserSessionParams<'_>,
+        playback_id: Option<&str>,
+        clear_ended: bool,
+    ) -> (u64, SessionIdentity) {
+        self.gc();
+
+        let mut user_connections = self.write_connections().await;
+        let (version, identity, divergence_snapshot) =
+            self.ensure_user_session_placeholder_in_data(&mut user_connections, &request, playback_id, clear_ended);
+        drop(user_connections);
+        self.log_divergence_snapshot(divergence_snapshot).await;
+        (version, identity)
+    }
+
+    pub(super) fn ensure_user_session_placeholder_in_data(
+        &self,
+        user_connections: &mut UserConnections,
+        request: &CreateUserSessionParams<'_>,
+        playback_id: Option<&str>,
+        clear_ended: bool,
+    ) -> (u64, SessionIdentity, Option<DivergenceSnapshot>) {
         let CreateUserSessionParams {
             user,
             session_token,
@@ -288,11 +324,11 @@ impl ActiveUserManager {
             connection_permission,
             connection_kind,
             socket_bound,
-        } = request;
-        self.gc();
-
-        let username = user.username.clone();
-        let mut user_connections = self.write_connections().await;
+        } = *request;
+        if clear_ended {
+            user_connections.ended_sessions.remove(session_token);
+        }
+        let username = &user.username;
         let connection_data = user_connections
             .by_key
             .entry(username.clone())
@@ -305,19 +341,22 @@ impl ActiveUserManager {
             if session.connection_kind.is_none() {
                 session.connection_kind = connection_kind;
             }
+            if let Some(playback_id) = playback_id {
+                session.playback_id = Some(Arc::from(playback_id));
+            }
             if session.permission == UserConnectionPermission::Exhausted {
                 Self::update_session_admission(session, connection_permission, None);
             }
             let version = Self::bump_session_transition_version(session);
-            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
-            drop(user_connections);
-            self.log_divergence_snapshot(divergence_snapshot).await;
-            return version;
+            let identity = session.identity();
+            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+            return (version, identity, divergence_snapshot);
         }
 
         let session = Self::new_user_session(&UserSessionParams {
             change_wakes: &self.deferred_wakes,
             session_token,
+            playback_id,
             virtual_id,
             provider,
             stream_url,
@@ -327,11 +366,14 @@ impl ActiveUserManager {
             socket_bound,
         });
         let version = session.transition_version;
+        let identity = session.identity();
         connection_data.add_session(session);
-        let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
-        drop(user_connections);
-        self.log_divergence_snapshot(divergence_snapshot).await;
-        version
+        let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+        (version, identity, divergence_snapshot)
+    }
+
+    pub async fn clear_ended_session_for_activation(&self, token: &str) {
+        self.write_connections().await.ended_sessions.remove(token);
     }
 
     pub async fn update_session_addr(&self, username: &str, token: &str, addr: &SocketAddr) {
@@ -387,7 +429,26 @@ impl ActiveUserManager {
         stream_url: Arc<str>,
     ) {
         let mut user_connections = self.write_connections().await;
-        Self::apply_session_provider_binding(&mut user_connections, username, token, &provider, &stream_url);
+        Self::apply_session_provider_binding(&mut user_connections, username, token, &provider, &stream_url, None);
+    }
+
+    pub async fn update_session_provider_binding_with_identity(
+        &self,
+        username: &str,
+        token: &str,
+        provider: Arc<str>,
+        stream_url: Arc<str>,
+        expected_incarnation: u64,
+    ) -> Option<SessionIdentity> {
+        let mut user_connections = self.write_connections().await;
+        Self::apply_session_provider_binding(
+            &mut user_connections,
+            username,
+            token,
+            &provider,
+            &stream_url,
+            Some(expected_incarnation),
+        )
     }
 
     pub(super) fn apply_session_provider_binding(
@@ -396,30 +457,34 @@ impl ActiveUserManager {
         token: &str,
         provider: &Arc<str>,
         stream_url: &Arc<str>,
-    ) {
+        expected_incarnation: Option<u64>,
+    ) -> Option<SessionIdentity> {
         let now = current_time_secs();
-        if let Some(connection_data) = user_connections.by_key.get_mut(username) {
-            if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
-                let previous_provider = session.provider.clone();
-                if session.provider != *provider {
-                    session.switch_provider(Arc::clone(provider));
-                }
-                session.stream_url = Arc::clone(stream_url);
-                session.ts = now;
-                Self::bump_session_transition_version(session);
-                for stream in &mut connection_data.streams {
-                    if stream.session_token.as_deref() == Some(token) {
-                        stream.provider = Arc::clone(provider);
-                        stream.ts = now;
-                    }
-                }
-                debug_if_enabled!(
-                    "Updated session {token} for {username} provider binding {} -> {}",
-                    sanitize_sensitive_info(&previous_provider),
-                    sanitize_sensitive_info(provider)
-                );
+        let connection_data = user_connections.by_key.get_mut(username)?;
+        let session = connection_data.sessions.iter_mut().find(|s| s.token == token)?;
+        if expected_incarnation.is_some_and(|inc| session.incarnation != inc) {
+            return None;
+        }
+        let previous_provider = session.provider.clone();
+        if session.provider != *provider {
+            session.switch_provider(Arc::clone(provider));
+        }
+        session.stream_url = Arc::clone(stream_url);
+        session.ts = now;
+        Self::bump_session_transition_version(session);
+        let identity = session.identity();
+        for stream in &mut connection_data.streams {
+            if stream.session_token.as_deref() == Some(token) {
+                stream.provider = Arc::clone(provider);
+                stream.ts = now;
             }
         }
+        debug_if_enabled!(
+            "Updated session {token} for {username} provider binding {} -> {}",
+            sanitize_sensitive_info(&previous_provider),
+            sanitize_sensitive_info(provider)
+        );
+        Some(identity)
     }
 
     /// After a shared failover group stream switched member: every viewer's stream and session

@@ -1470,6 +1470,15 @@
         color: var(--theme-brand-danger-strong);
       }
     }
+
+    &.tp__explorer-bulk-placement {
+      flex-wrap: wrap;
+      gap: var(--gap-small);
+
+      .input-name {
+        flex: 1 1 100%;
+      }
+    }
   }
 }
 

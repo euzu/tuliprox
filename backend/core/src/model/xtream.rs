@@ -94,6 +94,7 @@ pub fn xtream_mapping_option_from_target_options(
         web_ui_request: user.t_is_api_user,
         encrypt_secret,
         resource_host_policies: Arc::default(),
+        sampled_container_extensions: sampled_container_extensions(),
         default_container_extensions: default_container_extensions(app_config),
         // Read per request, so a config change applies to the next response.
         replace_rating: app_config
@@ -113,6 +114,14 @@ pub fn xtream_mapping_option_from_target_options(
 /// Aliases are keyed both under their own name and under the parent input's name: an input item
 /// carries the name of the account that fetched it, and an alias inherits the parent's options
 /// (`ConfigInput::as_input`), so either key must resolve to the same configured value.
+/// Snapshots what the Stalker sampler learned, once per request.
+///
+/// One `Arc` per input, so the cost does not grow with the catalog and the response stays consistent
+/// while a background sampling run publishes a newer snapshot.
+fn sampled_container_extensions() -> shared::utils::SampledContainerExtensionSnapshot {
+    shared::utils::sampled_container_extension_snapshot()
+}
+
 fn default_container_extensions(app_config: &AppConfig) -> Arc<HashMap<Arc<str>, Arc<str>>> {
     let sources = app_config.sources.load();
     let mut configured: HashMap<Arc<str>, Arc<str>> = HashMap::new();

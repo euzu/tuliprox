@@ -13,7 +13,7 @@ use crate::{
             build_alias_sort_edit, build_field_insertion_edit, detect_newline, find_input, flow_mapping_start_at,
             is_flow_style_mapping_at, line_content_end, line_end_offset, line_indent_at,
             parse_and_validate_patched_text, parse_patch_document, serialize_yaml_scalar, sibling_key_indent,
-            span_byte_range, TextEdit,
+            span_byte_range, FlowScopeScanner, TextEdit,
         },
         write_config_text_file,
     },
@@ -689,18 +689,22 @@ fn matches_cluster_filter(filter_text: &str, cluster: TargetGroupCluster) -> boo
         .is_ok_and(|filter| filter.to_string().eq_ignore_ascii_case(cluster_filter_canonical(cluster)))
 }
 
+/// Escapes a literal group name for an anchored regex, encoding `!` as `\x21` so `!name!`
+/// template placeholders cannot appear in stored sort sequences.
+fn encode_group_literal(name: &str) -> String { regex::escape(name).replace('!', "\\x21") }
+
 /// Sequence entries of a managed rule: one anchored, escaped literal per group name.
 ///
-/// `regex::escape` turns every metacharacter of the name into a literal, so a group called
-/// `News (HD)` matches only itself.
+/// `regex::escape` turns every metacharacter of the name into a literal and `!` becomes `\x21`,
+/// so a group called `News !HD!` matches only itself without triggering template expansion.
 fn managed_sequence(groups: &[String]) -> Vec<String> {
-    groups.iter().map(|name| format!("^{}$", regex::escape(name))).collect()
+    groups.iter().map(|name| format!("^{}$", encode_group_literal(name))).collect()
 }
 
 /// Recovers the group name from one managed sequence entry `^<escaped group name>$`.
 ///
-/// An entry that only looks anchored is rejected: the unescaped text must escape back to the exact
-/// entry, so `^A.B$` and `^A\d$` are no managed literals.
+/// An entry that only looks anchored is rejected: the unescaped text must encode back to the exact
+/// entry, so `^A.B$`, `^A\d$`, and `^A\x41$` are no managed literals.
 pub(crate) fn decode_group_sequence_entry(pattern: &str) -> Option<String> {
     let inner = pattern.strip_prefix('^')?.strip_suffix('$')?;
     if inner.is_empty() {
@@ -709,9 +713,23 @@ pub(crate) fn decode_group_sequence_entry(pattern: &str) -> Option<String> {
     let mut name = String::with_capacity(inner.len());
     let mut chars = inner.chars();
     while let Some(ch) = chars.next() {
-        name.push(if ch == '\\' { chars.next()? } else { ch });
+        if ch == '\\' {
+            let escaped = chars.next()?;
+            if escaped == 'x' {
+                let d1 = chars.next()?;
+                let d2 = chars.next()?;
+                if (d1, d2) != ('2', '1') {
+                    return None;
+                }
+                name.push('!');
+            } else {
+                name.push(escaped);
+            }
+        } else {
+            name.push(ch);
+        }
     }
-    (regex::escape(&name) == inner).then_some(name)
+    (encode_group_literal(&name) == inner).then_some(name)
 }
 
 /// Whether the sequence is non-empty and every entry is an anchored escaped literal.
@@ -1267,9 +1285,10 @@ fn validate_rule_list_items(
     text: &str,
     rules: &[serde_saphyr::Spanned<PatchSortRule>],
 ) -> Result<(), TargetGroupOrderPatchError> {
+    let mut flow_scanner = FlowScopeScanner::new(text);
     for rule in rules {
         let extent = rule_extent(&rule.value)?;
-        if let Some(flow_start) = flow_mapping_start_at(text, &extent) {
+        if let Some(flow_start) = flow_scanner.flow_mapping_start_at(extent.start) {
             validate_single_line_flow_rule(text, flow_start, &extent)?;
         } else {
             block_item_indent(text, extent.start)?;
@@ -1398,8 +1417,12 @@ fn plan_rule_sequence_edits(
     let first_span = span_range(first)?;
     let last_span = span_range(last)?;
     let item_indent = block_item_indent(text, first_span.start)?;
+    let range = block_lines(text, &(first_span.start..last_span.end));
+    if text[range.clone()].lines().any(|line| line.trim_start().starts_with('#')) {
+        return Err(unsupported_layout());
+    }
     edits.push(TextEdit {
-        range: block_lines(text, &(first_span.start..last_span.end)),
+        range,
         replacement: format!("{}{newline}", block_sequence_lines(patterns, item_indent, newline)?),
     });
 
@@ -1888,6 +1911,25 @@ fn plan_alias_structural_edits(
 // Central transaction
 // ---------------------------------------------------------------------------
 
+fn validate_group_order_layouts(text: &str, patches: &[SourcesYmlPatch]) -> Result<(), TargetGroupOrderPatchError> {
+    let target_names: Vec<&str> = patches
+        .iter()
+        .filter_map(|patch| match patch {
+            SourcesYmlPatch::SetTargetGroupOrder { target_name, .. } => Some(target_name.as_ref()),
+            _ => None,
+        })
+        .collect();
+    if target_names.is_empty() {
+        return Ok(());
+    }
+    let target_doc = parse_target_sort_document(text)?;
+    for target_name in target_names {
+        let target = find_patch_target(&target_doc, target_name)?;
+        validate_target_sort_layout(text, &target.value)?;
+    }
+    Ok(())
+}
+
 fn apply_patch_planning_step(
     expected: &mut SourcesConfigDto,
     patched_text: &mut String,
@@ -1895,6 +1937,7 @@ fn apply_patch_planning_step(
 ) -> Result<bool, TargetGroupOrderPatchError> {
     let mut next_expected = expected.clone();
     if !apply_sources_yml_patches_inner(&mut next_expected, patches)? {
+        validate_group_order_layouts(patched_text, patches)?;
         return Ok(false);
     }
     let text_edits = plan_text_edits(patched_text, expected, &next_expected, patches)?;
@@ -2192,6 +2235,19 @@ pub(crate) async fn execute_target_group_order_patch_locked(
     execute_source_yml_patches_inner(app_config, sources_path, std::slice::from_ref(&patch), guard).await
 }
 
+async fn classify_write_failure(
+    sources_path: &Path,
+    original_revision: blake3::Hash,
+    err: TuliproxError,
+) -> TargetGroupOrderPatchError {
+    if let Ok(bytes) = tokio::fs::read(sources_path).await {
+        if blake3::hash(&bytes) != original_revision {
+            return TargetGroupOrderPatchError::RevisionChanged;
+        }
+    }
+    TargetGroupOrderPatchError::Other(err)
+}
+
 async fn execute_source_yml_patches_inner(
     app_config: &Arc<AppConfig>,
     sources_path: &Path,
@@ -2252,13 +2308,7 @@ async fn execute_source_yml_patches_inner(
     .await
     {
         Ok(written) => written,
-        Err(err) => {
-            let current_revision = tokio::fs::read(sources_path).await.ok().map(|bytes| blake3::hash(&bytes));
-            if current_revision != Some(original_revision) {
-                return Err(TargetGroupOrderPatchError::RevisionChanged);
-            }
-            return Err(TargetGroupOrderPatchError::Other(err));
-        }
+        Err(err) => return Err(classify_write_failure(sources_path, original_revision, err).await),
     };
 
     if written {
@@ -3525,6 +3575,13 @@ sources:
             fn decodes_only_anchored_escaped_literals() {
                 assert_eq!(decode_group_sequence_entry("^News$").as_deref(), Some("News"));
                 assert_eq!(decode_group_sequence_entry("^A\\.B$").as_deref(), Some("A.B"));
+                assert_eq!(decode_group_sequence_entry("^Sports \\x21HD\\x21$").as_deref(), Some("Sports !HD!"));
+                assert_eq!(decode_group_sequence_entry("^a\\\\x21$").as_deref(), Some("a\\x21"));
+                assert_eq!(decode_group_sequence_entry("^a\\\\\\x21$").as_deref(), Some("a\\!"));
+                assert_eq!(decode_group_sequence_entry("^Sports !HD!$"), None);
+                assert_eq!(decode_group_sequence_entry("^\\x41$"), None);
+                assert_eq!(decode_group_sequence_entry("^\\x2$"), None);
+                assert_eq!(decode_group_sequence_entry("^\\x$"), None);
                 assert_eq!(decode_group_sequence_entry("News"), None);
                 assert_eq!(decode_group_sequence_entry("^News"), None);
                 assert_eq!(decode_group_sequence_entry("^News.*$"), None);
@@ -3589,6 +3646,103 @@ sources:
                 assert_eq!(sort.rules.len(), 2, "the sequence: [] rule is kept as a user rule");
                 assert_eq!(decode_all(&sort), ["Kids"]);
                 assert_eq!(sort.rules[1].sequence.as_deref(), Some(&[][..]));
+            }
+
+            #[tokio::test]
+            async fn rejects_sequence_update_when_comment_lies_between_managed_entries() {
+                let fixture_text = format!(
+                    "{FIXTURE}        sort:\n          rules:\n            - target: group\n              field: group\n              order: none\n              filter: 'Type = live'\n              sequence:\n                - '^First$'\n                # keep this comment\n                - '^Second$'\n"
+                );
+                let fixture = Fixture::new(&fixture_text);
+                let guard = fixture.app_cfg.file_locks.write_lock(&fixture.source_path).await;
+                let err = execute_target_group_order_patch_locked(
+                    &fixture.app_cfg,
+                    &fixture.source_path,
+                    order_test_patch(&["Second", "First"]),
+                    &guard,
+                )
+                .await
+                .expect_err("comment inside replaced sequence range must be rejected");
+                drop(guard);
+                match err {
+                    TargetGroupOrderPatchError::UnsupportedLayout(msg) => {
+                        assert_eq!(msg, UNSUPPORTED_SORT_LAYOUT_MSG);
+                    }
+                    other => panic!("expected UnsupportedLayout, got {other:?}"),
+                }
+                assert_eq!(fixture.text(), fixture_text, "file must remain unchanged");
+            }
+
+            #[tokio::test]
+            async fn write_failure_maps_revision_change_only_on_readable_different_hash() {
+                let dir = tempfile::tempdir().expect("temp dir");
+                let missing_path = dir.path().join("missing-source.yml");
+                let err =
+                    classify_write_failure(&missing_path, blake3::hash(b"original"), TuliproxError::Io("disk full"))
+                        .await;
+                match err {
+                    TargetGroupOrderPatchError::Other(inner) => {
+                        assert_eq!(inner.to_string(), TuliproxError::Io("disk full").to_string());
+                    }
+                    other => panic!("expected Other(write error), got {other:?}"),
+                }
+
+                let existing_path = dir.path().join("source.yml");
+                std::fs::write(&existing_path, b"original").expect("write original");
+                let same_hash_err = classify_write_failure(
+                    &existing_path,
+                    blake3::hash(b"original"),
+                    TuliproxError::Io("permission denied"),
+                )
+                .await;
+                assert!(
+                    matches!(same_hash_err, TargetGroupOrderPatchError::Other(_)),
+                    "same hash must preserve write error, got {same_hash_err:?}"
+                );
+
+                std::fs::write(&existing_path, b"modified").expect("write modified");
+                let changed_err =
+                    classify_write_failure(&existing_path, blake3::hash(b"original"), TuliproxError::Io("ignored"))
+                        .await;
+                assert!(
+                    matches!(changed_err, TargetGroupOrderPatchError::RevisionChanged),
+                    "readable modified file must map to RevisionChanged, got {changed_err:?}"
+                );
+            }
+
+            #[tokio::test]
+            async fn saves_group_order_with_flow_sort_rule_after_plain_apostrophe_filename() {
+                let yaml = "\
+inputs:
+  - name: provider
+    url: http://main.example
+sources:
+  - inputs: [provider]
+    targets:
+      - name: family
+        output:
+          - type: m3u
+            filename: family.m3u
+      - name: family_apostrophe
+        output:
+          - type: m3u
+            filename: family's.m3u
+      - name: kids
+        output:
+          - type: m3u
+            filename: kids.m3u
+        sort:
+          rules:
+            - {target: channel, field: title, order: asc, filter: 'Type = live'}
+";
+                let fixture = Fixture::new(yaml);
+                assert!(fixture.apply(order_test_patch(&["Kids"])).await);
+                let sort = fixture.target_sort("kids").expect("sort block");
+                assert_eq!(sort.rules.len(), 2);
+                assert_eq!(decode_all(&sort), ["Kids"]);
+                assert_eq!(sort.rules[1].target, SortTarget::Channel);
+                assert!(fixture.text().contains("filename: family's.m3u"));
+                assert!(fixture.text().contains("- {target: channel, field: title, order: asc"));
             }
         }
     }

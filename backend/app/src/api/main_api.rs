@@ -436,6 +436,7 @@ async fn create_shared_data(
     })?;
 
     let maintenance = load_maintenance(app_config).await;
+    crate::processing::container_extension_sampling::load_persisted_container_extension_ledgers(app_config).await;
     let member_health = Arc::new(tuliprox_session::MemberHealthIndex::new(
         tuliprox_session::failover_group::CircuitPolicy::from(&config.failover_groups.circuit),
     ));
@@ -1166,6 +1167,111 @@ mod tests {
             );
             assert_eq!(policy.demand_wait_timeout(), Duration::from_millis(405_200));
         }
+    }
+
+    #[tokio::test]
+    async fn cold_start_loads_persisted_container_extension_ledgers_even_when_disabled_or_in_maintenance() {
+        use crate::{
+            api::model::create_test_app_state,
+            model::{Config, ConfigInput, ConfigInputOptions, MaintenanceRegistry, ProcessTargets, SourcesConfig},
+            processing::container_extension_sampling::{ContainerExtensionLedger, CONTAINER_EXTENSION_LEDGER_FILE},
+        };
+        use shared::{
+            model::{ConfigInputOptionsDto, ContainerExtensionSamplingDto, InputType},
+            utils::{clear_sampled_container_extensions, sampled_container_extension, Internable},
+        };
+        use std::sync::Arc;
+        use tuliprox_repository::stalker_repository::ensure_stalker_storage_path;
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage_dir = directory.path().join("storage");
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let config = Config {
+            storage_dir: storage_dir.to_string_lossy().into_owned(),
+            backup_dir: Some(directory.path().join("backup").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        let disabled_name: Arc<str> = "startup_ledger_disabled".intern();
+        let maint_name: Arc<str> = "startup_ledger_maint".intern();
+        clear_sampled_container_extensions(&disabled_name);
+        clear_sampled_container_extensions(&maint_name);
+
+        let disabled_input = Arc::new(ConfigInput {
+            id: 1,
+            name: Arc::clone(&disabled_name),
+            input_type: InputType::Stalker,
+            url: "http://portal-a.example/stalker_portal/c/".to_string(),
+            enabled: true,
+            options: Some(ConfigInputOptions::from(&ConfigInputOptionsDto {
+                container_extension_sampling: ContainerExtensionSamplingDto {
+                    enabled: false,
+                    ..ContainerExtensionSamplingDto::default()
+                },
+                ..ConfigInputOptionsDto::default()
+            })),
+            ..ConfigInput::default()
+        });
+        let maint_input = Arc::new(ConfigInput {
+            id: 2,
+            name: Arc::clone(&maint_name),
+            input_type: InputType::Stalker,
+            url: "http://portal-b.example/stalker_portal/c/".to_string(),
+            enabled: true,
+            options: Some(ConfigInputOptions::from(&ConfigInputOptionsDto {
+                container_extension_sampling: ContainerExtensionSamplingDto {
+                    enabled: true,
+                    ..ContainerExtensionSamplingDto::default()
+                },
+                ..ConfigInputOptionsDto::default()
+            })),
+            ..ConfigInput::default()
+        });
+
+        let app_state = create_test_app_state(config);
+        app_state
+            .app_config
+            .sources
+            .store(Arc::new(SourcesConfig { inputs: vec![disabled_input, maint_input], ..SourcesConfig::default() }));
+        let app_config = Arc::clone(&app_state.app_config);
+
+        let mut ledger_a = ContainerExtensionLedger::default();
+        ledger_a.insert(101, "mkv");
+        let path_a = ensure_stalker_storage_path(&app_config, &disabled_name)
+            .await
+            .unwrap()
+            .join(CONTAINER_EXTENSION_LEDGER_FILE);
+        ledger_a.store(&path_a).await.unwrap();
+
+        let mut ledger_b = ContainerExtensionLedger::default();
+        ledger_b.insert(202, "ts");
+        let path_b =
+            ensure_stalker_storage_path(&app_config, &maint_name).await.unwrap().join(CONTAINER_EXTENSION_LEDGER_FILE);
+        ledger_b.store(&path_b).await.unwrap();
+
+        let maint_file = storage_dir.join(crate::model::MAINTENANCE_FILE);
+        let registry = MaintenanceRegistry::load(maint_file, &[disabled_name.as_ref(), maint_name.as_ref()]).await;
+        registry.add(&maint_name, Some("test".to_string()), 0).await.unwrap();
+
+        let targets =
+            Arc::new(ProcessTargets { enabled: false, inputs: vec![], targets: vec![], target_names: vec![] });
+        let (_state, _) = super::create_shared_data(&app_config, &targets).await.unwrap();
+
+        let got_a = sampled_container_extension(&disabled_name, 101);
+        let got_b = sampled_container_extension(&maint_name, 202);
+        clear_sampled_container_extensions(&disabled_name);
+        clear_sampled_container_extensions(&maint_name);
+
+        assert_eq!(
+            got_a.as_deref(),
+            Some("mkv"),
+            "startup must publish persisted ledger even when sampling is disabled"
+        );
+        assert_eq!(
+            got_b.as_deref(),
+            Some("ts"),
+            "startup must publish persisted ledger even when input is in maintenance"
+        );
     }
 
     fn temp_state_dir(name: &str) -> PathBuf {

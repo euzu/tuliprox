@@ -339,6 +339,7 @@ specific provider.
 | `resolve_filter`                           | String   | -       | Filter expression to selectively resolve only entries matching the condition. Uses the same Filter syntax.                                                                                                                             |
 | `probe_filter`                             | String   | -       | Filter expression to selectively probe only entries matching the condition. Uses the same Filter syntax.                                                                                                                               |
 | `default_container_extension`              | String   | `mp4`   | Extension published when neither the provider nor the stream URL states one (default `mp4`). Applied at delivery, never stored; a configured value replaces the default but never overrides a provider value. Needed for Stalker VOD.  |
+| `container_extension_sampling`             | Object   | off     | Opt-in Stalker-only sampling of the portal's playback answer to learn VOD container extensions. See below.                                                                                                                             |
 
 For M3U inputs, `flussonic_hls_catchup: bounded_archive` generates a `catchup-source` for live entries with
 `catchup="fs"`, no existing source, and a `/CHANNEL/mono.m3u8` URL. The generated URL uses
@@ -354,6 +355,42 @@ fallback to live playback or moving timeshift playlists. Omit the option or set 
 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are
 > updated.
+
+#### Stalker container extension sampling
+
+A Stalker portal names a movie's container only in its playback answer (`create_link`), so the playlist serves the
+configured `default_container_extension` until something asks the portal. This opt-in block asks for the movies that
+still have no extension and publishes what the portal answers.
+
+```yaml
+inputs:
+  - name: stalker-portal
+    type: stalker
+    url: http://portal.example/stalker_portal/c/
+    options:
+      container_extension_sampling:
+        enabled: true            # default false
+        max_calls_per_update: 20 # default 20, maximum 200
+        min_interval_secs: 3     # default 3, minimum 1
+        stop_after_refusals: 2   # default 2, minimum 1
+```
+
+The run starts after a playlist update of that input, in the background, and never inside a client request. It:
+
+* samples only movies whose provider value and URL state no extension and that have no sampled value yet,
+* calls `create_link` through the input's Stalker account, never opening a media stream,
+* makes at most `max_calls_per_update` calls, waits at least `min_interval_secs` between two calls, and stops the run
+  after `stop_after_refusals` consecutive auth or rate refusals (401/403/429),
+* does not run while the input is in maintenance or when its update failed, and never retries inside a run.
+
+Learned values are stored in a per-input ledger file, `container_extension_ledger.json` beside the published Stalker
+catalog, independent of the import, and are pruned when their items disappear from the catalog. Delivery order becomes:
+provider value, URL extension, sampled value, configured `default_container_extension`, built-in `mp4`. Every published
+token is canonical. Delete the ledger file to forget all sampled values; set `enabled: false` to stop sampling
+altogether.
+
+> **Note:** This is the only option that sends Stalker requests beyond the playlist import. Leave it off unless the
+> provider tolerates the extra calls; the answers are also what makes `default_container_extension` unnecessary.
 
 #### Update quality guard
 

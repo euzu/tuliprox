@@ -1327,6 +1327,199 @@ async fn expired_user_is_rejected_before_m3u_timeshift_is_resolved() -> Result<(
     Ok(())
 }
 
+async fn setup_m3u_timeshift_error_response_test(
+    archive_ext: &str,
+    with_custom_video: bool,
+) -> Result<(tempfile::TempDir, Arc<AppState>, Arc<ConfigTarget>, Fingerprint), String> {
+    let dir = tempdir().map_err(|err| err.to_string())?;
+    let input = m3u_timeshift_input();
+    let mut item = m3u_timeshift_item();
+    let catchup_source = format!("http://provider.example/channel/video-{{utc}}-{{duration}}.{archive_ext}");
+    if let Some(StreamProperties::Live(live)) = item.additional_properties.as_mut() {
+        if let Some(catchup) = live.catchup.as_mut() {
+            catchup.source = Some(catchup_source.intern());
+        }
+    }
+    let config = Config {
+        storage_dir: dir.path().to_string_lossy().into_owned(),
+        user_access_control: true,
+        custom_stream_response_enabled: with_custom_video,
+        ..Config::default()
+    };
+    let app_state = create_test_app_state(config);
+    if with_custom_video {
+        let api_proxy_dto = shared::model::ApiProxyConfigDto {
+            server: vec![shared::model::ApiProxyServerInfoDto {
+                name: "default".to_string(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some("8901".to_string()),
+                timezone: "UTC".to_string(),
+                message: "test".to_string(),
+                path: None,
+            }],
+            ..Default::default()
+        };
+        app_state
+            .app_config
+            .set_api_proxy(crate::model::ApiProxyConfig::from(&api_proxy_dto))
+            .map_err(|err| err.to_string())?;
+        let ts_bytes =
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/fixtures/hls/user_account_expired.ts"))
+                .to_vec();
+        let unavailable_bytes =
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/fixtures/hls/channel_unavailable.ts"))
+                .to_vec();
+        app_state.app_config.custom_stream_response.store(Some(Arc::new(crate::model::CustomStreamResponse {
+            channel_unavailable: Some(crate::api::model::TransportStreamBuffer::new(unavailable_bytes)),
+            user_connections_exhausted: None,
+            provider_connections_exhausted: None,
+            low_priority_preempted: None,
+            user_account_expired: Some(crate::api::model::TransportStreamBuffer::new(ts_bytes)),
+            panel_api_provisioning: None,
+            hls_session_or_lease_expired: None,
+            maintenance: None,
+            panel_api_provisioning_hls_segments: Vec::new(),
+        })));
+    }
+    let target = Arc::new(short_epg_target());
+    cache_xtream_test_item(&app_state, &target, item, Some(input)).await;
+    let addr = "127.0.0.1:0".parse().map_err(|err: std::net::AddrParseError| err.to_string())?;
+    let fingerprint = Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), addr);
+    // Keep tempdir alive until the test finishes.
+    Ok((dir, app_state, target, fingerprint))
+}
+
+#[tokio::test]
+async fn m3u_timeshift_expired_user_on_hls_archive_receives_hls_error_response() -> Result<(), String> {
+    let mut user = ProxyUserCredentials::default();
+    user.username = "expired".to_string();
+    user.status = Some(ProxyUserStatus::Expired);
+    user.output_clusters = ClusterFlags::all();
+    let user = Arc::new(user);
+
+    // Without custom video configured, HLS admission failure answers 403 FORBIDDEN (not 502 BAD_GATEWAY).
+    let (_dir, app_state, target, fingerprint) = setup_m3u_timeshift_error_response_test("m3u8", false).await?;
+    let status_response = xtream_player_api_stream(
+        &fingerprint,
+        &HeaderMap::new(),
+        &app_state,
+        &UserApiRequest::default(),
+        ApiStreamRequest::from(ApiStreamContext::Timeshift, "expired", "", "100.ts", "60/2024-01-01:00-00"),
+        Some((Arc::clone(&user), Arc::clone(&target))),
+    )
+    .await
+    .into_response();
+    assert_eq!(status_response.status(), axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(
+        status_response.headers().get(shared::model::HEADER_TULIPROX_FALLBACK).and_then(|v| v.to_str().ok()),
+        Some("user_account_expired")
+    );
+
+    // With custom video configured, HLS admission failure answers with an HLS manifest, not raw TS bytes.
+    let (_dir, app_state, target, fingerprint) = setup_m3u_timeshift_error_response_test("m3u8", true).await?;
+    let manifest_response = xtream_player_api_stream(
+        &fingerprint,
+        &HeaderMap::new(),
+        &app_state,
+        &UserApiRequest::default(),
+        ApiStreamRequest::from(ApiStreamContext::Timeshift, "expired", "", "100.ts", "60/2024-01-01:00-00"),
+        Some((user, target)),
+    )
+    .await
+    .into_response();
+    assert_eq!(manifest_response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        manifest_response.headers().get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+        Some("application/vnd.apple.mpegurl")
+    );
+    assert_eq!(
+        manifest_response.headers().get(shared::model::HEADER_TULIPROX_FALLBACK).and_then(|v| v.to_str().ok()),
+        Some("user_account_expired")
+    );
+    let body = response_body_text(manifest_response).await?;
+    assert!(body.starts_with("#EXTM3U"), "expected HLS manifest body, got: {body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn m3u_timeshift_denied_entry_on_hls_archive_receives_hls_error_response() -> Result<(), String> {
+    let mut user = ProxyUserCredentials::default();
+    user.username = "denied".to_string();
+    user.output_clusters = ClusterFlags::Vod;
+    let user = Arc::new(user);
+
+    // Without custom video configured, HLS denied entry answers 404 NOT_FOUND (not 502 BAD_GATEWAY).
+    let (_dir, app_state, target, fingerprint) = setup_m3u_timeshift_error_response_test("m3u8", false).await?;
+    let status_response = xtream_player_api_stream(
+        &fingerprint,
+        &HeaderMap::new(),
+        &app_state,
+        &UserApiRequest::default(),
+        ApiStreamRequest::from(ApiStreamContext::Timeshift, "denied", "", "100.ts", "60/2024-01-01:00-00"),
+        Some((Arc::clone(&user), Arc::clone(&target))),
+    )
+    .await
+    .into_response();
+    assert_eq!(status_response.status(), axum::http::StatusCode::NOT_FOUND);
+    assert_eq!(
+        status_response.headers().get(shared::model::HEADER_TULIPROX_FALLBACK).and_then(|v| v.to_str().ok()),
+        Some("channel_unavailable")
+    );
+
+    // With custom video configured, HLS denied entry answers with an HLS manifest, not raw TS bytes.
+    let (_dir, app_state, target, fingerprint) = setup_m3u_timeshift_error_response_test("m3u8", true).await?;
+    let manifest_response = xtream_player_api_stream(
+        &fingerprint,
+        &HeaderMap::new(),
+        &app_state,
+        &UserApiRequest::default(),
+        ApiStreamRequest::from(ApiStreamContext::Timeshift, "denied", "", "100.ts", "60/2024-01-01:00-00"),
+        Some((user, target)),
+    )
+    .await
+    .into_response();
+    assert_eq!(manifest_response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        manifest_response.headers().get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+        Some("application/vnd.apple.mpegurl")
+    );
+    assert_eq!(
+        manifest_response.headers().get(shared::model::HEADER_TULIPROX_FALLBACK).and_then(|v| v.to_str().ok()),
+        Some("channel_unavailable")
+    );
+    let body = response_body_text(manifest_response).await?;
+    assert!(body.starts_with("#EXTM3U"), "expected HLS manifest body, got: {body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn m3u_timeshift_expired_user_on_ts_archive_receives_non_hls_error_response() -> Result<(), String> {
+    let mut user = ProxyUserCredentials::default();
+    user.username = "expired".to_string();
+    user.status = Some(ProxyUserStatus::Expired);
+    user.output_clusters = ClusterFlags::all();
+    let user = Arc::new(user);
+
+    let (_dir, app_state, target, fingerprint) = setup_m3u_timeshift_error_response_test("ts", false).await?;
+    let response = xtream_player_api_stream(
+        &fingerprint,
+        &HeaderMap::new(),
+        &app_state,
+        &UserApiRequest::default(),
+        ApiStreamRequest::from(ApiStreamContext::Timeshift, "expired", "", "100.m3u8", "60/2024-01-01:00-00"),
+        Some((user, target)),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        response.headers().get(shared::model::HEADER_TULIPROX_FALLBACK).and_then(|v| v.to_str().ok()),
+        Some("user_account_expired")
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn xtream_token_stream_rejects_m3u_timeshift_with_bad_request() {
     use crate::auth::create_access_token;

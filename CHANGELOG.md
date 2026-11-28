@@ -228,6 +228,18 @@
 
 ## 🌟 New Features
 
+- **Stalker VOD container extension sampling (opt-in).** A Stalker input can learn the real container of movies
+  whose portal entry has none: with `options.container_extension_sampling.enabled: true`, a background run after a
+  successful playlist update asks the portal's `create_link` for at most `max_calls_per_update` items (default 20,
+  max 200), `min_interval_secs` apart (default 3), and stops after `stop_after_refusals` consecutive auth or rate
+  refusals (default 2). Results are kept in a ledger per input and published before the configured
+  `default_container_extension`. It never opens a media stream and is off by default, because every sample is a
+  portal request.
+
+- **Player playback id.** Players with the Player API can send `X-Tuliprox-Playback-Id` (or Apple's
+  `X-Playback-Session-Id`) on stream requests. A new request of the same user with the same id replaces the old
+  connection at once, so a reconnect after an abrupt drop no longer runs into the connection limit.
+
 - **Reorder groups in the Playlist Explorer.** In a target view, users with `source.write` can drag groups into a new
   order (or use move up and move down) and save it. The order is stored in `source.yml` as the first group sort rule
   of the target cluster (`sequence` of the group names), so it stays config-first and takes effect with the next
@@ -1810,6 +1822,15 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Xtream timeshift error responses for M3U HLS archives.** An expired user or a denied request on an M3U HLS
+  archive received the MPEG-TS style error answer, because the HLS decision used the client's `.ts` extension before
+  the archive URL was resolved. The archive is now resolved first.
+
+- **Explorer group order hardening.** Comments between the stored group names, a no-op save on an unsupported
+  layout, a failed read-back after a write error, names like `Sports !HD!`, and apostrophes in plain YAML values
+  (`family's.m3u`) are handled correctly; bulk edits keep committed overrides when the group placement fails and
+  offer a retry of the placement only.
 
 - **Direct live streams start at once again.** Since the live edge trim, every live MPEG-TS stream was held until
   the provider's start-up burst was over (up to 5 seconds), which slowed down channel switching. The start trim now

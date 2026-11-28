@@ -386,15 +386,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_stalker_app_state(
         max_connections: 1,
         options: Some(crate::model::ConfigInputOptions {
             flags: crate::model::ConfigInputFlagsSet::new(),
-            update_quality: crate::model::ConfigInputUpdateQuality::default(),
-            resolve_delay: shared::defaults::default_resolve_delay_secs(),
-            probe_delay: shared::defaults::default_probe_delay_secs(),
-            probe_live_interval_hours: 120,
-            resolve_filter: None,
-            probe_filter: None,
-            flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
-            flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
-            default_container_extension: None,
+            ..crate::model::ConfigInputOptions::defaults().clone()
         }),
         stalker: Some(crate::model::StalkerInputConfig {
             device: None,

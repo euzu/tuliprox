@@ -579,11 +579,25 @@ impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost> Playl
 
     pub async fn is_input_downloaded(&self, input_name: &str) -> bool {
         let processed = self.processed_inputs.lock().await;
+        matches!(processed.get(input_name), Some(InputRunOutcome::Ready | InputRunOutcome::Degraded))
+    }
+
+    pub(crate) async fn is_input_sampling_eligible(&self, input_name: &str) -> bool {
+        if self.is_input_in_maintenance(input_name) {
+            return false;
+        }
+        let processed = self.processed_inputs.lock().await;
         matches!(processed.get(input_name), Some(InputRunOutcome::Ready))
     }
+
     pub async fn mark_input_downloaded(&self, input_name: Arc<str>) -> bool {
         let mut processed = self.processed_inputs.lock().await;
         !matches!(processed.insert(input_name, InputRunOutcome::Ready), Some(InputRunOutcome::Ready))
+    }
+
+    pub(super) async fn mark_input_degraded(&self, input_name: Arc<str>) {
+        let mut processed = self.processed_inputs.lock().await;
+        processed.entry(input_name).or_insert(InputRunOutcome::Degraded);
     }
 
     /// What acquiring the input left in this run, `None` while it was not acquired.

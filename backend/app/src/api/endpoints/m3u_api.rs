@@ -327,18 +327,25 @@ pub(in crate::api) async fn m3u_api_stream_loaded_dedicated(
         let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id.get(), false);
         let user_session =
             app_state.active_users.get_and_update_user_session(&user.username, &playback_session_token).await;
-        let (admission, _grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
-            &app_state.admission_ctx(),
+        let playback_id = crate::api::api_utils::effective_playback_id_for_user(
+            &app_state.app_config.config.load(),
             &user,
-            fingerprint,
-            user_session.as_ref(),
-            playback_session_token.as_str(),
-            false,
-            crate::api::api_utils::EvictionReentryGuard::Session(playback_session_token.as_str()),
-            false,
-            false,
-        )
-        .await;
+            req_headers,
+        );
+        let (admission, _grace_mode, request_class) =
+            crate::api::api_utils::resolve_playback_request_admission_with_playback_id(
+                &app_state.admission_ctx(),
+                &user,
+                fingerprint,
+                user_session.as_ref(),
+                playback_session_token.as_str(),
+                false,
+                crate::api::api_utils::EvictionReentryGuard::Session(playback_session_token.as_str()),
+                false,
+                false,
+                playback_id,
+            )
+            .await;
         if admission.is_reentry_suppressed() {
             return StreamPlaybackOutcome::failure(reentry_suppressed_response(), FailureClass::Capacity);
         }
@@ -525,18 +532,35 @@ pub(in crate::api) async fn m3u_api_stream_loaded_dedicated(
         );
     }
 
-    let (connection_admission, grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
-        &app_state.admission_ctx(),
-        &user,
-        fingerprint,
-        user_session.as_ref(),
-        &session_key,
-        false,
-        eviction_reentry_guard,
-        false,
-        false,
-    )
-    .await;
+    let playback_id = if archive_discriminator.is_none()
+        && pli.item_type != PlaylistItemType::Catchup
+        && crate::api::api_utils::should_redirect_playback(
+            app_state,
+            &input,
+            &target,
+            &user,
+            pli.item_type,
+            pli.url.as_ref(),
+            effective_stream_ext,
+        ) {
+        None
+    } else {
+        crate::api::api_utils::effective_playback_id_for_user(&app_state.app_config.config.load(), &user, req_headers)
+    };
+    let (connection_admission, grace_mode, request_class) =
+        crate::api::api_utils::resolve_playback_request_admission_with_playback_id(
+            &app_state.admission_ctx(),
+            &user,
+            fingerprint,
+            user_session.as_ref(),
+            &session_key,
+            false,
+            eviction_reentry_guard,
+            false,
+            false,
+            playback_id,
+        )
+        .await;
     let connection_permission = connection_admission.permission();
     let connection_kind = connection_admission
         .kind()

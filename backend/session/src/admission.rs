@@ -34,7 +34,7 @@ pub struct AdmissionCtx {
 
 /// Default duration an eviction is remembered if not configured.
 pub const DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS: u64 = shared::defaults::DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS;
-const EVICTED_PROVIDER_RELEASE_TIMEOUT: Duration = Duration::from_millis(1500);
+pub(crate) const EVICTED_PROVIDER_RELEASE_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Reentry cooldown from a resolved stream config, falling back to the default when
 /// no `reverse_proxy.stream` block is configured.
@@ -109,7 +109,7 @@ pub fn classify_playback_request(facts: PlaybackRequestFacts<'_>) -> PlaybackReq
     PlaybackRequestClass::Activate
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "Playback admission takes request, session, guard, and lifecycle flags.")]
 pub async fn resolve_playback_request_admission(
     adm: &AdmissionCtx,
     user: &ProxyUserCredentials,
@@ -121,6 +121,72 @@ pub async fn resolve_playback_request_admission(
     prepare_only: bool,
     terminate: bool,
 ) -> (crate::ConnectionAdmission, Option<crate::GraceMode>, PlaybackRequestClass) {
+    resolve_playback_request_admission_with_playback_id(
+        adm,
+        user,
+        fingerprint,
+        user_session,
+        session_token,
+        activate_unbound_session,
+        eviction_reentry_guard,
+        prepare_only,
+        terminate,
+        None,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Playback admission takes request, session, guard, lifecycle flags, and optional playback id."
+)]
+pub async fn resolve_playback_request_admission_with_playback_id(
+    adm: &AdmissionCtx,
+    user: &ProxyUserCredentials,
+    fingerprint: &Fingerprint,
+    user_session: Option<&UserSession>,
+    session_token: &str,
+    activate_unbound_session: bool,
+    eviction_reentry_guard: EvictionReentryGuard<'_>,
+    prepare_only: bool,
+    terminate: bool,
+    playback_id: Option<&str>,
+) -> (crate::ConnectionAdmission, Option<crate::GraceMode>, PlaybackRequestClass) {
+    let (admission, grace_mode, request_class, _) = resolve_playback_request_admission_with_placeholder(
+        adm,
+        user,
+        fingerprint,
+        user_session,
+        session_token,
+        activate_unbound_session,
+        eviction_reentry_guard,
+        prepare_only,
+        terminate,
+        playback_id,
+        None,
+    )
+    .await;
+    (admission, grace_mode, request_class)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Playback admission takes request, session, guard, lifecycle flags, optional playback id, and optional placeholder."
+)]
+pub async fn resolve_playback_request_admission_with_placeholder(
+    adm: &AdmissionCtx,
+    user: &ProxyUserCredentials,
+    fingerprint: &Fingerprint,
+    user_session: Option<&UserSession>,
+    session_token: &str,
+    activate_unbound_session: bool,
+    eviction_reentry_guard: EvictionReentryGuard<'_>,
+    prepare_only: bool,
+    terminate: bool,
+    playback_id: Option<&str>,
+    placeholder: Option<crate::CreateUserSessionParams<'_>>,
+) -> (crate::ConnectionAdmission, Option<crate::GraceMode>, PlaybackRequestClass, Option<(u64, crate::SessionIdentity)>)
+{
     let request_class =
         classify_playback_request(PlaybackRequestFacts { existing_session: user_session, prepare_only, terminate });
     let limits_enabled =
@@ -140,6 +206,7 @@ pub async fn resolve_playback_request_admission(
             ),
             None,
             request_class,
+            None,
         );
     }
 
@@ -152,10 +219,11 @@ pub async fn resolve_playback_request_admission(
             ),
             None,
             request_class,
+            None,
         );
     }
 
-    if request_class == PlaybackRequestClass::FollowUp || !limits_enabled {
+    if request_class == PlaybackRequestClass::FollowUp {
         return (
             crate::ConnectionAdmission::from_permission(
                 user_session.map_or(UserConnectionPermission::Allowed, |session| session.permission),
@@ -163,10 +231,40 @@ pub async fn resolve_playback_request_admission(
             ),
             None,
             request_class,
+            None,
         );
     }
 
-    let result = resolve_admission_with_strategies(
+    if !limits_enabled {
+        if let Some(playback_id) = playback_id {
+            let (admission, placeholder_info) = adm
+                .connection_manager
+                .replace_playback_id_and_check_admission_with_placeholder(
+                    &user.username,
+                    0,
+                    0,
+                    &fingerprint.addr,
+                    playback_id,
+                    true,
+                    Some(session_token),
+                    activate_unbound_session,
+                    placeholder,
+                )
+                .await;
+            return (admission, None, request_class, placeholder_info);
+        }
+        return (
+            crate::ConnectionAdmission::from_permission(
+                user_session.map_or(UserConnectionPermission::Allowed, |session| session.permission),
+                user_session.and_then(|session| session.connection_kind).or(Some(crate::ConnectionKind::Normal)),
+            ),
+            None,
+            request_class,
+            None,
+        );
+    }
+
+    let (result, placeholder_info) = resolve_admission_with_strategies_with_placeholder(
         adm,
         AdmissionRequest {
             username: &user.username,
@@ -179,6 +277,8 @@ pub async fn resolve_playback_request_admission(
             activate_unbound_session,
             eviction_reentry_guard,
         },
+        playback_id,
+        placeholder,
     )
     .await;
 
@@ -204,7 +304,7 @@ pub async fn resolve_playback_request_admission(
         )));
     }
 
-    (result.admission, result.grace_mode, request_class)
+    (result.admission, result.grace_mode, request_class, placeholder_info)
 }
 
 async fn should_suppress_eviction_for_recent_request(
@@ -458,53 +558,108 @@ pub async fn resolve_admission_with_strategies(
     adm: &AdmissionCtx,
     request: AdmissionRequest<'_>,
 ) -> AdmissionStrategyResolution {
+    resolve_admission_with_strategies_with_playback_id(adm, request, None).await
+}
+
+pub async fn resolve_admission_with_strategies_with_playback_id(
+    adm: &AdmissionCtx,
+    request: AdmissionRequest<'_>,
+    playback_id: Option<&str>,
+) -> AdmissionStrategyResolution {
+    resolve_admission_with_strategies_with_placeholder(adm, request, playback_id, None).await.0
+}
+
+pub async fn resolve_admission_with_strategies_with_placeholder(
+    adm: &AdmissionCtx,
+    request: AdmissionRequest<'_>,
+    playback_id: Option<&str>,
+    placeholder: Option<crate::CreateUserSessionParams<'_>>,
+) -> (AdmissionStrategyResolution, Option<(u64, crate::SessionIdentity)>) {
     use shared::model::UserConnectionPermission;
 
     let username = request.username;
-    let admission = get_admission_for_request(adm, &request).await;
+    if playback_id.is_none() {
+        let admission = get_admission_for_request(adm, &request).await;
 
-    if admission.permission() != UserConnectionPermission::Exhausted
-        && adm.active_users.pending_provider_release(username).await.is_none()
-    {
-        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
+        if admission.permission() != UserConnectionPermission::Exhausted
+            && adm.active_users.pending_provider_release(username).await.is_none()
+        {
+            return (AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None }, None);
+        }
     }
 
     let _admission_guard = adm.active_users.acquire_user_admission(username).await;
 
-    if !pending_provider_release_ready(adm, username).await {
-        return AdmissionStrategyResolution {
-            admission: crate::ConnectionAdmission::exhausted(
-                crate::AdmissionRejectionReason::UserConnectionsExhausted,
-                admission.kind(),
-            ),
-            grace_mode: None,
-            grace_context: None,
-        };
-    }
+    let (admission, placeholder_info) = if let Some(playback_id) = playback_id {
+        if !pending_provider_release_ready(adm, username).await {
+            return (
+                AdmissionStrategyResolution {
+                    admission: crate::ConnectionAdmission::exhausted(
+                        crate::AdmissionRejectionReason::UserConnectionsExhausted,
+                        None,
+                    ),
+                    grace_mode: None,
+                    grace_context: None,
+                },
+                None,
+            );
+        }
+        adm.connection_manager
+            .replace_playback_id_and_check_admission_with_placeholder(
+                username,
+                request.max_connections,
+                request.soft_connections,
+                request.request_addr,
+                playback_id,
+                request.use_session_admission,
+                request.session_token,
+                request.activate_unbound_session,
+                placeholder,
+            )
+            .await
+    } else {
+        let initial_admission = get_admission_for_request(adm, &request).await;
+        if !pending_provider_release_ready(adm, username).await {
+            return (
+                AdmissionStrategyResolution {
+                    admission: crate::ConnectionAdmission::exhausted(
+                        crate::AdmissionRejectionReason::UserConnectionsExhausted,
+                        initial_admission.kind(),
+                    ),
+                    grace_mode: None,
+                    grace_context: None,
+                },
+                None,
+            );
+        }
 
-    // Re-read admission now that the gate is held. The first read above happened
-    // before we queued on the gate, so a request ahead of us may have released
-    // the very slot we are about to evict somebody for. Walking the strategies on
-    // the stale snapshot kicks a live connection to free a slot that is already
-    // free.
-    let admission = get_admission_for_request(adm, &request).await;
+        // Re-read admission now that the gate is held. The first read above happened
+        // before we queued on the gate, so a request ahead of us may have released
+        // the very slot we are about to evict somebody for. Walking the strategies on
+        // the stale snapshot kicks a live connection to free a slot that is already
+        // free.
+        (get_admission_for_request(adm, &request).await, None)
+    };
 
     if admission.permission() != UserConnectionPermission::Exhausted {
         debug!("Admission became available while waiting on the admission gate for user {username}");
-        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
+        return (AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None }, placeholder_info);
     }
 
     let strategies = get_effective_admission_strategies(adm);
     if strategies.is_empty() {
         debug!("No admission strategies configured, denying request for user {username}");
-        return AdmissionStrategyResolution {
-            admission: crate::ConnectionAdmission::exhausted(
-                crate::AdmissionRejectionReason::UserConnectionsExhausted,
-                admission.kind(),
-            ),
-            grace_mode: None,
-            grace_context: None,
-        };
+        return (
+            AdmissionStrategyResolution {
+                admission: crate::ConnectionAdmission::exhausted(
+                    crate::AdmissionRejectionReason::UserConnectionsExhausted,
+                    admission.kind(),
+                ),
+                grace_mode: None,
+                grace_context: None,
+            },
+            placeholder_info,
+        );
     }
 
     let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
@@ -513,17 +668,19 @@ pub async fn resolve_admission_with_strategies(
         kind: admission.kind(),
     };
 
-    match evaluate_admission_strategy_loop(adm, &request, &strategies, 0, admission, build_grace_ctx).await {
-        StrategyLoopResult::Admitted(resolution) => resolution,
-        StrategyLoopResult::Rejected(reason) => {
-            debug!("No admission strategy could admit user {username}: {reason:?}");
-            AdmissionStrategyResolution {
-                admission: crate::ConnectionAdmission::exhausted(reason, admission.kind()),
-                grace_mode: None,
-                grace_context: None,
+    let resolution =
+        match evaluate_admission_strategy_loop(adm, &request, &strategies, 0, admission, build_grace_ctx).await {
+            StrategyLoopResult::Admitted(resolution) => resolution,
+            StrategyLoopResult::Rejected(reason) => {
+                debug!("No admission strategy could admit user {username}: {reason:?}");
+                AdmissionStrategyResolution {
+                    admission: crate::ConnectionAdmission::exhausted(reason, admission.kind()),
+                    grace_mode: None,
+                    grace_context: None,
+                }
             }
-        }
-    }
+        };
+    (resolution, placeholder_info)
 }
 
 /// Evaluates only the strategies that come AFTER the already-used grace strategy.

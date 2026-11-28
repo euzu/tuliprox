@@ -1660,20 +1660,24 @@ pub(super) async fn prepare_hls_cache_user_session(
     input: &ConfigInput,
     connection_permission: UserConnectionPermission,
     connection_kind: Option<crate::api::model::ConnectionKind>,
+    playback_id: Option<&str>,
 ) -> String {
     app_state
         .active_users
-        .create_user_session(crate::api::model::CreateUserSessionParams {
-            user,
-            session_token,
-            virtual_id,
-            provider: input.name.as_ref(),
-            stream_url: request_url,
-            addr: &fingerprint.addr,
-            connection_permission,
-            connection_kind,
-            socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
-        })
+        .create_user_session_with_playback_id(
+            crate::api::model::CreateUserSessionParams {
+                user,
+                session_token,
+                virtual_id,
+                provider: input.name.as_ref(),
+                stream_url: request_url,
+                addr: &fingerprint.addr,
+                connection_permission,
+                connection_kind,
+                socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
+            },
+            playback_id,
+        )
         .await
 }
 
@@ -1687,6 +1691,7 @@ pub(super) fn hls_entry_origin_connection_kind(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn create_hls_cache_entry_master_playlist_response(
     app_state: &Arc<AppState>,
@@ -1703,8 +1708,44 @@ pub(super) async fn create_hls_cache_entry_master_playlist_response(
     connection_kind: Option<crate::api::model::ConnectionKind>,
     server_path: Option<&str>,
 ) -> axum::response::Response {
+    create_hls_cache_entry_master_playlist_response_with_playback_id(
+        app_state,
+        fingerprint,
+        user,
+        origin_source,
+        virtual_id,
+        existing_user_session,
+        known_bitrate_bps,
+        session_token_hint,
+        request_url,
+        input,
+        connection_permission,
+        connection_kind,
+        server_path,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn create_hls_cache_entry_master_playlist_response_with_playback_id(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    user: &ProxyUserCredentials,
+    origin_source: HlsOriginSource,
+    virtual_id: u32,
+    existing_user_session: Option<&UserSession>,
+    known_bitrate_bps: Option<u32>,
+    session_token_hint: Option<&str>,
+    request_url: &str,
+    input: &ConfigInput,
+    connection_permission: UserConnectionPermission,
+    connection_kind: Option<crate::api::model::ConnectionKind>,
+    server_path: Option<&str>,
+    playback_id: Option<&str>,
+) -> axum::response::Response {
     let session_key = origin_source.session_key();
-    create_hls_cache_entry_master_playlist_response_with_key(
+    create_hls_cache_entry_master_playlist_response_with_key_and_playback_id(
         app_state,
         fingerprint,
         user,
@@ -1719,6 +1760,7 @@ pub(super) async fn create_hls_cache_entry_master_playlist_response(
         connection_permission,
         connection_kind,
         server_path,
+        playback_id,
     )
     .await
 }
@@ -1728,7 +1770,7 @@ pub(super) async fn create_hls_cache_entry_master_playlist_response(
 /// A group key keeps the bound member (`origin_source`) as session state; `virtual_id` stays the
 /// logical group VID for blocking, authorization, history and the entry path.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn create_hls_cache_entry_master_playlist_response_with_key(
+pub(super) async fn create_hls_cache_entry_master_playlist_response_with_key_and_playback_id(
     app_state: &Arc<AppState>,
     fingerprint: &Fingerprint,
     user: &ProxyUserCredentials,
@@ -1743,6 +1785,7 @@ pub(super) async fn create_hls_cache_entry_master_playlist_response_with_key(
     connection_permission: UserConnectionPermission,
     connection_kind: Option<crate::api::model::ConnectionKind>,
     server_path: Option<&str>,
+    playback_id: Option<&str>,
 ) -> axum::response::Response {
     let item_bandwidth = HlsMasterBandwidth::new(known_bitrate_bps);
     let database_bitrate_bps = if item_bandwidth.is_unknown() {
@@ -1782,6 +1825,7 @@ pub(super) async fn create_hls_cache_entry_master_playlist_response_with_key(
         input,
         connection_permission,
         origin_connection_kind,
+        playback_id,
     )
     .await;
     let mut lease = HlsAccessLease::pending(

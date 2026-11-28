@@ -20,7 +20,9 @@ use std::{
 };
 use tokio::sync::{mpsc, Notify, RwLock, RwLockReadGuard};
 use tokio_util::sync::CancellationToken;
-use tuliprox_core::model::{DisconnectQos, ProviderHandle, StreamHistoryConfig, StreamHistoryRecord};
+use tuliprox_core::model::{
+    DisconnectQos, ProviderHandle, SharedSubscriberId, StreamHistoryConfig, StreamHistoryRecord,
+};
 use tuliprox_repository::StreamHistoryWriter;
 
 impl ConnectionManager {
@@ -175,6 +177,31 @@ impl ConnectionManager {
         self.release_user_sessions_with_reason(addr, StreamEndedReason::Kicked).await;
     }
 
+    async fn emit_kicked_stream_disconnect(&self, stream_info: &StreamInfo, reason: StreamEndedReason) {
+        let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+        let bytes_sent = qos.map(|qos| qos.bytes_total);
+        let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
+        self.event_manager.unregister_meter_client(stream_info.uid).await;
+        emit_disconnect_record(
+            &self.history_writer,
+            stream_info,
+            // Stream history keeps the established kicked reason for every server-side
+            // termination; the finer reason is only carried by the `StreamEnded` event.
+            DisconnectReason::ClientKicked,
+            &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
+            None,
+            None,
+        );
+        if self.event_manager.has_event_receivers() {
+            self.event_manager.send_event(EventMessage::StreamEnded {
+                username: Arc::from(stream_info.username.as_str()),
+                uid: stream_info.uid,
+                virtual_id: stream_info.channel.virtual_id,
+                reason,
+            });
+        }
+    }
+
     pub async fn release_user_sessions_with_reason(&self, addr: &SocketAddr, reason: StreamEndedReason) {
         let removed = self.user_manager.release_connection_as_kicked(addr).await;
         // Mirrors the kicked-specific steps from `release_connection_parts`.
@@ -188,28 +215,7 @@ impl ConnectionManager {
             self.user_manager.terminate_sessions_for_addr(username, addr).await;
         }
         for stream_info in &removed.removed_streams {
-            let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
-            let bytes_sent = qos.map(|qos| qos.bytes_total);
-            let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
-            self.event_manager.unregister_meter_client(stream_info.uid).await;
-            emit_disconnect_record(
-                &self.history_writer,
-                stream_info,
-                // Stream history keeps the established kicked reason for every server-side
-                // termination; the finer reason is only carried by the `StreamEnded` event.
-                DisconnectReason::ClientKicked,
-                &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
-                None,
-                None,
-            );
-            if self.event_manager.has_event_receivers() {
-                self.event_manager.send_event(EventMessage::StreamEnded {
-                    username: Arc::from(stream_info.username.as_str()),
-                    uid: stream_info.uid,
-                    virtual_id: stream_info.channel.virtual_id,
-                    reason,
-                });
-            }
+            self.emit_kicked_stream_disconnect(stream_info, reason).await;
         }
         if removed.addr_removed && !removed.removed_streams.is_empty() {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
@@ -242,6 +248,125 @@ impl ConnectionManager {
             }));
             notify_capacity(self.capacity_notify.as_ref());
         }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Replacing a playback-id connection atomically admits the replacement under one user-table write lock before running external teardown."
+    )]
+    pub async fn replace_playback_id_and_check_admission(
+        &self,
+        username: &str,
+        max_connections: u32,
+        soft_connections: u16,
+        request_addr: &SocketAddr,
+        playback_id: &str,
+        use_session_admission: bool,
+        session_token: Option<&str>,
+        activate_unbound_session: bool,
+    ) -> crate::ConnectionAdmission {
+        self.replace_playback_id_and_check_admission_with_placeholder(
+            username,
+            max_connections,
+            soft_connections,
+            request_addr,
+            playback_id,
+            use_session_admission,
+            session_token,
+            activate_unbound_session,
+            None,
+        )
+        .await
+        .0
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Replacing a playback-id connection atomically creates/tags the caller placeholder and admits the replacement under one user-table write lock before running external teardown."
+    )]
+    pub async fn replace_playback_id_and_check_admission_with_placeholder(
+        &self,
+        username: &str,
+        max_connections: u32,
+        soft_connections: u16,
+        request_addr: &SocketAddr,
+        playback_id: &str,
+        use_session_admission: bool,
+        session_token: Option<&str>,
+        activate_unbound_session: bool,
+        placeholder: Option<crate::CreateUserSessionParams<'_>>,
+    ) -> (crate::ConnectionAdmission, Option<(u64, crate::SessionIdentity)>) {
+        let (admission, effect, placeholder_info) = self
+            .user_manager
+            .replace_playback_id_and_connection_admission_with_placeholder(
+                username,
+                max_connections,
+                soft_connections,
+                request_addr,
+                playback_id,
+                use_session_admission,
+                session_token,
+                activate_unbound_session,
+                placeholder,
+            )
+            .await;
+
+        let had_effect = !effect.removed_streams.is_empty() || !effect.ended_session_tokens.is_empty();
+        if !had_effect {
+            return (admission, placeholder_info);
+        }
+
+        for tok in &effect.ended_session_tokens {
+            self.provider_manager.terminate_identified_playback_owner(tok);
+        }
+
+        let mut pending_snapshots = Vec::new();
+        for removed in &effect.removed_streams {
+            let stream_info = &removed.stream_info;
+            self.emit_kicked_stream_disconnect(stream_info, StreamEndedReason::Stopped).await;
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::DisconnectedStream {
+                addr: stream_info.addr,
+                uid: stream_info.uid,
+            }));
+            if removed.addr_disconnected {
+                self.event_manager
+                    .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(stream_info.addr)));
+            }
+
+            if stream_info.channel.shared {
+                self.shared_stream_manager
+                    .release_subscriber(SharedSubscriberId::from_stream_uid(stream_info.uid))
+                    .await;
+                if removed.close_socket {
+                    self.close_connection_with_reason(&stream_info.addr, DisconnectReason::ClientKicked);
+                }
+            } else {
+                let snapshot =
+                    removed.close_socket.then(|| self.provider_manager.release_snapshot_for_addr(&stream_info.addr));
+                let closed = if removed.close_socket {
+                    self.close_connection_with_reason(&stream_info.addr, DisconnectReason::ClientKicked)
+                } else {
+                    false
+                };
+                if closed {
+                    if let Some(snapshot) = snapshot.filter(|s| !s.is_empty()) {
+                        pending_snapshots.push(snapshot);
+                    }
+                } else if removed.release_provider {
+                    self.provider_manager.release_connection(&stream_info.addr);
+                    self.shared_stream_manager.release_connection(&stream_info.addr, true).await;
+                } else if let Some(owner) = stream_info.session_token.as_deref() {
+                    self.provider_manager.release_playback_connections_await(owner, &[stream_info.addr]).await;
+                }
+            }
+        }
+
+        for snapshot in pending_snapshots {
+            self.provider_manager.wait_for_snapshot_release(&snapshot, crate::EVICTED_PROVIDER_RELEASE_TIMEOUT).await;
+        }
+        notify_capacity(self.capacity_notify.as_ref());
+
+        (admission, placeholder_info)
     }
 
     pub fn release_provider_handle(&self, provider_handle: Option<ProviderHandle>) {

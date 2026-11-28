@@ -187,6 +187,15 @@ pub const fn should_accept_reorder_drag(drag_source_index: Option<usize>, saving
     drag_source_index.is_some() && !saving && !loading
 }
 
+/// Returns `true` when a drag-leave event on reorder row `index` must clear the drop highlight.
+///
+/// A related target inside the row (a child element such as the handle or a button) keeps the
+/// highlight; leaving the row clears it.
+#[must_use]
+pub fn clears_reorder_drag_over(related_inside_row: bool, drag_over_index: Option<usize>, index: usize) -> bool {
+    !related_inside_row && drag_over_index == Some(index)
+}
+
 /// Returns `true` when an async sidebar group-order operation still matches the mounted
 /// component, active request generation, and current catalog generation.
 #[must_use]
@@ -397,6 +406,9 @@ pub fn ExplorerSidebar(props: &ExplorerSidebarProps) -> Html {
     let reorder_error = use_state(|| None::<String>);
     let drag_over_index = use_state(|| None::<usize>);
     let drag: DragState = use_mut_ref(|| None);
+    // One ref per reorder row: the containment check of a drag-leave event needs the row node, and
+    // `current_target()` is already the row itself by then.
+    let row_refs = use_mut_ref(HashMap::<String, NodeRef>::new);
     let request_gen = use_mut_ref(|| 0u64);
     let is_mounted = use_mut_ref(|| true);
     let latest_generation = use_mut_ref(|| props.generation.clone());
@@ -770,6 +782,8 @@ pub fn ExplorerSidebar(props: &ExplorerSidebarProps) -> Html {
                                 {
                                     draft_order.iter().enumerate().map(|(index, title)| {
                                         let count = reorder_data.counts.get(title).copied().unwrap_or(0);
+                                        let row_ref =
+                                            row_refs.borrow_mut().entry(title.clone()).or_default().clone();
                                         let ondragstart = {
                                             let drag = drag.clone();
                                             Callback::from(move |event: DragEvent| {
@@ -804,14 +818,22 @@ pub fn ExplorerSidebar(props: &ExplorerSidebarProps) -> Html {
                                             })
                                         };
                                         let ondragleave = {
+                                            let row_ref = row_ref.clone();
                                             let drag_over_index = drag_over_index.clone();
                                             Callback::from(move |event: DragEvent| {
-                                                let still_inside = event
-                                                    .current_target()
-                                                    .and_then(|t| t.dyn_into::<web_sys::Node>().ok())
-                                                    .zip(event.related_target().and_then(|t| t.dyn_into::<web_sys::Node>().ok()))
-                                                    .is_some_and(|(current, related)| current.contains(Some(&related)));
-                                                if !still_inside && *drag_over_index == Some(index) {
+                                                let related_inside_row = event
+                                                    .related_target()
+                                                    .and_then(|target| target.dyn_into::<web_sys::Node>().ok())
+                                                    .is_some_and(|related| {
+                                                        row_ref
+                                                            .cast::<web_sys::Node>()
+                                                            .is_some_and(|row| row.contains(Some(&related)))
+                                                    });
+                                                if clears_reorder_drag_over(
+                                                    related_inside_row,
+                                                    *drag_over_index,
+                                                    index,
+                                                ) {
                                                     drag_over_index.set(None);
                                                 }
                                             })
@@ -858,6 +880,7 @@ pub fn ExplorerSidebar(props: &ExplorerSidebarProps) -> Html {
                                         html! {
                                             <div
                                                 key={format!("reorder-{title}")}
+                                                ref={row_ref}
                                                 class={classes!(
                                                     "tp__explorer-reorder-row",
                                                     (*drag_over_index == Some(index)).then_some("drag-over"),

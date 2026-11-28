@@ -1,5 +1,5 @@
 mod playlist;
-mod stalker;
+pub(crate) mod stalker;
 mod stalker_refresh;
 mod xtream;
 // mod affix;
@@ -21,7 +21,7 @@ pub use self::{
     probe_handle_guard::*,
     providers::*,
     resolve_options::*,
-    stalker::{download_stalker_playlist, re_resolve_stalker_url, StalkerCluster},
+    stalker::{download_stalker_playlist, re_resolve_stalker_url, StalkerCluster, StalkerLinkFailure},
     stalker_refresh::StalkerRefreshMode,
     stream_probe::*,
     xtream::*,

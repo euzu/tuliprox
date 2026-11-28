@@ -542,6 +542,7 @@ async fn hls_entry_origin_reservation_blocks_foreign_sessions_only_after_media_c
         ConnectionKind::Normal,
         false,
         None,
+        None,
     )
     .await
     .expect("provider reservation should be acquired before provisioning redirect");
@@ -681,6 +682,7 @@ async fn hls_entry_origin_reservation_uses_persisted_alias_manifest_url() {
         UserConnectionPermission::Allowed,
         ConnectionKind::Normal,
         false,
+        None,
         None,
     )
     .await
@@ -1150,4 +1152,44 @@ async fn hls_entry_with_an_expired_session_is_gated() {
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(app_state.hls.proxy.access_leases().read().await.is_empty(), "no lease for a maintenance input");
+}
+
+#[tokio::test]
+async fn hls_entry_origin_reservation_tags_session_with_playback_id_atomically() {
+    let input = single_hls_provider_input("available-provider");
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "hls-playback-id-user".to_string();
+
+    let reservation = super::super::try_reserve_hls_entry_origin_account_for_redirect(
+        &app_state,
+        &test_fingerprint(),
+        &user,
+        &input,
+        12345,
+        "http://account.example.com/live/account-user/account-pass/12345.m3u8",
+        "hls-playback-id-token",
+        "hls-playback-id-token",
+        crate::model::PlaybackKind::LiveHls,
+        super::super::hls_origin_account_reservation_ttl_secs_fallback(),
+        UserConnectionPermission::Allowed,
+        ConnectionKind::Normal,
+        true,
+        Some("hls-dev-1"),
+        None,
+    )
+    .await
+    .expect("provider reservation should succeed");
+
+    let session = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, &reservation.session_token)
+        .await
+        .expect("session created by legacy HLS entry reservation");
+    assert_eq!(
+        session.playback_id.as_deref(),
+        Some("hls-dev-1"),
+        "legacy HLS entry reservation must tag session playback_id atomically at creation"
+    );
+    app_state.connection_manager.release_provider_handle(reservation.provider_handle);
 }

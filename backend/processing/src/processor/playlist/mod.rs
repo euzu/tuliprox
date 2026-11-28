@@ -645,6 +645,8 @@ pub async fn exec_processing<
         error,
     }));
 
+    queue_container_extension_sampling(&ctx).await;
+
     let elapsed = start_time.elapsed().as_secs();
     let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");
 
@@ -660,6 +662,31 @@ pub async fn exec_processing<
     //trim_allocator_after_update();
 
     info!("{update_finished_message}");
+}
+
+/// Hands every input that opted into container-extension sampling to the background worker.
+///
+/// Only an input this run acquired and left usable has a catalog to sample, so a failed input and an
+/// input the run never touched are skipped; an input in maintenance is refused by the run itself.
+async fn queue_container_extension_sampling<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
+) {
+    let Some(manager) = ctx.metadata_manager.as_ref() else {
+        return;
+    };
+    let sources = ctx.config.sources.load();
+    let candidates: Vec<Arc<str>> = sources
+        .inputs
+        .iter()
+        .filter(|input| input.input_type.is_stalker() && input.container_extension_sampling().is_some())
+        .map(|input| Arc::clone(&input.name))
+        .collect();
+    drop(sources);
+    for input_name in candidates {
+        if ctx.is_input_sampling_eligible(&input_name).await {
+            Arc::clone(manager).queue_container_extension_sampling(input_name);
+        }
+    }
 }
 
 fn published_targets_by_source(config: &AppConfig, published: &[String]) -> Vec<SourceStats> {

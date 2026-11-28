@@ -103,10 +103,18 @@ fn gate_runs_before_shared_stream_join() {
 fn redirect_defers_maintenance_inputs_to_the_gated_proxy_path() {
     // Redirect mode would send the client straight to the provider; for an input in
     // maintenance it must fall through to the proxied path, where the maintenance check answers.
-    let body = function_body(include_str!("../strategy.rs"), "pub async fn redirect_response<");
-    let gate = body.find("if blocks_new_playback(").expect("gate present");
+    let source = include_str!("../strategy.rs");
+    // The maintenance gate is the first decision of the redirect classifier ...
+    let classifier = function_body(source, "fn classify_playback_redirect(");
+    assert!(
+        classifier.split_once("{\n").is_some_and(|(_, rest)| rest.trim_start().starts_with("if blocks_new_playback(")),
+        "the redirect classifier must check maintenance before anything else"
+    );
+    // ... and the classifier runs before any redirect response is built.
+    let body = function_body(source, "pub async fn redirect_response<");
+    let decision = body.find("classify_playback_redirect(").expect("classifier call present");
     let redirect = body.find("Some(redirect(").expect("redirect response present");
-    assert!(gate < redirect, "maintenance must be checked before any redirect is built");
+    assert!(decision < redirect, "maintenance must be checked before any redirect is built");
 }
 
 /// One MPEG-TS packet whose payload marks it as the maintenance clip.

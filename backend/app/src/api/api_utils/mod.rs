@@ -150,11 +150,14 @@ pub use tuliprox_core::try_unwrap_body;
 // Admission moved to `tuliprox-session`, where the types it decides over
 // already live. Re-exported so api call sites keep their names.
 pub(crate) use tuliprox_core::utils::request_headers::{get_headers_from_request, HeaderFilter};
+#[cfg(test)]
+use tuliprox_session::admission::resolve_admission_with_strategies;
 pub(crate) use tuliprox_session::{
     admission::{
-        classify_playback_request, connection_priority_for_kind, resolve_admission_with_strategies,
-        resolve_playback_request_admission, AdmissionRequest, EvictionReentryGuard, PlaybackRequestClass,
-        PlaybackRequestFacts,
+        classify_playback_request, connection_priority_for_kind, resolve_admission_with_strategies_with_placeholder,
+        resolve_playback_request_admission, resolve_playback_request_admission_with_placeholder,
+        resolve_playback_request_admission_with_playback_id, AdmissionRequest, EvictionReentryGuard,
+        PlaybackRequestClass, PlaybackRequestFacts,
     },
     stream_options::{get_stream_options, StreamOptions, StreamResponseMode},
 };
@@ -258,6 +261,8 @@ mod strategy;
 mod streaming;
 
 #[cfg(test)]
+use self::activation::activate_session_before_stream_open;
+#[cfg(test)]
 use self::failover_group::member_needs_stalker_resolution;
 #[cfg(test)]
 use self::metering::resolve_stream_config_u64;
@@ -275,7 +280,8 @@ use self::stalker::needs_initial_stalker_resolution;
 use self::strategy::resolve_streaming_strategy;
 use self::{
     activation::{
-        activate_session_before_stream_open, cleanup_forced_reopen_addrs, CurrentSessionGuard, SessionActivationRequest,
+        activate_session_before_stream_open_with_playback_id, cleanup_forced_reopen_addrs, CurrentSessionGuard,
+        SessionActivationRequest,
     },
     catchup::{
         cleanup_failed_detected_catchup_hls, detected_catchup_hls_response, probe_catchup_payload, CatchupPayload,
@@ -356,11 +362,12 @@ pub(crate) use self::{
     response::admission_failure_response,
     serialization::coalesce_byte_stream,
     session_identity::{
-        create_playback_session_fingerprint, get_hls_session_ttl_secs, get_session_reservation_ttl_secs,
-        is_session_based_playback, is_socket_bound_playback_session, should_pin_provider_for_session,
+        create_playback_session_fingerprint, effective_playback_id_for_user, get_hls_session_ttl_secs,
+        get_session_reservation_ttl_secs, is_session_based_playback, is_socket_bound_playback_session,
+        should_pin_provider_for_session,
     },
     stalker::{resolve_initial_stalker_playback_url, resolve_stalker_stream_for_account, stalker_stream_kind},
-    strategy::resolve_redirect_location,
+    strategy::{resolve_redirect_location, should_redirect_playback},
     streaming::{
         evaluate_free_join, free_join_available, get_hls_playback_ttl_secs, is_dedicated_requested, kick_stream,
         plugin_upstream_headers, record_connect_failed_attempt, resolve_request_url_for_logging,

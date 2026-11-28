@@ -353,3 +353,104 @@ fn bulk_edit_disables_interactions_while_saving_and_guards_stale_generation() {
     let other_cluster = CatalogGeneration { cluster: XtreamCluster::Video, ..base.clone() };
     assert!(!is_bulk_request_active(true, &base, &other_cluster));
 }
+
+#[test]
+fn confirmed_bulk_save_finishes_requests_and_only_gates_ui_reconciliation() {
+    assert_eq!(BulkSaveProgress::after_await(true), BulkSaveProgress::Current);
+    assert!(BulkSaveProgress::after_await(true).reconciles_ui());
+    assert_eq!(BulkSaveProgress::after_await(false), BulkSaveProgress::StalePersist);
+    assert!(!BulkSaveProgress::after_await(false).reconciles_ui());
+
+    // Every request ran after the confirmation, so the results reflect what was committed.
+    let summary = summarize_bulk_results(vec![
+        BulkInputResult {
+            input: "input-a".to_string(),
+            count: 2,
+            status: BulkInputStatus::Saved("rev-a-2".to_string()),
+        },
+        BulkInputResult {
+            input: "input-b".to_string(),
+            count: 1,
+            status: BulkInputStatus::Saved("rev-b-2".to_string()),
+        },
+    ]);
+    assert!(summary.is_all_success());
+    assert_eq!(summary.successful_inputs(), vec!["input-a".to_string(), "input-b".to_string()]);
+}
+
+#[test]
+fn target_bulk_save_places_the_new_group_even_when_the_panel_went_stale() {
+    let current = BulkSaveProgress::Current;
+    let stale = BulkSaveProgress::StalePersist;
+
+    assert_eq!(plan_target_bulk_save(true, current), TargetBulkSavePlan { patch_items: true, place_group: true });
+    assert_eq!(
+        plan_target_bulk_save(true, stale),
+        TargetBulkSavePlan { patch_items: false, place_group: true },
+        "the overrides committed, so the new group is placed without a UI reconciliation"
+    );
+    assert_eq!(
+        plan_target_bulk_save(false, current),
+        TargetBulkSavePlan { patch_items: false, place_group: false },
+        "a failed override save must not place the new group"
+    );
+    assert_eq!(plan_target_bulk_save(false, stale), TargetBulkSavePlan { patch_items: false, place_group: false });
+}
+
+#[test]
+fn placement_failure_stays_separate_from_committed_item_results() {
+    let summary = summarize_bulk_results(vec![BulkInputResult {
+        input: "main".to_string(),
+        count: 3,
+        status: BulkInputStatus::Saved("rev-9".to_string()),
+    }]);
+    assert!(summary.is_all_success());
+
+    let failed = BulkPlacementState::failed("Docs".to_string(), "News".to_string(), "Save failed: timeout".to_string());
+    assert_eq!(failed.failure(), Some("Save failed: timeout"));
+    assert_eq!(failed.retry_target(), Some(("Docs", "News")));
+    assert!(summary.is_all_success(), "a placement failure must not rewrite the committed item results");
+
+    let retrying = failed.retrying();
+    assert_eq!(retrying.failure(), None);
+    assert_eq!(retrying.retry_target(), None, "a running retry cannot start a second time");
+    assert_eq!(retrying.retrying(), retrying);
+
+    assert_eq!(BulkPlacementState::default(), BulkPlacementState::Idle);
+    assert_eq!(BulkPlacementState::Idle.retrying(), BulkPlacementState::Idle);
+}
+
+#[test]
+fn placement_failure_maps_save_outcomes() {
+    assert_eq!(placement_failure(&GroupOrderSaveOutcome::Saved { groups: vec![], pending: false }), None);
+    assert_eq!(placement_failure(&GroupOrderSaveOutcome::Stale), None);
+    assert_eq!(
+        placement_failure(&GroupOrderSaveOutcome::Failed("Save failed: offline".to_string())),
+        Some("Save failed: offline".to_string())
+    );
+    assert_eq!(
+        placement_failure(&GroupOrderSaveOutcome::ConflictReloaded {
+            merged_groups: vec![],
+            error: "Conflict".to_string(),
+        }),
+        Some("Conflict".to_string())
+    );
+}
+
+#[test]
+fn placement_retry_order_uses_the_latest_stored_order() {
+    let stored = vec!["Sports".to_string(), "News".to_string()];
+    let current = vec!["News".to_string(), "Sports".to_string(), "Kids".to_string()];
+    assert_eq!(
+        placement_retry_order(&stored, &current, "Docs", "News"),
+        vec!["Sports".to_string(), "News".to_string(), "Docs".to_string(), "Kids".to_string()]
+    );
+
+    // The stored order fetched at retry time wins over the dispatch-time order, and groups that no
+    // longer exist are dropped.
+    let latest_stored = vec!["Kids".to_string(), "Removed".to_string()];
+    assert_eq!(
+        placement_retry_order(&latest_stored, &current, "Docs", "Kids"),
+        vec!["Kids".to_string(), "Docs".to_string(), "News".to_string(), "Sports".to_string()]
+    );
+}

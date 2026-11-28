@@ -1,7 +1,7 @@
 use super::{
     append_user_session_provider_headers, build_hls_manifest_request_headers, build_hls_origin_resolution,
-    build_hls_origin_source_for_playback, create_hls_cache_entry_master_playlist_response,
-    create_hls_cache_entry_master_playlist_response_with_key, download_legacy_hls_manifest,
+    build_hls_origin_source_for_playback, create_hls_cache_entry_master_playlist_response_with_key_and_playback_id,
+    create_hls_cache_entry_master_playlist_response_with_playback_id, download_legacy_hls_manifest,
     ensure_hls_manifest_extension, hls_cache_enabled_for_user, hls_custom_video_manifest_response,
     hls_entry_user_session_token, hls_media_playlist_wrap_enabled, hls_panel_provisioning_or_status_response,
     hls_playback_kind, hls_response, m3u_archive_epg_reference_ts, m3u_catchup_epg_reference_from_session_token,
@@ -12,9 +12,10 @@ use super::{
 use crate::{
     api::{
         api_utils::{
-            blocks_new_playback, connection_priority_for_kind, failover_group::record_member_failure,
-            get_hls_playback_ttl_secs, group_playback_settings, is_running_playback,
-            resolve_stalker_stream_for_account, select_provider_stream_url, stalker_stream_kind, GroupSelectionRequest,
+            blocks_new_playback, connection_priority_for_kind, effective_playback_id_for_user,
+            failover_group::record_member_failure, get_hls_playback_ttl_secs, group_playback_settings,
+            is_running_playback, resolve_stalker_stream_for_account, select_provider_stream_url, stalker_stream_kind,
+            GroupSelectionRequest,
         },
         model::{AppState, CustomVideoStreamType, PlaybackLeaseRef, UserSession},
     },
@@ -140,6 +141,11 @@ pub(in crate::api) async fn handle_hls_stream_request(
             &url,
             user_session.map(|session| session.token.as_str()).or(session_token_hint),
         ) == PlaybackKind::LiveHls;
+
+    let config_snapshot = app_state.app_config.config.load();
+    let playback_id = matches!(stage, HlsRequestStage::Entry)
+        .then(|| effective_playback_id_for_user(&config_snapshot, user, req_headers))
+        .flatten();
 
     let classified = if matches!(stage, HlsRequestStage::Entry) {
         classify_virtual_id(&app_state.app_config, &app_state.playlists, target, VirtualId::new(virtual_id)).await
@@ -356,7 +362,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             };
 
             if archive_reference.is_some() {
-                return create_hls_cache_entry_master_playlist_response(
+                return create_hls_cache_entry_master_playlist_response_with_playback_id(
                     app_state,
                     fingerprint,
                     user,
@@ -370,12 +376,13 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     connection_permission,
                     connection_kind,
                     server_info.path.as_deref(),
+                    playback_id,
                 )
                 .await;
             }
 
             let member_origin = build_hls_origin_resolution(&member_input, &member_url);
-            return create_hls_cache_entry_master_playlist_response_with_key(
+            return create_hls_cache_entry_master_playlist_response_with_key_and_playback_id(
                 app_state,
                 fingerprint,
                 user,
@@ -390,13 +397,14 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 connection_permission,
                 connection_kind,
                 server_info.path.as_deref(),
+                playback_id,
             )
             .await;
         }
         let Some(origin_source) = hls_origin_source.clone() else {
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
-        return create_hls_cache_entry_master_playlist_response(
+        return create_hls_cache_entry_master_playlist_response_with_playback_id(
             app_state,
             fingerprint,
             user,
@@ -414,6 +422,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             connection_permission,
             connection_kind,
             server_info.path.as_deref(),
+            playback_id,
         )
         .await;
     }
@@ -750,17 +759,20 @@ pub(in crate::api) async fn handle_hls_stream_request(
 
         let session_token = app_state
             .active_users
-            .create_user_session(crate::api::model::CreateUserSessionParams {
-                user,
-                session_token: &user_session_token,
-                virtual_id,
-                provider: &provider_name,
-                stream_url: &member_url,
-                addr: &fingerprint.addr,
-                connection_permission,
-                connection_kind: Some(fallback_connection_kind),
-                socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
-            })
+            .create_user_session_with_playback_id(
+                crate::api::model::CreateUserSessionParams {
+                    user,
+                    session_token: &user_session_token,
+                    virtual_id,
+                    provider: &provider_name,
+                    stream_url: &member_url,
+                    addr: &fingerprint.addr,
+                    connection_permission,
+                    connection_kind: Some(fallback_connection_kind),
+                    socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
+                },
+                playback_id,
+            )
             .await;
 
         let new_binding = MemberBinding {
@@ -851,6 +863,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             connection_permission,
             fallback_connection_kind,
             true,
+            playback_id,
             stalker_hls_stream(stream_context.stream_ref(), archive_reference.is_some()),
         )
         .await

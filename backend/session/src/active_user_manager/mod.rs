@@ -169,6 +169,7 @@ pub struct LegacyHlsRebase {
 #[derive(Clone, Debug)]
 pub struct UserSession {
     pub token: String,
+    pub playback_id: Option<Arc<str>>,
     pub transition_version: u64,
     pub virtual_id: u32,
     pub provider: Arc<str>,

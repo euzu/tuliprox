@@ -229,7 +229,12 @@ pub use aliases::ConfigInputAliasDto;
 pub use kind::{
     ConfigInputStagedDto, InputCapabilities, InputFetchMethod, InputPersistence, InputType, StagedInputType,
 };
-pub use options::{default_flussonic_hls_catchup_max_duration_secs, ConfigInputOptionsDto, FlussonicHlsCatchup};
+pub use options::{
+    default_flussonic_hls_catchup_max_duration_secs, ConfigInputOptionsDto, ContainerExtensionSamplingDto,
+    FlussonicHlsCatchup, DEFAULT_CONTAINER_EXTENSION_SAMPLING_MAX_CALLS,
+    DEFAULT_CONTAINER_EXTENSION_SAMPLING_MIN_INTERVAL_SECS, DEFAULT_CONTAINER_EXTENSION_SAMPLING_STOP_AFTER_REFUSALS,
+    MAX_CONTAINER_EXTENSION_SAMPLING_CALLS,
+};
 pub use provider::{
     default_provider_dns_refresh_secs, is_default_dns_prefer, is_default_on_connect_error, is_default_on_resolve_error,
     is_default_provider_dns_refresh_secs, is_default_provider_url_selection_policy, ConfigProviderDto, DnsPrefer,

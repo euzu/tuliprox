@@ -17,6 +17,7 @@ fn sample_options() -> XtreamMappingOptions {
         web_ui_request: false,
         encrypt_secret: [0u8; 16],
         resource_host_policies: Arc::default(),
+        sampled_container_extensions: Arc::default(),
         default_container_extensions: Arc::default(),
         replace_rating: false,
     }
@@ -53,6 +54,7 @@ fn episode_extension(
         VirtualId::new(42),
         7,
         "",
+        None,
         configured_extension,
     ) else {
         panic!("expected series info document");
@@ -135,9 +137,15 @@ fn series_episode_info_document_includes_episode_plot() {
         ..SeriesStreamProperties::default()
     }));
 
-    let XtreamInfoDocument::Series(doc) =
-        properties.to_info_document(&sample_options(), PlaylistItemType::SeriesInfo, VirtualId::new(42), 7, "", None)
-    else {
+    let XtreamInfoDocument::Series(doc) = properties.to_info_document(
+        &sample_options(),
+        PlaylistItemType::SeriesInfo,
+        VirtualId::new(42),
+        7,
+        "",
+        None,
+        None,
+    ) else {
         panic!("expected series info document");
     };
 

@@ -3,7 +3,12 @@ use crate::{
     error::TuliproxError,
     utils::CONSTANTS,
 };
-use std::{borrow::Cow, sync::atomic::Ordering};
+use dashmap::DashMap;
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    sync::{atomic::Ordering, Arc, LazyLock},
+};
 use url::Url;
 
 pub const PROVIDER_SCHEME_PREFIX: &str = "provider://";
@@ -357,21 +362,91 @@ pub fn normalize_container_extension(raw: &str) -> Option<Cow<'_, str>> {
 
 /// Resolve the container extension published for one item.
 ///
-/// Order: the value the provider reported, then the extension carried by the item URL, then the
-/// input's configured default, and finally [`DEFAULT_CONTAINER_EXTENSION`]. The last two steps are
-/// assumptions, so they never override a value the provider or the URL already states. The result is
-/// always canonical and never empty: clients build `<stream_id>.<container_extension>` and drop items
-/// without one, while a nullish placeholder would make them request `.null`.
+/// Order: the value the provider reported, then the extension carried by the item URL, then a value
+/// the Stalker sampler observed from the provider's playback answer, then the input's configured
+/// default, and finally [`DEFAULT_CONTAINER_EXTENSION`]. The last two steps are assumptions, so they
+/// never override a value the provider or the URL already states. The result is always canonical and
+/// never empty: clients build `<stream_id>.<container_extension>` and drop items without one, while a
+/// nullish placeholder would make them request `.null`.
 pub fn resolve_container_extension<'a>(stored: &'a str, url: &'a str, configured: Option<&'a str>) -> Cow<'a, str> {
+    resolve_container_extension_with_ledger(stored, url, None, configured)
+}
+
+/// [`resolve_container_extension`] with a sampled value between the item URL and the configured default.
+///
+/// `sampled` is what the Stalker sampler learned from the provider's playback answer; it is stored in
+/// the sampling ledger and never in the playlist. A URL extension still wins, because the sampler only
+/// samples items without one.
+pub fn resolve_container_extension_with_ledger<'a>(
+    stored: &'a str,
+    url: &'a str,
+    sampled: Option<&'a str>,
+    configured: Option<&'a str>,
+) -> Cow<'a, str> {
     if let Some(extension) = normalize_container_extension(stored) {
         return extension;
     }
     if let Some(extension) = extract_extension_from_url(url).and_then(normalize_container_extension) {
         return extension;
     }
+    if let Some(extension) = sampled.and_then(normalize_container_extension) {
+        return extension;
+    }
     configured
         .and_then(normalize_container_extension)
         .unwrap_or(Cow::Borrowed(crate::defaults::DEFAULT_CONTAINER_EXTENSION))
+}
+
+/// Sampled container extensions per input and provider stream id.
+///
+/// The Stalker sampler writes what the portal's playback answer revealed; a request snapshots the map
+/// when it builds its mapping options, so delivery never does file I/O per item. The ledger on disk is
+/// only read by the background sampler.
+pub type SampledContainerExtensions = Arc<HashMap<u32, Arc<str>>>;
+
+/// Every input's sampled extensions, one shared map per input, as a request snapshots them.
+pub type SampledContainerExtensionSnapshot = Arc<HashMap<Arc<str>, SampledContainerExtensions>>;
+
+static SAMPLED_CONTAINER_EXTENSIONS: LazyLock<DashMap<Arc<str>, SampledContainerExtensions>> =
+    LazyLock::new(DashMap::new);
+
+/// Replace the sampled extensions of one input, publishing them to document builders.
+///
+/// Values are canonicalised here, so a stale ledger entry written by an earlier version cannot publish
+/// a malformed token. An empty map removes the input's entry instead of keeping an empty one.
+pub fn publish_sampled_container_extensions(input_name: Arc<str>, extensions: HashMap<u32, Arc<str>>) {
+    if extensions.is_empty() {
+        SAMPLED_CONTAINER_EXTENSIONS.remove(&input_name);
+        return;
+    }
+    let canonical = extensions
+        .into_iter()
+        .filter_map(|(stream_id, extension)| {
+            normalize_container_extension(&extension).map(|extension| (stream_id, extension.as_ref().into()))
+        })
+        .collect::<HashMap<_, _>>();
+    if canonical.is_empty() {
+        SAMPLED_CONTAINER_EXTENSIONS.remove(&input_name);
+    } else {
+        SAMPLED_CONTAINER_EXTENSIONS.insert(input_name, Arc::new(canonical));
+    }
+}
+
+/// Drop an input's sampled extensions, so delivery falls back to the configured default again.
+pub fn clear_sampled_container_extensions(input_name: &str) { SAMPLED_CONTAINER_EXTENSIONS.remove(input_name); }
+
+/// The sampled extension of one item, if the input's last sampling run observed one.
+pub fn sampled_container_extension(input_name: &str, stream_id: u32) -> Option<Arc<str>> {
+    SAMPLED_CONTAINER_EXTENSIONS.get(input_name).and_then(|extensions| extensions.get(&stream_id).cloned())
+}
+
+/// The current sampled extensions, for a request to hold while it builds its documents.
+///
+/// Copies one `Arc` per input, never the entries, so the cost does not grow with the catalog.
+pub fn sampled_container_extension_snapshot() -> SampledContainerExtensionSnapshot {
+    Arc::new(
+        SAMPLED_CONTAINER_EXTENSIONS.iter().map(|entry| (Arc::clone(entry.key()), Arc::clone(entry.value()))).collect(),
+    )
 }
 
 pub fn is_hls_url(url: &str) -> bool {
@@ -486,11 +561,15 @@ pub fn parse_provider_scheme_url_parts(stream_url: &str) -> Result<(&str, &str),
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_extension_from_url, normalize_container_extension, resolve_container_extension,
-        sanitize_sensitive_info, set_sanitize_sensitive_info,
+        clear_sampled_container_extensions, extract_extension_from_url, normalize_container_extension,
+        publish_sampled_container_extensions, resolve_container_extension, resolve_container_extension_with_ledger,
+        sampled_container_extension, sanitize_sensitive_info, set_sanitize_sensitive_info,
     };
     use crate::defaults::DEFAULT_CONTAINER_EXTENSION;
-    use std::sync::Mutex;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
     static SANITIZATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -556,6 +635,64 @@ mod tests {
     #[test]
     fn resolve_container_extension_normalizes_the_configured_default() {
         assert_eq!(resolve_container_extension("", "", Some(".MKV")).as_ref(), "mkv");
+    }
+
+    #[test]
+    fn sampled_extension_answers_after_the_url_and_before_the_configured_default() {
+        let url = "http://provider.example/movie/1.mkv";
+        // The URL still wins: the sampler never samples an item whose URL states an extension.
+        assert_eq!(resolve_container_extension_with_ledger("", url, Some("avi"), Some("mov")).as_ref(), "mkv");
+        assert_eq!(
+            resolve_container_extension_with_ledger("", "http://provider.example/movie/1", Some("avi"), Some("mov"))
+                .as_ref(),
+            "avi"
+        );
+        // Without a sampled value the configured default answers, as before.
+        assert_eq!(
+            resolve_container_extension_with_ledger("", "http://provider.example/movie/1", None, Some("mov")).as_ref(),
+            "mov"
+        );
+        // A provider value beats every fallback.
+        assert_eq!(resolve_container_extension_with_ledger("wmv", "", Some("avi"), Some("mov")).as_ref(), "wmv");
+        assert_eq!(resolve_container_extension_with_ledger("", "", Some("avi"), None).as_ref(), "avi");
+        assert_eq!(
+            resolve_container_extension_with_ledger("", "", Some(".AVI "), None).as_ref(),
+            "avi",
+            "a sampled value is canonicalised like every other token"
+        );
+        assert_eq!(
+            resolve_container_extension_with_ledger("", "", Some("null"), None).as_ref(),
+            DEFAULT_CONTAINER_EXTENSION,
+            "a placeholder in the ledger is not a value either"
+        );
+    }
+
+    #[test]
+    fn published_sampled_extensions_are_canonical_and_per_input() {
+        let input: Arc<str> = "sampling-test-input".into();
+        publish_sampled_container_extensions(
+            Arc::clone(&input),
+            HashMap::from([(7, "MKV".into()), (8, "null".into()), (9, ".mp4".into())]),
+        );
+
+        assert_eq!(sampled_container_extension(&input, 7).as_deref(), Some("mkv"));
+        assert_eq!(sampled_container_extension(&input, 9).as_deref(), Some("mp4"));
+        assert_eq!(sampled_container_extension(&input, 8), None, "a placeholder is dropped on publish");
+        assert_eq!(sampled_container_extension(&input, 10), None);
+        assert_eq!(sampled_container_extension("other-input", 7), None, "an entry belongs to its input");
+
+        clear_sampled_container_extensions(&input);
+        assert_eq!(sampled_container_extension(&input, 7), None);
+    }
+
+    #[test]
+    fn publishing_no_sampled_extensions_removes_the_input_entry() {
+        let input: Arc<str> = "sampling-empty-input".into();
+        publish_sampled_container_extensions(Arc::clone(&input), HashMap::from([(1, "mkv".into())]));
+        assert_eq!(sampled_container_extension(&input, 1).as_deref(), Some("mkv"));
+
+        publish_sampled_container_extensions(Arc::clone(&input), HashMap::new());
+        assert_eq!(sampled_container_extension(&input, 1), None);
     }
 
     #[test]

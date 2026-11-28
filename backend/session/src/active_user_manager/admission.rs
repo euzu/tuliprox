@@ -1,7 +1,7 @@
 use super::{
-    decide_connection_kind, ActiveUserManager, AdmissionRejectionReason, ConnectionAdmission,
-    PendingProviderWakeSource, PlaybackLifecycle, PromotionAction, UserConnectionCounts, UserConnectionData,
-    UserSession, USER_CON_TTL,
+    decide_connection_kind, ActiveUserManager, AdmissionRejectionReason, ConnectionAdmission, CreateUserSessionParams,
+    PendingProviderWakeSource, PlaybackLifecycle, PromotionAction, SessionIdentity, UserConnectionCounts,
+    UserConnectionData, UserSession, USER_CON_TTL,
 };
 use crate::active_provider_manager::{ConnectionKind, ProviderReleaseSnapshot};
 use jsonwebtoken::get_current_timestamp;
@@ -16,6 +16,18 @@ use tuliprox_core::model::AllocationId;
 
 /// Panel identity of a removed stream row, as carried by `DisconnectedStream`.
 pub(super) type RemovedStreamKey = (SocketAddr, u32);
+
+pub(crate) struct RemovedPlaybackIdStream {
+    pub(crate) stream_info: StreamInfo,
+    pub(crate) close_socket: bool,
+    pub(crate) release_provider: bool,
+    pub(crate) addr_disconnected: bool,
+}
+
+pub(crate) struct PlaybackIdReplacementEffect {
+    pub(crate) removed_streams: Vec<RemovedPlaybackIdStream>,
+    pub(crate) ended_session_tokens: Vec<String>,
+}
 
 impl PlaybackLifecycle {
     /// Returns true for lifecycle states that own a counted admission lease.
@@ -52,22 +64,23 @@ impl ConnectionAdmission {
 }
 
 impl UserConnectionData {
-    /// Removes one stream row together with its kind, priority and request-claim accounting.
-    /// Returns the row's panel identity and whether a counted connection kind was released.
-    pub(super) fn remove_stream_at(&mut self, stream_idx: usize) -> (RemovedStreamKey, bool) {
+    /// Removes one stream row together with its kind, priority, playback id, and request-claim accounting.
+    /// Returns the removed `StreamInfo` and whether a counted connection kind was released.
+    pub(super) fn remove_stream_info_at(&mut self, stream_idx: usize) -> (StreamInfo, bool) {
         let uid = self.streams[stream_idx].uid;
         let released_kind = self.stream_kinds.remove(&uid).inspect(|kind| self.decrement_kind(*kind)).is_some();
         self.stream_normal_priorities.remove(&uid);
+        self.stream_playback_ids.remove(&uid);
         self.remove_stream_request_claims(uid);
         let removed = self.streams.swap_remove(stream_idx);
-        ((removed.addr, removed.uid), released_kind)
+        (removed, released_kind)
     }
 
-    pub(super) fn remove_streams_for_session_and_release_counted(
+    pub(super) fn remove_session_stream_infos_and_release_counted(
         &mut self,
         session_token: &str,
         counted_kind: Option<ConnectionKind>,
-    ) -> (Vec<RemovedStreamKey>, bool) {
+    ) -> (Vec<StreamInfo>, bool) {
         let mut removed_streams = Vec::new();
         let mut released_stream_kind = false;
         let mut stream_idx = 0;
@@ -76,7 +89,7 @@ impl UserConnectionData {
                 stream_idx += 1;
                 continue;
             }
-            let (removed, released_kind) = self.remove_stream_at(stream_idx);
+            let (removed, released_kind) = self.remove_stream_info_at(stream_idx);
             released_stream_kind |= released_kind;
             removed_streams.push(removed);
         }
@@ -88,6 +101,17 @@ impl UserConnectionData {
         }
 
         (removed_streams, connection_changed)
+    }
+
+    pub(super) fn remove_streams_for_session_and_release_counted(
+        &mut self,
+        session_token: &str,
+        counted_kind: Option<ConnectionKind>,
+    ) -> (Vec<RemovedStreamKey>, bool) {
+        let (removed_streams, connection_changed) =
+            self.remove_session_stream_infos_and_release_counted(session_token, counted_kind);
+        let keys = removed_streams.into_iter().map(|s| (s.addr, s.uid)).collect();
+        (keys, connection_changed)
     }
 
     pub(super) fn try_promote_soft_stream(&mut self) -> Option<PromotionAction> {
@@ -560,16 +584,288 @@ impl ActiveUserManager {
         // Uncounted session with no stream row: run normal admission.
         // Same-token soft-preserve is handled above via `session_has_stream` (3.3.78 semantics).
         // Do not return Exhausted for own preserved rows — that forced self-eviction on HLS gaps.
-        let admission = self.check_connection_admission_with_counts(
+        let admission = self.evaluate_admission_for_request_in_data(
             username,
             connection_data,
-            connection_data.effective_counts_for_admission(Some(session_token)),
+            max_connections,
+            soft_connections,
+            true,
+            Some(session_token),
+            true,
         );
         if admission.permission() == UserConnectionPermission::Allowed {
-            let session = &mut connection_data.sessions[session_index];
-            Self::update_session_admission(session, admission.permission(), admission.kind());
+            if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == session_token) {
+                Self::update_session_admission(session, admission.permission(), admission.kind());
+            }
         }
         admission
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Admission decision depends on limits and session activation flags under one lock."
+    )]
+    pub(super) fn evaluate_admission_for_request_in_data(
+        &self,
+        username: &str,
+        connection_data: &mut UserConnectionData,
+        max_connections: u32,
+        soft_connections: u16,
+        use_session_admission: bool,
+        session_token: Option<&str>,
+        activate_unbound_session: bool,
+    ) -> ConnectionAdmission {
+        if max_connections == 0 && soft_connections == 0 {
+            return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
+        }
+
+        connection_data.max_connections = max_connections;
+        connection_data.soft_connections = soft_connections;
+
+        if use_session_admission {
+            if let Some(token) = session_token {
+                if let Some(session_index) = connection_data.sessions.iter().position(|session| session.token == token)
+                {
+                    if activate_unbound_session {
+                        if connection_data.sessions[session_index].lifecycle.is_counted()
+                            || Self::session_has_stream(connection_data, token)
+                        {
+                            return ConnectionAdmission::allowed(
+                                connection_data.sessions[session_index]
+                                    .connection_kind
+                                    .or(Some(ConnectionKind::Normal)),
+                            );
+                        }
+                    } else if connection_data.sessions[session_index].lifecycle.is_counted() {
+                        return ConnectionAdmission::allowed(
+                            connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
+                        );
+                    }
+                    return self.check_connection_admission_with_counts(
+                        username,
+                        connection_data,
+                        connection_data.effective_counts_for_admission(Some(token)),
+                    );
+                }
+            }
+        }
+
+        self.check_connection_admission(username, connection_data)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "Replacing an old playback-id connection, creating/tagging the caller placeholder, and admitting it must share one write_connections critical section."
+    )]
+    pub(crate) async fn replace_playback_id_and_connection_admission_with_placeholder(
+        &self,
+        username: &str,
+        max_connections: u32,
+        soft_connections: u16,
+        request_addr: &SocketAddr,
+        playback_id: &str,
+        use_session_admission: bool,
+        session_token: Option<&str>,
+        activate_unbound_session: bool,
+        placeholder: Option<CreateUserSessionParams<'_>>,
+    ) -> (ConnectionAdmission, PlaybackIdReplacementEffect, Option<(u64, SessionIdentity)>) {
+        self.gc();
+
+        let (
+            admission,
+            removed_streams,
+            matched_session_tokens,
+            disconnected_addrs,
+            connection_changed,
+            promotions,
+            divergence_snapshot,
+            placeholder_info,
+        ) = {
+            let mut user_connections = self.write_connections().await;
+            let mut matched_session_tokens: Vec<String> = Vec::new();
+            let mut raw_removed_streams: Vec<StreamInfo> = Vec::new();
+            let mut touched_addrs: Vec<SocketAddr> = Vec::new();
+            let mut connection_changed = false;
+            let mut promotions = Vec::new();
+            let mut divergence_snapshot = None;
+            let mut admission = ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
+
+            if let Some(connection_data) = user_connections.by_key.get_mut(username) {
+                for session in &connection_data.sessions {
+                    if session.playback_id.as_deref() == Some(playback_id)
+                        && session_token.is_none_or(|tok| session.token != tok)
+                        && !matched_session_tokens.contains(&session.token)
+                    {
+                        matched_session_tokens.push(session.token.clone());
+                    }
+                }
+                for stream in &connection_data.streams {
+                    if connection_data.stream_playback_ids.get(&stream.uid).is_some_and(|id| id.as_ref() == playback_id)
+                        && session_token.is_none_or(|tok| stream.session_token.as_deref() != Some(tok))
+                    {
+                        if let Some(tok) = stream.session_token.as_ref() {
+                            if !matched_session_tokens.contains(tok) {
+                                matched_session_tokens.push(tok.clone());
+                            }
+                        }
+                    }
+                }
+
+                for tok in &matched_session_tokens {
+                    let session_index = connection_data.sessions.iter().position(|s| s.token == *tok);
+                    let counted_kind = session_index.and_then(|idx| {
+                        connection_data.sessions[idx]
+                            .lifecycle
+                            .is_counted()
+                            .then(|| connection_data.sessions[idx].connection_kind.unwrap_or(ConnectionKind::Normal))
+                    });
+                    let (removed, changed) =
+                        connection_data.remove_session_stream_infos_and_release_counted(tok, counted_kind);
+                    connection_changed |= changed;
+                    raw_removed_streams.extend(removed);
+                    if let Some(idx) = session_index {
+                        let removed_session = connection_data.sessions.swap_remove(idx);
+                        touched_addrs.push(removed_session.addr);
+                        touched_addrs.extend(removed_session.active_addrs);
+                    }
+                }
+
+                let mut stream_idx = 0;
+                while stream_idx < connection_data.streams.len() {
+                    let uid = connection_data.streams[stream_idx].uid;
+                    let matches_id =
+                        connection_data.stream_playback_ids.get(&uid).is_some_and(|id| id.as_ref() == playback_id);
+                    let matches_caller = session_token
+                        .is_some_and(|tok| connection_data.streams[stream_idx].session_token.as_deref() == Some(tok));
+                    if !matches_id || matches_caller {
+                        stream_idx += 1;
+                        continue;
+                    }
+                    let (removed, released_kind) = connection_data.remove_stream_info_at(stream_idx);
+                    connection_changed |= released_kind;
+                    raw_removed_streams.push(removed);
+                }
+
+                for stream in &raw_removed_streams {
+                    touched_addrs.push(stream.addr);
+                }
+
+                if !raw_removed_streams.is_empty() || !matched_session_tokens.is_empty() {
+                    if connection_data.connections == 0 && connection_data.streams.is_empty() {
+                        connection_data.granted_grace = false;
+                        connection_data.grace_ts = 0;
+                    }
+                    promotions = Self::collect_promotions_after_capacity_release(connection_data);
+                }
+            }
+
+            for tok in &matched_session_tokens {
+                user_connections.pending_member_bindings.remove(tok.as_str());
+            }
+            if !matched_session_tokens.is_empty() {
+                user_connections.mark_sessions_ended(matched_session_tokens.iter().cloned());
+            }
+
+            let placeholder_info = if let Some(ref placeholder_params) = placeholder {
+                let (version, identity, placeholder_divergence) = self.ensure_user_session_placeholder_in_data(
+                    &mut user_connections,
+                    placeholder_params,
+                    Some(playback_id),
+                    true,
+                );
+                divergence_snapshot = placeholder_divergence;
+                Some((version, identity))
+            } else {
+                None
+            };
+
+            if let Some(connection_data) = user_connections.by_key.get_mut(username) {
+                divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+                admission = self.evaluate_admission_for_request_in_data(
+                    username,
+                    connection_data,
+                    max_connections,
+                    soft_connections,
+                    use_session_admission,
+                    session_token,
+                    activate_unbound_session,
+                );
+                if activate_unbound_session
+                    && use_session_admission
+                    && admission.permission() == UserConnectionPermission::Allowed
+                {
+                    if let Some(tok) = session_token {
+                        if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == tok) {
+                            Self::update_session_admission(session, admission.permission(), admission.kind());
+                            if session.playback_id.is_none() {
+                                session.playback_id = Some(Arc::from(playback_id));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut unique_addrs = touched_addrs;
+            unique_addrs.sort_unstable_by_key(|a| (a.ip(), a.port()));
+            unique_addrs.dedup();
+            let mut disconnected_addrs = HashSet::new();
+            for addr in unique_addrs {
+                let still_for_user = user_connections
+                    .by_key
+                    .get(username)
+                    .is_some_and(|d| d.has_session_addr(&addr) || d.streams.iter().any(|s| s.addr == addr));
+                if !still_for_user {
+                    let remove_entry =
+                        user_connections.key_by_addr.get_mut(&addr).is_some_and(|reg| reg.remove_user(username));
+                    if remove_entry {
+                        user_connections.key_by_addr.remove(&addr);
+                    }
+                    disconnected_addrs.insert(addr);
+                }
+            }
+
+            let removed_streams = raw_removed_streams
+                .into_iter()
+                .map(|stream_info| {
+                    let other_active_at_addr = user_connections.by_key.values().any(|d| {
+                        d.streams.iter().any(|s| s.addr == stream_info.addr) || d.has_session_addr(&stream_info.addr)
+                    });
+                    RemovedPlaybackIdStream {
+                        close_socket: stream_info.addr != *request_addr && !other_active_at_addr,
+                        release_provider: !other_active_at_addr,
+                        addr_disconnected: disconnected_addrs.contains(&stream_info.addr),
+                        stream_info,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            (
+                admission,
+                removed_streams,
+                matched_session_tokens,
+                disconnected_addrs,
+                connection_changed,
+                promotions,
+                divergence_snapshot,
+                placeholder_info,
+            )
+        };
+
+        let _ = disconnected_addrs;
+        self.log_divergence_snapshot(divergence_snapshot).await;
+        if connection_changed {
+            self.log_active_user().await;
+        }
+        for action in promotions {
+            self.emit_promotion_update(username, action).await;
+        }
+
+        (
+            admission,
+            PlaybackIdReplacementEffect { removed_streams, ended_session_tokens: matched_session_tokens },
+            placeholder_info,
+        )
     }
 
     pub async fn release_unbound_session_reservation(

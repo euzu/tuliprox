@@ -645,7 +645,14 @@ async fn download_input_with_policy<E: EventSink + Clone + 'static, M: MetadataU
         && (!playlist.is_empty() || !accepted_empty_clusters.is_empty() || authoritative_library)
     {
         // Mark after persist/load so other workers only see this input as ready when data is usable.
-        ctx.mark_input_downloaded(input.name.clone()).await;
+        if playlist_download_result.download_err.is_empty()
+            && playlist_download_result.quality_rejections.is_empty()
+            && !ctx.is_input_in_maintenance(&input.name)
+        {
+            ctx.mark_input_downloaded(input.name.clone()).await;
+        } else {
+            ctx.mark_input_degraded(input.name.clone()).await;
+        }
     } else if mark_as_processed && !playlist_download_result.partial {
         // A partial (resumable) input may continue in a later source; a failed one is not fetched again.
         let failure = playlist_download_result.download_err.first().or(error.as_ref()).cloned();

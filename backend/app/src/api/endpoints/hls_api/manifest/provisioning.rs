@@ -61,6 +61,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
     connection_permission: UserConnectionPermission,
     connection_kind: crate::api::model::ConnectionKind,
     create_user_session: bool,
+    playback_id: Option<&str>,
     stalker_stream: Option<(u32, StalkerStreamKind)>,
 ) -> Option<HlsEntryOriginAccountReservation> {
     let provider_handle = app_state.active_provider.acquire_connection_with_lease_for_session(
@@ -96,17 +97,20 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
     let session_token = if create_user_session {
         app_state
             .active_users
-            .create_user_session(crate::api::model::CreateUserSessionParams {
-                user,
-                session_token: user_session_token,
-                virtual_id,
-                provider: &provider_config.name,
-                stream_url: &stream_url,
-                addr: &fingerprint.addr,
-                connection_permission,
-                connection_kind: Some(connection_kind),
-                socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
-            })
+            .create_user_session_with_playback_id(
+                crate::api::model::CreateUserSessionParams {
+                    user,
+                    session_token: user_session_token,
+                    virtual_id,
+                    provider: &provider_config.name,
+                    stream_url: &stream_url,
+                    addr: &fingerprint.addr,
+                    connection_permission,
+                    connection_kind: Some(connection_kind),
+                    socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
+                },
+                playback_id,
+            )
             .await
     } else {
         user_session_token.to_string()
@@ -269,6 +273,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
         connection_admission.permission(),
         connection_kind,
         false,
+        None,
         stalker_hls_stream(stream_identity.stream_ref(), !is_live),
     )
     .await

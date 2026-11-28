@@ -121,80 +121,142 @@ pub fn line_end_offset(text: &str, byte_pos: usize) -> usize {
     }
 }
 
-/// Opening byte offset when the scalar owning `byte_range` is inside a flow mapping (`{...}`).
+fn is_scalar_start_at(bytes: &[u8], index: usize, in_flow: bool) -> bool {
+    let mut pos = index;
+    while pos > 0 && matches!(bytes[pos - 1], b' ' | b'\t') {
+        pos -= 1;
+    }
+    if pos == 0 || matches!(bytes[pos - 1], b'\n' | b'\r') {
+        return true;
+    }
+    match bytes[pos - 1] {
+        b'[' | b'{' => true,
+        b',' => in_flow,
+        b':' => pos < index || in_flow,
+        b'-' if pos < index => {
+            let mut before_dash = pos - 1;
+            while before_dash > 0 && matches!(bytes[before_dash - 1], b' ' | b'\t') {
+                before_dash -= 1;
+            }
+            before_dash == 0 || matches!(bytes[before_dash - 1], b'\n' | b'\r' | b'-')
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ScanState {
+    #[default]
+    Normal,
+    SingleQuote,
+    DoubleQuote {
+        escaped: bool,
+    },
+    Comment,
+}
+
+/// Incremental byte scanner that tracks YAML flow-collection nesting across monotonically
+/// increasing byte offsets in one pass.
 ///
 /// The lightweight scanner ignores quoted values and comments while tracking nested flow
-/// collections. Opening delimiters are only recognized at YAML token boundaries so braces in
-/// plain values such as environment placeholders do not create false flow scopes.
-pub fn flow_mapping_start_at(text: &str, byte_range: &Range<usize>) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let limit = byte_range.start.min(bytes.len());
-    let mut flow_stack = Vec::<(u8, usize)>::new();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut in_comment = false;
-    let mut index = 0;
+/// collections. Opening delimiters and quoted scalars are recognized only at YAML token
+/// boundaries so braces or apostrophes inside plain scalars (such as `${env:VAR}` or
+/// `family's.m3u`) do not create false scopes.
+pub struct FlowScopeScanner<'a> {
+    bytes: &'a [u8],
+    index: usize,
+    flow_stack: Vec<(u8, usize)>,
+    state: ScanState,
+}
 
-    while index < limit {
-        let byte = bytes[index];
-        if in_comment {
-            if byte == b'\n' {
-                in_comment = false;
-            }
-            index += 1;
-            continue;
-        }
-        if in_single_quote {
-            if byte == b'\'' {
-                if index + 1 < limit && bytes[index + 1] == b'\'' {
-                    index += 2;
-                    continue;
-                }
-                in_single_quote = false;
-            }
-            index += 1;
-            continue;
-        }
-        if in_double_quote {
-            if byte == b'\\' {
-                index = (index + 2).min(limit);
-                continue;
-            }
-            if byte == b'"' {
-                in_double_quote = false;
-            }
-            index += 1;
-            continue;
-        }
-
-        match byte {
-            b'\'' => in_single_quote = true,
-            b'"' => in_double_quote = true,
-            b'#' if index == 0
-                || bytes[index - 1].is_ascii_whitespace()
-                || matches!(bytes[index - 1], b',' | b'{' | b'[') =>
-            {
-                in_comment = true;
-            }
-            b'{' | b'['
-                if index == 0
-                    || bytes[index - 1].is_ascii_whitespace()
-                    || matches!(bytes[index - 1], b'-' | b':' | b',' | b'{' | b'[') =>
-            {
-                flow_stack.push((byte, index));
-            }
-            b'}' if flow_stack.last().is_some_and(|(delimiter, _)| *delimiter == b'{') => {
-                flow_stack.pop();
-            }
-            b']' if flow_stack.last().is_some_and(|(delimiter, _)| *delimiter == b'[') => {
-                flow_stack.pop();
-            }
-            _ => {}
-        }
-        index += 1;
+impl<'a> FlowScopeScanner<'a> {
+    #[must_use]
+    pub fn new(text: &'a str) -> Self {
+        Self { bytes: text.as_bytes(), index: 0, flow_stack: Vec::new(), state: ScanState::Normal }
     }
 
-    flow_stack.last().filter(|(delimiter, _)| *delimiter == b'{').map(|(_, start)| *start)
+    /// Advances the scanner to `byte_pos` and returns the opening byte offset when `byte_pos`
+    /// lies inside a flow mapping (`{...}`).
+    pub fn flow_mapping_start_at(&mut self, byte_pos: usize) -> Option<usize> {
+        let limit = byte_pos.min(self.bytes.len());
+        if limit < self.index {
+            self.index = 0;
+            self.flow_stack.clear();
+            self.state = ScanState::Normal;
+        }
+
+        while self.index < limit {
+            let byte = self.bytes[self.index];
+            match self.state {
+                ScanState::Comment => {
+                    if byte == b'\n' {
+                        self.state = ScanState::Normal;
+                    }
+                    self.index += 1;
+                }
+                ScanState::SingleQuote => {
+                    if byte == b'\'' {
+                        if self.index + 1 < limit && self.bytes[self.index + 1] == b'\'' {
+                            self.index += 2;
+                            continue;
+                        }
+                        self.state = ScanState::Normal;
+                    }
+                    self.index += 1;
+                }
+                ScanState::DoubleQuote { escaped } => {
+                    if escaped {
+                        self.state = ScanState::DoubleQuote { escaped: false };
+                    } else if byte == b'\\' {
+                        self.state = ScanState::DoubleQuote { escaped: true };
+                    } else if byte == b'"' {
+                        self.state = ScanState::Normal;
+                    }
+                    self.index += 1;
+                }
+                ScanState::Normal => {
+                    let in_flow = !self.flow_stack.is_empty();
+                    match byte {
+                        b'\'' if is_scalar_start_at(self.bytes, self.index, in_flow) => {
+                            self.state = ScanState::SingleQuote;
+                        }
+                        b'"' if is_scalar_start_at(self.bytes, self.index, in_flow) => {
+                            self.state = ScanState::DoubleQuote { escaped: false };
+                        }
+                        b'#' if self.index == 0
+                            || self.bytes[self.index - 1].is_ascii_whitespace()
+                            || matches!(self.bytes[self.index - 1], b',' | b'{' | b'[') =>
+                        {
+                            self.state = ScanState::Comment;
+                        }
+                        b'{' | b'['
+                            if self.index == 0
+                                || self.bytes[self.index - 1].is_ascii_whitespace()
+                                || matches!(self.bytes[self.index - 1], b'-' | b':' | b',' | b'{' | b'[') =>
+                        {
+                            self.flow_stack.push((byte, self.index));
+                        }
+                        b'}' if self.flow_stack.last().is_some_and(|(delimiter, _)| *delimiter == b'{') => {
+                            self.flow_stack.pop();
+                        }
+                        b']' if self.flow_stack.last().is_some_and(|(delimiter, _)| *delimiter == b'[') => {
+                            self.flow_stack.pop();
+                        }
+                        _ => {}
+                    }
+                    self.index += 1;
+                }
+            }
+        }
+
+        self.flow_stack.last().filter(|(delimiter, _)| *delimiter == b'{').map(|(_, start)| *start)
+    }
+}
+
+/// Opening byte offset when the scalar owning `byte_range` is inside a flow mapping (`{...}`).
+pub fn flow_mapping_start_at(text: &str, byte_range: &Range<usize>) -> Option<usize> {
+    let mut scanner = FlowScopeScanner::new(text);
+    scanner.flow_mapping_start_at(byte_range.start)
 }
 
 pub fn is_flow_style_mapping_at(text: &str, byte_range: &Range<usize>) -> bool {
@@ -1558,5 +1620,61 @@ mod tests {
             oldest_comment_pos > newest_pos && oldest_comment_pos > newest_comment_pos,
             "oldest comment must come after newest block, not before it"
         );
+    }
+
+    #[test]
+    fn flow_mapping_start_ignores_apostrophe_in_plain_scalar() {
+        let yaml = concat!(
+            "sources:\n",
+            "  - inputs: [provider]\n",
+            "    targets:\n",
+            "      - name: family\n",
+            "        output:\n",
+            "          - type: m3u\n",
+            "            filename: family.m3u\n",
+            "      - name: family_apostrophe\n",
+            "        output:\n",
+            "          - type: m3u\n",
+            "            filename: family's.m3u\n",
+            "      - name: rock\n",
+            "        title: Rock - '90s\n",
+            "      - name: comma_plain\n",
+            "        title: foo, 'bar\n",
+            "      - name: quotes_after_indicators\n",
+            "        list:\n",
+            "          - 'item'\n",
+            "          - ['a', 'b']\n",
+            "          - {'k': 'v'}\n",
+            "        multiline:\n",
+            "          'indented'\n",
+            "      - name: kids\n",
+            "        sort:\n",
+            "          rules:\n",
+            "            - {target: channel, field: title, order: asc, filter: 'Type = live'}\n",
+        );
+        let brace = yaml.find("{target: channel").expect("flow rule brace");
+        let target_key = yaml.find("target: channel").expect("target key");
+        assert_eq!(flow_mapping_start_at(yaml, &(target_key..target_key + 6)), Some(brace));
+
+        // Verify incremental FlowScopeScanner handles quoted scalars and double-quote escapes across steps.
+        let mut scanner = FlowScopeScanner::new(yaml);
+        let list_item = yaml.find("'item'").expect("list item");
+        assert_eq!(scanner.flow_mapping_start_at(list_item), None);
+        let flow_val = yaml.find("'v'").expect("flow val");
+        let flow_map_brace = yaml.find("{'k': 'v'}").expect("flow map brace");
+        assert_eq!(scanner.flow_mapping_start_at(flow_val), Some(flow_map_brace));
+        assert_eq!(scanner.flow_mapping_start_at(target_key), Some(brace));
+    }
+
+    #[test]
+    fn flow_scope_scanner_tracks_escaped_double_quote_across_step_boundary() {
+        let yaml = "- {a: \"\\\"\", b: 1}\n- c: 2\n";
+        let escaped_quote = yaml.find("\\\"").expect("escaped quote") + 1;
+        let b_key = yaml.find("b: 1").expect("b key");
+        let c_key = yaml.find("c: 2").expect("c key");
+        let mut scanner = FlowScopeScanner::new(yaml);
+        assert_eq!(scanner.flow_mapping_start_at(escaped_quote), Some(2));
+        assert_eq!(scanner.flow_mapping_start_at(b_key), Some(2));
+        assert_eq!(scanner.flow_mapping_start_at(c_key), None);
     }
 }

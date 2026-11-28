@@ -130,9 +130,7 @@ fn group_order_i18n_keys_exist_in_all_locales() {
             .unwrap_or_else(|| panic!("{lang}.json missing MESSAGES.PLAYLIST_EXPLORER.GROUP_ORDER_TOO_MANY_GROUPS"));
         assert!(too_many.contains("{max}"), "{lang}.json GROUP_ORDER_TOO_MANY_GROUPS should interpolate {{max}}");
 
-        for err_key in
-            ["too_many_groups", "empty_group_name", "duplicate_group_name", "group_name_template_placeholder"]
-        {
+        for err_key in ["too_many_groups", "empty_group_name", "duplicate_group_name"] {
             let msg = json["error"][err_key].as_str().unwrap_or_else(|| panic!("{lang}.json missing error.{err_key}"));
             assert!(!msg.trim().is_empty(), "{lang}.json error.{err_key} must not be empty");
         }
@@ -158,6 +156,17 @@ fn should_accept_reorder_drag_requires_internal_source_and_idle_state() {
     assert!(should_accept_reorder_drag(Some(2), false, false));
     assert!(!should_accept_reorder_drag(Some(0), true, false));
     assert!(!should_accept_reorder_drag(Some(0), false, true));
+}
+
+#[test]
+fn drag_leave_clears_highlight_only_when_leaving_the_row() {
+    // Moving between children of the row keeps the highlight.
+    assert!(!clears_reorder_drag_over(true, Some(2), 2));
+    // Leaving the row clears the highlight of that row.
+    assert!(clears_reorder_drag_over(false, Some(2), 2));
+    // Events of other rows and an already cleared highlight leave the state alone.
+    assert!(!clears_reorder_drag_over(false, Some(1), 2));
+    assert!(!clears_reorder_drag_over(false, None, 2));
 }
 
 #[test]
@@ -227,18 +236,18 @@ fn resolve_conflict_reload_outcome_merges_stored_order_or_formats_error() {
 #[test]
 fn format_group_order_field_errors_with_formats_entries_and_fallback() {
     let translate_fn = |key: &str| match key {
-        "error.group_name_template_placeholder" => "Placeholder not allowed".to_string(),
+        "error.duplicate_group_name" => "Duplicate group".to_string(),
         "error.too_many_groups" => "Too many groups".to_string(),
         other => other.to_string(),
     };
     assert_eq!(format_group_order_field_errors_with(&[], translate_fn, "Validation Error"), "Validation Error");
     let errs = vec![
-        FieldError::new("groups", "error.group_name_template_placeholder").with_entry("!bad!"),
+        FieldError::new("groups", "error.duplicate_group_name").with_entry("Sports"),
         FieldError::new("groups", "error.too_many_groups"),
     ];
     assert_eq!(
         format_group_order_field_errors_with(&errs, translate_fn, "Validation Error"),
-        "Placeholder not allowed (!bad!); Too many groups"
+        "Duplicate group (Sports); Too many groups"
     );
 }
 

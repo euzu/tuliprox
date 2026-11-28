@@ -443,6 +443,9 @@ impl PlaylistEntry for PlaylistItem {
 
     fn get_resolved_info_document(&self, options: &XtreamMappingOptions) -> Option<XtreamInfoDocument> {
         if self.has_details() {
+            let sampled_extension = self
+                .get_provider_id()
+                .and_then(|provider_id| options.sampled_container_extension(&self.header.input_name, provider_id));
             self.header.additional_properties.as_ref().map(|p| {
                 p.to_info_document(
                     options,
@@ -450,6 +453,7 @@ impl PlaylistEntry for PlaylistItem {
                     self.get_virtual_id(),
                     self.get_category_id().unwrap_or(0),
                     &self.header.url,
+                    sampled_extension,
                     options.default_container_extension(&self.header.input_name),
                 )
             })

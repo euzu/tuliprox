@@ -6,7 +6,7 @@ use crate::{
         model::AppState,
     },
     iptv::stalker::client::validate_public_playable_url,
-    model::{ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigInputUpdateQuality, SourcesConfig},
+    model::{ConfigInput, ConfigInputFlags, ConfigInputOptions, SourcesConfig},
     processing::processor::re_resolve_stalker_url,
 };
 use axum::response::IntoResponse;
@@ -27,15 +27,7 @@ pub(super) fn create_config_input_for_m3u(url: &str) -> ConfigInput {
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
-            update_quality: ConfigInputUpdateQuality::default(),
-            resolve_delay: shared::defaults::default_resolve_delay_secs(),
-            probe_delay: shared::defaults::default_probe_delay_secs(),
-            probe_live_interval_hours: 120,
-            resolve_filter: None,
-            probe_filter: None,
-            flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
-            flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
-            default_container_extension: None,
+            ..ConfigInputOptions::defaults().clone()
         }),
         ..Default::default()
     }
@@ -52,15 +44,7 @@ pub(super) fn create_config_input_for_xtream(username: &str, password: &str, hos
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
-            update_quality: ConfigInputUpdateQuality::default(),
-            resolve_delay: shared::defaults::default_resolve_delay_secs(),
-            probe_delay: shared::defaults::default_probe_delay_secs(),
-            probe_live_interval_hours: 120,
-            resolve_filter: None,
-            probe_filter: None,
-            flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
-            flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
-            default_container_extension: None,
+            ..ConfigInputOptions::defaults().clone()
         }),
         ..Default::default()
     }

@@ -9,8 +9,12 @@ use crate::imdb::ImdbRatingRuntime;
 /// What acquiring an input left in the current run.
 #[derive(Debug, Clone)]
 pub enum InputRunOutcome {
-    /// Persisted and usable; later sources load it from disk.
+    /// Persisted and usable without errors, quality rejections, or maintenance bypass; later sources
+    /// load it from disk and post-update sampling may run.
     Ready,
+    /// Usable persisted/partial data for target building, but acquisition had errors, quality
+    /// rejections, or maintenance bypass; later sources may reuse it, but post-update sampling must not run.
+    Degraded,
     /// Failed; later sources get this error (if any) instead of a new fetch.
     Failed(Option<TuliproxError>),
 }

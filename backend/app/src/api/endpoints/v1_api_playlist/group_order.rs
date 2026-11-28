@@ -108,8 +108,6 @@ fn validate_group_order(groups: &[String]) -> Result<(), Vec<FieldError>> {
     for group in groups {
         if group.trim().is_empty() {
             errors.push(FieldError::new("groups", "error.empty_group_name"));
-        } else if shared::utils::CONSTANTS.re_template_var.is_match(group) {
-            errors.push(FieldError::new("groups", "error.group_name_template_placeholder").with_entry(group));
         } else if !seen.insert(group.as_str()) {
             errors.push(FieldError::new("groups", "error.duplicate_group_name").with_entry(group));
         }
@@ -544,24 +542,51 @@ sources:
     }
 
     #[tokio::test]
-    async fn template_placeholder_group_names_answer_field_errors() {
-        let fixture = fixture().await;
-        let (status, body) = fixture
-            .put(json!({"target": "kids", "cluster": "live", "groups": ["Kids", "!custom!", "News !HD!"]}))
-            .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        assert_eq!(body["field_errors"].as_array().map(Vec::len), Some(2), "{body}");
-        assert_eq!(body["field_errors"][0]["message_key"], json!("error.group_name_template_placeholder"));
-        assert_eq!(body["field_errors"][0]["entry"], json!("!custom!"));
-        assert_eq!(body["field_errors"][1]["message_key"], json!("error.group_name_template_placeholder"));
-        assert_eq!(body["field_errors"][1]["entry"], json!("News !HD!"));
-        assert_eq!(fixture.source_text(), SOURCE_YML, "a rejected save must not touch the file");
-
-        // A single exclamation mark cannot match a `!name!` placeholder and remains storable.
-        let (status, body) =
-            fixture.put(json!({"target": "kids", "cluster": "live", "groups": ["Sports!", "!News"]})).await;
+    async fn group_names_with_template_delimiters_store_reload_and_match_literal_title() {
+        let yaml = format!(
+            "\
+templates:
+  - name: HD
+    value: '1080p'
+{SOURCE_YML}"
+        );
+        let fixture = fixture_with(&yaml).await;
+        let groups = ["Sports !HD!", "!custom!", "Sports!", "!News"];
+        let (status, body) = fixture.put(json!({"target": "kids", "cluster": "live", "groups": groups})).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["groups"], json!(["Sports!", "!News"]));
+        assert_eq!(body["groups"], json!(groups));
+        assert_eq!(body["pending"], json!(true));
+
+        let text = fixture.source_text();
+        assert!(!text.contains("^Sports !HD!$"), "stored pattern must not contain raw !HD!: {text}");
+        assert!(text.contains(r"\x21HD\x21"), "stored pattern must encode ! as \\x21: {text}");
+
+        // Reload from disk with templates prepared (same path as server reload) and verify literal match.
+        let mut paths = (*fixture.app_state.app_config.paths.load_full()).clone();
+        paths.sources_file_path = fixture.source_path.to_string_lossy().into_owned();
+        let config = fixture.app_state.app_config.config.load();
+        let templates = crate::config_loader::load_prepared_global_templates(&paths, &config).await.expect("templates");
+        let reloaded_dto = crate::config_loader::read_sources_file_from_path_with_options(
+            &fixture.source_path,
+            crate::config_loader::ReadConfigOptions { resolve_env: true, include_computed: false },
+            None,
+            templates.as_deref(),
+        )
+        .await
+        .expect("reloaded sources");
+        let reloaded = SourcesConfig::try_from(&reloaded_dto).expect("runtime sources");
+        let sort = reloaded.get_target_by_name("kids").expect("target").sort.as_ref().expect("sort");
+        let seq = sort.rules[0].sequence.as_ref().expect("sequence");
+        assert!(seq[0].is_match("Sports !HD!"), "must match literal group title");
+        assert!(!seq[0].is_match("Sports 1080p"), "must not expand !HD! template");
+        assert!(seq[1].is_match("!custom!"));
+        assert!(seq[2].is_match("Sports!"));
+        assert!(seq[3].is_match("!News"));
+
+        assert_eq!(fixture.runtime_order("kids", shared::model::TargetGroupCluster::Live), groups);
+        let (status, body) = fixture.get("/playlist/group_order?target=kids&cluster=live").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["groups"], json!(groups));
     }
 
     #[tokio::test]
@@ -725,6 +750,65 @@ sources:
     }
 
     #[tokio::test]
+    async fn noop_on_unsupported_layout_returns_conflict_and_leaves_file_unchanged() {
+        let base = "\
+inputs:
+  - name: provider
+    type: m3u
+    url: http://provider.example/playlist.m3u
+sources:
+  - inputs: [provider]
+    targets:
+      - name: kids
+        output:
+          - type: m3u
+            filename: kids.m3u
+";
+        let cases = [
+            (
+                "empty order on flow-style sort",
+                format!("{base}        sort: {{rules: [{{target: channel, field: title, order: asc, filter: 'Type = live'}}]}}\n"),
+                json!([]),
+            ),
+            (
+                "unchanged order on flow-style rules",
+                format!("{base}        sort:\n          rules: [{{target: group, field: group, order: none, filter: 'Type = live', sequence: ['^Kids$']}}]\n"),
+                json!(["Kids"]),
+            ),
+            ("empty order on null sort", format!("{base}        sort: null\n"), json!([])),
+            (
+                "empty order on inline flow target",
+                "\
+inputs:
+  - name: provider
+    type: m3u
+    url: http://provider.example/playlist.m3u
+sources:
+  - inputs: [provider]
+    targets:
+      - {name: kids, output: [{type: m3u, filename: kids.m3u}]}
+"
+                .to_string(),
+                json!([]),
+            ),
+        ];
+
+        for (label, yaml, groups) in cases {
+            let fixture = fixture_with(&yaml).await;
+            let before = std::fs::read(&fixture.source_path).expect("before bytes");
+            let (status, body) = fixture.put(json!({"target": "kids", "cluster": "live", "groups": groups})).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{label}: {body}");
+            assert_eq!(
+                body["error"],
+                json!("the target's sort block uses a layout that cannot be edited automatically; edit sort.rules in source.yml by hand"),
+                "{label}: {body}"
+            );
+            let after = std::fs::read(&fixture.source_path).expect("after bytes");
+            assert_eq!(after, before, "{label}: file must remain unchanged byte for byte");
+        }
+    }
+
+    #[tokio::test]
     async fn an_empty_order_removes_the_rule_again() {
         let fixture = fixture().await;
         let (status, _) = fixture.put(json!({"target": "kids", "cluster": "live", "groups": ["Kids"]})).await;
@@ -768,9 +852,11 @@ sources:
         let body = json!({"target": "kids", "cluster": "vod", "groups": ["Movies"]});
         let (status, _) = fixture.put(body.clone()).await;
         assert_eq!(status, StatusCode::OK);
+        let before = std::fs::read(&fixture.source_path).expect("before bytes");
         let (status, body) = fixture.put(body).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["pending"], json!(false), "an unchanged order needs no playlist update");
+        assert_eq!(std::fs::read(&fixture.source_path).expect("after bytes"), before);
         assert!(fixture.source_text().contains("filter: Type = vod"), "{}", fixture.source_text());
     }
 
