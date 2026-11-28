@@ -4,7 +4,10 @@ use super::{
 };
 use crate::processor::{EarlyGuideChannel, EpgIdCache};
 use log::error;
-use quick_xml::events::{BytesStart, BytesText, Event};
+use quick_xml::{
+    escape::resolve_xml_entity,
+    events::{BytesStart, Event},
+};
 use shared::{
     concat_string,
     model::{
@@ -14,7 +17,6 @@ use shared::{
     utils::Internable,
 };
 use std::{
-    borrow::Cow,
     collections::{HashMap, HashSet},
     sync::Arc,
 };
@@ -766,6 +768,7 @@ impl<'a, P: PluginHost> HookedPass<'a, P> {
 struct TvGuideStream<R: AsyncRead + Unpin> {
     reader: quick_xml::reader::Reader<tokio::io::BufReader<R>>,
     stack: Vec<XmlTag>,
+    text: String,
     buf: Vec<u8>,
 }
 
@@ -774,6 +777,7 @@ impl<R: AsyncRead + Unpin> TvGuideStream<R> {
         Self {
             reader: quick_xml::reader::Reader::from_reader(async_file_reader(content)),
             stack: Vec::new(),
+            text: String::new(),
             // See `parse_tvguide` for the size.
             buf: Vec::with_capacity(64 * 1024),
         }
@@ -786,7 +790,7 @@ impl<R: AsyncRead + Unpin> TvGuideStream<R> {
             let before = out.len();
             match self.reader.read_event_into_async(&mut self.buf).await {
                 Ok(Event::Eof) => return false,
-                Ok(event) => dispatch_event(event, &mut |tag| out.push(tag), &mut self.stack),
+                Ok(event) => dispatch_event(event, &mut |tag| out.push(tag), &mut self.stack, &mut self.text),
                 Err(_) => {}
             }
             self.buf.clear();
@@ -797,10 +801,15 @@ impl<R: AsyncRead + Unpin> TvGuideStream<R> {
     }
 }
 
-fn dispatch_event<F>(event: Event<'_>, callback: &mut F, stack: &mut Vec<XmlTag>)
+fn dispatch_event<F>(event: Event<'_>, callback: &mut F, stack: &mut Vec<XmlTag>, text: &mut String)
 where
     F: FnMut(XmlTag),
 {
+    // quick-xml splits references out of the text. Trim the joined value, not each fragment.
+    if matches!(event, Event::Start(_) | Event::Empty(_) | Event::End(_)) {
+        append_tag_text(stack, text.trim());
+        text.clear();
+    }
     match event {
         Event::Start(e) => handle_tag_start(callback, stack, &e),
         Event::Empty(e) => {
@@ -808,7 +817,26 @@ where
             handle_tag_end(callback, stack);
         }
         Event::End(_e) => handle_tag_end(callback, stack),
-        Event::Text(e) => handle_text_tag(stack, &e),
+        Event::Text(e) => {
+            let fragment = e.xml10_content();
+            if let Some(prefix) = fragment.trim_end().strip_suffix('\\') {
+                // A backslash at the end of a text event inserts a literal "&apos; " (#359, #360).
+                text.push_str(prefix);
+                text.push_str("&apos; ");
+                append_tag_text(stack, text.trim_start());
+                text.clear();
+            } else {
+                text.push_str(&fragment);
+            }
+        }
+        Event::CData(e) => text.push_str(&e.xml10_content()),
+        Event::GeneralRef(e) => {
+            if let Some(value) = resolve_xml_entity(&e) {
+                text.push_str(value);
+            } else if let Ok(Some(ch)) = e.resolve_char_ref() {
+                text.push(ch);
+            }
+        }
         _ => {}
     }
 }
@@ -860,27 +888,15 @@ where
     }
 }
 
-fn handle_text_tag(stack: &mut [XmlTag], e: &BytesText) {
+fn append_tag_text(stack: &mut [XmlTag], text: &str) {
+    if text.is_empty() {
+        return;
+    }
     if let Some(tag) = stack.last_mut() {
-        {
-            let text = e.xml10_content();
-            let t = text.trim();
-            if !t.is_empty() {
-                let t_fixed: Cow<str> = if t.ends_with('\\') {
-                    let mut owned = t.to_string();
-                    owned.pop();
-                    owned.push_str("&apos; ");
-                    Cow::Owned(owned)
-                } else {
-                    Cow::Borrowed(t)
-                };
-
-                tag.value = Some(match tag.value.take() {
-                    None => t_fixed.intern(),
-                    Some(old) => concat_string!(old.as_ref(), t_fixed.as_ref()).intern(),
-                });
-            }
-        }
+        tag.value = Some(match &tag.value {
+            None => text.intern(),
+            Some(old) => concat_string!(old.as_ref(), text).intern(),
+        });
     }
 }
 
@@ -890,6 +906,7 @@ where
     F: FnMut(XmlTag),
 {
     let mut stack: Vec<XmlTag> = vec![];
+    let mut text = String::new();
     let mut xml_reader = quick_xml::reader::Reader::from_reader(async_file_reader(content));
     // Pre-allocate so the first giant `<programme>` block does not trigger a
     // chain of `Vec::grow` reallocs. The buffer is monotonically grown by
@@ -900,7 +917,7 @@ where
     loop {
         match xml_reader.read_event_into_async(&mut buf).await {
             Ok(Event::Eof) => break,
-            Ok(event) => dispatch_event(event, callback, &mut stack),
+            Ok(event) => dispatch_event(event, callback, &mut stack, &mut text),
             Err(_) => {}
         }
         // quick_xml does not clear the buffer between events — the borrow
@@ -927,6 +944,40 @@ mod tests {
     };
     use tokio::io::{AsyncRead, ReadBuf};
     use tuliprox_core::model::{PersistedEpgSource, PersistedEpgSourceKind};
+
+    async fn read_programme_children(fields: &str) -> [Vec<Arc<XmlTag>>; 2] {
+        let xml = format!(
+            r#"<tv><channel id="c1"><display-name>Demo</display-name></channel>
+            <programme start="20300101090000 +0000" channel="c1">{fields}</programme></tv>"#
+        );
+        let mut parsed = Vec::new();
+        parse_tvguide(xml.as_bytes(), &mut |tag| parsed.push(tag)).await;
+
+        let mut streamed = Vec::new();
+        let mut stream = TvGuideStream::new(xml.as_bytes());
+        while stream.next_tags(&mut streamed).await {}
+
+        [parsed, streamed]
+            .map(|tags| tags.into_iter().find(|tag| tag.name.as_ref() == EPG_TAG_PROGRAMME).unwrap().children.unwrap())
+    }
+
+    #[tokio::test]
+    async fn programme_text_preserves_references_and_cdata() {
+        let fields = "<title>  Rock &amp; Roll  </title><desc>L&apos;art &#x26; <![CDATA[<music> &amp; more]]>.</desc>";
+        for children in read_programme_children(fields).await {
+            assert_eq!(children[0].value.as_deref(), Some("Rock & Roll"));
+            assert_eq!(children[1].value.as_deref(), Some("L'art & <music> &amp; more."));
+        }
+    }
+
+    #[tokio::test]
+    async fn programme_text_keeps_trailing_backslash_replacement() {
+        let fields = r"<title>  End\  </title><desc>First\  <!-- fragment boundary --> second</desc>";
+        for children in read_programme_children(fields).await {
+            assert_eq!(children[0].value.as_deref(), Some("End&apos; "));
+            assert_eq!(children[1].value.as_deref(), Some("First&apos; second"));
+        }
+    }
 
     struct StepReader {
         step: usize,
