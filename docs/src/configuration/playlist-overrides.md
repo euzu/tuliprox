@@ -651,8 +651,8 @@ When a bulk edit in target scope moves items to a new group, the new group is pl
 is selected in the sidebar.
 
 The Explorer edits only a `sort` block written in YAML block style. When the target's `sort` block uses another layout
-(flow style such as `sort: {rules: [...]}`, a comment or anchor on `sort:` or `rules:`, a comment between the
-`sequence` entries, or an inline target mapping), saving answers `409` and leaves `source.yml` unchanged; edit the
+(flow style such as `sort: {rules: [...]}`, a comment or anchor on `sort:` or `rules:`, a comment inside the
+lines of the Explorer rule that saving rewrites, or an inline target mapping), saving answers `409` and leaves `source.yml` unchanged; edit the
 rule by hand in that case.
 
 REST: `GET /api/v1/playlist/group_order?target=<name>&cluster=<live|vod|series>` returns `{"groups": [...]}`

@@ -178,6 +178,19 @@ impl<'a> FlowScopeScanner<'a> {
     /// Advances the scanner to `byte_pos` and returns the opening byte offset when `byte_pos`
     /// lies inside a flow mapping (`{...}`).
     pub fn flow_mapping_start_at(&mut self, byte_pos: usize) -> Option<usize> {
+        self.advance_to(byte_pos);
+        self.flow_stack.last().filter(|(delimiter, _)| *delimiter == b'{').map(|(_, start)| *start)
+    }
+
+    /// Whether a YAML comment starts inside `range`; `#` inside quoted scalars and plain scalars
+    /// (such as `A#B`) is no comment.
+    pub fn comment_starts_in(&mut self, range: &Range<usize>) -> bool {
+        self.advance_to(range.start);
+        self.advance_to(range.end)
+    }
+
+    /// Advances the scanner to `byte_pos` and returns whether a comment started on the way.
+    fn advance_to(&mut self, byte_pos: usize) -> bool {
         let limit = byte_pos.min(self.bytes.len());
         if limit < self.index {
             self.index = 0;
@@ -185,6 +198,7 @@ impl<'a> FlowScopeScanner<'a> {
             self.state = ScanState::Normal;
         }
 
+        let mut comment_started = false;
         while self.index < limit {
             let byte = self.bytes[self.index];
             match self.state {
@@ -228,6 +242,7 @@ impl<'a> FlowScopeScanner<'a> {
                             || matches!(self.bytes[self.index - 1], b',' | b'{' | b'[') =>
                         {
                             self.state = ScanState::Comment;
+                            comment_started = true;
                         }
                         b'{' | b'['
                             if self.index == 0
@@ -249,8 +264,16 @@ impl<'a> FlowScopeScanner<'a> {
             }
         }
 
-        self.flow_stack.last().filter(|(delimiter, _)| *delimiter == b'{').map(|(_, start)| *start)
+        comment_started
     }
+}
+
+/// Whether a YAML comment starts inside the line-aligned `range` of `text` (quote-aware).
+///
+/// The scan starts with a fresh state at `range.start`, so quote characters earlier in the file
+/// (for example inside a block scalar body) cannot hide a comment in the range.
+pub fn comment_starts_in(text: &str, range: &Range<usize>) -> bool {
+    text.get(range.clone()).is_some_and(|slice| FlowScopeScanner::new(slice).comment_starts_in(&(0..slice.len())))
 }
 
 /// Opening byte offset when the scalar owning `byte_range` is inside a flow mapping (`{...}`).
@@ -1664,6 +1687,32 @@ mod tests {
         let flow_map_brace = yaml.find("{'k': 'v'}").expect("flow map brace");
         assert_eq!(scanner.flow_mapping_start_at(flow_val), Some(flow_map_brace));
         assert_eq!(scanner.flow_mapping_start_at(target_key), Some(brace));
+    }
+
+    #[test]
+    fn comment_starts_in_ignores_hash_in_scalars() {
+        let yaml = "a: 'x # y'\nb: \"x # y\"\nc: A#B\nd: [x#1, 'y']\ne: 1 # note\n# full line\n";
+        let line = |key: &str| {
+            let start = yaml.find(key).expect("key");
+            start..yaml[start..].find('\n').map_or(yaml.len(), |end| start + end + 1)
+        };
+        assert!(!comment_starts_in(yaml, &line("a:")));
+        assert!(!comment_starts_in(yaml, &line("b:")));
+        assert!(!comment_starts_in(yaml, &line("c:")));
+        assert!(!comment_starts_in(yaml, &line("d:")));
+        assert!(comment_starts_in(yaml, &line("e:")));
+        assert!(comment_starts_in(yaml, &line("# full")));
+        assert!(!comment_starts_in(yaml, &(0..line("e:").start)));
+    }
+
+    #[test]
+    fn comment_starts_in_handles_quote_escapes_and_earlier_block_scalars() {
+        assert!(!comment_starts_in("a: 'it''s # no'\n", &(0..16)));
+        assert!(!comment_starts_in("a: \"x\\\" # no\"\n", &(0..16)));
+        assert!(comment_starts_in("a: 'it''s' # yes\n", &(0..17)));
+        let yaml = "note: |\n  'open quote\nrules:\n  - '^First$' # keep\n";
+        let start = yaml.find("  - ").expect("entry");
+        assert!(comment_starts_in(yaml, &(start..yaml.len())));
     }
 
     #[test]

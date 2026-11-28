@@ -1827,7 +1827,8 @@
   archive received the MPEG-TS style error answer, because the HLS decision used the client's `.ts` extension before
   the archive URL was resolved. The archive is now resolved first.
 
-- **Explorer group order hardening.** Comments between the stored group names, a no-op save on an unsupported
+- **Explorer group order hardening.** Comments inside the stored Explorer rule (between or after the group names,
+  or in a rule that is rewritten), a no-op save on an unsupported
   layout, a failed read-back after a write error, names like `Sports !HD!`, and apostrophes in plain YAML values
   (`family's.m3u`) are handled correctly; bulk edits keep committed overrides when the group placement fails and
   offer a retry of the placement only.

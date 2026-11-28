@@ -753,10 +753,12 @@ Setting `shared_burst_secs: 0` sends the whole burst buffer from its oldest byte
 
 Many providers send 15-25 seconds of media within the first one or two seconds of a new connection and then continue
 in real time. Without a trim, the first viewer of a channel plays that whole burst and stays that far behind live.
-Tuliprox therefore holds the start of shared live MPEG-TS streams (`Live` channels only) and failover group streams
-until the burst is over and then starts at the newest keyframe that is at least `shared_burst_secs` of media behind
-the newest data. A direct live stream (not shared and not in a failover group) starts at once and keeps the provider
-burst. The media time comes from the stream's PCR clock, so the arrival time of the burst does not matter.
+Tuliprox therefore holds the start of shared live MPEG-TS streams (`Live` channels only) and of failover group
+streams with runtime failover (`playback.failover.enabled: true`, item type `Live`, MPEG-TS payload) until the burst
+is over and then starts at the newest keyframe that is at least `shared_burst_secs` of media behind the newest data.
+A direct live stream (not shared, and not a group stream with runtime failover) starts at once and keeps the provider
+burst; this includes a group member that is opened without runtime failover. The media time comes from the stream's
+PCR clock, so the arrival time of the burst does not matter.
 
 * The burst is over when, during the last 400 ms, the received media ran ahead of the clock by less than 100 ms.
 * The hold lasts at most 5 seconds and 32 MB; then playback starts at the best start point found so far.

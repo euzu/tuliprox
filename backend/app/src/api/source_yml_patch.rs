@@ -10,8 +10,8 @@ use crate::{
     config_loader::{
         source_patch::{
             apply_scalar_edits, build_alias_addition_edit, build_alias_removal_edits, build_alias_sequence_edit,
-            build_alias_sort_edit, build_field_insertion_edit, detect_newline, find_input, flow_mapping_start_at,
-            is_flow_style_mapping_at, line_content_end, line_end_offset, line_indent_at,
+            build_alias_sort_edit, build_field_insertion_edit, comment_starts_in, detect_newline, find_input,
+            flow_mapping_start_at, is_flow_style_mapping_at, line_content_end, line_end_offset, line_indent_at,
             parse_and_validate_patched_text, parse_patch_document, serialize_yaml_scalar, sibling_key_indent,
             span_byte_range, FlowScopeScanner, TextEdit,
         },
@@ -1399,9 +1399,14 @@ fn plan_rule_sequence_edits(
     if flow_mapping_start_at(text, &rule_ext).is_some()
         || text.get(sequence_start..).is_some_and(|rest| rest.trim_start().starts_with('['))
     {
+        // The canonical rule replaces every line the rule touches; a comment there would be lost.
+        let range = block_lines(text, &rule_ext);
+        if comment_starts_in(text, &range) {
+            return Err(unsupported_layout());
+        }
         let dash_indent = line_indent_at(text, line_start(text, rule_ext.start));
         edits.push(TextEdit {
-            range: block_lines(text, &rule_ext),
+            range,
             replacement: format!("{}{newline}", block_rule_lines(cluster, patterns, dash_indent, newline)?),
         });
         return Ok(());
@@ -1418,7 +1423,7 @@ fn plan_rule_sequence_edits(
     let last_span = span_range(last)?;
     let item_indent = block_item_indent(text, first_span.start)?;
     let range = block_lines(text, &(first_span.start..last_span.end));
-    if text[range.clone()].lines().any(|line| line.trim_start().starts_with('#')) {
+    if comment_starts_in(text, &range) {
         return Err(unsupported_layout());
     }
     edits.push(TextEdit {
@@ -3671,6 +3676,74 @@ sources:
                     other => panic!("expected UnsupportedLayout, got {other:?}"),
                 }
                 assert_eq!(fixture.text(), fixture_text, "file must remain unchanged");
+            }
+
+            async fn assert_unsupported_layout_unchanged(fixture_text: &str, groups: &[&str]) {
+                let fixture = Fixture::new(fixture_text);
+                let guard = fixture.app_cfg.file_locks.write_lock(&fixture.source_path).await;
+                let err = execute_target_group_order_patch_locked(
+                    &fixture.app_cfg,
+                    &fixture.source_path,
+                    order_test_patch(groups),
+                    &guard,
+                )
+                .await
+                .expect_err("a comment inside the replaced rule lines must be rejected");
+                drop(guard);
+                match err {
+                    TargetGroupOrderPatchError::UnsupportedLayout(msg) => {
+                        assert_eq!(msg, UNSUPPORTED_SORT_LAYOUT_MSG);
+                    }
+                    other => panic!("expected UnsupportedLayout, got {other:?}"),
+                }
+                assert_eq!(fixture.text(), fixture_text, "file must remain unchanged");
+            }
+
+            #[tokio::test]
+            async fn rejects_sequence_update_when_entry_has_trailing_comment() {
+                let fixture_text = format!(
+                    "{FIXTURE}        sort:\n          rules:\n            - target: group\n              field: group\n              order: none\n              filter: 'Type = live'\n              sequence:\n                - '^First$' # keep this comment\n                - '^Second$'\n"
+                );
+                assert_unsupported_layout_unchanged(&fixture_text, &["Second", "First"]).await;
+            }
+
+            #[tokio::test]
+            async fn rejects_flow_sequence_rewrite_when_rule_holds_a_comment() {
+                let fixture_text = format!(
+                    "{FIXTURE}        sort:\n          rules:\n            - target: group\n              # keep this comment\n              field: group\n              order: none\n              filter: 'Type = live'\n              sequence: ['^First$', '^Second$']\n"
+                );
+                assert_unsupported_layout_unchanged(&fixture_text, &["Second", "First"]).await;
+            }
+
+            #[tokio::test]
+            async fn rejects_flow_rule_rewrite_when_line_has_trailing_comment() {
+                let fixture_text = format!(
+                    "{FIXTURE}        sort:\n          rules:\n            - {{target: group, field: group, order: none, filter: 'Type = live', sequence: ['^First$']}} # keep\n"
+                );
+                assert_unsupported_layout_unchanged(&fixture_text, &["Second", "First"]).await;
+            }
+
+            #[tokio::test]
+            async fn keeps_comment_above_a_rewritten_flow_rule() {
+                let fixture_text = format!(
+                    "{FIXTURE}        sort:\n          rules:\n            # group note\n            - {{target: group, field: group, order: none, filter: 'Type = live', sequence: ['^First$']}}\n"
+                );
+                let fixture = Fixture::new(&fixture_text);
+                assert!(fixture.apply(order_test_patch(&["Second", "First"])).await);
+                let sort = fixture.target_sort("kids").expect("sort block");
+                assert_eq!(decode_all(&sort), ["Second", "First"]);
+                assert!(fixture.text().contains("            # group note\n            - target: group\n"));
+            }
+
+            #[tokio::test]
+            async fn updates_sequence_whose_quoted_entry_contains_a_hash() {
+                let fixture_text = format!(
+                    "{FIXTURE}        sort:\n          rules:\n            - target: group\n              field: group\n              order: none\n              filter: 'Type = live'\n              sequence:\n                - '^A \\#1$'\n                - '^Second$'\n"
+                );
+                let fixture = Fixture::new(&fixture_text);
+                assert!(fixture.apply(order_test_patch(&["Second", "A #1"])).await);
+                let sort = fixture.target_sort("kids").expect("sort block");
+                assert_eq!(decode_all(&sort), ["Second", "A #1"]);
             }
 
             #[tokio::test]
