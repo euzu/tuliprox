@@ -288,7 +288,8 @@ impl UiPlaylistItem {
     /// - `ImdbThenProvider`: keep an `Imdb` origin, otherwise provider value is effective with origin `Provider`;
     /// - `Imdb`: store `rating` only.
     pub fn set_provider_rating(&mut self, rating: Option<f64>, source: ImdbRatingSource) {
-        // A value outside the 0-10 scale is ignored and keeps the stored rating; `None` clears it.
+        // `None` and `0` clear the provider rating; another value outside the 0-10 scale is ignored and keeps the stored one.
+        let rating = rating.filter(|&value| value != 0.0);
         if rating.is_some_and(|value| !is_valid_provider_rating(value)) {
             return;
         }
@@ -1059,5 +1060,9 @@ mod tests {
 
         item.set_provider_rating(Some(10.0), ImdbRatingSource::Provider);
         assert_eq!(item.effective_rating, Some(10.0));
+
+        item.set_provider_rating(Some(0.0), ImdbRatingSource::Provider);
+        assert_eq!(item.rating, 0.0);
+        assert_eq!(item.effective_rating, None);
     }
 }

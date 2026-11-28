@@ -228,6 +228,18 @@
 
 ## 🌟 New Features
 
+- **Deduplicate movies and series by TMDB id.** `deduplicate.match_by` accepts `tmdb` and `tmdb_then_caption`.
+  `tmdb` collapses movies and series with the same TMDB id inside one group and ignores everything else (live
+  channels, episodes, items without an id). `tmdb_then_caption` uses the TMDB id when present and the caption
+  otherwise, also inside one group, and skips episodes; remakes with the same title but different TMDB ids stay
+  separate. `keep: best_quality` ranks by the caption. The existing `caption`, `name` and `title` modes are unchanged
+  (per cluster across all groups).
+
+- **One EPG download per URL and update.** Inputs that use the same EPG URL, source type, request method, headers
+  and ICS size limit now share one download per playlist update; the other inputs receive a hard link (or a copy) of the file in their own cache
+  directory. Parallel inputs wait for the running download instead of starting a second one. A failed download is
+  retried by the next input.
+
 - **Release year, rating and votes in mappings and filters.** The mapper DSL has the read-only fields `@year`,
   `@rating` and `@votes`, and Rhai mapping scripts read `item.year`, `item.rating` and `item.votes`. The filter DSL
   has the numeric field `Year` (`Year >= 2020`, `Year IS EMPTY`). The year is the first four-digit year
@@ -1809,9 +1821,10 @@
 - **Provider ratings outside 0 to 10 no longer become the effective rating.** Negative ratings or ratings above 10
   from the provider are ignored for the effective rating (filters `Rating`, `@rating`, sorting, `replace_rating`
   output and the Web UI explorer rating badge); IMDb can still supply one. The raw provider `rating` field is
-  passed through unchanged. A rating override outside 0 to 10 is ignored. The rating source documentation no longer claims a TMDB rating fallback for
-  Xtream and M3U items. The Xtream series info `year` now uses the same year rule as `@year` (for example
-  `01.05.2024` gives `2024` instead of `105`).
+  passed through unchanged. A rating override of `0` clears the provider rating; another value outside 0 to 10 is ignored.
+  The rating source documentation no longer claims a TMDB rating fallback for Xtream and M3U items. The Xtream
+  series info `year` now uses the same year rule as `@year` (for example `01.05.2024` gives `2024` instead of
+  `105`).
 
 - **Recording database from earlier releases opens again.** The Xtream VOD ids for recordings added two fields in
   the middle of the stored recording library entry. The recording database stores fields by position, so tuliprox

@@ -235,6 +235,7 @@ fn processing_context_with_events<E: EventSink>(storage_dir: &Path, events: E) -
         processed_inputs: Arc::default(),
         input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
+        epg_downloads: Arc::default(),
         provider_manager: None,
         metadata_manager: None,
         pre_processed_inputs: None,

@@ -76,6 +76,7 @@ fn test_processing_context(
         processed_inputs: Arc::default(),
         input_completions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         input_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        epg_downloads: Arc::default(),
         provider_manager: None,
         metadata_manager: None,
         pre_processed_inputs: None,

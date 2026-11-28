@@ -3,12 +3,13 @@ use log::{debug, warn};
 use shared::{
     concat_string,
     error::TuliproxError,
-    model::{EventSink, PluginHost},
-    utils::{sanitize_sensitive_info, short_hash},
+    model::{EventSink, InputFetchMethod, PluginHost},
+    utils::{hash_bytes, hex_encode, sanitize_sensitive_info, short_hash},
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tuliprox_core::{
     model::{ConfigInput, EpgConfig, EpgSource, EpgSourceType, PersistedEpgSource, PersistedEpgSourceKind},
@@ -110,19 +111,27 @@ async fn download_epg_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink
         }
     }
 
-    let lock_key: std::sync::Arc<str> = persist_file_path.display().to_string().into();
-    let _input_lock = ctx.get_input_lock(&lock_key).await;
+    let download_key = epg_download_key(epg_source, ctx, input, headers);
+    let _download_lock = ctx.get_input_lock(&download_key).await;
 
-    if ctx.is_input_downloaded(&lock_key).await {
-        let _cache_lock = ctx.config.file_locks.read_lock(&persist_file_path).await;
-        if tokio::fs::metadata(&persist_file_path).await.is_ok_and(|metadata| metadata.is_file()) {
-            return Ok(persist_file_path);
+    let cached_path = {
+        let downloads = ctx.epg_downloads.lock().await;
+        downloads.get(&download_key).cloned()
+    };
+
+    if let Some(downloaded_path) = cached_path {
+        match link_or_copy_epg_file(&ctx.config.file_locks, &downloaded_path, &persist_file_path).await {
+            Ok(true) => return Ok(persist_file_path),
+            Ok(false) => {}
+            Err(err) => {
+                debug!("Failed to reuse cached epg file for input '{}' ({err}); falling back to download", input.name);
+            }
         }
     }
 
     debug!("Downloading epg for input '{}'", input.name);
     let max_bytes = epg_download_limit(epg_source);
-    match request::get_input_epg_content_as_file(
+    let path = request::get_input_epg_content_as_file(
         &ctx.config,
         &ctx.client,
         input,
@@ -134,13 +143,166 @@ async fn download_epg_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink
             max_bytes,
         },
     )
-    .await
+    .await?;
+
     {
-        Ok(path) => {
-            ctx.mark_input_downloaded(lock_key.clone()).await;
-            Ok(path)
+        let mut downloads = ctx.epg_downloads.lock().await;
+        downloads.insert(download_key, path.clone());
+    }
+    Ok(path)
+}
+
+fn push_len_prefixed(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+/// Computes an opaque hash key for deduplicating EPG downloads within a run.
+///
+/// The raw key includes credentials in the source URL and request headers, so it
+/// is hashed before storage and never logged.
+fn epg_download_key<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    epg_source: &EpgSource,
+    ctx: &PlaylistProcessingContext<E, M, P>,
+    input: &ConfigInput,
+    headers: Option<&reqwest::header::HeaderMap>,
+) -> Arc<str> {
+    let custom_headers = headers
+        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
+    let (default_user_agent, disabled_headers) = {
+        let config = ctx.config.config.load();
+        (config.default_user_agent.clone(), config.get_disabled_headers())
+    };
+    let effective_headers = request::get_request_headers(
+        Some(&input.headers),
+        custom_headers.as_ref(),
+        disabled_headers.as_ref(),
+        default_user_agent.as_deref(),
+    );
+    let mut header_entries: Vec<(&str, &[u8])> =
+        effective_headers.iter().map(|(name, value)| (name.as_str(), value.as_bytes())).collect();
+    header_entries.sort_unstable();
+
+    let mut key_bytes = Vec::new();
+    key_bytes.extend_from_slice(b"tuliprox.epg-download-key.v1");
+    key_bytes.push(match epg_source.source_type {
+        EpgSourceType::Xmltv => 0,
+        EpgSourceType::Ics => 1,
+    });
+    key_bytes.push(match input.method {
+        InputFetchMethod::GET => 0,
+        InputFetchMethod::POST => 1,
+    });
+    push_len_prefixed(&mut key_bytes, epg_source.url.as_bytes());
+    key_bytes.extend_from_slice(&u64::try_from(header_entries.len()).unwrap_or(u64::MAX).to_be_bytes());
+    for (name, value) in header_entries {
+        push_len_prefixed(&mut key_bytes, name.as_bytes());
+        push_len_prefixed(&mut key_bytes, value);
+    }
+    match epg_download_limit(epg_source) {
+        None => key_bytes.push(0),
+        Some(limit) => {
+            key_bytes.push(1);
+            key_bytes.extend_from_slice(&limit.to_be_bytes());
         }
-        Err(err) => Err(err),
+    }
+
+    let digest = hash_bytes(&key_bytes);
+    Arc::from(format!("epg:{}", hex_encode(digest.as_ref())))
+}
+
+fn epg_cache_parent(path: &Path) -> &Path {
+    path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
+}
+
+async fn copy_epg_file_atomically(source_path: &Path, dest_path: &Path) -> Result<bool, TuliproxError> {
+    let parent = epg_cache_parent(dest_path);
+    let temp_file = tempfile::Builder::new()
+        .prefix(".tuliprox-epg-copy-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|e| TuliproxError::Io(format!("Could not create temp epg cache file: {e}")))?;
+    if let Err(err) = tokio::fs::copy(source_path, temp_file.path()).await {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            return Ok(false);
+        }
+        return Err(TuliproxError::Io(format!(
+            "Could not copy cached epg file {} to {}: {err}",
+            source_path.display(),
+            dest_path.display()
+        )));
+    }
+    temp_file.persist(dest_path).map_err(|e| {
+        TuliproxError::Io(format!("Could not persist copied epg file {}: {}", dest_path.display(), e.error))
+    })?;
+    Ok(true)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_HARD_LINK_FAILURE: bool;
+}
+
+async fn hard_link_to_temp(source_path: &Path, parent: &Path) -> std::io::Result<tempfile::TempPath> {
+    #[cfg(test)]
+    if TEST_HARD_LINK_FAILURE.try_with(|fail| *fail).unwrap_or(false) {
+        return Err(std::io::Error::new(std::io::ErrorKind::CrossesDevices, "simulated hard-link failure"));
+    }
+
+    let source = source_path.to_path_buf();
+    let parent_dir = parent.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let temp_file = tempfile::Builder::new()
+            .prefix(".tuliprox-epg-link-")
+            .suffix(".tmp")
+            .make_in(&parent_dir, |temp_path| std::fs::hard_link(&source, temp_path))?;
+        Ok(temp_file.into_temp_path())
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+async fn link_or_copy_epg_file(
+    file_locks: &tuliprox_core::utils::FileLockManager,
+    source_path: &Path,
+    dest_path: &Path,
+) -> Result<bool, TuliproxError> {
+    if source_path == dest_path {
+        let _read_lock = file_locks.read_lock(dest_path).await;
+        return Ok(tokio::fs::metadata(dest_path).await.is_ok_and(|metadata| metadata.is_file()));
+    }
+
+    {
+        let _source_lock = file_locks.read_lock(source_path).await;
+        if !tokio::fs::metadata(source_path).await.is_ok_and(|metadata| metadata.is_file()) {
+            return Ok(false);
+        }
+    }
+
+    let _dest_lock = file_locks.write_lock(dest_path).await;
+    let parent = epg_cache_parent(dest_path);
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| TuliproxError::Io(format!("Could not create epg cache directory {}: {e}", parent.display())))?;
+
+    match hard_link_to_temp(source_path, parent).await {
+        Ok(temp_link) => {
+            let rename_result = tokio::fs::rename(&temp_link, dest_path).await;
+            drop(temp_link);
+            rename_result.map_err(|err| {
+                TuliproxError::Io(format!("Could not replace existing epg cache file {}: {err}", dest_path.display()))
+            })?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(link_err) => {
+            debug!(
+                "Hard-linking cached epg file {} to {} failed ({link_err}); falling back to copy",
+                source_path.display(),
+                dest_path.display()
+            );
+            copy_epg_file_atomically(source_path, dest_path).await
+        }
     }
 }
 
@@ -487,5 +649,607 @@ mod tests {
         let truncated_mixed: String = mixed.chars().take(200).collect();
         assert_eq!(truncated_mixed.chars().count(), 200);
         assert!(truncated_mixed.starts_with("Error: 🔥"));
+    }
+
+    struct MockEpgResponse {
+        status: &'static str,
+        body: String,
+        wait_for: Option<tokio::sync::oneshot::Receiver<()>>,
+        entered: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl MockEpgResponse {
+        fn ok(body: impl Into<String>) -> Self {
+            Self { status: "200 OK", body: body.into(), wait_for: None, entered: None }
+        }
+
+        fn error(status: &'static str) -> Self {
+            Self { status, body: "error".to_string(), wait_for: None, entered: None }
+        }
+    }
+
+    struct RecordingEpgServer {
+        base_url: String,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl RecordingEpgServer {
+        async fn start_with_responses(responses: Vec<MockEpgResponse>, default_body: String) -> Self {
+            use std::collections::VecDeque;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind local epg test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let requests_ref = std::sync::Arc::clone(&requests);
+            let queue = std::sync::Arc::new(tokio::sync::Mutex::new(VecDeque::from(responses)));
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let requests_ref = std::sync::Arc::clone(&requests_ref);
+                    let queue = std::sync::Arc::clone(&queue);
+                    let default_body = default_body.clone();
+                    tokio::spawn(async move {
+                        let mut bytes = Vec::new();
+                        loop {
+                            let mut chunk = [0_u8; 1024];
+                            let len = socket.read(&mut chunk).await.expect("read request");
+                            if len == 0 {
+                                return;
+                            }
+                            bytes.extend_from_slice(&chunk[..len]);
+                            if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        let req_text = String::from_utf8_lossy(&bytes).into_owned();
+                        let target = req_text
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_whitespace().nth(1))
+                            .unwrap_or_default()
+                            .to_string();
+                        requests_ref.lock().expect("lock requests").push(target);
+
+                        let next = queue.lock().await.pop_front();
+                        let (status, body) = match next {
+                            Some(mut resp) => {
+                                if let Some(entered) = resp.entered.take() {
+                                    let _ = entered.send(());
+                                }
+                                if let Some(wait_for) = resp.wait_for.take() {
+                                    let _ = wait_for.await;
+                                }
+                                (resp.status, resp.body)
+                            }
+                            None => ("200 OK", default_body),
+                        };
+
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    });
+                }
+            });
+            Self { base_url, requests, task }
+        }
+
+        async fn start(body: impl Into<String>) -> Self { Self::start_with_responses(Vec::new(), body.into()).await }
+
+        fn request_count(&self) -> usize { self.requests.lock().expect("lock requests").len() }
+    }
+
+    impl Drop for RecordingEpgServer {
+        fn drop(&mut self) { self.task.abort(); }
+    }
+
+    fn test_epg_context(storage_dir: &Path) -> PlaylistProcessingContext<shared::model::NoopSink> {
+        use arc_swap::{ArcSwap, ArcSwapOption};
+        use shared::model::ConfigPaths;
+        use std::sync::Arc;
+        use tuliprox_core::model::{
+            AppConfig, Config, MediaToolCapabilities, ResourceRetryConfig, ReverseProxyConfig, SourcesConfig,
+        };
+
+        let config = Config {
+            storage_dir: storage_dir.to_string_lossy().into_owned(),
+            reverse_proxy: Some(ReverseProxyConfig {
+                resource_rewrite_disabled: false,
+                rewrite_secret: [0; 16],
+                resource_retry: ResourceRetryConfig { max_attempts: 1, ..ResourceRetryConfig::default() },
+                disabled_header: None,
+                stream: None,
+                cache: None,
+                rate_limit: None,
+                geoip: None,
+                stream_history: None,
+                qos_aggregation: None,
+                hls_cache: None,
+                hls_origin_telemetry: None,
+            }),
+            ..Config::default()
+        };
+        config.update_runtime();
+
+        let paths = ConfigPaths {
+            home_path: String::new(),
+            config_path: String::new(),
+            storage_path: storage_dir.to_string_lossy().into_owned(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            failover_file_path: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        };
+        let app_config = Arc::new(AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(config)),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(paths)),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+            failover: Arc::default(),
+        });
+        let client = reqwest::Client::builder().no_proxy().build().expect("no-proxy client");
+        PlaylistProcessingContext::for_epg_test(app_config, client)
+    }
+
+    fn xmltv_body(channel_id: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\"?><tv><channel id=\"{channel_id}\"><display-name>{channel_id}</display-name></channel></tv>"
+        )
+    }
+
+    fn xmltv_input(name: &str, url: &str) -> ConfigInput {
+        ConfigInput {
+            name: name.intern(),
+            epg: Some(EpgConfig {
+                sources: vec![source(EpgSourceType::Xmltv, url, None)],
+                configured_sources: None,
+                smart_match: None,
+            }),
+            ..ConfigInput::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn same_epg_url_across_two_inputs_downloads_once_per_run() {
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().into_owned();
+        let body = xmltv_body("shared");
+        let server = RecordingEpgServer::start(body.clone()).await;
+
+        let mut dto_a = shared::model::ConfigInputDto {
+            id: 1,
+            name: "input-a".intern(),
+            input_type: shared::model::InputType::Xtream,
+            url: server.base_url.clone(),
+            username: Some("u".to_string()),
+            password: Some("p".to_string()),
+            epg: Some(shared::model::EpgConfigDto {
+                sources: Some(vec![shared::model::EpgSourceDto { url: "auto".to_string(), ..Default::default() }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        dto_a.prepare_epg(true).expect("prepare auto epg");
+        let input_a = ConfigInput::from(&dto_a);
+        let expanded_url = format!("{}/xmltv.php?username=u&password=p", server.base_url);
+        let input_b = xmltv_input("input-b", &expanded_url);
+
+        let ctx = test_epg_context(dir.path());
+        let (guide_a, err_a) = get_xmltv(&ctx, &input_a, None, &storage_dir).await;
+        assert!(err_a.is_empty(), "unexpected errors for input_a: {err_a:?}");
+        assert!(guide_a.is_some());
+
+        let (guide_b, err_b) = get_xmltv(&ctx, &input_b, None, &storage_dir).await;
+        assert!(err_b.is_empty(), "unexpected errors for input_b: {err_b:?}");
+        assert!(guide_b.is_some());
+
+        assert_eq!(server.request_count(), 1);
+
+        let path_a = get_input_raw_epg_file_path(&input_a.epg.as_ref().unwrap().sources[0], &input_a, &storage_dir)
+            .await
+            .expect("path_a");
+        let path_b = get_input_raw_epg_file_path(&input_b.epg.as_ref().unwrap().sources[0], &input_b, &storage_dir)
+            .await
+            .expect("path_b");
+        assert_ne!(path_a, path_b);
+        assert!(path_a.is_file());
+        assert!(path_b.is_file());
+        let bytes_a = tokio::fs::read(&path_a).await.expect("read path_a");
+        let bytes_b = tokio::fs::read(&path_b).await.expect("read path_b");
+        assert_eq!(bytes_a, body.as_bytes());
+        assert_eq!(bytes_a, bytes_b);
+    }
+
+    #[tokio::test]
+    async fn different_request_headers_download_separately() {
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().into_owned();
+        let server = RecordingEpgServer::start(xmltv_body("hdr")).await;
+        let url = format!("{}/guide.xml", server.base_url);
+
+        let mut input_a = xmltv_input("input-a", &url);
+        input_a.headers.insert("X-Token".to_string(), "alpha".to_string());
+        let mut input_b = xmltv_input("input-b", &url);
+        input_b.headers.insert("X-Token".to_string(), "beta".to_string());
+
+        let ctx = test_epg_context(dir.path());
+        let (guide_a, err_a) = get_xmltv(&ctx, &input_a, None, &storage_dir).await;
+        let (guide_b, err_b) = get_xmltv(&ctx, &input_b, None, &storage_dir).await;
+        assert!(err_a.is_empty(), "{err_a:?}");
+        assert!(err_b.is_empty(), "{err_b:?}");
+        assert!(guide_a.is_some() && guide_b.is_some());
+        assert_eq!(server.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn fresh_cache_duration_skips_download_without_populating_run_cache() {
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().into_owned();
+        let fresh_body = xmltv_body("cached-a");
+        let server_body = xmltv_body("live-b");
+        let server = RecordingEpgServer::start(server_body.clone()).await;
+        let url = format!("{}/guide.xml", server.base_url);
+
+        let mut input_a = xmltv_input("input-a", &url);
+        input_a.cache_duration_seconds = 3600;
+        let path_a = get_input_raw_epg_file_path(&input_a.epg.as_ref().unwrap().sources[0], &input_a, &storage_dir)
+            .await
+            .expect("path_a");
+        tokio::fs::write(&path_a, fresh_body.as_bytes()).await.expect("seed cache_a");
+
+        let input_b = xmltv_input("input-b", &url);
+
+        let ctx = test_epg_context(dir.path());
+        let (guide_a, err_a) = get_xmltv(&ctx, &input_a, None, &storage_dir).await;
+        assert!(err_a.is_empty(), "{err_a:?}");
+        assert!(guide_a.is_some());
+        assert_eq!(server.request_count(), 0);
+
+        let (guide_b, err_b) = get_xmltv(&ctx, &input_b, None, &storage_dir).await;
+        assert!(err_b.is_empty(), "{err_b:?}");
+        assert!(guide_b.is_some());
+        assert_eq!(server.request_count(), 1);
+
+        let path_b = get_input_raw_epg_file_path(&input_b.epg.as_ref().unwrap().sources[0], &input_b, &storage_dir)
+            .await
+            .expect("path_b");
+        assert_eq!(tokio::fs::read(&path_a).await.expect("read path_a"), fresh_body.as_bytes());
+        assert_eq!(tokio::fs::read(&path_b).await.expect("read path_b"), server_body.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn failed_first_download_is_retried_by_second_input() {
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().into_owned();
+        let body = xmltv_body("recovered");
+        let server = RecordingEpgServer::start_with_responses(
+            vec![MockEpgResponse::error("500 Internal Server Error"), MockEpgResponse::ok(body.clone())],
+            body.clone(),
+        )
+        .await;
+        let url = format!("{}/guide.xml", server.base_url);
+
+        let input_a = xmltv_input("input-a", &url);
+        let input_b = xmltv_input("input-b", &url);
+
+        let ctx = test_epg_context(dir.path());
+        let (guide_a, err_a) = get_xmltv(&ctx, &input_a, None, &storage_dir).await;
+        assert!(guide_a.is_none());
+        assert_eq!(err_a.len(), 1);
+        assert_eq!(server.request_count(), 1);
+
+        let (guide_b, err_b) = get_xmltv(&ctx, &input_b, None, &storage_dir).await;
+        assert!(err_b.is_empty(), "{err_b:?}");
+        assert!(guide_b.is_some());
+        assert_eq!(server.request_count(), 2);
+
+        let path_b = get_input_raw_epg_file_path(&input_b.epg.as_ref().unwrap().sources[0], &input_b, &storage_dir)
+            .await
+            .expect("path_b");
+        assert_eq!(tokio::fs::read(&path_b).await.expect("read path_b"), body.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn parallel_acquisition_with_same_epg_url_downloads_once() {
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().into_owned();
+        let body = xmltv_body("parallel");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = RecordingEpgServer::start_with_responses(
+            vec![MockEpgResponse {
+                status: "200 OK",
+                body: body.clone(),
+                wait_for: Some(release_rx),
+                entered: Some(entered_tx),
+            }],
+            body.clone(),
+        )
+        .await;
+        let url = format!("{}/guide.xml", server.base_url);
+
+        let input_a = xmltv_input("input-a", &url);
+        let input_b = xmltv_input("input-b", &url);
+        let ctx_a = test_epg_context(dir.path());
+        let ctx_b = ctx_a.clone();
+
+        let mut handle_a = tokio::spawn({
+            let ctx_a = ctx_a.clone();
+            let input_a = input_a.clone();
+            let storage_dir = storage_dir.clone();
+            async move { get_xmltv(&ctx_a, &input_a, None, &storage_dir).await }
+        });
+
+        // Wait until input_a has sent the single HTTP request and is inside the server handler.
+        entered_rx.await.expect("input_a entered server");
+
+        let mut handle_b = tokio::spawn({
+            let ctx_b = ctx_b.clone();
+            let input_b = input_b.clone();
+            let storage_dir = storage_dir.clone();
+            async move { get_xmltv(&ctx_b, &input_b, None, &storage_dir).await }
+        });
+
+        // input_b must block on the singleflight lock rather than issuing a second request or finishing early.
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut handle_b).await.is_err());
+        assert_eq!(server.request_count(), 1);
+
+        release_tx.send(()).expect("release server response");
+
+        let (guide_a, err_a) = (&mut handle_a).await.expect("join input_a");
+        let (guide_b, err_b) = (&mut handle_b).await.expect("join input_b");
+        assert!(err_a.is_empty(), "{err_a:?}");
+        assert!(err_b.is_empty(), "{err_b:?}");
+        assert!(guide_a.is_some() && guide_b.is_some());
+        assert_eq!(server.request_count(), 1);
+
+        let path_a = get_input_raw_epg_file_path(&input_a.epg.as_ref().unwrap().sources[0], &input_a, &storage_dir)
+            .await
+            .expect("path_a");
+        let path_b = get_input_raw_epg_file_path(&input_b.epg.as_ref().unwrap().sources[0], &input_b, &storage_dir)
+            .await
+            .expect("path_b");
+        assert_eq!(tokio::fs::read(&path_a).await.expect("read path_a"), body.as_bytes());
+        assert_eq!(tokio::fs::read(&path_b).await.expect("read path_b"), body.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn copy_epg_file_atomically_replaces_existing_destination() {
+        let dir = tempdir().expect("temp dir");
+        let source = dir.path().join("source_epg.xml");
+        let dest = dir.path().join("dest_epg.xml");
+        tokio::fs::write(&source, b"fresh-epg").await.expect("write source");
+        tokio::fs::write(&dest, b"stale-epg").await.expect("write stale dest");
+
+        assert!(copy_epg_file_atomically(&source, &dest).await.expect("copy succeeds"));
+        assert_eq!(tokio::fs::read(&dest).await.expect("read dest"), b"fresh-epg");
+    }
+
+    #[tokio::test]
+    async fn different_ics_download_limits_download_separately() {
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().into_owned();
+        let ics_body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:1\r\nDTSTART:20261128T120000Z\r\nDTEND:20261128T130000Z\r\nSUMMARY:Race\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let server = RecordingEpgServer::start(ics_body).await;
+        let url = format!("{}/cal.ics", server.base_url);
+
+        let mut source_a = source(EpgSourceType::Ics, &url, Some("chan.a"));
+        source_a.ics = Some(tuliprox_core::model::IcsEpgSourceConfig {
+            max_download_bytes: 4096,
+            ..tuliprox_core::model::IcsEpgSourceConfig::default()
+        });
+        let mut source_b = source(EpgSourceType::Ics, &url, Some("chan.b"));
+        source_b.ics = Some(tuliprox_core::model::IcsEpgSourceConfig {
+            max_download_bytes: 8192,
+            ..tuliprox_core::model::IcsEpgSourceConfig::default()
+        });
+
+        let input_a = ConfigInput {
+            name: "input-a".intern(),
+            epg: Some(EpgConfig { sources: vec![source_a], configured_sources: None, smart_match: None }),
+            ..ConfigInput::default()
+        };
+        let input_b = ConfigInput {
+            name: "input-b".intern(),
+            epg: Some(EpgConfig { sources: vec![source_b], configured_sources: None, smart_match: None }),
+            ..ConfigInput::default()
+        };
+
+        let ctx = test_epg_context(dir.path());
+        let (_, err_a) = get_xmltv(&ctx, &input_a, None, &storage_dir).await;
+        let (_, err_b) = get_xmltv(&ctx, &input_b, None, &storage_dir).await;
+        assert!(err_a.is_empty(), "{err_a:?}");
+        assert!(err_b.is_empty(), "{err_b:?}");
+        assert_eq!(server.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn same_ics_url_with_different_channels_downloads_once() {
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().into_owned();
+        let ics_body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:1\r\nDTSTART:20261128T120000Z\r\nDTEND:20261128T130000Z\r\nSUMMARY:Race\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let server = RecordingEpgServer::start(ics_body).await;
+        let url = format!("{}/cal.ics", server.base_url);
+
+        let mut source_a = source(EpgSourceType::Ics, &url, Some("chan.a"));
+        source_a.channel_title = Some("Channel A".intern());
+        source_a.ics = Some(tuliprox_core::model::IcsEpgSourceConfig {
+            max_download_bytes: 4096,
+            ..tuliprox_core::model::IcsEpgSourceConfig::default()
+        });
+        let mut source_b = source(EpgSourceType::Ics, &url, Some("chan.b"));
+        source_b.channel_title = Some("Channel B".intern());
+        source_b.ics = Some(tuliprox_core::model::IcsEpgSourceConfig {
+            max_download_bytes: 4096,
+            ..tuliprox_core::model::IcsEpgSourceConfig::default()
+        });
+
+        let input_a = ConfigInput {
+            name: "input-a".intern(),
+            epg: Some(EpgConfig { sources: vec![source_a], configured_sources: None, smart_match: None }),
+            ..ConfigInput::default()
+        };
+        let input_b = ConfigInput {
+            name: "input-b".intern(),
+            epg: Some(EpgConfig { sources: vec![source_b], configured_sources: None, smart_match: None }),
+            ..ConfigInput::default()
+        };
+
+        let ctx = test_epg_context(dir.path());
+        let (guide_a, err_a) = get_xmltv(&ctx, &input_a, None, &storage_dir).await;
+        let (guide_b, err_b) = get_xmltv(&ctx, &input_b, None, &storage_dir).await;
+        assert!(err_a.is_empty(), "{err_a:?}");
+        assert!(err_b.is_empty(), "{err_b:?}");
+        assert!(guide_a.is_some() && guide_b.is_some());
+        assert_eq!(server.request_count(), 1);
+
+        let path_a = get_input_raw_epg_file_path(&input_a.epg.as_ref().unwrap().sources[0], &input_a, &storage_dir)
+            .await
+            .expect("path_a");
+        let path_b = get_input_raw_epg_file_path(&input_b.epg.as_ref().unwrap().sources[0], &input_b, &storage_dir)
+            .await
+            .expect("path_b");
+        assert_ne!(path_a, path_b);
+        assert!(path_a.is_file());
+        assert!(path_b.is_file());
+        let bytes_a = tokio::fs::read(&path_a).await.expect("read path_a");
+        let bytes_b = tokio::fs::read(&path_b).await.expect("read path_b");
+        assert_eq!(bytes_a, ics_body.as_bytes());
+        assert_eq!(bytes_b, ics_body.as_bytes());
+    }
+
+    async fn epg_temp_files_in(directory: &Path) -> Vec<PathBuf> {
+        let mut temp_files = Vec::new();
+        let mut entries = tokio::fs::read_dir(directory).await.expect("read directory");
+        while let Some(entry) = entries.next_entry().await.expect("read directory entry") {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(".tuliprox-epg-") {
+                temp_files.push(entry.path());
+            }
+        }
+        temp_files
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copy_fallback_failure_preserves_existing_destination() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("temp dir");
+        let source = dir.path().join("source_epg.xml");
+        let dest = dir.path().join("dest_epg.xml");
+        tokio::fs::write(&source, b"fresh-epg").await.expect("write source");
+        tokio::fs::write(&dest, b"stale-epg").await.expect("write dest");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).expect("chmod source 000");
+
+        let file_locks = FileLockManager::default();
+        let result = TEST_HARD_LINK_FAILURE.scope(true, link_or_copy_epg_file(&file_locks, &source, &dest)).await;
+
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).expect("restore source mode");
+        assert!(result.is_err(), "expected copy fallback failure when source is unreadable");
+        assert_eq!(tokio::fs::read(&dest).await.expect("existing dest stays readable"), b"stale-epg");
+        assert_eq!(epg_temp_files_in(dir.path()).await, Vec::<PathBuf>::new());
+    }
+
+    #[tokio::test]
+    async fn link_or_copy_replaces_existing_destination_via_link_without_temp_files() {
+        let dir = tempdir().expect("temp dir");
+        let source = dir.path().join("source_epg.xml");
+        let dest = dir.path().join("dest_epg.xml");
+        tokio::fs::write(&source, b"fresh-epg").await.expect("write source");
+        tokio::fs::write(&dest, b"stale-epg").await.expect("write stale dest");
+
+        let file_locks = FileLockManager::default();
+        assert!(link_or_copy_epg_file(&file_locks, &source, &dest).await.expect("replace via link"));
+        assert_eq!(tokio::fs::read(&dest).await.expect("read dest"), b"fresh-epg");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let source_ino = tokio::fs::metadata(&source).await.expect("source meta").ino();
+            let dest_ino = tokio::fs::metadata(&dest).await.expect("dest meta").ino();
+            assert_eq!(dest_ino, source_ino, "dest must be hard-linked to source");
+        }
+        assert_eq!(epg_temp_files_in(dir.path()).await, Vec::<PathBuf>::new());
+
+        // Replacing when dest already shares the source inode must not leave a temp hard-link behind.
+        let _ = link_or_copy_epg_file(&file_locks, &source, &dest).await;
+        assert_eq!(tokio::fs::read(&dest).await.expect("read dest"), b"fresh-epg");
+        assert_eq!(epg_temp_files_in(dir.path()).await, Vec::<PathBuf>::new());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hit_path_link_or_copy_error_falls_back_to_download() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().into_owned();
+        let body = xmltv_body("fallback");
+        let server = RecordingEpgServer::start(body.clone()).await;
+        let url = format!("{}/guide.xml", server.base_url);
+
+        let input_a = xmltv_input("input-a", &url);
+        let input_b = xmltv_input("input-b", &url);
+
+        let ctx = test_epg_context(dir.path());
+        let (guide_a, err_a) = get_xmltv(&ctx, &input_a, None, &storage_dir).await;
+        assert!(err_a.is_empty(), "{err_a:?}");
+        assert!(guide_a.is_some());
+        assert_eq!(server.request_count(), 1);
+
+        let path_a = get_input_raw_epg_file_path(&input_a.epg.as_ref().unwrap().sources[0], &input_a, &storage_dir)
+            .await
+            .expect("path_a");
+        std::fs::set_permissions(&path_a, std::fs::Permissions::from_mode(0o000)).expect("chmod path_a 000");
+
+        let (guide_b, err_b) = TEST_HARD_LINK_FAILURE.scope(true, get_xmltv(&ctx, &input_b, None, &storage_dir)).await;
+
+        std::fs::set_permissions(&path_a, std::fs::Permissions::from_mode(0o600)).expect("restore path_a mode");
+        assert!(err_b.is_empty(), "hit-path error must fall back to download without failing input: {err_b:?}");
+        assert!(guide_b.is_some());
+        assert_eq!(server.request_count(), 2);
+
+        let path_b = get_input_raw_epg_file_path(&input_b.epg.as_ref().unwrap().sources[0], &input_b, &storage_dir)
+            .await
+            .expect("path_b");
+        assert_eq!(tokio::fs::read(&path_b).await.expect("read path_b"), body.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn provider_url_and_equivalent_plain_url_produce_different_download_keys() {
+        let dir = tempdir().expect("temp dir");
+        let ctx = test_epg_context(dir.path());
+        let provider = tuliprox_core::model::ConfigProvider::from(&shared::model::ConfigProviderDto {
+            name: "cdn".into(),
+            urls: vec!["http://cdn.example.com".into()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
+            dns: None,
+        });
+
+        let mut provider_input = xmltv_input("provider-input", "provider://cdn/guide.xml");
+        provider_input.provider_configs = Some(vec![Arc::new(provider)]);
+        let plain_input = xmltv_input("plain-input", "http://cdn.example.com/guide.xml");
+
+        let provider_key =
+            epg_download_key(&provider_input.epg.as_ref().unwrap().sources[0], &ctx, &provider_input, None);
+        let plain_key = epg_download_key(&plain_input.epg.as_ref().unwrap().sources[0], &ctx, &plain_input, None);
+        assert_ne!(provider_key, plain_key);
     }
 }

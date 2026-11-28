@@ -1431,6 +1431,7 @@ services:
     handler:
       type: socks5
       chain: upstream
+      retries: 1           # retry a failed connection once, through the next node of the chain
     listener:
       type: tcp
 chains:
@@ -1475,7 +1476,8 @@ Notes:
   outside the host or container network: the example service has no authentication.
 * GOST detects a proxy that refuses or drops connections. It does **not** detect a proxy whose IP the provider has
   banned: such a proxy still connects and the provider answers with an error such as HTTP 403. Replace that proxy
-  in `gost.yml` by hand.
+  in `gost.yml` by hand and restart GOST; GOST does not reload `gost.yml` on its own (runtime changes go through
+  its Web API).
 * GOST 3.3 can also probe each node periodically (`probe` block on a node). Point a probe at a neutral address, never
   at your provider: periodic requests to the provider can get the account banned.
 * See the GOST documentation for all options:

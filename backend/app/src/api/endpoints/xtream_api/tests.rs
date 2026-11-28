@@ -1056,12 +1056,32 @@ async fn m3u_timeshift_supports_archive_accepts_mapped_explicit_and_unmapped_ite
     }
 }
 
+const M3U_TIMESHIFT_START: i64 = 1_704_067_200;
+const M3U_TIMESHIFT_DURATION: u32 = 1800;
+const M3U_TIMESHIFT_QUERY: &str = "sig=%2B%2F%3D";
+
+type MirrorHits = (usize, Vec<String>);
+
+fn parse_http_request_target(buf: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(buf).ok()?;
+    let line = text.lines().next()?;
+    let mut parts = line.split(' ');
+    let method = parts.next()?;
+    let target = parts.next()?;
+    let version = parts.next()?;
+    if !method.is_empty() && !target.is_empty() && !version.is_empty() {
+        Some(target.to_string())
+    } else {
+        None
+    }
+}
+
 async fn run_m3u_timeshift_consumer_mirror_test(
     primary_status: &'static str,
     primary_body: &'static str,
     fallback_status: &'static str,
     fallback_body: &'static str,
-) -> (axum::http::StatusCode, String, usize, usize) {
+) -> (axum::http::StatusCode, String, MirrorHits, MirrorHits) {
     run_m3u_timeshift_consumer_mirror_test_with_hls_cache(
         primary_status,
         primary_body,
@@ -1075,7 +1095,7 @@ async fn run_m3u_timeshift_consumer_mirror_test(
 async fn spawn_m3u_timeshift_test_origin(
     status_line: &'static str,
     body: &'static str,
-) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+) -> (String, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -1086,6 +1106,8 @@ async fn spawn_m3u_timeshift_test_origin(
     let addr = listener.local_addr().expect("local addr");
     let hits = Arc::new(AtomicUsize::new(0));
     let hits_task = Arc::clone(&hits);
+    let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let targets_task = Arc::clone(&targets);
     tokio::spawn(async move {
         loop {
             let Ok((mut socket, _)) = listener.accept().await else {
@@ -1093,7 +1115,12 @@ async fn spawn_m3u_timeshift_test_origin(
             };
             hits_task.fetch_add(1, Ordering::SeqCst);
             let mut buf = [0_u8; 2048];
-            let _ = socket.read(&mut buf).await;
+            let read_len = socket.read(&mut buf).await.unwrap_or(0);
+            if let Some(target) = parse_http_request_target(&buf[..read_len]) {
+                if let Ok(mut recorded) = targets_task.lock() {
+                    recorded.push(target);
+                }
+            }
             let resp = format!(
                 "HTTP/1.1 {status_line}\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -1101,7 +1128,7 @@ async fn spawn_m3u_timeshift_test_origin(
             let _ = socket.write_all(resp.as_bytes()).await;
         }
     });
-    (format!("http://{addr}/media"), hits)
+    (format!("http://{addr}/media"), hits, targets)
 }
 
 async fn run_m3u_timeshift_consumer_mirror_test_with_hls_cache(
@@ -1110,11 +1137,13 @@ async fn run_m3u_timeshift_consumer_mirror_test_with_hls_cache(
     fallback_status: &'static str,
     fallback_body: &'static str,
     with_hls_cache: bool,
-) -> (axum::http::StatusCode, String, usize, usize) {
+) -> (axum::http::StatusCode, String, MirrorHits, MirrorHits) {
     use std::sync::atomic::Ordering;
 
-    let (primary_base, primary_hits) = spawn_m3u_timeshift_test_origin(primary_status, primary_body).await;
-    let (fallback_base, fallback_hits) = spawn_m3u_timeshift_test_origin(fallback_status, fallback_body).await;
+    let (primary_base, primary_hits, primary_targets) =
+        spawn_m3u_timeshift_test_origin(primary_status, primary_body).await;
+    let (fallback_base, fallback_hits, fallback_targets) =
+        spawn_m3u_timeshift_test_origin(fallback_status, fallback_body).await;
 
     let dir = tempdir().expect("temp dir");
     let config = Config { storage_dir: dir.path().to_string_lossy().into_owned(), ..Config::default() };
@@ -1159,12 +1188,9 @@ async fn run_m3u_timeshift_consumer_mirror_test_with_hls_cache(
         provider_configs: Some(vec![profile]),
         ..ConfigInput::default()
     };
-    let stored_mirror_b = format!("{fallback_base}/Channel_A/archive-{{utc}}-{{duration}}.m3u8?sig=%2B%2F%3D");
-    let item = bounded_flussonic_timeshift_item(
-        "provider://cdn/Channel_A/mono.m3u8?sig=%2B%2F%3D",
-        Some(&stored_mirror_b),
-        Some(1800),
-    );
+    let stored_mirror_b = format!("{fallback_base}/Channel_A/archive-{{utc}}-{{duration}}.m3u8?{M3U_TIMESHIFT_QUERY}");
+    let live_url = format!("provider://cdn/Channel_A/mono.m3u8?{M3U_TIMESHIFT_QUERY}");
+    let item = bounded_flussonic_timeshift_item(&live_url, Some(&stored_mirror_b), Some(M3U_TIMESHIFT_DURATION));
     let mut target = short_epg_target();
     if with_hls_cache {
         target.options = Some(shared::model::ConfigTargetOptions {
@@ -1184,8 +1210,7 @@ async fn run_m3u_timeshift_consumer_mirror_test_with_hls_cache(
     user.proxy = shared::model::ProxyType::Reverse(None);
     let user = Arc::new(user);
     let fingerprint = Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:0".parse().unwrap());
-    let start = chrono::Utc::now().timestamp() - 86400;
-    let action_path = format!("120/{start}");
+    let action_path = format!("120/{M3U_TIMESHIFT_START}");
 
     let response = xtream_player_api_stream(
         &fingerprint,
@@ -1200,39 +1225,61 @@ async fn run_m3u_timeshift_consumer_mirror_test_with_hls_cache(
 
     let status = response.status();
     let body = response_body_text(response).await.expect("response body");
-    (status, body, primary_hits.load(Ordering::SeqCst), fallback_hits.load(Ordering::SeqCst))
+    let primary_recorded_targets = primary_targets.lock().expect("lock primary targets").clone();
+    let fallback_recorded_targets = fallback_targets.lock().expect("lock fallback targets").clone();
+    (
+        status,
+        body,
+        (primary_hits.load(Ordering::SeqCst), primary_recorded_targets),
+        (fallback_hits.load(Ordering::SeqCst), fallback_recorded_targets),
+    )
 }
 
 #[tokio::test]
 async fn m3u_timeshift_consumer_uses_preferred_provider_mirror_over_stored_mirror_b() {
     let playlist = "#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
-    let (status, _body, hits_a, hits_b) =
+    let (status, _body, (hits_a, targets_a), (hits_b, targets_b)) =
         run_m3u_timeshift_consumer_mirror_test("200 OK", playlist, "200 OK", playlist).await;
+
+    let expected_manifest_path =
+        format!("/media/Channel_A/archive-{M3U_TIMESHIFT_START}-{M3U_TIMESHIFT_DURATION}.m3u8?{M3U_TIMESHIFT_QUERY}");
 
     assert_eq!(status, axum::http::StatusCode::OK);
     assert_eq!(hits_a, 1, "preferred mirror A must serve the request");
     assert_eq!(hits_b, 0, "stored mirror B must not be hit when A succeeds");
+    assert_eq!(targets_a, vec![expected_manifest_path]);
+    assert!(targets_b.is_empty(), "stored mirror B must receive nothing");
 }
 
 #[tokio::test]
 async fn m3u_timeshift_consumer_fails_over_from_mirror_a_to_mirror_b() {
     let playlist = "#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
-    let (status, _body, hits_a, hits_b) =
+    let (status, _body, (hits_a, targets_a), (hits_b, targets_b)) =
         run_m3u_timeshift_consumer_mirror_test("502 Bad Gateway", "", "200 OK", playlist).await;
 
     assert_eq!(status, axum::http::StatusCode::OK);
     assert!(hits_a >= 1, "mirror A must be tried first");
     assert_eq!(hits_b, 1, "mirror B must serve the failover request");
+    let expected_manifest_path =
+        format!("/media/Channel_A/archive-{M3U_TIMESHIFT_START}-{M3U_TIMESHIFT_DURATION}.m3u8?{M3U_TIMESHIFT_QUERY}");
+    let expected_suffix =
+        format!("/Channel_A/archive-{M3U_TIMESHIFT_START}-{M3U_TIMESHIFT_DURATION}.m3u8?{M3U_TIMESHIFT_QUERY}");
+    assert_eq!(targets_a, vec![expected_manifest_path.clone()]);
+    assert_eq!(targets_b, vec![expected_manifest_path]);
+    assert!(targets_a[0].ends_with(&expected_suffix));
+    assert!(targets_b[0].ends_with(&expected_suffix));
+    assert_eq!(targets_a[0], targets_b[0]);
 }
 
 #[tokio::test]
 async fn m3u_timeshift_consumer_serves_hls_archive_through_hls_proxy() {
     let playlist = "#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
-    let (status, body, _hits_a, hits_b) =
+    let (status, body, (_hits_a, _targets_a), (hits_b, targets_b)) =
         run_m3u_timeshift_consumer_mirror_test_with_hls_cache("200 OK", playlist, "200 OK", playlist, true).await;
 
     assert_eq!(status, axum::http::StatusCode::OK);
     assert_eq!(hits_b, 0, "stored mirror B must not be hit when A succeeds");
+    assert!(targets_b.is_empty(), "stored mirror B must receive nothing when A succeeds");
     assert!(
         body.contains("/hls/shared/live/") && body.contains("/manifest.m3u8"),
         "HLS archive must be served through the HLS session handler (/hls/shared/live/.../manifest.m3u8), got: {body}"

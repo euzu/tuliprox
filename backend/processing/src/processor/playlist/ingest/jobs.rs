@@ -538,6 +538,7 @@ impl<E: EventSink + Clone, M: MetadataUpdateSink, P: PluginHost> Clone for Playl
             processed_inputs: Arc::clone(&self.processed_inputs),
             input_completions: Arc::clone(&self.input_completions),
             input_locks: Arc::clone(&self.input_locks),
+            epg_downloads: Arc::clone(&self.epg_downloads),
             provider_manager: self.provider_manager.clone(),
             metadata_manager: self.metadata_manager.clone(),
             pre_processed_inputs: self.pre_processed_inputs.clone(),

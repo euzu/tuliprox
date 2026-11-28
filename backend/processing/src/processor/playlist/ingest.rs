@@ -124,6 +124,9 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     pub(super) input_completions: Arc<Mutex<HashMap<u16, PlaylistUpdateState>>>,
     #[allow(clippy::type_complexity)]
     pub input_locks: Arc<Mutex<HashMap<Arc<str>, Weak<RwLock<()>>>>>,
+    /// Completed EPG downloads in this run keyed by a hash of source type, configured source URL,
+    /// request method, request headers and ICS byte limit; the resolved request target is not part of the key.
+    pub epg_downloads: Arc<Mutex<HashMap<Arc<str>, PathBuf>>>,
 
     // New field for STRM probes & background updates
     pub provider_manager: Option<Arc<ActiveProviderManager>>,
@@ -169,6 +172,7 @@ impl PlaylistProcessingContext<shared::model::NoopSink> {
             processed_inputs: Arc::default(),
             input_completions: Arc::default(),
             input_locks: Arc::default(),
+            epg_downloads: Arc::default(),
             provider_manager: None,
             metadata_manager: None,
             pre_processed_inputs: None,

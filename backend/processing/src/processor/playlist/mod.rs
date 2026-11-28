@@ -540,6 +540,7 @@ pub async fn exec_processing<
         processed_inputs: Arc::default(),
         input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
+        epg_downloads: Arc::default(),
         disabled_headers,
         provider_manager,
         metadata_manager,

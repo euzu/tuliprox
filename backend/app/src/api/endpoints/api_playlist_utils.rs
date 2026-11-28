@@ -203,6 +203,11 @@ pub(crate) fn apply_raw_item_effective_rating(
     imdb_config: Option<&ImdbConfig>,
 ) -> UiPlaylistItem {
     let enabled_config = imdb_config.filter(|cfg| cfg.enabled);
+    // A stored effective rating outside the 0-10 scale (written before the range check existed) is dropped and
+    // derived again from the provider rating, so the origin below matches the value the explorer shows.
+    if item.effective_rating.is_some_and(|value| !is_valid_provider_rating(value)) {
+        item.effective_rating = None;
+    }
     if is_valid_provider_rating(item.rating) && item.effective_rating.is_none() {
         item.set_provider_rating(Some(item.rating), imdb_rating_source(imdb_config));
     }
@@ -744,5 +749,10 @@ mod tests {
         max_item.rating = 10.0;
         let max_item = super::apply_raw_item_effective_rating(max_item, None);
         assert_eq!(max_item.effective_rating, Some(10.0));
+        let mut stale_item = sample_item("");
+        stale_item.rating = 7.0;
+        stale_item.effective_rating = Some(85.0);
+        let stale_item = super::apply_raw_item_effective_rating(stale_item, None);
+        assert_eq!(stale_item.effective_rating, Some(7.0));
     }
 }

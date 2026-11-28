@@ -517,6 +517,13 @@ epg:
 | **`match_names`**   | List   |    No    | `[]`    | Optional additional names for matching the generated ICS channel to playlist entries. Useful when the playlist channel name differs from the calendar title, for example `F1`, `Formula One`, or `Formel 1`.           |
 | **`ics`**           | Object | ICS only |         | Additional configuration for `type: ics`. See [ICS Calendar Source Parameters](#ics-calendar-source-parameters-ics).                                                                                                   |
 
+#### Shared EPG downloads
+
+Within one playlist update, Tuliprox downloads each EPG source only once when several inputs use the same URL, source
+type, request method, headers and ICS size limit (for example one EPG service configured on many inputs). The other inputs get a
+hard link of the downloaded file in their own cache directory, or a copy when a hard link is not possible. The input
+`cache_duration` still applies first: an input with a fresh cached file does not download it again.
+
 #### XMLTV Sources
 
 XMLTV is the default source type. Existing configurations remain valid and do not need to be changed.
@@ -1995,7 +2002,7 @@ targets:
 | `share_live_streams.hls`                   | Bool | No       | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `share_live_streams.mpeg_ts`               | Bool | No       | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.                                                                                                                                                                                                                                                                                                                                                                |
 | `remove_duplicates`                        | Bool | No       | `false` | Legacy pre-transform identity deduplication. It runs independently for each input before the F/R/M pipe and removes repeated source identities before mapping can emit additional items. The field remains supported for backward compatibility.                                                                                                                                                                                                                                                                                                                                                  |
-| `deduplicate`                              | Map  | No       | -       | Post-merge, quality-aware content deduplication. It runs after all inputs have been transformed and merged. Channels whose match value is identical after stripping quality tokens (`4K`, `UHD`, `2160p`, `QHD`, `1440p`, `FHD`, `1080p`, `HD`, `720p`, `SD`, `480p`, `576p`) collapse to one entry. Sub-keys: `match_by` (`caption` (default), `name`, `title`), `keep` (`best_quality` (default), `first`) and `match_as_ascii` (default `false`). Matching is per cluster across all groups; ties keep the first occurrence. This lets mappings affect the final duplicate comparison results. |
+| `deduplicate`                              | Map  | No       | -       | Post-merge, quality-aware content deduplication. See [Quality-Aware Deduplication](#quality-aware-deduplication-example).                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `epg_output.clear_invalid_ids`             | Bool | No       | `false` | Clears an EPG ID when it does not resolve to the processed EPG data. Playlist entries are never removed. Smart matching runs first, and IDs introduced or changed by later mappings are validated again before the `persist` filter.                                                                                                                                                                                                                                                                                                                                                              |
 | `epg_output.adopt_guide_id_case`           | Bool | No       | `true`  | Rewrites a live channel EPG id that matches a guide channel only case-insensitively (for example `usa4k.us` against `<channel id="USA4K.us">`) to the guide's exact spelling, so the M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV `<channel id>` and EPG API lookups use the same id. Set `false` to keep the playlist's original spelling. Changing this option requires a full target refresh.                                                                                                                                                                                                  |
 | `epg_output.lowercase_ids`                 | Bool | No       | `false` | Canonicalizes visible technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV channel/programme references, and EPG API responses. Changing this option requires a full target refresh.                                                                                                                                                                                                                                                                                                                                                                        |
@@ -2017,6 +2024,23 @@ targets:
 
 #### Quality-Aware Deduplication Example
 
+`deduplicate` runs after all inputs have been transformed and merged, so mappings affect the comparison. Channels
+whose match value is identical after stripping quality tokens (`4K`, `UHD`, `2160p`, `QHD`, `1440p`, `FHD`, `1080p`,
+`HD`, `720p`, `SD`, `480p`, `576p`) collapse to one entry. Sub-keys:
+
+* `match_by`: `caption` (default), `name`, `title`, `tmdb` or `tmdb_then_caption`.
+  * `caption`, `name` and `title` match per cluster across all groups.
+  * `tmdb` matches movies and series by TMDB id, only within the same group. Live channels, episodes and items
+    without a TMDB id are ignored (episodes carry the TMDB id of their series, so they are never matched by it).
+  * `tmdb_then_caption` uses the TMDB id when the item has one and the caption otherwise, also only within the same
+    group. Two films with the same title but different TMDB ids (remakes) stay separate. Episodes are never
+    deduplicated in this mode either, because two episodes with the same title can belong to different series.
+* `keep`: `best_quality` (default, ranked from the caption), `first`, or `plugin:<id>`.
+* `match_as_ascii`: default `false`.
+
+Ties keep the first occurrence. TMDB ids come from the provider or from the background metadata resolution, so an
+id found by the resolution is used from the next update on.
+
 Keep only the best-quality copy of every channel, collapsing entries like `News HD`, `News FHD`, and `NEWS [4K]`
 into the single `NEWS [4K]` entry:
 
@@ -2026,7 +2050,7 @@ targets:
     filter: 'Group ~ ".*"'
     options:
       deduplicate:
-        match_by: caption      # caption (default) | name | title
+        match_by: caption      # caption (default) | name | title | tmdb | tmdb_then_caption
         keep: best_quality     # best_quality (default) | first
         match_as_ascii: false  # true: "Café HD" matches "Cafe FHD"
     output:
